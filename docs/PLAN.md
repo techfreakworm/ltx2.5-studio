@@ -69,6 +69,10 @@ fine on 0.39.0 — so the app starts, the UI renders, weights begin downloading 
 does it fail on a missing `temporal_latent_upsampler`. A failure that happens after 70 GB of
 download is the worst kind.
 
+**Confirmed by the repo itself.** `model_index.json` on `Lightricks/LTX-2.5-Diffusers`
+declares `_diffusers_version: 0.40.0.dev0`. The weights and the code agree on the dev version;
+our SHA pin is not a guess.
+
 **Therefore: a startup fail-fast assertion.**
 
 ```python
@@ -118,8 +122,21 @@ Two folders ship the *same weights twice*, in two different shardings:
 | `transformer/` | 4 shards: 9.932 + 9.919 + 9.986 + 8.138 = **37.975 GB** | 8 shards: 4.991 + 4.944 + 4.994 + 4.928 + 4.977 + 4.995 + 4.994 + 3.163 = **37.986 GB** | only **one** `diffusion_pytorch_model.safetensors.index.json` |
 | `connectors/` | single file: **6.344 GB** | 2 shards: 5.000 + 1.344 = **6.344 GB** | same |
 
-A naive `snapshot_download` of those folders pulls **both** sets (+44.33 GB of pure
-duplication). `from_pretrained` reads the index JSON and fetches only the referenced shards.
+**Resolved against the actual index files — which set is live is now measured, not inferred:**
+
+| folder | LIVE set | DEAD weight |
+|---|---|---:|
+| `transformer/` | the **4-shard** set — 37.976 GB | 37.986 GB |
+| `connectors/` | the **2-shard** set — 6.345 GB | 6.344 GB |
+| `text_encoder/` | all 5 shards — 23.920 GB | none |
+| `transformer_full/` | 4 shards (excluded entirely, §2.2) | none |
+| | | **total avoidable waste: 44.33 GB** |
+
+Note the direction on `connectors/`: the **2-shard** set is live and the single 6.344 GB file is
+the dead one — the opposite of the naive guess that a single file must be canonical.
+
+A naive `snapshot_download` of those folders pays the full 44.33 GB. `from_pretrained` reads the
+index JSON and fetches only the referenced shards.
 
 **Binding consequences:** (1) we rely on the index, never hand-rolling a `snapshot_download` of
 `transformer/`; (2) any `preload_from_hub:` entry must name **only the live shards**. A wrong
@@ -130,33 +147,67 @@ list here does not fail fast — it fails after tens of GB, and on a 150 GB cap 
 A further **37.975 GB**, the *dev* (non-distilled) transformer. We ship the distilled 8-step
 path, so we do not ship it. Documented as opt-in (§2.5), not deleted from our mental model.
 
-### 2.3 The bf16 subset we ship
+### 2.3 The bf16 subset we ship — **33 files, 72.186 GB (67.23 GiB)**
 
-| component | GB | why |
-|---|---:|---|
-| `transformer/` (distilled, one shard set) | 37.975 | the model |
-| `text_encoder/` (5 shards: 4.961 + 4.967 + 4.884 + 4.986 + 4.121) | 23.919 | Gemma-4 unified (§10 R-4) |
-| `connectors/` | 6.344 | text → transformer conditioning; also a LoRA target |
-| `vae/` | 1.452 | video VAE (fallback decoder — §7.4) |
-| `audio_vae/` | 0.107 | audio VAE (mel ↔ latent) |
-| `vocoder/` | 0.258 | mel → waveform |
-| `latent_upsampler/` | 0.996 | stage-2 spatial upscale |
-| `temporal_latent_upsampler/` | 0.262 | stage-2 temporal upscale |
-| `diffusion_decoder/` | 0.834 | **the native 2.5 decoder** — §7.4 |
-| `duration_head/` | 0.004 | duration prediction |
-| `tokenizer/` | 0.032 | |
-| **TOTAL** | **72.185** | **≈ 72.19 GB = 67.2 GiB** |
+Measured against the resolved index files, not estimated.
+
+| component | GB | loaded via | why |
+|---|---:|---|---|
+| `transformer/` | 37.977 | index | the model |
+| `text_encoder/` | 23.920 | index | `Gemma4UnifiedForConditionalGeneration` (§10 OQ-4) |
+| `connectors/` | 6.345 | index | text → transformer conditioning; also a LoRA target |
+| `vae/` | 1.452 | index | video VAE (conv-decoder fallback — §7.4) |
+| `latent_upsampler/` | 0.996 | **subfolder** | stage-2 spatial upscale |
+| `diffusion_decoder/` | 0.834 | index | **the native 2.5 decoder** — §7.4 |
+| `temporal_latent_upsampler/` | 0.262 | **subfolder** | stage-2 temporal upscale |
+| `vocoder/` | 0.258 | index | `LTX2VocoderWithBWE` — **not** plain `LTX2Vocoder` |
+| `audio_vae/` | 0.107 | index | audio VAE (mel ↔ latent) |
+| `tokenizer/` | 0.032 | index | `GemmaTokenizer` |
+| `duration_head/` | 0.004 | index | duration prediction |
+| `scheduler/`, `model_index.json` | ~0 | index | `FlowMatchEulerDiscreteScheduler` |
+| **TOTAL** | **72.186** | | **= 67.23 GiB, 44% of the repo — we skip 92.006 GB** |
+
+**`model_index.json`, verbatim** — this is the authority for what the pipeline expects:
+
+```
+_class_name:       LTX2Pipeline
+_diffusers_version: 0.40.0.dev0
+audio_vae:         ['diffusers',    'AutoencoderKLLTX2Audio']
+connectors:        ['ltx2',         'LTX2TextConnectors']
+diffusion_decoder: ['diffusers',    'LTX2VideoDiffusionDecoderModel']
+duration_head:     ['ltx2',         'LTX2DurationHead']
+processor:         [None, None]
+prompt_enhancer:   [None, None]
+scheduler:         ['diffusers',    'FlowMatchEulerDiscreteScheduler']
+text_encoder:      ['transformers', 'Gemma4UnifiedForConditionalGeneration']
+tokenizer:         ['transformers', 'GemmaTokenizer']
+transformer:       ['diffusers',    'LTX2VideoTransformer3DModel']
+vae:               ['diffusers',    'AutoencoderKLLTX2Video']
+vocoder:           ['ltx2',         'LTX2VocoderWithBWE']
+```
+
+**Two loading mechanisms, and `model_files.py` must model the difference.**
+`latent_upsampler` and `temporal_latent_upsampler` are **not in `model_index.json`**. They are
+loaded separately by subfolder, exactly as the model card does:
+
+```python
+LTX2LatentUpsamplerModel.from_pretrained(MODEL_ID, subfolder="latent_upsampler")
+```
+
+Index-components and subfolder-components are fetched by *different calls*. A resolver that
+assumes one mechanism silently misses two components — and they are precisely the two the
+stage-2 quality path needs.
 
 ### 2.4 What we exclude, and why
 
 | excluded | GB | reason |
 |---|---:|---|
-| `transformer_full/` | 37.975 | the DEV transformer; not needed for the distilled 8-step path |
-| duplicate shard sets (transformer 8-shard + connectors 2-shard) | 44.330 | Trap A — same weights, different sharding |
+| `transformer_full/` | 37.976 | the DEV transformer; not needed for the distilled 8-step path |
+| duplicate shard sets (transformer 8-shard + connectors single-file) | 44.330 | Trap A — same weights, different sharding |
 | `ltx-2.5-22b-distilled-lora-450-bf16.safetensors` (repo root) | 9.699 | the distilled LoRA for **DEV** workflows; useless when we ship the distilled transformer |
 
-**Arithmetic check:** 72.185 + 37.975 + 44.330 + 9.699 = **164.189 GB**, closing exactly against
-the repo's stated 164.19 GB across 56 files. The accounting is complete; there is no
+**Arithmetic check:** 72.186 + 37.976 + 44.330 + 9.699 = **164.191 GB**, closing against the
+repo's stated 164.19 GB across 56 files (33 shipped, 23 skipped). The accounting is complete; there is no
 unexplained remainder.
 
 ### 2.5 The transient disk peak
@@ -291,9 +342,10 @@ button that implies support we cannot back.
 
 ### 3.5 Prompt enhancement: **unavailable by default; we ship no dead toggle**
 
-`LTX25AutoBlocks` declares a `prompt_enhancer` component, and it appears in
-`_optional_components`. But **the Diffusers pack has no `prompt_enhancer/` folder** — all 56
-files enumerated. It would come from `google/gemma-4-E2B-it`, a separate model. So
+**`model_index.json` ships it as explicitly absent:** `prompt_enhancer: [None, None]` (and
+`processor: [None, None]`). `LTX25AutoBlocks` declares the component and it appears in
+`_optional_components`, but the pack has no `prompt_enhancer/` folder — all 56 files enumerated,
+and the index itself declares the slot empty. It would come from `google/gemma-4-E2B-it`, a separate model. So
 `enable_prompt_enhancement=True` fails on our subset.
 
 Shipping a toggle that cannot work is exactly the silent lie §5 exists to prevent. No UI
@@ -354,7 +406,7 @@ Accepts either a **Hub repo-id** or a **direct file upload**.
 | 1 | **Size bound** | reject above a configured max | refuse before any download or parse |
 | 2 | **Header-only parse** | read the safetensors header, **never** materialise the payload | — |
 | 3 | **Format** | safetensors with a parseable header | distinct messages: not-safetensors vs unparseable-header |
-| 4 | **Version** | read `__metadata__.model_version` | **warn** if absent, **reject** on explicit mismatch |
+| 4 | **Version** | read a *set* of version signals in priority order (§4.5) — `model_version`, `ss_ltx_version`, `modelspec.architecture`, `ss_base_model_version` | **warn** if all absent, **reject** only on an explicit mismatch |
 | 5 | **Convention** | classify: `diffusion_model.` / `transformer.` / `text_embedding_projection.` / unknown | on unknown, the error **names the prefixes actually found** |
 | 6 | **Pairing** | `lora_A`/`lora_B` (or `lora_down`/`lora_up`) must pair | name the unpaired keys |
 | 7 | **Attach assertion** | **after** `load_lora_weights`, assert the adapter attached to **> 0** modules | specific error if zero — *the anti-silent-garbage check* |
@@ -371,6 +423,53 @@ actually protects the user; it runs on **every** load, built-in LoRAs included.
 `components=["transformer", "connectors"]`. A LoRA that trains the text-conditioning path would
 partially apply — worse than not applying, because it looks like it worked. We always pass both
 components explicitly, and this is a test case.
+
+### 4.5 What real LoRAs actually look like — measured, and it changes stage 4
+
+I range-read the safetensors **headers** of three real public LTX LoRAs (header only, no payload
+— the same technique §4.3 stage 2 mandates, proving it works over plain HTTP range requests):
+
+| LoRA | size | tensors | prefix | `__metadata__` | `model_version`? | connectors keys |
+|---|---:|---:|---|---|---|---:|
+| `joyfox/LTX-2.3-Transition-LORA` (19.4k downloads) | 0.390 GB | 1152 | `diffusion_model.` | **ABSENT** | — | 0 |
+| `vrgamedevgirl84/LTX_2.3_Crisp_Enhance_Style_LoRa` | 0.705 GB | 1152 | `diffusion_model.` | present, **sd-scripts style** | **no such key** | 0 |
+| `elix3r/LTX-2.3-22b-AV-LoRA-talking-head` | 0.428 GB | 2304 | `diffusion_model.` | **ABSENT** | — | 0 |
+
+**Four findings, each of which changes the design:**
+
+1. **Not one of them carries `model_version`.** Two have no `__metadata__` at all. Stage 4 as
+   originally written — "read `__metadata__.model_version`" — would be warn-only for **100% of
+   real community uploads**, i.e. effectively dead code. The official Lightricks LoRA does carry
+   it (`'2.5.0'`), so the field is real; it is just not what users bring us.
+
+2. **There is a second, richer convention we must read.** The sd-scripts / musubi-tuner trainer
+   writes a large metadata block with entirely different keys — from the measured header:
+   `ss_ltx_version: "2.3"`, `ss_base_model_version: "ltx2_v1"`,
+   `modelspec.architecture: "LTX2/lora"`, `ss_network_module: "networks.lora_ltx2"`,
+   `ss_sd_model_name: "ltx-2.3-22b-dev.safetensors"`, `ss_network_dim: "64"`,
+   `ss_network_alpha: "32"`, `ss_lora_target_preset: "full"`.
+
+   **`modelspec.architecture == "LTX2/lora"` is a better *architecture* signal than
+   `model_version` is** — a Flux or Wan LoRA carries a different value there, which is exactly
+   the wrong-architecture case stage 7 exists to catch. Reading it lets us catch that at stage 4
+   instead, cheaply, before any weights load.
+
+   **Revised stage 4** reads, in priority order: `model_version` → `ss_ltx_version` →
+   `modelspec.architecture` → `ss_base_model_version`. All absent → **warn and proceed**;
+   rejecting on absence would reject the most popular LTX LoRA on the Hub.
+
+3. **`diffusion_model.` is the dominant real-world convention, not an edge case.** All three use
+   it, so `_convert_non_diffusers_ltx2_lora_to_diffusers` is on the *main* path. The
+   diffusers-native `transformer.` convention is the rarer one.
+
+4. **None of them touch the connectors** (`text_embedding_projection.` count is 0 across all
+   three). So in practice stage 7 will see transformer-only attachment. §4.4's both-components
+   fusing rule stays — it must be right for the LoRA that does touch them — but we should not
+   expect connector attachment as the normal case, and a stage-7 assertion demanding it would
+   reject every real LoRA.
+
+These three headers become **offline test fixtures** for stages 1–6 (§9.1): real-world data,
+zero GPU, zero weights, no network at test time.
 
 ---
 
@@ -435,6 +534,22 @@ happens again, the message should tell the operator which URL to go look at.
 
 Pinning a **revision** per repo is part of this module's job — a repo whose content can change
 under us is not pinned just because its name is stable.
+
+**New requirement: `model_files.py` emits the download allow-list as data.** It must be able to
+produce the exact list of 33 paths (§2.3), so that:
+
+- the **runtime download** and the Space README **`preload_from_hub:`** list are *generated from
+  the same source*, never hand-maintained in two places; and
+- a **drift test** can assert the committed README list equals what `model_files.py` declares.
+
+**And the live shard names must come from reading the index files, not from a hardcoded list.**
+That is what makes an upstream re-shard get picked up automatically instead of silently
+downloading the dead set. Hardcoding today's shard names would reintroduce Trap A (§2.1) the
+moment Lightricks re-shards — which, given they have already deleted a checkpoint without
+warning, is not a remote possibility.
+
+This is the single-source-of-truth principle (§5.2) applied to deployment, and it is the thing
+that stops the shard-set trap from silently reappearing.
 
 ### 5.3 Never return an empty output — and the four layers that let it happen
 
@@ -566,35 +681,45 @@ Recorded for completeness — **but see §8.4: we do not use accelerate's offloa
 Naming precedent: `techfreakworm/LTX2.3-Studio`, `wan-studio` (private), `SAM3-cutout-studio`
 (private).
 
-### 6.2 `preload_from_hub` hazards
+### 6.2 Download strategy — DECIDED
 
-Two, and they interact:
+**`preload_from_hub:` with the file list generated from `model_files.py` (§5.2), plus a runtime
+fallback that fetches anything missing.**
 
-1. **Only live shards** (§2.1 Trap A). A wrong list fails after tens of GB, not fast.
-2. **Capped at 10 entries.** Our subset spans 11 component folders and ~20 individual shard
-   files, so a naive one-file-per-entry list **cannot fit**. Entries take the form
-   `repo_id file1,file2,…`, so one entry can name many files from one repo — the list must be
-   written that way. **Verification item before first deploy:** confirm there is no separate
-   per-entry file-count or line-length limit.
+Preloading bakes the weights into the image so a restart does not re-fetch 72 GB — which matters
+because ZeroGPU's ephemeral disk is **wiped on every restart/rebuild** (§2). The runtime fallback
+exists because a preload that silently drops a file must not become a mysterious load failure.
+
+Three hazards to code around:
+
+1. **Only live shards** (§2.1 Trap A). A wrong list fails after tens of GB, not fast. Mitigated
+   structurally: the list is *generated*, and a drift test asserts README == `model_files.py`.
+2. **Capped at 10 entries.** Not a problem — we are **one repo, so one entry**, with
+   comma-separated filenames. It fits. (A naive one-file-per-entry list would not: 33 files.)
 3. **Ownership.** Preloaded files belong to the *build* user and are read-only to runtime uid
-   1000. Any later lazy `hf_hub_download` into the same cache fails with
-   `Permission denied (os error 13)` unless the cache is mirrored. Design implication: **preload
-   everything we need, or mirror the cache at startup — do not mix the two strategies.**
+   1000, so a later lazy `hf_hub_download` into the same cache fails with
+   `Permission denied (os error 13)`. **Mitigation: point `HF_HOME` / `HF_HUB_CACHE` at a
+   writable location and handle the mirror case explicitly.** This is what makes "preload plus
+   runtime fallback" viable rather than the all-or-nothing choice it would otherwise be.
 
-### 6.3 🚨 BLOCKER — repo gate not accepted
+   Related and reassuring: ZeroGPU's packer deletes the HF cache blobs after packing anyway
+   (§2.5). **Treat the HF cache as transient by design** — it is not a durable store, and any
+   code that assumes a file stays there after startup is wrong.
 
-`Lightricks/LTX-2.5-Diffusers` is gated (`gated: auto`) and the operator's token has **not**
-accepted that gate. Verified response:
+### 6.3 ✅ Main gate RESOLVED · ⚠️ one secondary gate still shut
 
-> `Access to model Lightricks/LTX-2.5-Diffusers is restricted and you are not in the authorized list.`
+**`Lightricks/LTX-2.5-Diffusers` — OPEN.** The gate was accepted and access is verified:
+`model_index.json` returns HTTP 200 with the operator's token. Weights work is unblocked.
 
-This is a **separate acceptance** from `Lightricks/LTX-2.5`, which *is* already accepted. One
-click resolves it:
+**Still shut: the Lightricks *LoRA* repos.** Verified separately — `LTX-2.5-22b-IC-LoRA-*` and
+`LTX-2.3-22b-IC-LoRA-*` are each gated on their own acceptance and the token does not have
+them. This is **not** a blocker: §4.5 shows the ungated community LoRAs are a *better* R3
+fixture anyway, because they are what users actually upload. Recorded so nobody is surprised
+when an official IC-LoRA 403s.
 
-**https://huggingface.co/Lightricks/LTX-2.5-Diffusers**
-
-Until accepted, nothing touching real weights can be built or tested. Everything that does not
-need real weights proceeds. Escalated to the orchestrator.
+**Local reality check:** the gate being open does not mean we can generate locally. The 22B
+model does not run on macOS. Real generations happen on the Space, under the quota discipline
+in [`docs/TEST_PLAN.md`](TEST_PLAN.md).
 
 ---
 
@@ -877,7 +1002,7 @@ register.
 | **OQ-1** | Pin a diffusers release, or `main`? | **RESOLVED: pin the exact SHA** `ac56fa2f…` (§1.3). A SHA is more pinned than a range, not less. Plus a startup version assertion, because 0.39.0 fails *late*. |
 | **OQ-2** | Does `diffusion_decoder` have a consumer? | **Moot** — the SHA provides it. Both `diffusion_decoder` (0.834) and `duration_head` (0.004) stay in the subset; duration prediction ships. |
 | **OQ-3** | Is `num_frames % 8 == 1` enforced? | **RESOLVED: no.** Upstream silently floors. We raise; the modulus is a **parameter with an `8` fallback** for pre-load validation, plus a load-time tripwire (§5.5). |
-| **OQ-4** | Gemma-3 or Gemma-4? | **RESOLVED: both, via a union annotation** — `Gemma3ForConditionalGeneration \| Gemma4UnifiedForConditionalGeneration`. LTX-2.5 genuinely is Gemma-4; the proof is that CRF 18 is selected by `model_type in ("gemma4_unified","gemma4")`. **Derive family and CRF at runtime; hardcode neither** (§5.7 #8). |
+| **OQ-4** | Gemma-3 or Gemma-4? | **CLOSED ON EVIDENCE: Gemma-4.** `model_index.json` says `text_encoder: ['transformers', 'Gemma4UnifiedForConditionalGeneration']`. The diffusers annotation is a union (`Gemma3ForConditionalGeneration \| Gemma4UnifiedForConditionalGeneration`); the *weights* resolve it. So CRF provably takes the `gemma4` branch → **18**. **Still derive family and CRF at runtime; hardcode neither** (§5.7 #8). |
 | **OQ-5** | Audio length from duration or latent shape? | **RESOLVED: latent shape wins.** Upstream computes it from duration, then overrides from `audio_latents.shape` when supplied. The desync is real and directional (§5.7 #11). |
 | **OQ-6** | Output retention bound? | **RESOLVED: 20 GB**, oldest-first, swept on startup and after each run (§2.7). |
 
@@ -887,14 +1012,18 @@ register.
 |---|---|---|---|
 | **1** | **bf16 fits ZeroGPU's CPU RAM and transient disk** | The ~68 GB RAM ceiling is a **community cgroup observation**, not official — HF publishes ZeroGPU RAM as `"-"` / "Dynamic resources". Transient disk peaks at ~144 GB against a 150 GB cap before the packer auto-prunes. | **Measurement on the Space, not argument.** §5.6's preflight turns a failure into a diagnosable message; §2.6's one-line dtype switch makes the fallback cheap. |
 | 2 | ZeroGPU's packer handles the pipeline's tensor graph correctly | Verified for ordinary tensors; **unverified for quantised custom tensor subclasses** (bitsandbytes `Int8Params`/`Params4bit`, torchao) against the packer's `WeakTensorKeyDictionary` | only becomes live if risk #1 forces quantization — measure then |
-| 3 | `preload_from_hub` can express our shard list within 10 entries | entry format is `repo_id file1,file2,…`, so one entry names many files; **a per-entry limit is unconfirmed** | verify before first deploy (§6.2) |
+| 3 | ~~`preload_from_hub` 10-entry cap~~ | **RETIRED.** We are one repo → one entry with comma-separated filenames. Fits comfortably (§6.2). | — |
 | 4 | Max `@spaces.GPU` duration on our tier | server-side, tier-dependent, **unpublished** | discover empirically; never hardcode (§5.8 #4) |
 | 5 | Multishot via prompt structure produces usable results | no API support, and the enhancer system prompts actively discourage scene cuts (§3.4) | presented to users as unverified technique, not a feature |
+| 6 | An LTX-**2.3** LoRA attaches cleanly to the **2.5 distilled** transformer | the model card says most 2.3 LoRAs run on 2.5 unchanged, but our R3 fixture is a 2.3 LoRA and our transformer is 2.5-distilled; the official 2.5 LoRA targets the **DEV** transformer, so it is not a valid control | **TEST_PLAN R3** — stage 7 asserts attachment count > 0 against real weights |
 
-### 🚨 Live blocker
+### ✅ Blocker cleared
 
-**`Lightricks/LTX-2.5-Diffusers` gate not accepted** — §6.3. One click at
-https://huggingface.co/Lightricks/LTX-2.5-Diffusers. Blocks everything that touches real weights.
+**`Lightricks/LTX-2.5-Diffusers` gate is OPEN** (§6.3), verified by an authenticated HTTP 200 on
+`model_index.json`. Weights work is unblocked.
+
+Remaining access note, **not** a blocker: the Lightricks *LoRA* repos are separately gated and
+still shut. §4.5 shows the ungated community LoRAs make a better R3 fixture anyway.
 
 ---
 
@@ -903,7 +1032,10 @@ https://huggingface.co/Lightricks/LTX-2.5-Diffusers. Blocks everything that touc
 1. ✅ **This document**, committed.
 2. ✅ **Scaffold** — venv, `pyproject.toml`, package stubs, `.gitignore`.
 3. ✅ **`requirements.txt`** — the §5.1 pin set, with **no `spaces` line**.
-4. **TDD, innermost-out**, against the test teammate's failing specs:
+4. ✅ **[`docs/TEST_PLAN.md`](TEST_PLAN.md)** — the quota-bounded GPU matrix. **Must exist and be
+   reported before the first GPU call.**
+5. **TDD, innermost-out**, against the test teammate's failing specs:
    `errors` → `constraints` → `model_files` → `preflight` → `lora/` → `zerogpu` → `conditioning`
    → `modes` → `audio` → `generate` → `outputs` → `ui`.
-5. **Blocked on §6.3** — anything that touches real weights, and every `gpu`-marked test.
+6. **GPU runs on the Space**, in the TEST_PLAN order (R1 first — it is the riskiest), logging
+   actual cost after each and stopping hard at 1920 GPU-seconds.
