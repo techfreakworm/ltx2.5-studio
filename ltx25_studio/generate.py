@@ -29,6 +29,7 @@ depth is testable with no GPU and no weights.
 
 from __future__ import annotations
 
+import logging
 import secrets
 import uuid
 from collections.abc import Callable
@@ -37,6 +38,8 @@ from pathlib import Path
 
 from . import constraints, modes
 from .errors import DecodeError, EmptyOutputError, EncodeError, ModelLoadError
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "DEFAULT_OUTPUT_ROOT",
@@ -184,6 +187,34 @@ def _decoded(output, mode: str):
     return output
 
 
+def _sweep(root: Path, retention_bytes: int | None) -> tuple[str, ...]:
+    """Evict old runs after a successful generation, and log what went.
+
+    PLAN §2.7 requires a sweep after every run: the predecessor filled its disk
+    and the Space went unhealthy. Deliberately non-fatal -- the user's video
+    exists and is fine, so a retention failure must not turn a good run into an
+    error. It is surfaced as a warning instead of being swallowed.
+    """
+    from . import outputs
+
+    if retention_bytes is None:
+        from .config import load_config
+
+        try:
+            retention_bytes = int(load_config().output_retention_gb * 1e9)
+        except Exception as exc:  # a misconfigured cap must not fail a good run
+            return (f"output retention was skipped: {exc}",)
+    try:
+        evicted = outputs.enforce_retention(root, max_bytes=retention_bytes)
+    except Exception as exc:
+        message = f"output retention failed: {exc}"
+        logger.warning(message)
+        return (message,)
+    for path in evicted:
+        logger.info("evicted old run %s", path)
+    return tuple(f"evicted old run {path}" for path in evicted)
+
+
 def _require_artifact(candidate, *, mode: str, run_dir: Path) -> Path:
     """The last gate. Everything falsy, absent or empty dies here.
 
@@ -210,6 +241,7 @@ def generate(
     encoder: Callable | None = None,
     output_root: str | Path | None = None,
     progress: Callable | None = None,
+    retention_bytes: int | None = None,
     **params,
 ) -> GenerationResult:
     """Run one generation and return a result whose artifact provably exists.
@@ -267,6 +299,8 @@ def generate(
 
     artifact = _require_artifact(written, mode=request.mode, run_dir=run_dir)
 
+    warnings = _sweep(root, retention_bytes)
+
     video_path = artifact if "video" in spec.exports else None
     audio_path = artifact if "audio" in spec.exports and video_path is None else None
     return GenerationResult(
@@ -277,4 +311,5 @@ def generate(
         seed=seed,
         video_path=video_path,
         audio_path=audio_path,
+        warnings=warnings,
     )

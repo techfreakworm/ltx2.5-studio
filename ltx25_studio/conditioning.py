@@ -37,8 +37,10 @@ __all__ = [
     "build_conditions",
     "image_crf_for",
     "latent_index_for",
+    "latent_to_pixel_index",
     "normalise_condition",
     "pixel_index_for",
+    "pixel_to_latent_index",
     "validate_condition_index",
 ]
 
@@ -55,6 +57,28 @@ def pixel_index_for(
     the stride become ``ratio``. That kink is where off-by-one bugs live.
     """
     return max((latent_index - 1) * temporal_compression_ratio + 1, 0)
+
+
+#: Alias with the name the UI layer asks for. Same function, one implementation
+#: -- a second copy of ``max((latent - 1) * ratio + 1, 0)`` living in the UI
+#: could drift from this one, and a readout that disagrees with the generator is
+#: worse than no readout at all.
+def latent_to_pixel_index(
+    latent_index: int,
+    *,
+    temporal_compression_ratio: int = DEFAULT_TEMPORAL_COMPRESSION_RATIO,
+) -> int:
+    """The pixel frame a latent index lands on. See :func:`pixel_index_for`."""
+    return pixel_index_for(latent_index, temporal_compression_ratio=temporal_compression_ratio)
+
+
+def pixel_to_latent_index(
+    pixel_frame: int,
+    *,
+    temporal_compression_ratio: int = DEFAULT_TEMPORAL_COMPRESSION_RATIO,
+) -> int:
+    """The latent index holding a pixel frame. See :func:`latent_index_for`."""
+    return latent_index_for(pixel_frame, temporal_compression_ratio=temporal_compression_ratio)
 
 
 def latent_index_for(

@@ -18,7 +18,27 @@ try:  # noqa: I001 - import order is load-bearing; see the module docstring
 except ImportError:  # local development, where ZeroGPU does not exist
     spaces = None
 
+import logging
+
+from ltx25_studio import outputs
+from ltx25_studio.config import load_config
 from ltx25_studio.ui import build_ui
+
+logging.basicConfig(level=logging.INFO)
+_log = logging.getLogger("ltx25_studio")
+
+# PLAN §2.7: sweep on startup as well as after each run. ZeroGPU's disk is
+# ephemeral but a restart is not a guaranteed clean slate, and the predecessor
+# went unhealthy by filling it. Non-fatal: a retention failure must not stop the
+# app from starting.
+try:
+    _config = load_config()
+    for _evicted in outputs.enforce_retention(
+        _config.output_dir, max_bytes=int(_config.output_retention_gb * 1e9)
+    ):
+        _log.info("startup eviction: removed old run %s", _evicted)
+except Exception as _exc:  # noqa: BLE001 - startup must survive a bad sweep
+    _log.warning("startup output sweep skipped: %s", _exc)
 
 demo = build_ui()
 
