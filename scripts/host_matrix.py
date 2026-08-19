@@ -151,6 +151,16 @@ RUNS = {
     "H9":  dict(mode="video_to_audio",            needs=("video",), extra={}),
     "H10": dict(mode="audio_to_audio",            needs=("audio",), extra={"noise_scale": 0.5}),
     "H11": dict(mode="audio_to_video",            needs=("audio",), extra={"noise_scale": 0.5}),
+    # A.4 -- the two features that need their own run.
+    # H15: duration_head picks the length, so num_frames must not be sent at all;
+    # generate() pops it when auto_duration is set and passes the bounds instead.
+    "H15": dict(mode="text_to_video", needs=(), extra={
+        "auto_duration": True, "min_seconds": 2.0, "max_seconds": 6.0}),
+    # A.5 -- the resolution a user would actually choose. 1216 and 704 are both
+    # multiples of 32; everything above this is a correctness check, this is the
+    # one that says whether it is usable.
+    "H16": dict(mode="text_to_audio_video", needs=(), extra={},
+                width=1216, height=704),
 }
 
 
@@ -335,13 +345,16 @@ def main() -> int:
         req = dict(
             mode=mode_id,
             prompt=PROMPT,
-            width=BASE_W,
-            height=BASE_H,
-            num_frames=BASE_FRAMES,
+            width=spec_row.get("width", BASE_W),
+            height=spec_row.get("height", BASE_H),
+            num_frames=spec_row.get("frames", BASE_FRAMES),
             seed=SEED,
             output_root=OUTPUT_ROOT,
             **spec_row["extra"],
         )
+        log(f"  request geometry {req['width']}x{req['height']}x{req['num_frames']}"
+            + ("  auto_duration ON (num_frames will be dropped)"
+               if spec_row["extra"].get("auto_duration") else ""))
         absent = [n for n in spec_row["needs"] if n not in fixtures]
         if absent:
             log(f"  SKIPPED: fixture(s) {absent} unavailable")
