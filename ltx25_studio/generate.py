@@ -133,8 +133,10 @@ class GenerationRequest:
     noise_scale: float = 0.5
     conditions: tuple = ()
     strength: float = 0.8
-    guidance_scale: float = 1.0
-    num_inference_steps: int = 8
+    #: NOTE: there is deliberately no `guidance_scale` or `num_inference_steps`.
+    #: The distilled recipe fixes both, and a lever that fights the schedule is
+    #: worse than no lever -- the user gets worse output with no way to know why.
+    #: `pipelines.distilled_kwargs()` is the single source for the sampling set.
     loras: tuple = ()
     #: Run the stage-2 refinement chain (PLAN §7.4): latent upsample, three more
     #: denoise steps, then the diffusion decode. Off by default because it is a

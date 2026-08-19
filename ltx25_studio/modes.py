@@ -133,8 +133,11 @@ def _base_kwargs(request, *, min_resolution: bool) -> dict:
         "width": width,
         "height": height,
         "num_frames": getattr(request, "num_frames", None),
-        "guidance_scale": getattr(request, "guidance_scale", None),
-        "num_inference_steps": getattr(request, "num_inference_steps", None),
+        # guidance_scale and num_inference_steps are NOT sent from here.
+        # `pipelines.distilled_kwargs()` owns the whole sampling recipe, because
+        # the distilled schedule and its guidance settings are one set that must
+        # not be assembled from two places -- which is how the sigmas came to be
+        # applied on only one branch. See PLAN 5.5.
     }
     return {key: value for key, value in candidates.items() if value is not None}
 

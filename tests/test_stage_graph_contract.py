@@ -953,3 +953,101 @@ def test_stage_2_still_refuses_when_the_parts_cannot_be_had():
     assert "single-stage" in str(excinfo.value), (
         f"the refusal no longer explains what it is refusing to do: {excinfo.value}"
     )
+
+
+# --------------------------------------------------------------------------
+# the distilled recipe reaches every run
+#
+# It used to live on `stage_1_kwargs()`, which is applied ONLY when stage 2 is
+# enabled -- so DISTILLED_SIGMA_VALUES was defined, documented as mandatory,
+# quoted in the module docstring, and had never been sent to a pipeline until
+# the first stage-2 run. Eleven of twelve host runs used upstream's linear
+# fallback and the SFT guidance defaults.
+# --------------------------------------------------------------------------
+
+#: The distilled recipe as the model card states it, at revision 871165de….
+#: *Recorded from the source rather than derived from our own constants, so a
+#: change to ours cannot quietly redefine what "correct" means.*
+MODEL_CARD_DISTILLED = {
+    "guidance_scale": 1.0,
+    "audio_guidance_scale": 1.0,
+    "stg_scale": 0.0,
+    "audio_stg_scale": 0.0,
+    "modality_scale": 1.0,
+    "audio_modality_scale": 1.0,
+}
+
+
+def test_a_single_stage_run_is_given_the_distilled_schedule():
+    """The default path is the one that was missing it."""
+    runner, pipeline, _up, _dec = two_stage()
+
+    runner(prompt="a lighthouse")
+
+    sent = pipeline.kwargs.get("sigmas")
+    assert sent == list(pipelines.DISTILLED_SIGMA_VALUES), (
+        f"a single-stage run sent sigmas={sent}. Without them upstream builds "
+        f"linspace(1.0, 1/steps, steps) -- a floor of 0.125 against the distilled "
+        f"schedule's 0.421875, which is a different denoising trajectory."
+    )
+
+
+@pytest.mark.parametrize("name,value", sorted(MODEL_CARD_DISTILLED.items()))
+def test_a_single_stage_run_carries_every_guidance_value(name, value):
+    """Omitting one does not leave it alone -- it selects the SFT default."""
+    runner, pipeline, _up, _dec = two_stage()
+
+    runner(prompt="a lighthouse")
+
+    assert pipeline.kwargs.get(name) == value, (
+        f"{name} was sent as {pipeline.kwargs.get(name)!r}, not {value!r}. The pipeline "
+        f"defaults are the SFT values (stg 1.0, modality 3.0, audio_guidance 7.0), so an "
+        f"omitted parameter silently selects a different model's settings."
+    )
+
+
+def test_num_inference_steps_is_not_sent():
+    """Upstream builds the linear schedule from it; the card warns against it."""
+    runner, pipeline, _up, _dec = two_stage()
+
+    runner(prompt="a lighthouse")
+
+    assert "num_inference_steps" not in pipeline.kwargs, (
+        "num_inference_steps was sent alongside an explicit sigma schedule; upstream's "
+        "own guidance is that passing it 'would hand the model a generic linear schedule "
+        "and quietly cost quality'"
+    )
+
+
+def test_both_stages_share_one_guidance_set():
+    """Two places to assemble the recipe is how it diverged the first time."""
+    runner, pipeline, _up, _dec = two_stage()
+
+    runner(prompt="a lighthouse", enable_stage_2=True)
+
+    stage_1, stage_2 = pipeline.calls
+    for name, value in MODEL_CARD_DISTILLED.items():
+        assert stage_1.get(name) == value, f"stage 1 lost {name}"
+        assert stage_2.get(name) == value, f"stage 2 lost {name}"
+    assert stage_2["sigmas"] == list(pipelines.STAGE_2_DISTILLED_SIGMA_VALUES), (
+        "stage 2 must use the three-step tail, not stage 1's schedule"
+    )
+
+
+def test_our_recipe_matches_the_model_card():
+    """A recorded fact, not a restatement of the constant it checks."""
+    assert dict(pipelines.DISTILLED_GUIDANCE) == MODEL_CARD_DISTILLED, (
+        f"the guidance set has drifted from the published recipe: "
+        f"{dict(pipelines.DISTILLED_GUIDANCE)} vs {MODEL_CARD_DISTILLED}"
+    )
+
+
+def test_no_advertised_lever_sets_guidance_or_steps():
+    """A lever attached to nothing is a defect; one attached to harm is worse."""
+    from ltx25_studio.ui.fields import FIELD_KEYS
+
+    for key in ("guidance_scale", "num_inference_steps"):
+        assert key not in FIELD_KEYS, (
+            f"{key!r} is still a UI field, but the distilled recipe fixes it -- a user "
+            f"changing it fights the schedule and gets worse output with no way to know why"
+        )

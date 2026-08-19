@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import inspect
 from dataclasses import dataclass
+from types import MappingProxyType
 
 from . import model_files
 from .constraints import (
@@ -64,6 +65,8 @@ __all__ = [
     "derive_pipeline",
     "get_pipeline",
     "stage_1_kwargs",
+    "distilled_kwargs",
+    "DISTILLED_GUIDANCE",
     "stage_2_kwargs",
     "upsample_kwargs",
     "STAGE_2_STRIPPED_KEYS",
@@ -442,9 +445,55 @@ def bundle_for(pipeline_object, kind: str) -> PipelineBundle:
     )
 
 
+#: The distilled recipe's guidance settings, from the model card at ``871165de``.
+#:
+#: ⚠️ **The pipeline defaults are the SFT values** -- ``stg_scale=1.0``,
+#: ``modality_scale=3.0``, ``audio_guidance_scale=7.0`` -- so omitting any of
+#: these does not "leave it at the default", it selects a *different model's*
+#: settings. Upstream is explicit: distilled inference "runs unguided --
+#: guidance_scale=1.0 plus STG and modality guidance zeroed, since the pipeline
+#: defaults are the SFT values."
+DISTILLED_GUIDANCE = MappingProxyType(
+    {
+        "guidance_scale": 1.0,
+        "audio_guidance_scale": 1.0,
+        "stg_scale": 0.0,
+        "audio_stg_scale": 0.0,
+        "modality_scale": 1.0,
+        "audio_modality_scale": 1.0,
+    }
+)
+
+
+def distilled_kwargs() -> dict:
+    """The distilled recipe. **Every** run gets this, single-stage included.
+
+    This function exists because the previous arrangement put the sigmas on
+    ``stage_1_kwargs()``, which is applied **only when stage 2 is enabled** -- so
+    ``DISTILLED_SIGMA_VALUES`` was defined, documented as mandatory, quoted in
+    this module's own docstring, and **had never been sent to a pipeline** until
+    the first stage-2 run. Every other generation got upstream's fallback:
+
+        sigmas is None -> np.linspace(1.0, 1/num_inference_steps, num_inference_steps)
+        [1.0, 0.875, 0.75, 0.625, 0.5, 0.375, 0.25, 0.125]
+
+    against the distilled schedule's
+
+        [1.0, 0.99375, 0.9875, 0.98125, 0.975, 0.909375, 0.725, 0.421875]
+
+    -- five of eight steps above 0.97 and a floor of 0.42, versus one and 0.125.
+    A different denoising trajectory, not a mistuning.
+
+    ``num_inference_steps`` is deliberately NOT sent: upstream builds the linear
+    schedule from it, and the model card warns that passing it "would hand the
+    model a generic linear schedule and quietly cost quality".
+    """
+    return {"sigmas": list(DISTILLED_SIGMA_VALUES), **DISTILLED_GUIDANCE}
+
+
 def stage_1_kwargs() -> dict:
-    """Stage-1 denoise: distilled 8-step schedule, latents out."""
-    return {"sigmas": list(DISTILLED_SIGMA_VALUES), "output_type": "latent"}
+    """Stage-1 denoise: the distilled recipe, latents out."""
+    return {**distilled_kwargs(), "output_type": "latent"}
 
 
 def upsample_kwargs(latents) -> dict:
@@ -477,7 +526,10 @@ def stage_2_kwargs(latents, *, audio_latents=None) -> dict:
     denoised alongside.
     """
     kwargs = {
+        **distilled_kwargs(),
         "latents": latents,
+        # The three-step tail replaces stage 1's schedule; the guidance settings
+        # above are the same for both stages and come from one place.
         "sigmas": list(STAGE_2_DISTILLED_SIGMA_VALUES),
         "noise_scale": STAGE_2_DISTILLED_SIGMA_VALUES[0],
         "output_type": "latent",
@@ -561,7 +613,10 @@ class StageRunner:
     def __call__(self, *, enable_stage_2: bool = False, **kwargs):
         kwargs = _with_real_conditions(kwargs)
         if not enable_stage_2:
-            return self.pipeline(**kwargs)
+            # The distilled recipe applies here too. It used to apply ONLY on
+            # the stage-2 path, which is how eleven of twelve host runs were
+            # generated with a linear schedule and SFT guidance.
+            return self.pipeline(**kwargs, **distilled_kwargs())
         self._stage_2_ready()
 
         stage_1 = self.pipeline(**kwargs, **stage_1_kwargs())

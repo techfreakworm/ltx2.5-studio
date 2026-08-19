@@ -109,9 +109,11 @@ def build_ui() -> gr.Blocks:
                     frame_hint = gr.Markdown()
 
                 with gr.Accordion("Sampling", open=False):
-                    with gr.Row():
-                        components.render_fields(pool, "seed", "num_inference_steps")
-                    components.render_fields(pool, "strength", "noise_scale", "guidance_scale")
+                    # No guidance or step controls: the distilled recipe fixes
+                    # both, and `pipelines.distilled_kwargs()` is the one place
+                    # that sets them. See the note in `ui/fields.py`.
+                    components.render_fields(pool, "seed")
+                    components.render_fields(pool, "strength", "noise_scale")
                     components.render_fields(pool, "enable_stage_2")
 
                 with gr.Accordion("LoRA", open=True):

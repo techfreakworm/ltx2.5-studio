@@ -364,24 +364,13 @@ FIELDS: tuple[Field, ...] = (
         options={"minimum": 0.0, "maximum": 1.0, "step": 0.01},
         visible_when=_accepts("audio"),
     ),
-    Field(
-        key="guidance_scale",
-        kind="slider",
-        label="Guidance scale",
-        info="The distilled schedule is trained for 1.0. Raising it fights the schedule.",
-        group="sampling",
-        default=1.0,
-        options={"minimum": 1.0, "maximum": 10.0, "step": 0.1},
-    ),
-    Field(
-        key="num_inference_steps",
-        kind="number",
-        label="Steps",
-        info="8 is the distilled schedule's own step count (PLAN §5.5).",
-        group="sampling",
-        default=8,
-        options={"minimum": 1, "maximum": 50, "step": 1, "precision": 0},
-    ),
+    # NOTE: "Guidance scale" and "Steps" were here and are deliberately gone.
+    # The distilled recipe fixes both -- `guidance_scale=1.0`, and an explicit
+    # sigma schedule rather than a step count. A user raising guidance fights
+    # the schedule and gets worse output with no way to know why, and the step
+    # count became inert the moment the sigmas were always sent. An advertised
+    # lever attached to nothing is a defect; one attached to HARM is worse.
+    # `pipelines.distilled_kwargs()` owns the whole sampling set.
     # -- carried state --------------------------------------------------------
     Field(
         key="loras",
