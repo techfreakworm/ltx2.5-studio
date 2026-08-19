@@ -120,10 +120,12 @@ def main() -> int:
         # tells us the convention even when validation goes on to refuse.
         try:
             insp = inspect_lora(path)
-            log(f"    inspect: convention={insp.convention!r} tensors={len(insp.tensors)}")
-            for attr in ("model_version", "in_context", "prefixes"):
-                if hasattr(insp, attr):
-                    log(f"      {attr} = {getattr(insp, attr)!r}")
+            log(f"    inspect: convention={insp.convention!r} keys={len(insp.keys)} "
+                f"shapes={len(insp.shapes)}")
+            log(f"      prefixes      = {insp.prefixes}")
+            log(f"      model_version = {insp.model_version!r}")
+            log(f"      metadata keys = {sorted(insp.metadata)}")
+            log(f"      first 3 keys  = {insp.keys[:3]}")
         except Exception as exc:
             log(f"    inspect raised {type(exc).__name__}: {exc}")
 
