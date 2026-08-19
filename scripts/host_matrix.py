@@ -156,6 +156,20 @@ RUNS = {
     # generate() pops it when auto_duration is set and passes the bounds instead.
     "H15": dict(mode="text_to_video", needs=(), extra={
         "auto_duration": True, "min_seconds": 2.0, "max_seconds": 6.0}),
+    # A.4 H14 -- stage 2. Same prompt and seed as H1, so the comparison is the
+    # refinement chain and nothing else; the artifact must DIFFER from H1's.
+    "H14": dict(mode="text_to_video", needs=(), extra={"enable_stage_2": True}),
+    # A.4.1 H4b -- strength 0.3 vs 0.9 on the same seed. Two runs that must differ
+    # from each other; identical output means `strength` reaches nothing.
+    "H4b_lo": dict(mode="video_to_video", needs=("video",), extra={"strength": 0.3}),
+    "H4b_hi": dict(mode="video_to_video", needs=("video",), extra={"strength": 0.9}),
+    # A.4.1 H10b -- the acceptance test for the audio-input path. noise_scale 1.0
+    # discards the input BY DESIGN, so a bug that drops it entirely is
+    # indistinguishable from correct operation: the mode produces audio either
+    # way and every stream check passes. Only these two differing proves the
+    # upload arrived.
+    "H10b_lo": dict(mode="audio_to_audio", needs=("audio",), extra={"noise_scale": 0.1}),
+    "H10b_hi": dict(mode="audio_to_audio", needs=("audio",), extra={"noise_scale": 0.9}),
     # A.5 -- the resolution a user would actually choose. 1216 and 704 are both
     # multiples of 32; everything above this is a correctness check, this is the
     # one that says whether it is usable.
