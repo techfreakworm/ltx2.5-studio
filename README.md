@@ -11,7 +11,23 @@ app_file: app.py
 # RTX PRO 6000 Blackwell Server Edition, MIG-partitioned (sm_120). This is the id
 # the Spaces API still reports for ZeroGPU. Do NOT "correct" it to an h200 value:
 # that moves the Space off ZeroGPU onto paid dedicated hardware. See docs/PLAN.md §8.1.
+# Note it is only a HINT for people duplicating the Space — it does not assign
+# hardware. The real request is made through the API, and already has been.
 suggested_hardware: zero-a10g
+#
+# DO NOT REMOVE OR SHORTEN — this is not padding.
+# The field DEFAULTS TO 30 MINUTES. This Space downloads 72.19 GB at build time
+# and then ZeroGPU packs every tensor to disk with O_DIRECT before the app reports
+# healthy; 30 minutes does not cover that. When it blows, the Space is simply
+# flagged unhealthy and the logs show a download progressing normally and then
+# ceasing to matter — there is NO error message saying the timeout was too short.
+# It is the one failure on this deploy that looks like something else entirely,
+# and every retry costs another 72 GB.
+startup_duration_timeout: 1h
+# Declare the model dependency explicitly rather than relying on HF parsing it
+# out of the source.
+models:
+  - Lightricks/LTX-2.5-Diffusers
 pinned: false
 short_description: Every LTX-2.5 mode, with user-uploadable LoRA at inference time.
 #
@@ -45,7 +61,7 @@ A Gradio studio for [LTX-2.5](https://huggingface.co/Lightricks/LTX-2.5) — Lig
 with **user-uploadable LoRA at inference time**.
 
 Built on `diffusers`, pinned to an exact commit. Deploys to a private Hugging Face Space
-on ZeroGPU.
+on ZeroGPU: [`techfreakworm/LTX2.5-Studio`](https://huggingface.co/spaces/techfreakworm/LTX2.5-Studio).
 
 ---
 
