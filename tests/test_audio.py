@@ -16,7 +16,13 @@ import ast
 from types import SimpleNamespace
 
 import pytest
-from conftest import PACKAGE_ROOT, FakeAudioVae, code_string_constants, waveform_of
+from conftest import (
+    PACKAGE_ROOT,
+    FakeAudioVae,
+    FakeVocoder,
+    code_string_constants,
+    waveform_of,
+)
 
 from ltx25_studio import audio
 from ltx25_studio.errors import LTXStudioError
@@ -458,3 +464,133 @@ def test_a_planar_file_is_concatenated_rather_than_reshaped():
     data = audio.deinterleaved(chunks, channels=2, planar=True)
 
     assert data.tolist() == [[1.0, 2.0, 3.0], [9.0, 8.0, 7.0]], data
+
+
+# --------------------------------------------------------------------------
+# the mel front-end the checkpoint does not ship
+#
+# No forward transform exists anywhere in diffusers.pipelines.ltx2 -- the
+# vocoder's only `hann` window belongs to its anti-aliasing filter. So the
+# forward direction has to be built, from parameters that live across TWO
+# components. `decode_latents_to_waveform` needs none of this: the VAE decoder
+# emits a mel and the vocoder inverts it. That asymmetry is why H5-H9 produce
+# real audio while the audio-INPUT modes cannot start.
+# --------------------------------------------------------------------------
+
+#: The exact key set of ``vocoder/config.json`` at revision 871165de….
+#: *Read off the cached checkpoint, not inferred.*
+REAL_VOCODER_CONFIG_KEYS = frozenset(
+    {
+        "_class_name",
+        "_diffusers_version",
+        "act_fn",
+        "antialias",
+        "antialias_kernel_size",
+        "antialias_ratio",
+        "bwe_act_fn",
+        "bwe_antialias",
+        "bwe_antialias_kernel_size",
+        "bwe_antialias_ratio",
+        "bwe_final_act_fn",
+        "bwe_final_bias",
+        "bwe_hidden_channels",
+        "bwe_in_channels",
+        "bwe_leaky_relu_negative_slope",
+        "bwe_out_channels",
+        "bwe_resnet_dilations",
+        "bwe_resnet_kernel_sizes",
+        "bwe_upsample_factors",
+        "bwe_upsample_kernel_sizes",
+        "filter_length",
+        "final_act_fn",
+        "final_bias",
+        "hidden_channels",
+        "hop_length",
+        "in_channels",
+        "input_sampling_rate",
+        "leaky_relu_negative_slope",
+        "num_mel_channels",
+        "out_channels",
+        "output_sampling_rate",
+        "resnet_dilations",
+        "resnet_kernel_sizes",
+        "upsample_factors",
+        "upsample_kernel_sizes",
+        "window_length",
+    }
+)
+
+REAL_KEYS_BY_OWNER = {
+    "audio_vae": REAL_AUDIO_VAE_CONFIG_KEYS,
+    "vocoder": REAL_VOCODER_CONFIG_KEYS,
+}
+
+
+@pytest.mark.parametrize("name", sorted(audio.MEL_PARAM_SOURCES))
+def test_every_mel_parameter_names_a_key_the_checkpoint_really_has(name):
+    """The check a fake cannot make, because fakes are built from the mapping."""
+    owner, field = audio.MEL_PARAM_SOURCES[name]
+
+    assert field in REAL_KEYS_BY_OWNER[owner], (
+        f"{name!r} is read from {owner}.config[{field!r}] and the real checkpoint has no "
+        f"such key -- it would raise on real weights and pass every offline test"
+    )
+
+
+def test_the_window_is_read_across_and_the_hop_is_not():
+    """The asymmetry IS the judgement, and it is the thing someone will tidy.
+
+    ``audio_vae.mel_hop_length`` is 160 and ``vocoder.hop_length`` is 80. The
+    vocoder's own ``upsample_factors`` multiply to 160, matching the VAE — so
+    its 80 means something else inside the vocoder. Reading the hop across for
+    consistency would halve it.
+    """
+    assert audio.MEL_PARAM_SOURCES["win_length"][0] == "vocoder"
+    assert audio.MEL_PARAM_SOURCES["n_fft"][0] == "vocoder"
+    assert audio.MEL_PARAM_SOURCES["hop_length"] == ("audio_vae", "mel_hop_length"), (
+        f"the hop is {audio.MEL_PARAM_SOURCES['hop_length']}. Taking it from the vocoder "
+        f"gives 80 against the VAE's 160, and the vocoder's own upsample factors say 160."
+    )
+
+
+def test_the_vocoders_upsample_factors_corroborate_the_vaes_hop():
+    """Why 160 wins: the vocoder's own arithmetic agrees with the VAE, not itself."""
+    vocoder = FakeVocoder()
+    product = 1
+    for factor in vocoder.config.upsample_factors:
+        product *= factor
+
+    assert product == 160
+    assert product != vocoder.config.hop_length, (
+        "the vocoder's declared hop now equals its upsample product; if that is really "
+        "true the comment in MEL_PARAM_SOURCES needs revisiting"
+    )
+
+
+def test_the_two_components_agree_on_everything_except_the_hop():
+    """Four of five parameters are corroborated, which is what makes this a lookup."""
+    vae, vocoder = FakeAudioVae(), FakeVocoder()
+
+    assert vae.config.mel_bins == vocoder.config.num_mel_channels
+    assert vae.config.sample_rate == vocoder.config.input_sampling_rate
+    assert vae.config.mel_hop_length != vocoder.config.hop_length
+
+
+def test_the_declared_parameters_are_read_not_defaulted():
+    params = audio.mel_parameters(FakeAudioVae(), FakeVocoder())
+
+    assert params == {
+        "n_fft": 512,
+        "win_length": 512,
+        "hop_length": 160,
+        "n_mels": 64,
+        "sample_rate": 16000,
+    }, params
+
+
+def test_building_without_a_vocoder_refuses_rather_than_guessing():
+    """A guessed FFT size produces a mel the VAE was never trained on."""
+    with pytest.raises(LTXStudioError) as excinfo:
+        audio.mel_parameters(FakeAudioVae(), None)
+
+    assert "vocoder" in str(excinfo.value), excinfo.value

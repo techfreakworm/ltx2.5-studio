@@ -183,9 +183,7 @@ def lora_tensors(prefix, module_paths, *, style="peft", rank=DEFAULT_RANK, dims=
     tensors: dict[str, tuple[str, list[int]]] = {}
     overrides = dims or {}
     for path in module_paths:
-        tensors.update(
-            lora_pair(prefix, path, style=style, rank=rank, dims=overrides.get(path))
-        )
+        tensors.update(lora_pair(prefix, path, style=style, rank=rank, dims=overrides.get(path)))
     return tensors
 
 
@@ -449,6 +447,27 @@ def waveform_of(channels: int, samples: int = 4096):
     import numpy as np
 
     return np.zeros((channels, samples), dtype=np.float32)
+
+
+class FakeVocoder:
+    """The vocoder, with the REAL key names from vocoder/config.json.
+
+    It carries the analysis window the audio VAE's config does not declare, so
+    the forward mel transform needs it as well as the VAE. Keys are the
+    checkpoint's own, not ours -- a fake using our names would pass a wrong
+    lookup, which is exactly how the audio-VAE parameters went unnoticed.
+    """
+
+    def __init__(self):
+        self.config = SimpleNamespace(
+            filter_length=512,
+            window_length=512,
+            hop_length=80,  # NOT the mel hop; see audio.MEL_PARAM_SOURCES
+            num_mel_channels=64,
+            input_sampling_rate=16000,
+            output_sampling_rate=48000,
+            upsample_factors=[5, 2, 2, 2, 2, 2],
+        )
 
 
 #: What the stub loader hands back. STEREO, matching the fake VAE's in_channels,

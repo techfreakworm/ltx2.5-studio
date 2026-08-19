@@ -240,6 +240,49 @@ notice.
 |---|---|---|---|
 | H16 | `text_to_audio_video` | **1216 × 704**, 121 frames | the resolution a user would actually choose. Everything above is a correctness check; this is the one that says whether it is usable |
 
+## A.5.1 H17 — the mel round-trip. **Required before H10/H11 are believed.**
+
+The forward mel transform **does not exist in the checkpoint**. No module in
+`diffusers.pipelines.ltx2` implements one; the vocoder's only `hann` window
+belongs to its anti-aliasing filter. So `build_mel_front_end` constructs it, and
+**five of its parameters are read from config and the rest are conventions**:
+
+| read from the checkpoint | | convention, **not** a reading |
+|---|---|---|
+| `n_fft` 512 | `vocoder.filter_length` | `power` |
+| `win_length` 512 | `vocoder.window_length` | `f_min` / `f_max` |
+| `hop_length` 160 | `audio_vae.mel_hop_length` | `mel_scale` / `norm` |
+| `n_mels` 64 | `audio_vae.mel_bins` | `center` |
+| `sample_rate` 16000 | `audio_vae.sample_rate` | the log and its floor |
+
+The offline gate asserts the left column is **sourced** correctly. **Nothing
+offline can validate the right column**, and a wrong choice there is *"audible
+as degraded audio, reported as nothing"* — the exact failure the module's own
+error message warns about. So it is validated by reconstruction:
+
+```
+known waveform -> build_mel_front_end -> audio_vae.encode
+              -> audio_vae.decode -> vocoder -> waveform
+```
+
+**Compare against the input.** A wrong window or scaling smears the spectrum and
+the reconstruction degrades measurably.
+
+> ⚠️ **The signal must have structure a wrong window would damage.** Two tones
+> plus an envelope, as the stereo fixture uses. **Not noise and not silence** —
+> both survive a wrong analysis window looking much the same, which would make
+> this test pass while proving nothing. That is the same fixture trap as a
+> `float32` audio fixture over a `bfloat16` defect.
+
+**If it fails, the conventions are the candidates, in this order:** the log and
+its floor, then `mel_scale`/`norm` (slaney vs htk), then `power` (1.0 vs 2.0),
+then `center`. Each is one line in `audio.MEL_CONVENTIONS`.
+
+**H10 and H11 passing does not substitute for this.** They will produce
+well-formed audio with a wrong mel — that is what "reported as nothing" means.
+
+---
+
 ## A.6 Run log
 
 | Run | Mode | Result | Wall clock | **Streams observed** | **Output looks right?** | Notes |

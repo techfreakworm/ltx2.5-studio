@@ -69,6 +69,10 @@ __all__ = [
     "match_channel_count",
     "export_sampling_rate_from",
     "mel_front_end_for",
+    "build_mel_front_end",
+    "mel_parameters",
+    "MEL_PARAM_SOURCES",
+    "MEL_CONVENTIONS",
     "validate_audio_latents_against_video",
     "validate_audio_latents_shape",
 ]
@@ -312,7 +316,98 @@ def validate_audio_latents_against_video(
 MEL_FRONT_END_ATTRS = ("mel_spectrogram", "mel_transform", "_mel_spectrogram")
 
 
-def mel_front_end_for(audio_vae):
+#: Where each mel parameter comes from. **Four of the five are declared by BOTH
+#: components and agree**, which is what makes this a lookup rather than a
+#: reconstruction: the vocoder's ``num_mel_channels`` is 64 and the VAE's
+#: ``mel_bins`` is 64; the vocoder's ``input_sampling_rate`` is 16000 and the
+#: VAE's ``sample_rate`` is 16000.
+#:
+#: ⚠️ **The hop is the one disagreement, and it is read from the VAE on purpose.**
+#: ``audio_vae.mel_hop_length`` is 160; ``vocoder.hop_length`` is 80. The
+#: vocoder's own ``upsample_factors`` -- ``[5, 2, 2, 2, 2, 2]`` -- multiply to
+#: **160**, matching the VAE rather than the vocoder's own declared 80, so that
+#: 80 refers to something else inside the vocoder. Read ``window_length`` across
+#: from the vocoder; **do NOT read a hop across.** The asymmetry is deliberate
+#: and is exactly the kind of thing a later reader will "tidy" into consistency.
+#:
+#: *Read off vocoder/config.json and audio_vae/config.json at revision
+#: 871165de…, cross-checked against the upsample factors.*
+MEL_PARAM_SOURCES = MappingProxyType(
+    {
+        "n_fft": ("vocoder", "filter_length"),
+        "win_length": ("vocoder", "window_length"),
+        "hop_length": ("audio_vae", "mel_hop_length"),
+        "n_mels": ("audio_vae", "mel_bins"),
+        "sample_rate": ("audio_vae", "sample_rate"),
+    }
+)
+
+#: ⚠️ **These are CONVENTIONS, not readings.** Neither config declares them and
+#: no forward transform ships anywhere in ``diffusers.pipelines.ltx2`` -- the
+#: vocoder's only ``hann`` window belongs to its anti-aliasing filter, not to an
+#: STFT. So unlike everything in :data:`MEL_PARAM_SOURCES`, each of these is a
+#: choice, and a wrong one is *"audible as degraded audio, reported as nothing"*.
+#:
+#: **The round-trip test is what validates them**, and it is not optional
+#: decoration: a wrong window or scaling smears the spectrum and the
+#: reconstruction degrades measurably. If that test fails, these are the
+#: candidates -- in this order.
+MEL_CONVENTIONS = MappingProxyType(
+    {
+        "power": 1.0,  # magnitude, not power; log is applied after
+        "f_min": 0.0,
+        "f_max": None,  # -> sample_rate / 2
+        "mel_scale": "slaney",
+        "norm": "slaney",
+        "center": True,
+    }
+)
+
+#: Floor before the log, so silence does not become -inf.
+MEL_LOG_FLOOR = 1e-5
+
+
+def mel_parameters(audio_vae, vocoder):
+    """The five declared mel parameters, each from the component that owns it."""
+    owners = {"audio_vae": audio_vae, "vocoder": vocoder}
+    values = {}
+    for name, (owner, field) in MEL_PARAM_SOURCES.items():
+        component = owners[owner]
+        if component is None:
+            raise LTXStudioError(
+                f"the mel front-end needs {name!r}, which is declared by the {owner}, and no "
+                f"{owner} was supplied. Every value comes from a loaded component; this module "
+                f"holds no defaults, because a guessed FFT size produces a mel spectrogram the "
+                f"VAE was never trained on."
+            )
+        values[name] = int(_read(_config_of(component, name=owner), field, owner=f"{owner}.config"))
+    return values
+
+
+def build_mel_front_end(audio_vae, vocoder):
+    """Construct the forward transform, because the checkpoint ships none.
+
+    **Only the forward direction needs this.** ``decode_latents_to_waveform``
+    works without any STFT -- the VAE decoder emits a mel and the vocoder
+    inverts it -- which is why H5-H9 produce real audio while the audio-INPUT
+    modes cannot start. The gap is asymmetric by nature, not by oversight.
+    """
+    import torch
+    import torchaudio
+
+    params = mel_parameters(audio_vae, vocoder)
+    conventions = dict(MEL_CONVENTIONS)
+    conventions["f_max"] = conventions["f_max"] or params["sample_rate"] / 2
+    transform = torchaudio.transforms.MelSpectrogram(**params, **conventions)
+
+    def to_mel(waveform):
+        mel = transform.to(device=waveform.device, dtype=torch.float32)(waveform.float())
+        return torch.log(torch.clamp(mel, min=MEL_LOG_FLOOR))
+
+    return to_mel
+
+
+def mel_front_end_for(audio_vae, vocoder=None):
     """The callable that turns a waveform into the mel the VAE expects.
 
     Deliberately *found*, never built: see :data:`MEL_FRONT_END_ATTRS`. If the
@@ -323,6 +418,8 @@ def mel_front_end_for(audio_vae):
         found = getattr(audio_vae, attribute, None)
         if callable(found):
             return found
+    if vocoder is not None:
+        return build_mel_front_end(audio_vae, vocoder)
     raise LTXStudioError(
         f"the loaded audio_vae carries no mel front-end (looked for "
         f"{', '.join(MEL_FRONT_END_ATTRS)}), and this module will not construct one: the FFT "
@@ -485,7 +582,9 @@ def match_channel_count(waveform, *, channels: int):
     )
 
 
-def encode_waveform_to_latents(waveform, *, audio_vae, sampling_rate: int, to_mel=None, notes=None):
+def encode_waveform_to_latents(
+    waveform, *, audio_vae, sampling_rate: int, to_mel=None, notes=None, vocoder=None
+):
     """waveform -> mel -> ``audio_vae`` latents, ready to pass as ``audio_latents``.
 
     The img2img route of PLAN §3.1(c): the result is combined upstream as
@@ -507,7 +606,7 @@ def encode_waveform_to_latents(waveform, *, audio_vae, sampling_rate: int, to_me
         logger.warning(note)
         if notes is not None:
             notes.append(note)
-    mel = (to_mel or mel_front_end_for(audio_vae))(prepared)
+    mel = (to_mel or mel_front_end_for(audio_vae, vocoder))(prepared)
     latents = _sampled(audio_vae.encode(mel))
     validate_audio_latents_shape(getattr(latents, "shape", ()))
     return latents

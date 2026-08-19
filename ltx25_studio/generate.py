@@ -301,6 +301,9 @@ def _prepared_audio(kwargs: dict, request: GenerationRequest, pipe) -> tuple[str
 
     target = getattr(pipe, "pipeline", pipe)
     audio_vae = getattr(target, "audio_vae", None)
+    # The vocoder declares the analysis window the VAE's config does not, so the
+    # forward transform needs both components. See audio.MEL_PARAM_SOURCES.
+    vocoder = getattr(target, "vocoder", None)
     if audio_vae is None:
         raise GenerationError(
             f"mode {request.mode!r} was given an audio input but the pipeline exposes no "
@@ -313,7 +316,11 @@ def _prepared_audio(kwargs: dict, request: GenerationRequest, pipe) -> tuple[str
     # so it reaches `GenerationResult.warnings` rather than the Space log alone.
     notes: list[str] = []
     kwargs["audio_latents"] = audio_module.encode_waveform_to_latents(
-        waveform, audio_vae=audio_vae, sampling_rate=rate, notes=notes
+        waveform,
+        audio_vae=audio_vae,
+        sampling_rate=rate,
+        notes=notes,
+        vocoder=vocoder,
     )
     return tuple(notes)
 
