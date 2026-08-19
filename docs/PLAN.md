@@ -1646,6 +1646,89 @@ machine nobody wrote it for** — including the duplicate-shard trap it exists t
 nothing**. A hand-maintained second copy would have been accurate about the machine its
 author had in front of them — the only machine that never needed it to be right.
 
+### 9.1.5 Four rules the hardware taught, which no amount of reading would have
+
+§9.1.1 through §9.1.4 came from reading the code. These came from running it,
+and each cost a real defect to learn.
+
+**5. Fixtures must cover the union of what the callers pass, not the
+intersection that is convenient to construct.**
+
+`_as_array` is reached by two callers and only one ever passes the awkward type.
+`test_encoder_contract.py` drove the **real** encoder through **real** containers
+to a real file — and built its audio as `np.float32`, because that is what is
+easy to make. The model produces `bfloat16`, numpy has no such dtype, and **six
+of eleven modes were broken at the last step while 1926 tests passed.** The path
+was covered. The *dtype* was not. "Cover the code paths" does not say this;
+"cover what the callers actually pass" does.
+
+**6. A fake that cannot reproduce the failure is not a test of it — and a fake
+derived from the mapping can never catch a wrong mapping.**
+
+Three instances in one day, each in a test that was otherwise good:
+
+* the `np.float32` audio fixture above;
+* its replacement, whose `.float()` returned an `ndarray` where torch returns a
+  *tensor* — written the convenient way it would have passed a broken fix;
+* the audio-VAE fake, which used **our** parameter names. All six were wrong,
+  every runtime path raised on real weights, and every offline test passed —
+  because the fake agreed with the code and with nothing else.
+
+The instinctive repair for the third — build the fake from the same mapping the
+code uses — is a trap for exactly the same reason. **The fix is a recorded fact
+about reality**: `REAL_AUDIO_VAE_CONFIG_KEYS`, `REAL_VOCODER_CONFIG_KEYS`,
+`MODEL_CARD_DISTILLED`, each copied from the vendor's source rather than derived
+from ours. *The fake checks semantics; the recorded fact checks the world.*
+Where a fake stands in for something unavailable locally, **something must check
+the fake still behaves like the real thing** — that check found a defect in its
+own fixture within a minute of existing.
+
+**7. Prefer a check to a comment, because a comment has no purchase on its own
+author five minutes later.**
+
+Twice a constraint did not survive the next function written *by the person who
+wrote the constraint*: a `dtype` requirement violated two commits after the ⚠️
+comment demanding it, and a 44.33 GB refetch reintroduced **while reading the
+docstring that predicts it**. A comment is a message to a future stranger.
+**Make the wrong thing unsayable instead** — derive the value once and share it,
+as `snapshot_dir()` is shared by the loader and the completeness check, so the
+two cannot drift.
+
+**8. A refutation from source is only a refutation of the mechanism it
+examined.**
+
+`video_to_audio` came back 50 dB down. Two candidates were proposed; both were
+killed from the pinned source with line numbers, correctly — the conditioning
+mask is applied to video only, and the strength ceiling never binds. **The
+conclusion drawn was too broad.** The cause *was* condition strength, by a
+mechanism neither of us had considered: strength sets where in the sigma
+schedule the run starts, so the audio stream — which nothing anchors — was never
+denoised at all. The refutation was of the *denoise loop*; the effect was in the
+*initialisation*.
+
+> **When a refutation kills a candidate, say which mechanism was examined and
+> which were not.** Neither party could have reached this alone: source reading
+> eliminated the wrong path with certainty and could not find the right one;
+> measurement found the right one and could not say why.
+
+### 9.1.6 The ladder, and the rung that is still hand-built
+
+Each rung was added because the one below it passed while something was broken:
+
+| | the check | what it still misses |
+|---|---|---|
+| 1 | the module is **imported** | it can be imported by a UI readout and dead on the generation path |
+| 2 | it is **reached by the path that does the work** | a live module can contain a dead function |
+| 3 | this specific **function ran** | a function can run with the wrong arguments |
+| 4 | the **arguments match the vendor's specification** | ⏸️ hand-built, one call site at a time |
+
+Rung 4 is where `DISTILLED_SIGMA_VALUES` hid: defined, documented as mandatory,
+quoted in its own module docstring, and **referenced** — from a function applied
+only when stage 2 was enabled. Every check we owned passed while eleven of
+twelve runs used a schedule the model was not trained for. **It is the rung with
+no general instrument**, and the only thing that works today is recording the
+vendor's specification independently and asserting against it.
+
 ### 9.2 GPU-gated tests
 
 Anything needing real weights is marked `gpu` and deselected by default. CI and the default local
