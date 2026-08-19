@@ -473,6 +473,9 @@ class FakeAudioVae:
     #: hand-off that never moves the tensor.
     device = "cuda"
 
+    #: Downsampling applied to BOTH axes by `encode`, from the real config.
+    mel_compression_ratio = 4
+
     def __init__(self, sampling_rate=16000):
         # ⚠️ These are the REAL key names, read off audio_vae/config.json at
         # revision 871165de…, not our semantic ones. The previous fake used our
@@ -487,25 +490,49 @@ class FakeAudioVae:
         )
         # Instance attributes on the model, as upstream sets them in __init__.
         # They are absent from config.json entirely.
-        self.mel_compression_ratio = 4
         self.temporal_compression_ratio = 4
         self.mels: list = []
         self.encoded: list = []
 
     def mel_spectrogram(self, waveform):
-        # float32, as the real transform computes it -- an STFT in bf16 would
-        # lose precision exactly where the log floor matters. The cast to the
-        # VAE's dtype happens at the hand-off, which is what this lets us check.
+        """A mel whose TIME axis is derived from the waveform, in encoder layout.
+
+        float32, as the real transform computes it -- the cast to the VAE's
+        dtype happens at the hand-off, which is what this lets us check.
+
+        ⚠️ The time axis is computed, not fixed. A constant-shaped mel makes
+        every duration look the same, which is exactly the symptom a doubled
+        transpose produced on the card: reconstructions pinned to one length
+        regardless of input. A fixture that cannot express duration cannot
+        catch that.
+        """
         self.mels.append(waveform)
-        return FakeMel("float32")
+        batch, channels, samples = waveform.shape
+        frames = samples // self.config.mel_hop_length + 1
+        return FakeMel("float32", (batch, channels, frames, self.config.mel_bins))
 
     def encode(self, mel):
+        """Model what the real encoder does: **preserve axis order, downsample both.**
+
+        ⚠️ The output shape is DERIVED from the input's, not fixed. That is the
+        whole point: the encoder does not reorder anything, so the mel's layout
+        decides the latents' layout. A fake returning a constant shape agrees
+        with whatever the code does to it -- it would pass a missing transpose
+        and a doubled one alike, and a doubled one shipped.
+
+        Matches the card exactly: a (1, 2, 401, 64) mel gives (1, 8, 101, 16).
+        """
         self.encoded.append(mel)
-        # ⚠️ MEL-MAJOR [B, C, M, L], which is what the real VAE emits -- axis 3
-        # tracks duration, axis 2 is pinned at mel_bins / mel_compression_ratio.
-        # Upstream wants [B, C, L, M], so `unpacked_latents` has to swap them. A
-        # fake emitting the already-correct order would pass a missing transpose.
-        latents = ShapedTensor((1, 8, 16, 100))
+        batch, _channels, first, second = mel.shape
+        ratio = self.mel_compression_ratio
+        latents = ShapedTensor(
+            (
+                batch,
+                self.config.latent_channels,
+                -(-first // ratio),  # ceil, as the strided convolutions give
+                second // ratio,
+            )
+        )
         return SimpleNamespace(latent_dist=SimpleNamespace(sample=lambda: latents))
 
 

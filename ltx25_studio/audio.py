@@ -72,7 +72,6 @@ __all__ = [
     "build_mel_front_end",
     "encoder_layout",
     "batched",
-    "unpacked_latents",
     "mel_parameters",
     "MEL_PARAM_SOURCES",
     "MEL_CONVENTIONS",
@@ -424,6 +423,21 @@ def encoder_layout(mel):
     encoder wants, and unbatched. Correcting only the batch axis yields a 4D
     tensor that satisfies the rank check and is a **transposed spectrogram** --
     audio out, silently wrong. See :data:`MEL_INPUT_DIMS`.
+
+    **This is the ONLY rearrangement in the path, and that is the point.**
+    ``audio_vae.encode`` does not reorder axes -- it downsamples both by the
+    compression ratio and preserves their order -- so **the mel's layout decides
+    the latents' layout.** Fed a time-major mel it returns ``[B, C, L, M]``
+    directly, which is what :data:`AUDIO_LATENT_DIMS` declares and what upstream
+    packs.
+
+    ⚠️ A second transpose was once applied to the *encode output*, on a
+    measurement taken **before this function existed** -- when the mel was still
+    mel-major, the latents were too, and the transposition was the mel's showing
+    up one stage later. Applying both corrections put the frame axis back where
+    it started and pinned every reconstruction to 0.61 s regardless of input.
+    **The symptom's location is not its origin**; fixing the mel is the whole
+    fix.
     """
     return mel.transpose(-2, -1)
 
@@ -654,30 +668,6 @@ def batched(waveform):
     return waveform[None]
 
 
-def unpacked_latents(latents):
-    """``audio_vae.encode`` output ``[B, C, M, L]`` -> upstream's ``[B, C, L, M]``.
-
-    ✅ Established by experiment on real weights: halving the input duration
-    halves **axis 3** (100 → 50) while axis 2 stays pinned at
-    ``mel_bins / mel_compression_ratio`` = 16. So the VAE emits mel-major.
-
-    📄 Upstream wants length-major, and says so in
-    ``pipeline_ltx2_condition.prepare_audio_latents``: *"latents expected to be
-    unpacked (4D) with shape [B, C, L, M]"*, with ``_pack_audio_latents`` doing
-    ``latents.transpose(1, 2).flatten(2, 3)  # [B, C, L, M] --> [B, L, C * M]``.
-
-    **This is why :data:`AUDIO_LATENT_DIMS` was right and must not be
-    "corrected".** Our constant, ``validate_audio_latents_shape`` and
-    ``audio_frames_from_latents`` all agree with upstream; the missing step was
-    here. Swapping the constant instead would have made every reader agree with
-    every other reader and all of them wrong -- PLAN §5.7 row 5 exactly.
-    """
-    swap = getattr(latents, "transpose", None)
-    if swap is None:
-        return latents
-    return swap(-2, -1)
-
-
 def _validate_mel_rank(mel) -> None:
     """Refuse a mel the encoder would silently misread.
 
@@ -787,7 +777,7 @@ def encode_waveform_to_latents(
     # explicitly-passed `to_mel=` from a caller who does not know the VAE dtype.
     mel = _matched_to_module(mel, audio_vae, name="audio_vae")
     _validate_mel_rank(mel)
-    latents = unpacked_latents(_sampled(audio_vae.encode(mel)))
+    latents = _sampled(audio_vae.encode(mel))
     validate_audio_latents_shape(getattr(latents, "shape", ()))
     return latents
 

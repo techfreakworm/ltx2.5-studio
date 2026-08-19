@@ -702,28 +702,54 @@ def test_a_batched_waveform_is_refused_by_the_channel_check():
     assert "3D" in message and "UNBATCHED" in message, message
 
 
-def test_the_encode_output_is_put_into_upstreams_latent_layout():
-    """The VAE emits [B, C, M, L]; upstream reads [B, C, L, M].
+def test_the_latents_come_back_frames_major_from_one_rearrangement():
+    """The mel's layout decides the latents' layout, so fixing the mel is the fix.
 
-    Established by experiment: halving the input halves axis 3 while axis 2
-    stays at mel_bins / mel_compression_ratio. Upstream's own packer says
-    `[B, C, L, M] --> [B, L, C * M]`.
+    ``audio_vae.encode`` preserves axis order. Fed a time-major mel it returns
+    ``[B, C, L, M]`` directly -- no second transpose, and a second transpose put
+    the frame axis back where it started.
     """
-    swapped = audio.unpacked_latents(ShapedTensor((1, 8, 16, 100)))
+    vae = FakeAudioVae()
+    rate = vae.config.sample_rate
 
-    assert swapped.shape == (1, 8, 100, 16), (
-        f"got {swapped.shape}; the frames axis must be axis 2, which is where "
-        f"audio_frames_from_latents and upstream both read it"
+    # A real clip, not the short default fixture: at 4096 samples there are
+    # genuinely fewer frames than mel bins, so the invariant would not hold and
+    # the test would be measuring the fixture rather than the code.
+    latents = audio.encode_waveform_to_latents(
+        waveform_of(2, rate * 4), audio_vae=vae, sampling_rate=rate
+    )
+
+    frames = audio.audio_frames_from_latents(latents.shape)
+    mel_axis = latents.shape[-1]
+    assert frames > mel_axis, (
+        f"the frame count came back as {frames} against {mel_axis} on the mel axis. "
+        f"For any real clip there are far more frames than mel bins, so this is the "
+        f"signature of a transposed latent -- most likely two rearrangements where "
+        f"one was needed."
     )
 
 
-def test_the_frame_count_is_read_from_the_axis_the_transpose_produces():
-    """The transpose and AUDIO_LATENT_DIMS have to agree, or both are wrong."""
-    swapped = audio.unpacked_latents(ShapedTensor((1, 8, 16, 100)))
+@pytest.mark.parametrize("seconds,expected", [(1.0, 25), (2.0, 50), (4.0, 100)])
+def test_the_frame_count_tracks_the_input_duration(seconds, expected):
+    """The invariant that catches an axis-order error in EITHER direction.
 
-    assert audio.audio_frames_from_latents(swapped.shape) == 100, (
-        "the frame count does not come back as the axis that tracks duration; "
-        "AUDIO_LATENT_DIMS and unpacked_latents disagree"
+    Stronger than a shape check, which passes on a transposed tensor of the
+    right rank. A doubled transpose pinned every reconstruction to 0.61 s
+    regardless of input, and **the fixed length was the tell** -- the mel axis
+    does not move when the clip gets longer.
+    """
+    vae = FakeAudioVae()
+    rate = vae.config.sample_rate
+
+    latents = audio.encode_waveform_to_latents(
+        waveform_of(2, int(rate * seconds)), audio_vae=vae, sampling_rate=rate
+    )
+
+    frames = audio.audio_frames_from_latents(latents.shape)
+    assert frames == pytest.approx(expected, abs=2), (
+        f"a {seconds}s clip gave {frames} frames, expected about {expected}. A frame "
+        f"count that does not scale with duration means the axis being read is the mel "
+        f"axis, which is fixed at mel_bins / mel_compression_ratio."
     )
 
 
