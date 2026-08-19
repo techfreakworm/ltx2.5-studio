@@ -582,6 +582,32 @@ def match_channel_count(waveform, *, channels: int):
     )
 
 
+def _matched_dtype(tensor, component, *, name: str):
+    """Cast a tensor to the dtype the component's own weights use.
+
+    **A dtype boundary has two ends.** ``outputs._as_array`` fixes the way *out*
+    -- bf16 tensors into numpy, which has no bfloat16. This is the way *in*: a
+    float32 mel into a bf16 ``conv_in``, which raises ``Input type (float) and
+    bias type (c10::BFloat16) should be the same`` four frames inside someone
+    else's library. Same boundary, opposite direction, same class of defect.
+
+    **Read off the component, never hardcoded.** ``WEIGHT_DTYPE`` is bfloat16
+    today and would be wrong the moment a quantised load lands. The audio VAE
+    knows its own dtype the same way it knows its own config keys and the
+    vocoder knows its own sample rate.
+    """
+    dtype = getattr(component, "dtype", None)
+    if dtype is None or getattr(tensor, "dtype", None) == dtype:
+        return tensor
+    cast = getattr(tensor, "to", None)
+    if not callable(cast):
+        raise LTXStudioError(
+            f"the mel handed to {name} is a {type(tensor).__name__}, which cannot be cast to "
+            f"the {dtype} its weights use. A `to_mel=` callable must return a tensor."
+        )
+    return cast(dtype=dtype)
+
+
 def encode_waveform_to_latents(
     waveform, *, audio_vae, sampling_rate: int, to_mel=None, notes=None, vocoder=None
 ):
@@ -607,6 +633,16 @@ def encode_waveform_to_latents(
         if notes is not None:
             notes.append(note)
     mel = (to_mel or mel_front_end_for(audio_vae, vocoder))(prepared)
+    # ⚠️ Cast HERE, at the hand-off, not inside the transform. The mel is
+    # computed in float32 on purpose -- an STFT in bf16 would lose precision
+    # exactly where the log floor matters -- but the VAE's weights are bf16 and
+    # `conv_in` will not take a float32 input.
+    #
+    # In this shared helper rather than at a call site, for the reason two lines
+    # above: every caller reaches the same `conv_in`, and a cast at one of them
+    # leaves the others raising from inside diffusers. It also protects an
+    # explicitly-passed `to_mel=` from a caller who does not know the VAE dtype.
+    mel = _matched_dtype(mel, audio_vae, name="audio_vae")
     latents = _sampled(audio_vae.encode(mel))
     validate_audio_latents_shape(getattr(latents, "shape", ()))
     return latents

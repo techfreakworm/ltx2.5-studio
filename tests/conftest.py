@@ -393,6 +393,16 @@ class FakeComponent(FakeModule):
         self.peft_config: dict[str, object] = {}
 
 
+class FakeMel:
+    """A mel that carries a dtype, so the hand-off to the VAE can be asserted."""
+
+    def __init__(self, dtype):
+        self.dtype = dtype
+
+    def to(self, dtype):
+        return FakeMel(dtype)
+
+
 class FakeAudioVae:
     """Duck-types an audio VAE closely enough to really encode a waveform.
 
@@ -405,6 +415,12 @@ class FakeAudioVae:
     Its sampling rate matches the stub loader's, so ``_resampled`` short-circuits
     and the whole encode runs with no torch present.
     """
+
+    #: ⚠️ **bf16, because that is what the checkpoint is.** A float32 fake would
+    #: pass a broken cast -- the mel is computed in float32 and float32 is the
+    #: dtype that works, which is why three dtype-boundary defects reached the
+    #: card before one reached the gate.
+    dtype = "bfloat16"
 
     def __init__(self, sampling_rate=16000):
         # ⚠️ These are the REAL key names, read off audio_vae/config.json at
@@ -426,9 +442,11 @@ class FakeAudioVae:
         self.encoded: list = []
 
     def mel_spectrogram(self, waveform):
-        mel = ("mel", waveform)
+        # float32, as the real transform computes it -- an STFT in bf16 would
+        # lose precision exactly where the log floor matters. The cast to the
+        # VAE's dtype happens at the hand-off, which is what this lets us check.
         self.mels.append(waveform)
-        return mel
+        return FakeMel("float32")
 
     def encode(self, mel):
         self.encoded.append(mel)

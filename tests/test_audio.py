@@ -19,6 +19,7 @@ import pytest
 from conftest import (
     PACKAGE_ROOT,
     FakeAudioVae,
+    FakeMel,
     FakeVocoder,
     code_string_constants,
     waveform_of,
@@ -594,3 +595,58 @@ def test_building_without_a_vocoder_refuses_rather_than_guessing():
         audio.mel_parameters(FakeAudioVae(), None)
 
     assert "vocoder" in str(excinfo.value), excinfo.value
+
+
+def test_the_mel_is_cast_to_the_dtype_the_vae_actually_uses():
+    """A dtype boundary has two ends, and only one of them had crashed.
+
+    ``outputs._as_array`` fixes the way out -- bf16 into numpy. This is the way
+    in: a float32 mel reaching a bf16 ``conv_in`` raises *"Input type (float)
+    and bias type (c10::BFloat16) should be the same"* from four frames inside
+    diffusers.
+    """
+    vae = FakeAudioVae()
+
+    audio.encode_waveform_to_latents(
+        waveform_of(2), audio_vae=vae, sampling_rate=vae.config.sample_rate
+    )
+
+    assert vae.encoded[-1].dtype == vae.dtype, (
+        f"the VAE was handed a {vae.encoded[-1].dtype} mel and its weights are {vae.dtype}; "
+        f"conv_in raises rather than casting"
+    )
+
+
+def test_the_dtype_is_read_from_the_component_not_hardcoded():
+    """WEIGHT_DTYPE is right today and wrong the moment a quantised load lands."""
+
+    class Int8Vae(FakeAudioVae):
+        dtype = "int8"
+
+    vae = Int8Vae()
+
+    audio.encode_waveform_to_latents(
+        waveform_of(2), audio_vae=vae, sampling_rate=vae.config.sample_rate
+    )
+
+    assert vae.encoded[-1].dtype == "int8", (
+        f"the cast targeted {vae.encoded[-1].dtype!r} rather than the VAE's own dtype, so it "
+        f"is reading a constant somewhere instead of the loaded component"
+    )
+
+
+def test_an_explicit_to_mel_is_protected_too():
+    """A caller supplying `to_mel=` does not know the VAE's dtype."""
+    vae = FakeAudioVae()
+
+    audio.encode_waveform_to_latents(
+        waveform_of(2),
+        audio_vae=vae,
+        sampling_rate=vae.config.sample_rate,
+        to_mel=lambda waveform: FakeMel("float32"),
+    )
+
+    assert vae.encoded[-1].dtype == vae.dtype, (
+        "an explicitly-passed to_mel reached the VAE uncast, so the guard lives at the "
+        "wrong end of the hand-off"
+    )
