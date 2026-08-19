@@ -457,3 +457,87 @@ def test_the_base_workflow_is_the_superset_class():
     output never reveals. That is this build's recurring failure shape.
     """
     assert pipelines.BASE_KIND == "condition"
+
+
+# --------------------------------------------------------------------------
+# identity was necessary and NOT sufficient — dtype must survive too
+# --------------------------------------------------------------------------
+#
+# `from_pipe(base)` with no dtype resolves `... or torch.float32`
+# (pipeline_utils.py:2155) and then calls `new_pipeline.to(dtype=dtype)` (:2253).
+#
+# The crash it caused on a 96 GiB card is the LESSER half: an fp32 cast of bf16
+# allocates twice the bytes, so the "derived" pipeline was a second ~130 GiB copy.
+#
+# The half that matters is that `nn.Module.to()` mutates IN PLACE and the modules
+# are genuinely shared — so had it fit, **the base would silently have become
+# fp32** and every generation after it would have run at the wrong precision with
+# no error and plausible output.
+#
+# The identity tests above passed WITH this bug present: the modules really were
+# shared. They were just also silently recast. Sharing and preserving are two
+# properties and this build only asserted one.
+
+
+class _CastableModule:
+    def __init__(self, dtype="bfloat16"):
+        self.dtype = dtype
+
+
+class _CastingBase:
+    """Models the real failure: `to(dtype=...)` mutates the shared modules."""
+
+    def __init__(self):
+        self.dtype = "bfloat16"
+        self._modules = {name: _CastableModule() for name in WEIGHT_BEARING}
+
+    @property
+    def components(self):
+        return dict(self._modules)
+
+    def to(self, dtype=None):
+        if dtype is not None:
+            self.dtype = dtype
+            for module in self._modules.values():
+                module.dtype = dtype
+        return self
+
+    def __getattr__(self, name):
+        try:
+            return self.__dict__["_modules"][name]
+        except KeyError:
+            raise AttributeError(name) from None
+
+
+class _CastingTarget:
+    """Stands in for diffusers: casts to float32 unless a dtype is supplied."""
+
+    @classmethod
+    def from_pipe(cls, base, **kwargs):
+        base.to(dtype=kwargs.get("dtype") or "float32")
+        return base
+
+
+def test_deriving_does_not_recast_the_base():
+    """The silent half. Mutate `derive_pipeline` back to `from_pipe(base)` and
+    this fires; the identity tests above do not."""
+    base = _CastingBase()
+    pipelines.derive_pipeline(base, _CastingTarget)
+
+    assert base.dtype == "bfloat16", (
+        f"deriving cast the BASE pipeline to {base.dtype!r}. nn.Module.to() mutates in "
+        f"place and the modules are shared, so every later generation would run at the "
+        f"wrong precision — no error, no log line, plausible output."
+    )
+
+
+@pytest.mark.parametrize("component", WEIGHT_BEARING)
+def test_the_shared_modules_keep_their_dtype(component):
+    base = _CastingBase()
+    derived = pipelines.derive_pipeline(base, _CastingTarget)
+
+    assert getattr(derived, component).dtype == "bfloat16", (
+        f"{component} was recast while deriving. On a card this OOMs at twice the bytes; "
+        f"where it fits, it silently halves precision — and on ZeroGPU a cast also "
+        f"materialises anonymous memory, so the post-pack prune frees nothing."
+    )
