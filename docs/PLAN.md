@@ -404,23 +404,70 @@ targeting `to_q`/`to_k`/`to_v`/`to_gate_logits`, `adaln_single`, `audio_adaln_si
 `__metadata__ = {'lora_rank': '450', 'lora_alpha': '450', 'model_version': '2.5.0', 'license': …}`.
 **`model_version` is machine-readable.**
 
-### 4.3 The validator (7 stages — each stage is a test unit)
+### 4.3 The validator (9 stages — each stage is a test unit)
 
-Accepts either a **Hub repo-id** or a **direct file upload**.
+Accepts either a **Hub repo-id** or a **direct file upload**. Both routes converge on one parser.
 
 | # | Stage | Rule | On failure |
 |---|---|---|---|
-| 1 | **Size bound** | reject above a configured max | refuse before any download or parse |
+| 1 | **Size bound** | reject above a configured max | refuse before any download or parse. On the Hub route this comes from the HTTP `Content-Length` — before a single weight byte moves |
 | 2 | **Header-only parse** | read the safetensors header, **never** materialise the payload | — |
 | 3 | **Format** | safetensors with a parseable header | distinct messages: not-safetensors vs unparseable-header |
-| 4 | **Version** | read a *set* of version signals in priority order (§4.5) — `model_version`, `ss_ltx_version`, `modelspec.architecture`, `ss_base_model_version` | **warn** if all absent, **reject** only on an explicit mismatch |
+| 4 | **Version** | read a *set* of signals in priority order (§4.5): `model_version`, `ss_ltx_version`, `modelspec.architecture`, `ss_base_model_version` | **warn** if all absent, **reject** only on explicit mismatch. Absent is the **common** case, not an edge case |
 | 5 | **Convention** | classify: `diffusion_model.` / `transformer.` / `text_embedding_projection.` / unknown | on unknown, the error **names the prefixes actually found** |
+| **5.5** | **IC-LoRA detection** | an in-context LoRA is marked by `__metadata__.reference_downscale_factor` | **refuse with a specific explanation.** An IC-LoRA applied to the plain pipeline neither errors nor works — see below |
 | 6 | **Pairing** | `lora_A`/`lora_B` (or `lora_down`/`lora_up`) must pair | name the unpaired keys |
-| 7 | **Attach assertion** | **after** `load_lora_weights`, assert the adapter attached to **> 0** modules | specific error if zero — *the anti-silent-garbage check* |
+| **6.5** | **Per-module dimension compatibility** | resolve each pair to its **target module in the real transformer** and compare against *that module's* `in_features`/`out_features` | reject naming **module, expected, actual**. A key whose target module does not exist at all is a **distinct** failure — that is what a genuinely foreign adapter looks like |
+| 7 | **Attach assertion** | **after** `load_lora_weights`, assert the adapter attached to **> 0** modules | specific error if zero — the anti-silent-garbage check |
 
 Stage 2 is a hard rule: a multi-GB upload must never be fully materialised just to discover it
-is the wrong architecture. Stage 7 is the one upstream does not do for us and the one that
-actually protects the user; it runs on **every** load, built-in LoRAs included.
+is the wrong architecture.
+
+#### Stage 7 is necessary but NOT sufficient — do not delete 6.5 as redundant
+
+The case that proves it: `charlied98/ltxv_2b_lora_soft_draw_v1`, an LTX-**Video-2B** adapter, i.e.
+flatly the wrong architecture. Header measured:
+
+- prefix `diffusion_model.` → **passes stage 5**
+- peft `lora_A`/`lora_B` pairs → **passes stage 6**
+- every key contains `lora` → **passes diffusers' one and only built-in check**
+- `__metadata__` empty → **passes stage 4** under our own (correct) absent-is-not-fatal rule
+- module names are `transformer_blocks.N.attn1.to_k` — **the same names LTX-2.5 uses**, so it may
+  attach to > 0 modules and **pass stage 7 as well**
+
+The only thing wrong with it is that `to_k.lora_A` is `[32, 2048]` where this model is 4096.
+**Stage 6.5 is the only gate that catches it.**
+
+#### Stage 6.5 compares PER MODULE — there is no single "expected hidden dim"
+
+The transformer carries **two streams**, and a naive "everything must be 4096" rule would reject
+the most-downloaded LTX LoRA on the Hub. Measured from `joyfox/LTX-2.3-Transition-LORA`:
+
+| module family | in-dim |
+|---|---:|
+| `attn1.to_q/k/v/out.0`, `attn2.…` | **4096** (video stream) |
+| `ff.net.N.proj` | 4096 |
+| `ff.net.2` | **16384** (4× feed-forward expansion) |
+| `audio_ff.net.N.proj` | **2048** (audio stream) |
+| `audio_ff.net.2` | **8192** |
+
+Corroborated by the official 2.5 adapter, which pairs `adaln_single…linear_1.lora_B [4096, 256]`
+with `audio_adaln_single…linear_1.lora_B [2048, 256]`.
+
+So **"contains 2048" is not a signal. "2048 at a module that expects 4096" is.** Build the
+expectation map by walking the loaded transformer's `nn.Linear` modules — never from a hardcoded
+table — so it stays correct across checkpoints. The derived
+`num_attention_heads × attention_head_dim = 32 × 128 = 4096` is one entry in that map, not the
+rule.
+
+#### Stage 5.5 — why IC-LoRAs must be refused rather than loaded
+
+`DoctorDiffusion/LTX-2.3-IC-LoRA-Colorizer` carries
+`__metadata__ = {'reference_downscale_factor': '1'}`. That maps to the `reference_downscale_factor`
+kwarg on `LTX2InContextPipeline`, which upstream documents as needing to match the factor the
+IC-LoRA was trained with. Applied to the plain pipeline an IC-LoRA **will not error and will not
+work** — the exact silent-garbage shape stage 7 exists to prevent, arriving through a door stage 7
+does not watch.
 
 ### 4.4 Fusing — the connectors trap
 
@@ -433,8 +480,13 @@ components explicitly, and this is a test case.
 
 ### 4.5 What real LoRAs actually look like — measured, and it changes stage 4
 
-I range-read the safetensors **headers** of three real public LTX LoRAs (header only, no payload
-— the same technique §4.3 stage 2 mandates, proving it works over plain HTTP range requests):
+**Technique note, since this document cites measured headers in several places:** every such
+measurement was taken by **HTTP range-reading the safetensors header** — `Range: bytes=0-7` for
+the 8-byte little-endian header length, then `Range: bytes=8-(8+N-1)` for the JSON — with no full
+download. It reads a 9 GB adapter's complete key list in well under a second. This is the same
+technique `lora/inspect.py` uses for the Hub route (§4.6).
+
+I range-read the headers of three real public LTX LoRAs:
 
 | LoRA | size | tensors | prefix | `__metadata__` | `model_version`? | connectors keys |
 |---|---:|---:|---|---|---|---:|
@@ -444,10 +496,15 @@ I range-read the safetensors **headers** of three real public LTX LoRAs (header 
 
 **Four findings, each of which changes the design:**
 
-1. **Not one of them carries `model_version`.** Two have no `__metadata__` at all. Stage 4 as
-   originally written — "read `__metadata__.model_version`" — would be warn-only for **100% of
-   real community uploads**, i.e. effectively dead code. The official Lightricks LoRA does carry
-   it (`'2.5.0'`), so the field is real; it is just not what users bring us.
+1. **Not one of them carries `model_version`.** Stage 4 as originally written — "read
+   `__metadata__.model_version`" — would be warn-only for **100% of real community uploads**,
+   i.e. effectively dead code. The official Lightricks LoRA does carry it (`'2.5.0'`), so the
+   field is real; it is just not what users bring us.
+
+   **The absent case has two distinct shapes and the code must handle both:** no `__metadata__`
+   key at all, *and* `__metadata__: {}` present but empty. Both mean "no version signal". Since
+   this is the **common** path rather than an edge case, stage 4's warn-not-reject branch must not
+   be "tightened" later by someone who assumes metadata is normally present.
 
 2. **There is a second, richer convention we must read.** The sd-scripts / musubi-tuner trainer
    writes a large metadata block with entirely different keys — from the measured header:
@@ -475,8 +532,37 @@ I range-read the safetensors **headers** of three real public LTX LoRAs (header 
    expect connector attachment as the normal case, and a stage-7 assertion demanding it would
    reject every real LoRA.
 
-These three headers become **offline test fixtures** for stages 1–6 (§9.1): real-world data,
+These three headers become **offline test fixtures** for stages 1–6.5 (§9.1): real-world data,
 zero GPU, zero weights, no network at test time.
+
+### 4.6 `lora/inspect.py` has ZERO heavy dependencies — and that buys a real feature
+
+The safetensors container is trivial:
+
+```
+[8 bytes little-endian uint64 = header length N][N bytes of JSON header][raw tensor bytes]
+```
+
+`struct` + `json` from the stdlib read `__metadata__`, every key name, every dtype and every
+shape. No torch, no diffusers, no `safetensors` package. Three reasons, in order:
+
+1. **A bad upload must be rejectable without loading torch.** A validator that needs a 2 GB
+   import to say "this is not a safetensors file" is the wrong shape.
+2. **It keeps the gate fast and portable.** Stages 1–6.5 become offline, torch-free unit tests
+   that run in milliseconds, with fixtures hand-constructed from `struct` + `json`. Only stage 7
+   needs real weights, and that is `gpu`-marked.
+3. **It lets us validate a Hub LoRA *before* downloading it.** The header sits at the very start
+   of the file, so one range request validates the whole thing.
+
+**Hub route:** resolve the file → **range-read the header** → run stages 1–6.5 → only then
+download. A user who pastes a repo-id for a 2B-architecture adapter gets a specific rejection in
+about a second instead of after a 300 MB download. Stage 1 comes free from `Content-Length`.
+
+**Upload route:** the bytes are already local, so the same parser runs against the file. Both
+routes converge on one code path, which is what §4.3 asks for.
+
+`validate.py` stays dependency-light too. **`apply.py` is the only module in `lora/` that may
+import diffusers or peft**, because it is the only one that touches a real model.
 
 ---
 
@@ -543,7 +629,7 @@ Pinning a **revision** per repo is part of this module's job — a repo whose co
 under us is not pinned just because its name is stable.
 
 **New requirement: `model_files.py` emits the download allow-list as data.** It must be able to
-produce the exact list of 33 paths (§2.3), so that:
+produce the exact list of **37 paths** (§2.3), so that:
 
 - the **runtime download** and the Space README **`preload_from_hub:`** list are *generated from
   the same source*, never hand-maintained in two places; and
@@ -551,7 +637,26 @@ produce the exact list of 33 paths (§2.3), so that:
 
 **And the live shard names must come from reading the index files, not from a hardcoded list.**
 That is what makes an upstream re-shard get picked up automatically instead of silently
-downloading the dead set. Hardcoding today's shard names would reintroduce Trap A (§2.1) the
+downloading the dead set.
+
+**But the index alone is not enough, and this bug was made for real.** A first attempt at
+generating the list produced **33** files: for the three *sharded* components it took only the
+shards named in the weight map plus the index, and so silently dropped `transformer/config.json`,
+`text_encoder/config.json`, `connectors/config.json` and `text_encoder/generation_config.json`.
+`from_pretrained` cannot construct a component without its config, so a Space preloaded from that
+list would have failed at startup **after a 72 GB download**.
+
+The weight-map index tells you which *weights* are live. It says nothing about sibling config
+files. So the rule is per component:
+
+- **sharded** (`transformer`, `text_encoder`, `connectors`): the shards named in the index, plus
+  the index itself, plus **every non-`.safetensors` file in the folder**
+- **whole-file** (everything else): every file in the folder
+- plus root `model_index.json`
+
+And the emitter **asserts, as a self-check, that every component contributes a config file** --
+`config.json` for most, `scheduler_config.json` for `scheduler`, `tokenizer_config.json` for
+`tokenizer`. That assertion is what would have caught the mistake, and it is cheap. Hardcoding today's shard names would reintroduce Trap A (§2.1) the
 moment Lightricks re-shards — which, given they have already deleted a checkpoint without
 warning, is not a remote possibility.
 
@@ -702,7 +807,7 @@ Three hazards to code around:
 1. **Only live shards** (§2.1 Trap A). A wrong list fails after tens of GB, not fast. Mitigated
    structurally: the list is *generated*, and a drift test asserts README == `model_files.py`.
 2. **Capped at 10 entries.** Not a problem — we are **one repo, so one entry**, with
-   comma-separated filenames. It fits. (A naive one-file-per-entry list would not: 33 files.)
+   comma-separated filenames. It fits in ~1.5 KB. (A naive one-file-per-entry list would not: 37 files.)
 3. **Ownership.** Preloaded files belong to the *build* user and are read-only to runtime uid
    1000, so a later lazy `hf_hub_download` into the same cache fails with
    `Permission denied (os error 13)`. **Mitigation: point `HF_HOME` / `HF_HUB_CACHE` at a

@@ -45,9 +45,11 @@ __all__ = [
     "REVISION",
     "ROOT_FILES",
     "ComponentSpec",
+    "config_filename",
     "download_allow_list",
     "file_url",
     "get_component",
+    "missing_config_files",
     "preload_from_hub_entry",
     "require_file",
     "total_size_gb",
@@ -287,10 +289,52 @@ def download_allow_list(components: tuple[str, ...] | None = None) -> tuple[str,
     re-shard.
     """
     names = DEFAULT_COMPONENTS if components is None else components
+    incomplete = missing_config_files(names)
+    if incomplete:
+        raise MissingModelFileError(
+            filename=", ".join(f"{n}/{config_filename(n)}" for n in incomplete),
+            url=f"{HUB_BASE_URL}/{REPO_ID}/tree/{REVISION}",
+        )
     paths: list[str] = list(ROOT_FILES)
     for name in names:
         paths.extend(get_component(name).paths)
     return tuple(paths)
+
+
+#: The config file each component needs in order to be constructed. Most use
+#: ``config.json``; schedulers and tokenizers follow their own conventions.
+CONFIG_FILENAMES = MappingProxyType(
+    {
+        "scheduler": "scheduler_config.json",
+        "tokenizer": "tokenizer_config.json",
+    }
+)
+DEFAULT_CONFIG_FILENAME = "config.json"
+
+
+def config_filename(component: str) -> str:
+    """The config file that ``from_pretrained`` needs for this component.
+
+    ``scheduler/`` uses ``scheduler_config.json``, not ``config.json`` -- a
+    preload list built from a naive ``{component}/config.json`` pattern misses
+    it and the Space fails to construct the scheduler.
+    """
+    return CONFIG_FILENAMES.get(component, DEFAULT_CONFIG_FILENAME)
+
+
+def missing_config_files(components: tuple[str, ...] | None = None) -> tuple[str, ...]:
+    """Components whose file list omits their config file.
+
+    A weight-map index tells you which *weights* are live. It says nothing about
+    the sibling config files -- so a file list generated from the index alone
+    silently drops ``config.json`` for every sharded component, and
+    ``from_pretrained`` cannot construct a component without it. That failure
+    surfaces only after the full download.
+
+    This is the cheap self-check that catches it.
+    """
+    names = DEFAULT_COMPONENTS if components is None else components
+    return tuple(name for name in names if config_filename(name) not in get_component(name).files)
 
 
 def preload_from_hub_entry(components: tuple[str, ...] | None = None) -> str:

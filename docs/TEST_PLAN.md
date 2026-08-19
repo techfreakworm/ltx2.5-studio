@@ -102,7 +102,7 @@ broken, nothing else matters and we want to know at 120 GPU-seconds spent, not 7
 |---|---|---:|---:|---|---|---|
 | **R1** | t2v · 256×256 · 9 frames · distilled 8-step sigmas · no stage 2 | 60 | 120 | Pipeline loads → **packs** → forked worker runs → stage-1 denoise → **diffusion decode** → muxed mp4 **with audio**. The riskiest single path in the app. | 1, 5, 8 | _(pending)_ |
 | **R2** | i2v · same tiny config · one condition at index 0 | 60 | 120 | `LTX2VideoCondition` construction, VAE encode of the condition, the **CRF-18 recompression** branch, and the **pixel→latent index** math | 2, 3, 6, 7 | _(pending)_ |
-| **R3** | R2 config **+ a real adapter** (§5) | 60 | 120 | **LoRA stage 7 end-to-end** — adapter loads and attaches to **> 0 modules** on the real transformer. The headline feature. | LoRA | _(pending)_ |
+| **R3** | R2 config **+ two adapters** (§5) | 60 | 120 | **Both directions in one call.** (a) the 2.5 adapter loads, attaches to **> 0 modules**, and generates — the headline feature works; (b) the 2B adapter is then attempted and **rejected loudly and specifically** — the anti-silent-garbage guard fires. | LoRA | _(pending)_ |
 | **R4** | same tiny config + a short input audio clip | 60 | 120 | audio-in: waveform → mel → `audio_vae` → **4D `audio_latents`** + `noise_scale` | 10, 11 | _(pending)_ |
 | **R5** | same tiny config + a short input video | 60 | 120 | **video** conditioning: a multi-frame condition — note multi-frame is **never** CRF-recompressed, unlike single-frame, so this is a genuinely different branch from R2 | 4, 9 | _(pending)_ |
 | **R6** | R1 config **+ stage 2** | 90 | 180 | The stage-2 chain: `LTX2LatentUpsamplePipeline` → `STAGE_2_DISTILLED_SIGMA_VALUES` → `noise_scale` → **`denormalize=False`** on the diffusion decode | quality path | _(pending)_ |
@@ -126,10 +126,11 @@ Both are still tight enough to reserve comfortably (§1.1).
 
 ---
 
-## 5. The R3 fixture — **`joyfox/LTX-2.3-Transition-LORA`**
+## 5. The R3 fixtures — one positive, one negative
 
-R3 needs a real adapter. I searched the Hub and read candidate safetensors **headers** over HTTP
-range requests — no full downloads.
+R3 proves **both directions in a single GPU call**: that a good adapter works, and that a bad one
+is refused. All candidates were assessed by HTTP **range-reading their safetensors headers** — no
+full downloads.
 
 ### 5.1 Rejected: the official distilled LoRA
 
@@ -144,36 +145,53 @@ configuration and a passing result would be misleading. Already excluded from th
 **separately gated** and the operator's token does not have them — verified, they 403. Not worth
 a second gate request, because §5.3 is a better fixture anyway.
 
-### 5.3 **Chosen: `joyfox/LTX-2.3-Transition-LORA`**
+### 5.3 **Positive fixture: `AhsanHareem/reelbids-ltx25-camera-lora`**
+
+File `lora_weights_step_01250.safetensors`.
 
 | | |
 |---|---|
-| Size | **0.390 GB** — small enough to download inside a run |
-| Popularity | **19,445 downloads, 162 likes** — the most-downloaded LTX LoRA on the Hub |
+| Size | **201 MB** — downloads inside a run |
 | Access | **ungated** |
-| Convention | `diffusion_model.` prefix (1152 tensors) — exercises `_convert_non_diffusers_ltx2_lora_to_diffusers` |
-| Pairing | 576 × `lora_A.weight` + 576 × `lora_B.weight` — clean peft-style pairing |
-| Metadata | **`__metadata__` entirely ABSENT** |
+| Generation | an actual **LTX-2.5** camera LoRA |
+| Shape | 768 tensors, prefix `diffusion_model.`, rank 32, `to_q.lora_B` = `[4096, 32]` → **hidden dim 4096, matching our 22B transformer** |
+| Metadata | **`__metadata__` present but EMPTY (`{}`)** — no `model_version` |
 
-**Why this one is better than an official adapter, not merely acceptable:**
+**Why this and not the official adapter.** `ltx-2.5-22b-distilled-lora-450-bf16.safetensors` is
+8.9 GB and documented for **DEV-transformer** workflows; we ship the **distilled** transformer,
+so it is the wrong adapter for our configuration and a passing result would be misleading. It is
+already excluded from the disk budget (PLAN §2.4) for the same reason.
 
-1. **It is what users actually upload.** The most-downloaded LTX LoRA on the Hub is a far more
-   representative stage-7 subject than a first-party adapter shipped alongside the model.
-2. **It exercises the dominant real-world key convention.** All three real LoRAs I measured use
-   `diffusion_model.`, so the *conversion* path is the main path (PLAN §4.5).
-3. **Its missing `__metadata__` exercises stage 4's warn-not-reject branch** — the branch that
-   would otherwise be untested, and the branch whose absence would reject the Hub's most popular
-   LTX LoRA.
-4. **It directly tests risk #6** (PLAN §10): a **2.3** LoRA against the **2.5 distilled**
-   transformer. The model card claims most 2.3 LoRAs run on 2.5 unchanged. R3 is where that claim
-   either holds or does not, and either outcome is information we need.
+**Why this is a *better* fixture, not merely an available one.** Its empty `__metadata__` makes it
+a realistic stand-in for what users actually upload, and it exercises stage 4's
+absent-is-not-fatal branch against a real file. Note the distinction the code must honour:
+metadata **present but empty** is a different shape from metadata **absent**, and both mean "no
+version signal" (PLAN §4.5).
 
-**Backup fixture:** `vrgamedevgirl84/LTX_2.3_Crisp_Enhance_Style_LoRa` (0.705 GB, ungated) — it
-carries a full sd-scripts metadata block (`ss_ltx_version: "2.3"`,
-`modelspec.architecture: "LTX2/lora"`). Better used **offline** as the metadata-present fixture
-for stages 1–6; a second GPU run for it would prove nothing R3 does not.
+### 5.4 **Negative fixture: `charlied98/ltxv_2b_lora_soft_draw_v1`**
 
-**No synthetic adapter is needed.** Real fixtures were available and are strictly more
+An LTX-**Video-2B** adapter — flatly the wrong architecture, and the reason PLAN §4.3 has a stage
+6.5 at all. It passes stages 4, 5 and 6, passes diffusers' only built-in check, and may even pass
+**stage 7** because its module names match ours. The single thing wrong with it is
+`to_k.lora_A = [32, 2048]` where this model is 4096.
+
+R3 attempts it **after** the positive case and asserts a loud, specific rejection naming module,
+expected and actual dims. One run, both directions.
+
+### 5.5 Rejected candidates
+
+| candidate | why not |
+|---|---|
+| `Lightricks/LTX-2.5-22b-IC-LoRA-Pixel-Spatial-Upscaler` | **separately gated**, token does not have it (403) |
+| `Lightricks/LTX-2.3-22b-LoRA-Cinemagraph` | **403** — another separately gated repo. Do not depend on it |
+| `ltx-2.5-22b-distilled-lora-450-bf16.safetensors` | 8.9 GB, DEV-transformer workflow — wrong adapter for our distilled config |
+
+**Offline-only fixtures** (no GPU run, used for stages 1–6.5):
+`joyfox/LTX-2.3-Transition-LORA` (0.390 GB — the mixed-dimension case that proves 6.5 must be
+per-module) and `vrgamedevgirl84/LTX_2.3_Crisp_Enhance_Style_LoRa` (0.705 GB — the
+metadata-present case, `ss_ltx_version: "2.3"`, `modelspec.architecture: "LTX2/lora"`).
+
+**No synthetic adapter is needed.** Real fixtures cover every branch and are strictly more
 informative.
 
 ---

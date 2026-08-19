@@ -26,6 +26,7 @@ from .errors import AudioVideoDesyncError, ConstraintError, DimensionError, Fram
 __all__ = [
     "DEFAULT_IMAGE_CRF",
     "DEFAULT_LENGTH_TOLERANCE_SECONDS",
+    "DEFAULT_SPATIAL_COMPRESSION_RATIO",
     "DEFAULT_TEMPORAL_COMPRESSION_RATIO",
     "DIMENSION_MULTIPLE",
     "DISTILLED_SIGMA_VALUES",
@@ -46,9 +47,15 @@ __all__ = [
 #: loaded. NOT a constant of the model -- see the module docstring.
 DEFAULT_TEMPORAL_COMPRESSION_RATIO = 8
 
+#: Fallback for ``vae.spatial_compression_ratio``, same status as the temporal
+#: one above: a pre-load default, not a constant of the model. Verified against
+#: the real ``vae/config.json`` (``spatial_compression_ratio: 32``).
+DEFAULT_SPATIAL_COMPRESSION_RATIO = 32
+
 #: Every spatial dimension must be a multiple of this. Enforced upstream too
 #: (all generation pipelines and the latent-upsample pipeline raise on it).
-DIMENSION_MULTIPLE = 32
+#: Pass ``multiple=vae.spatial_compression_ratio`` once a VAE is loaded.
+DIMENSION_MULTIPLE = DEFAULT_SPATIAL_COMPRESSION_RATIO
 
 #: Image-conditioning CRF for LTX-2.5, selected when
 #: ``text_encoder.config.model_type`` is a gemma4 variant.
