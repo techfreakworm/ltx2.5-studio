@@ -45,22 +45,24 @@ AUDIO_ONLY_MODE_IDS = ("text_to_audio", "video_to_audio", "audio_to_audio")
 FIRST_CLASS_MODE_IDS = EXPECTED_MODE_IDS[:7]
 WARNED_MODE_IDS = EXPECTED_MODE_IDS[7:]
 
-#: Reached through ``LTX2Pipeline`` (§3.2 rows 1, 5, 8, 10, 11).
-BASE_PIPELINE_MODE_IDS = (
-    "text_to_video",
-    "text_to_audio_video",
-    "text_to_audio",
-    "audio_to_audio",
-    "audio_to_video",
-)
-#: Reached through ``LTX2ConditionPipeline`` (§3.2 rows 2, 3, 4, 6, 7, 9).
-CONDITION_PIPELINE_MODE_IDS = (
+#: The four real workflows, quoted from upstream's ``_workflow_map`` in
+#: ``diffusers/modular_pipelines/ltx2/modular_blocks_ltx25.py`` (PLAN §3.1).
+#: 11 UI modes are a presentation layer over these — "not 11 code paths".
+UPSTREAM_WORKFLOWS = ("text2video", "image2video", "condition", "in_context")
+
+#: PLAN §3.3 workflow column: rows 1, 5, 8.
+TEXT2VIDEO_MODE_IDS = ("text_to_video", "text_to_audio_video", "text_to_audio")
+
+#: PLAN §3.3 workflow column: rows 2, 3, 4, 6, 7, 9, 10, 11.
+CONDITION_MODE_IDS = (
     "image_to_video",
     "image_text_to_video",
     "video_to_video",
     "image_to_audio_video",
     "image_text_to_audio_video",
     "video_to_audio",
+    "audio_to_audio",
+    "audio_to_video",
 )
 
 EXPECTED_EXPORTS = {
@@ -178,27 +180,27 @@ def test_every_mode_declares_a_known_pipeline_kind(mode_id):
     assert modes.get_mode(mode_id).pipeline in modes.PIPELINE_KINDS
 
 
-def test_no_dead_pipeline_kinds():
-    used = {modes.get_mode(m).pipeline for m in modes.MODES}
-    assert set(modes.PIPELINE_KINDS) == used, (
-        f"declared but unused pipeline kinds: {set(modes.PIPELINE_KINDS) - used}"
+def test_pipeline_kinds_use_the_upstream_workflow_vocabulary():
+    """PLAN §3.1: the workflow names are upstream's, not ours. Inventing a
+    parallel vocabulary is how a registry entry and the pipeline it names drift
+    apart."""
+    assert set(modes.PIPELINE_KINDS) <= set(UPSTREAM_WORKFLOWS), (
+        f"unknown workflows: {set(modes.PIPELINE_KINDS) - set(UPSTREAM_WORKFLOWS)}"
     )
 
 
-def test_the_base_pipeline_modes_agree_on_one_kind():
-    kinds = {modes.get_mode(m).pipeline for m in BASE_PIPELINE_MODE_IDS}
-    assert len(kinds) == 1, f"§3.2 rows 1/5/8/10/11 all use LTX2Pipeline; got {kinds}"
+@pytest.mark.parametrize("mode_id", TEXT2VIDEO_MODE_IDS)
+def test_text2video_modes_declare_the_text2video_workflow(mode_id):
+    assert modes.get_mode(mode_id).pipeline == "text2video"
 
 
-def test_the_condition_pipeline_modes_agree_on_one_kind():
-    kinds = {modes.get_mode(m).pipeline for m in CONDITION_PIPELINE_MODE_IDS}
-    assert len(kinds) == 1, f"§3.2 rows 2/3/4/6/7/9 all use LTX2ConditionPipeline; got {kinds}"
+@pytest.mark.parametrize("mode_id", CONDITION_MODE_IDS)
+def test_condition_modes_declare_the_condition_workflow(mode_id):
+    assert modes.get_mode(mode_id).pipeline == "condition"
 
 
-def test_the_two_pipeline_kinds_are_different():
-    base = modes.get_mode("text_to_video").pipeline
-    condition = modes.get_mode("image_to_video").pipeline
-    assert base != condition
+def test_every_mode_is_accounted_for_by_a_workflow():
+    assert set(TEXT2VIDEO_MODE_IDS) | set(CONDITION_MODE_IDS) == set(EXPECTED_MODE_IDS)
 
 
 # --------------------------------------------------------------------------
