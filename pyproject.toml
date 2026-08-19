@@ -7,10 +7,17 @@ requires-python = ">=3.12"
 license = { text = "MIT" }
 authors = [{ name = "Mayank Gupta", email = "techfreakworm@gmail.com" }]
 
-# Runtime dependencies are declared in requirements.txt, which is the file the
-# Hugging Face Space build reads. It is intentionally not written yet — see
-# docs/PLAN.md §5.1 (pin everything, with upper bounds) and §10 OQ-1, which must
-# be resolved before the diffusers pin can be chosen.
+# Runtime dependencies are declared in requirements.txt — that is the file the
+# Hugging Face Space build reads, and it is the single source of truth for pins.
+# See docs/PLAN.md §5.1, including why `spaces` is deliberately NOT pinned there.
+
+[project.optional-dependencies]
+# Dev tooling lives here rather than in requirements.txt so the Space image stays
+# lean. Install with: .venv/bin/python -m pip install -e ".[dev]"
+dev = [
+    "pytest>=9.0,<10",
+    "ruff>=0.16,<0.17",
+]
 
 [project.urls]
 Repository = "https://github.com/techfreakworm/ltx2.5-studio"

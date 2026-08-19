@@ -7,4 +7,4 @@ video + audio generation model — covering every mode the model supports, with
 Runs locally on Apple Silicon (MPS) / NVIDIA (CUDA) and deploys to a private
 Hugging Face Space on ZeroGPU.
 
-Status: greenfield. See `docs/PLAN.md` once the design lands.
+Status: design locked, implementation starting. See [`docs/PLAN.md`](docs/PLAN.md).

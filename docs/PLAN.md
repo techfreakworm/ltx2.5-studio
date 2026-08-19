@@ -4,19 +4,23 @@
 **Branch:** `soma/ltx25-studio` · **Remote:** `git@github.com:techfreakworm/ltx2.5-studio.git`
 **Target:** private Hugging Face Space `techfreakworm/LTX2.5-Studio` (gradio SDK, ZeroGPU).
 
-This document is the contract for the build. Every section below is either a **decision**
-(settled, build to it) or an **open question** (§10, blocks work, needs an answer). Where a
-claim was verified against real source or real repo metadata, the evidence is cited inline so a
-future reader can re-check it instead of trusting it.
+This document is the contract for the build. Every section is either a **decision** (settled,
+build to it) or a **risk** (§10, needs measurement not argument). Where a claim was verified
+against real source or real repo metadata, the evidence is cited inline so a future reader can
+re-check it instead of trusting it.
 
 **Prime directive:** this app must not repeat the failure modes of its predecessor
-(`ltx2.3-AIO-generator`). Those failures were not model failures. They were *packaging,
-pinning, and silent-failure* failures. §5 is therefore not a nice-to-have section; it is the
-section the build will be judged on.
+(`ltx2.3-AIO-generator`). Those were not model failures. They were *packaging, pinning, and
+silent-failure* failures. §5 and §8 are the sections the build will be judged on.
+
+**A note on how to read this document.** Several statements here contradict things that are
+true of *other* diffusion apps, or true of LTX-2.5 on a normal GPU box but false on ZeroGPU. The
+biggest is §8: **`enable_model_cpu_offload()` must not be used.** If a future reader's instinct
+says otherwise, §8.4 explains why the instinct is wrong here.
 
 ---
 
-## 1. Decision 1 — Integration path: **Diffusers**
+## 1. Decision 1 — Integration path: **Diffusers**, pinned to an exact SHA
 
 We build on `diffusers`, loading `Lightricks/LTX-2.5-Diffusers`.
 
@@ -30,102 +34,118 @@ We build on `diffusers`, loading `Lightricks/LTX-2.5-Diffusers`.
 
 ### 1.2 Why C
 
-**The `ltx2` module is real and complete enough.** `diffusers` ships a first-class
-`pipelines/ltx2` package. Verified present in the installed source tree:
-`pipeline_ltx2.py`, `pipeline_ltx2_condition.py`, `pipeline_ltx2_image2video.py`,
-`pipeline_ltx2_latent_upsample.py`, plus `connectors.py`, `latent_upsampler.py`,
-`vocoder.py`, `export_utils.py`, `utils.py`. Models `AutoencoderKLLTX2Video`,
-`AutoencoderKLLTX2Audio`, `LTX2VideoTransformer3DModel` are exported from the top-level
-`diffusers` namespace.
-
-**Path A is a heavy, fragile install for a Space.** It requires `uv sync` of a git workspace,
-CUDA >= 12.7 and torch ~= 2.7. A Space build that depends on resolving a git workspace at
-image-build time is a build we cannot reproduce or pin.
+**Path A is a heavy, fragile install for a Space.** It needs `uv sync` of a git workspace,
+CUDA >= 12.7, torch ~= 2.7. A Space build that resolves a git workspace at image-build time is
+a build we cannot reproduce or pin.
 
 **Path B is the documented cause of the fragility we are told to avoid.** The 2.3 project's
-`requirements.txt` vendors an entire ComfyUI runtime — roughly 50 dependencies, nearly all
-unpinned: `spandrel`, `torchsde`, `kornia`, `PyOpenGL`, `glfw`, `SQLAlchemy`, `alembic`,
-`Mako`, `blake3`, `comfyui-frontend-package`, `comfyui-workflow-templates`,
-`comfyui-embedded-docs`, plus a hand-maintained block of *custom-node deps we discovered are
-required but aren't auto-installed by their respective nodes* (`gguf`, `imageio_ffmpeg`,
-`opencv-python`, `matplotlib`, `scikit-image`, `onnxruntime`, `yt-dlp`). That comment block is
-itself the evidence: the dependency surface was discovered by breakage, not by design.
-Diffusers replaces all of it with ~15 pinned direct deps and zero custom-node surface.
+`requirements.txt` vendors an entire ComfyUI runtime — ~50 dependencies, nearly all unpinned:
+`spandrel`, `torchsde`, `kornia`, `PyOpenGL`, `glfw`, `SQLAlchemy`, `alembic`, `Mako`, `blake3`,
+`comfyui-frontend-package`, `comfyui-workflow-templates`, `comfyui-embedded-docs`, plus a
+hand-maintained block of *custom-node deps we discovered are required but aren't auto-installed
+by their respective nodes* (`gguf`, `imageio_ffmpeg`, `opencv-python`, `matplotlib`,
+`scikit-image`, `onnxruntime`, `yt-dlp`). That comment block is the evidence: the dependency
+surface was discovered by breakage, not by design. Diffusers replaces all of it with ~16 pinned
+direct deps and zero custom-node surface.
 
 **Decisive coupling to §2.** The `*-comfy-int8-convrot` quantised weights are **ComfyUI-only**
-— the model card says so explicitly. Choosing A or C means those 36.9 GB of int8 weights are
-unusable to us. Path choice and disk budget are therefore one decision, not two, and §2 is
-computed on the bf16 Diffusers pack.
+— the model card says so. Choosing A or C means those 36.9 GB of int8 weights are unusable to
+us. Path choice and disk budget are one decision, not two.
 
-### 1.3 The single-file escape hatch: investigated and REJECTED
+### 1.3 The pinned revision — and why a release tag will not do
 
-It is tempting to skip the Diffusers pack and load the 200.85 GB single-file release through
-`from_single_file`. That does not work, and the reason is specific.
+```
+diffusers @ git+https://github.com/huggingface/diffusers@ac56fa2f25c1c15b4cbaa1e0b3255e9bc38c06dc
+```
+
+HEAD at 2026-08-19T12:11:04Z. Contains the LTX-2.5 merge (PR #14447, 2026-08-11) plus #14453
+and #14462. PEP 508 direct reference — **not** the legacy `#egg=` form.
+
+**A SHA is more pinned than a version range, not less.** It is byte-for-byte reproducible and
+cannot drift. It costs a git clone at build time and manual upgrades; both are acceptable.
+
+**The latest release (0.39.0) does not have 2.5, and it fails LATE.** `LTX2Pipeline` imports
+fine on 0.39.0 — so the app starts, the UI renders, weights begin downloading — and only then
+does it fail on a missing `temporal_latent_upsampler`. A failure that happens after 70 GB of
+download is the worst kind.
+
+**Therefore: a startup fail-fast assertion.**
+
+```python
+assert diffusers.__version__ == "0.40.0.dev0", (
+    f"LTX-2.5 needs the pinned diffusers SHA (reports 0.40.0.dev0); got {diffusers.__version__}. "
+    "See docs/PLAN.md §1.3."
+)
+```
+
+This converts a late, confusing, expensive failure into an immediate, obvious one. It lives in
+`preflight.py` (§7.1) and it is a test case (§9.3).
+
+### 1.4 The single-file escape hatch: investigated and REJECTED
 
 `diffusers/loaders/single_file_utils.py` does contain an LTX-2 route:
 `CHECKPOINT_KEY_NAMES["ltx2"]` → `model_type = "ltx2-dev"` → config repo
-`{"pretrained_model_name_or_path": "Lightricks/LTX-2"}`. But note the repo it points at:
-`LTX-2`, i.e. **2.0, not 2.5**. And the converters it ships are only:
-
-- `convert_ltx2_transformer_to_diffusers` (`LTX_2_0_TRANSFORMER_KEYS_RENAME_DICT`)
-- `convert_ltx2_vae_to_diffusers` (`LTX_2_0_VIDEO_VAE_RENAME_DICT`)
-- `convert_ltx2_audio_vae_to_diffusers` (`LTX_2_0_AUDIO_VAE_RENAME_DICT`)
+`{"pretrained_model_name_or_path": "Lightricks/LTX-2"}`. Note the repo: **`LTX-2`, i.e. 2.0,
+not 2.5**. The converters it ships are only `convert_ltx2_transformer_to_diffusers`,
+`convert_ltx2_vae_to_diffusers` and `convert_ltx2_audio_vae_to_diffusers` — all keyed on
+`LTX_2_0_*` rename dicts.
 
 There is **no** single-file converter for 2.5's `connectors`, `diffusion_decoder`, `vocoder`,
-`duration_head` or `latent_upsampler`. Even a successful single-file load would give us a
-pipeline missing the components that make 2.5 what it is. We use the Diffusers pack. This is
-settled; do not revisit it without new upstream converters.
+`duration_head` or `latent_upsampler`. Even a successful load would give us a pipeline missing
+the components that make 2.5 what it is. Settled; do not revisit without new upstream
+converters.
 
 ---
 
-## 2. Decision 2 — Disk budget: **~72.2 GB of a 150 GB cap**
+## 2. Decision 2 — Disk, RAM and dtype budget
 
-ZeroGPU gives us a 150 GB persistent-storage cap. The `Lightricks/LTX-2.5-Diffusers` repo
-totals **164.19 GB across 56 files** — which would blow the cap. That total is *not* what we
-download, and understanding why is a correctness requirement, not an optimisation.
+Three separate resource ceilings, and the tightest one is not the obvious one.
+
+| resource | ceiling | our load | margin |
+|---|---|---|---|
+| **VRAM** (`xlarge`) | ~95 GiB | 67.2 GiB weights | ~28 GiB for activations — **comfortable** |
+| **CPU RAM** | **~68 GB** (community cgroup observation, *not* an official figure — HF publishes ZeroGPU RAM as `"-"` / "Dynamic resources") | ~72 GB | **marginal — risk #1** |
+| **Ephemeral disk** | 150 GB, **wiped on every restart/rebuild** | ~144 GB transient peak | **marginal — risk #1** |
+
+**VRAM was never the problem.** The problems are RAM and transient disk.
 
 ### 2.1 Trap A — duplicate shard sets
 
-Two folders in the repo ship the *same weights twice*, in two different shardings:
+Two folders ship the *same weights twice*, in two different shardings:
 
 | folder | set 1 | set 2 | note |
 |---|---|---|---|
 | `transformer/` | 4 shards: 9.932 + 9.919 + 9.986 + 8.138 = **37.975 GB** | 8 shards: 4.991 + 4.944 + 4.994 + 4.928 + 4.977 + 4.995 + 4.994 + 3.163 = **37.986 GB** | only **one** `diffusion_pytorch_model.safetensors.index.json` |
 | `connectors/` | single file: **6.344 GB** | 2 shards: 5.000 + 1.344 = **6.344 GB** | same |
 
-A naive `snapshot_download` of those folders pulls **both** sets and roughly doubles the
-footprint (+44.33 GB of pure duplication). `from_pretrained` does the right thing: it reads
-the index JSON and fetches only the shards the index references.
+A naive `snapshot_download` of those folders pulls **both** sets (+44.33 GB of pure
+duplication). `from_pretrained` reads the index JSON and fetches only the referenced shards.
 
-**Two consequences that are binding on the build:**
-
-1. We rely on the index. We do **not** hand-roll a `snapshot_download` of `transformer/`.
-2. Any `preload_from_hub:` list in the Space README must name **only the live shards** — the
-   ones the index references. A wrong list here silently doubles disk and fails the deploy at
-   72 GB in, which is the worst possible time to find out.
+**Binding consequences:** (1) we rely on the index, never hand-rolling a `snapshot_download` of
+`transformer/`; (2) any `preload_from_hub:` entry must name **only the live shards**. A wrong
+list here does not fail fast — it fails after tens of GB, and on a 150 GB cap it evicts us.
 
 ### 2.2 Trap B — `transformer_full/` is the DEV transformer
 
-`transformer_full/` is a further **37.975 GB** and is the *dev* (non-distilled) transformer. We
-ship the distilled 8-step path by default, so we do not ship it. It is documented as an opt-in
-(§2.5), not deleted from our mental model.
+A further **37.975 GB**, the *dev* (non-distilled) transformer. We ship the distilled 8-step
+path, so we do not ship it. Documented as opt-in (§2.5), not deleted from our mental model.
 
-### 2.3 The subset we ship
+### 2.3 The bf16 subset we ship
 
 | component | GB | why |
 |---|---:|---|
 | `transformer/` (distilled, one shard set) | 37.975 | the model |
-| `text_encoder/` (5 shards: 4.961 + 4.967 + 4.884 + 4.986 + 4.121) | 23.919 | Gemma-3 12B (see §10 OQ-4) |
+| `text_encoder/` (5 shards: 4.961 + 4.967 + 4.884 + 4.986 + 4.121) | 23.919 | Gemma-4 unified (§10 R-4) |
 | `connectors/` | 6.344 | text → transformer conditioning; also a LoRA target |
-| `vae/` | 1.452 | video VAE |
+| `vae/` | 1.452 | video VAE (fallback decoder — §7.4) |
 | `audio_vae/` | 0.107 | audio VAE (mel ↔ latent) |
 | `vocoder/` | 0.258 | mel → waveform |
 | `latent_upsampler/` | 0.996 | stage-2 spatial upscale |
 | `temporal_latent_upsampler/` | 0.262 | stage-2 temporal upscale |
-| `diffusion_decoder/` | 0.834 | high-quality decode (see §10 OQ-1) |
-| `duration_head/` | 0.004 | duration prediction (see §10 OQ-1) |
+| `diffusion_decoder/` | 0.834 | **the native 2.5 decoder** — §7.4 |
+| `duration_head/` | 0.004 | duration prediction |
 | `tokenizer/` | 0.032 | |
-| **TOTAL** | **72.185** | **≈ 72.19 GB** |
+| **TOTAL** | **72.185** | **≈ 72.19 GB = 67.2 GiB** |
 
 ### 2.4 What we exclude, and why
 
@@ -133,137 +153,197 @@ ship the distilled 8-step path by default, so we do not ship it. It is documente
 |---|---:|---|
 | `transformer_full/` | 37.975 | the DEV transformer; not needed for the distilled 8-step path |
 | duplicate shard sets (transformer 8-shard + connectors 2-shard) | 44.330 | Trap A — same weights, different sharding |
-| `ltx-2.5-22b-distilled-lora-450-bf16.safetensors` (repo root) | 9.699 | the distilled LoRA for **DEV** workflows; useless when we already ship the distilled transformer |
+| `ltx-2.5-22b-distilled-lora-450-bf16.safetensors` (repo root) | 9.699 | the distilled LoRA for **DEV** workflows; useless when we ship the distilled transformer |
 
-**Arithmetic check:** 72.185 + 37.975 + 44.330 + 9.699 = **164.189 GB** — which closes exactly
-against the repo's stated 164.19 GB total. The accounting above is complete; there is no
+**Arithmetic check:** 72.185 + 37.975 + 44.330 + 9.699 = **164.189 GB**, closing exactly against
+the repo's stated 164.19 GB across 56 files. The accounting is complete; there is no
 unexplained remainder.
 
-### 2.5 Headroom
+### 2.5 The transient disk peak
 
-`150 − 72.19 ≈ **77.8 GB**` left for the pip environment, user-uploaded LoRAs, and generated
-outputs. The dev transformer (`transformer_full/`, 37.98 GB) fits inside that headroom, which is
-why it is an *opt-in* rather than an impossibility — but enabling it leaves ~40 GB, and outputs
-must then be pruned aggressively.
+Startup holds **two** copies: the HF cache (~72 GB) *and* the packed copy ZeroGPU writes to
+`~/.zerogpu/tensors` (~72 GB) ≈ **144 GB against a 150 GB cap**. The 2.3 project was evicted
+with exactly this: `"Workload evicted, storage limit exceeded (150G)"`.
 
-**Implied requirement:** outputs are not immortal. `outputs/` needs a retention policy (bounded
-count or bounded bytes, oldest-first eviction) or the Space will fill up in normal use.
+**Mitigating fact:** the packer auto-prunes the HF cache blobs after packing —
+`ZEROGPU_MMAP_AUTOPRUNE_PATTERN` = `~/.cache/huggingface/hub/models--*/blobs/*` — logging
+`"Cleaned NGB of tensor files ... after packing"`. So the 144 GB peak is **transient**. It is
+still a peak, and 6 GB of margin is not much. This is why §5.6's preflight measures free disk
+and says a number rather than letting the platform evict us anonymously.
+
+Remaining headroom after packing: `150 − 72.19 ≈ 77.8 GB` for the pip environment, user LoRA
+uploads and outputs. `transformer_full/` (37.98 GB) fits in that — which is why it is opt-in
+rather than impossible — but enabling it leaves ~40 GB and makes output eviction urgent.
+
+### 2.6 dtype and quantization — **default bf16**, quantization is a documented fallback
+
+Packed weight size decides which ZeroGPU tier we land on, and the tier decides quota cost. The
+threshold is `xlarge_threshold = 42.00 GiB`: **exceed it and ZeroGPU silently auto-promotes to
+`xlarge` and doubles quota cost, with no code change.**
+
+| config | approx total | packed vs 42.00 GiB | tier | quota | verdict |
+|---|---:|---|---|---|---|
+| **bf16 everything** | 72.19 GB (67.2 GiB) | over | `xlarge` | **2×** | **DEFAULT** — documented by the model card, matches the official Lightricks Space pattern; RAM/disk marginal |
+| fp8 transformer (~19) + bf16 TE (~24) + rest (~10) | ~53 GB (~49.3 GiB) | over | `xlarge` | 2× | comfortable RAM/disk, no quota win |
+| fp8 transformer + int8 TE | ~41 GB (~38.2 GiB) | **under** | `large` | **1×** | best quota economics, highest accuracy risk |
+
+**Why bf16 is the default and not the quantised config.** Shipping quantised by default would
+trade a *known* uncertainty for an *unverified* one:
+
+- The RAM ceiling (~68 GB) is a community cgroup observation, not an official number. It is
+  uncertain, but it is uncertainty about a configuration that upstream documents and that a
+  production Space already runs.
+- Quantization carries its own **unquantified** risk on this specific platform. bitsandbytes
+  `Int8Params` / `Params4bit` and torchao both use **custom tensor subclasses**, and ZeroGPU's
+  packer tracks aliased tensors in a `WeakTensorKeyDictionary`. Whether it packs subclassed
+  tensors correctly is **unverified**. A packer that mishandles them fails in exactly the way
+  we cannot tolerate: quietly, as a quality regression.
+
+So bf16 ships, `size="xlarge"` is **declared explicitly** rather than being silently promoted
+(§8.5), and dtype/quantization is **one switch in `model_files.py`** so moving to fp8 or fp8+int8
+is a one-line change. This is **technical risk #1** (§10), and it is to be settled by
+measurement on the Space, not by argument.
+
+### 2.7 Output retention — 20 GB, evicted oldest-first
+
+`outputs/` is capped at **20 GB**, bounded-bytes, oldest-first eviction, as a single constant in
+`config.py` overridable by env. Swept **on startup as well as after each run**, logging what was
+evicted.
+
+Rationale: ~78 GB headroom minus the pip environment and a user LoRA or two. 20 GB is many
+generations and leaves the margin the 2.3 Space did not have when it filled its disk and went
+unhealthy.
 
 ---
 
-## 3. Decision 3 — Mode coverage: all 11, honestly
+## 3. Decision 3 — Mode coverage: 11 UI modes over 4 real workflows
 
-All 11 requested modes are reachable. Several are reachable only in a way that costs more than
-the name suggests, and the plan states that plainly rather than shipping a fast-looking button
-that is secretly slow.
+All 11 requested modes are reachable. **They are not 11 code paths**, and the plan says so
+plainly — describing them as independent implementations would be dishonest and would produce a
+much worse registry.
 
-### 3.1 Three facts that shape the whole registry
+### 3.1 The four real workflows
+
+From `_workflow_map` in `diffusers/modular_pipelines/ltx2/modular_blocks_ltx25.py`:
+
+```
+text2video   {prompt}
+image2video  {image, prompt}
+condition    {conditions, prompt}
+in_context   {reference_conditions, num_frames, prompt}
+```
+
+Our **11 UI modes are a presentation layer over those four**, plus the audio-latent input route
+and the audio-only export. That is the honest description, and it is also the design that keeps
+the registry small: `modes.py` is data over four builders, not eleven.
+
+### 3.2 Three facts that shape everything
 
 **(a) One conditioning mechanism covers both image and video.**
-`LTX2VideoCondition` is a dataclass whose `frames` field is typed
+`LTX2VideoCondition.frames` is typed
 `PIL.Image.Image | list[PIL.Image.Image] | np.ndarray | torch.Tensor` — "the image (**or
-video**) to condition the video on". It carries `index` (the frame position at which the
-conditioning takes effect, default `0`) and `strength` (default `1.0`). So image-conditioning
-and video-conditioning are *the same code path* with a different payload. The UI should expose
-it that way: a list of conditions, each with a source, an index and a strength.
+video**) to condition the video on" — and carries `index` and `strength`. Image- and
+video-conditioning are *the same code path* with a different payload. See §5.7 for the
+`index` trap, which is severe.
 
 **(b) The model is jointly audio-visual. There is no video-off switch.**
-The return type is `LTX2PipelineOutput(frames=..., audio=...)` — both fields are non-optional
-`torch.Tensor`. Every call spends video compute and returns a video. This is the single most
-important cost fact in the app, and it is why the "audio" modes below carry a warning.
+The return type is `LTX2PipelineOutput(frames=..., audio=...)`, both non-optional tensors. Every
+call spends video compute and returns a video. This is the most important cost fact in the app.
 
 **(c) Audio input is not a first-class kwarg.**
-There is no `audio=` argument. Audio goes in as `audio_latents` (waveform → mel →
-`audio_vae` → latents), combined with `noise_scale`. `prepare_audio_latents` routes through
-`_create_noised_state(latents, noise_scale, generator)`, whose body is
-`noised_latents = noise_scale * noise + (1 - noise_scale) * latents` — i.e. classic
-img2img-style strength, where `noise_scale=1.0` discards the input entirely and `0.0` keeps it.
-Audio frame count and video frame count are computed independently, so **they can desync**;
-§5.5 makes validating that a hard requirement.
+There is no `audio=` argument. Audio enters as `audio_latents` — upstream documents it as
+*"Optional pre-encoded audio latents; random noise is used when not provided"* — combined with
+`noise_scale`. `prepare_audio_latents` routes through `_create_noised_state`, whose body is
+`noise_scale * noise + (1 - noise_scale) * latents`: img2img-style strength, where `1.0`
+discards the input entirely.
 
-### 3.2 The mode registry
+### 3.3 The mode registry
 
-| # | Mode | How it is reached | Cost note |
-|---|---|---|---|
-| 1 | text → video | `LTX2Pipeline(prompt=…)` | first-class |
-| 2 | image → video | `LTX2ConditionPipeline` with one `LTX2VideoCondition(frames=PIL, index=0)`, empty prompt | first-class |
-| 3 | image + text → video | as #2 with a prompt | first-class |
-| 4 | video → video | `LTX2ConditionPipeline` with `LTX2VideoCondition(frames=<video>, strength<1.0)` | first-class |
-| 5 | text → audio+video | #1 — the audio track is always produced | first-class; **this is the default shape** |
-| 6 | image → audio+video | #2 | first-class |
-| 7 | image + text → audio+video | #3 | first-class |
-| 8 | text → audio | #1, export only the audio track | ⚠️ **still pays full video compute** |
-| 9 | video → audio | #4, export only the audio track | ⚠️ same |
-| 10 | audio → audio | `audio_latents` + `noise_scale`, export only audio | ⚠️ same |
-| 11 | audio → video | `audio_latents` + `noise_scale`, export only video | ⚠️ pays audio encode on top |
+| # | Mode | Workflow | How it is reached | Cost note |
+|---|---|---|---|---|
+| 1 | text → video | text2video | `prompt` | first-class |
+| 2 | image → video | condition | one `LTX2VideoCondition(frames=PIL, index=0)`, empty prompt | first-class |
+| 3 | image + text → video | condition | as #2 with a prompt | first-class |
+| 4 | video → video | condition | `LTX2VideoCondition(frames=<video>, strength<1.0)` | first-class |
+| 5 | text → audio+video | text2video | #1 — the audio track is always produced | **the default shape** |
+| 6 | image → audio+video | condition | #2 | first-class |
+| 7 | image + text → audio+video | condition | #3 | first-class |
+| 8 | text → audio | text2video | #1, export only the audio track | ⚠️ **still pays full video compute** |
+| 9 | video → audio | condition | #4, export only the audio track | ⚠️ same |
+| 10 | audio → audio | condition | `audio_latents` + `noise_scale`, export only audio | ⚠️ same |
+| 11 | audio → video | condition | `audio_latents` + `noise_scale`, export only video | ⚠️ pays audio encode on top |
 
-**Mitigation for modes 8–11** (mandatory, not optional):
-run at the **minimum legal resolution**, **skip the stage-2 spatial upscale**, and export only
-the requested track. The UI must say, in words, that audio-only modes still render video
-internally — a user who does not know that will read the runtime as a bug.
+**Mandatory mitigation for modes 8–11:** run at the **minimum legal resolution**, **skip the
+stage-2 spatial upscale**, export only the requested track. The UI must say in words that
+audio-only modes still render video internally — a user who does not know that will read the
+runtime as a bug.
 
-### 3.3 Multishot is a UI affordance, not a 12th mode
+### 3.4 Multishot — **downgraded to honest**
 
-2.5's native multishot is driven by (i) prompt structure — per the LTX prompting guide — and
-(ii) multiple `LTX2VideoCondition`s at different `index` values. It is not a separate pipeline.
-We therefore build it as a **first-class UI affordance** on top of the condition list: add a
-shot, give it a prompt segment and an anchor frame index. Building it as a separate "mode"
-would duplicate the condition-list code for no gain.
+There is **no multishot or scene API**. Multishot is prompt-structure driven only.
 
-### 3.4 Prompt enhancement: **deferred, and we ship no dead toggle**
+Worse: the 2.5 enhancer system prompts **explicitly instruct the model not to describe scene
+cuts**, so prompt-level multishot actively fights the enhancer. We present it as *prompt-structure
+driven, unverified, no API support* — a documented technique in the UI copy, not a feature with a
+button that implies support we cannot back.
 
-`enable_prompt_enhancement=True` requires a separate `prompt_enhancer` component
-(`google/gemma-4-E2B-it`). It is optional in the pipeline constructor and **is not present in
-the Diffusers pack**. Shipping a toggle that cannot work is exactly the kind of silent lie §5
-exists to prevent. Documented as deferred/opt-in with that reason; no UI control until the
-component is actually fetchable and wired.
+(Superseding an earlier draft of this plan that called it a first-class affordance. It is not.)
 
-### 3.5 Duration prediction: ship it (subject to OQ-1)
+### 3.5 Prompt enhancement: **unavailable by default; we ship no dead toggle**
 
-`duration_head` is an optional constructor component and **is** in the pack (0.004 GB). Usage:
-omit `num_frames` and pass `min_seconds` / `max_seconds`; the head predicts the duration.
-This is a real differentiator and we ship it — **conditional on OQ-1 (§10), which is currently
-unresolved.**
+`LTX25AutoBlocks` declares a `prompt_enhancer` component, and it appears in
+`_optional_components`. But **the Diffusers pack has no `prompt_enhancer/` folder** — all 56
+files enumerated. It would come from `google/gemma-4-E2B-it`, a separate model. So
+`enable_prompt_enhancement=True` fails on our subset.
+
+Shipping a toggle that cannot work is exactly the silent lie §5 exists to prevent. No UI
+control until the component is fetchable and wired.
+
+Recorded for whoever enables it later: `prompt_max_new_tokens=600`, greedy decoding,
+`prompt_enhancement_seed` is **inert under LTX-2.5's greedy decoding**, and the system prompt is
+auto-selected between `LTX2_5_T2V_DEFAULT_SYSTEM_PROMPT` and `LTX2_5_I2V_DEFAULT_SYSTEM_PROMPT`.
+
+### 3.6 Duration prediction: ships
+
+`duration_head` is in the pack (0.004 GB) and in `_optional_components`. Omit `num_frames`, pass
+`min_seconds` / `max_seconds`. See §5.7 for the `num_frames` default trap and the >1-prompt
+restriction.
 
 ---
 
 ## 4. Decision 4 — LoRA: the headline feature
 
-User-uploadable LoRA at inference time is the reason this app exists. It must be the most
-robust thing in it.
+User-uploadable LoRA at inference time is why this app exists. It must be the most robust thing
+in it.
 
 ### 4.1 Verified mechanics
 
-- All three generation pipelines (`LTX2Pipeline`, `LTX2ConditionPipeline`,
-  `LTX2ImageToVideoPipeline`) are declared as
+- All generation pipelines are declared
   `class LTX2…Pipeline(DiffusionPipeline, FromSingleFileMixin, LTX2LoraLoaderMixin)`.
-- `LTX2LoraLoaderMixin` sets `_lora_loadable_modules = ["transformer", "connectors"]`. Note
-  **`connectors`** — a LoRA may legitimately touch the text-conditioning path, not just the
-  transformer.
+- `LTX2LoraLoaderMixin._lora_loadable_modules = ["transformer", "connectors"]`. Note
+  **`connectors`** — a LoRA may legitimately touch the text-conditioning path.
 - **Both key conventions load.** `lora_state_dict()` detects
   `is_non_diffusers_format = any(k.startswith("diffusion_model.") for k in state_dict)` and runs
   `_convert_non_diffusers_ltx2_lora_to_diffusers(state_dict)`; separately it detects
   `has_connector = any(k.startswith("text_embedding_projection.") for k in state_dict)` and
-  converts those into the connectors sub-dict. So ComfyUI-style and diffusers-style checkpoints
-  both work.
+  converts those into the connectors sub-dict.
 - `lora_state_dict(..., return_lora_metadata=True)` returns the file's `__metadata__`.
 
-### 4.2 The danger: validation is almost non-existent upstream
+### 4.2 The danger: upstream validation is almost non-existent
 
-The **only** built-in check is a substring test, which raises
-`ValueError("Invalid LoRA checkpoint. Make sure all LoRA param names contain `'lora'` substring.")`.
+The **only** built-in check is a substring test:
+`ValueError("Invalid LoRA checkpoint. Make sure all LoRA param names contain `'lora'` substring.")`
 
-A LoRA built for a *completely different architecture* passes that check — it has `lora` in its
-key names — and then attaches to **zero** modules. Generation proceeds. Output looks like the
-base model. **No error is raised.** That is silent garbage, and it is precisely the class of
-failure the operator has told us to eliminate.
+A LoRA for a *completely different architecture* passes that check — it has `lora` in its key
+names — then attaches to **zero** modules. Generation proceeds. Output looks like the base
+model. **No error is raised.** That is silent garbage, and it is precisely the class of failure
+the operator has told us to eliminate.
 
-We also have a real compatibility signal available. Reading the official LoRA's safetensors
-header directly: 3320 tensors, all under prefix `diffusion_model.`, peft-style
-`lora_A.weight` / `lora_B.weight`, targeting `to_q` / `to_k` / `to_v` / `to_gate_logits`,
-`adaln_single`, `audio_adaln_single`; and
+We do have a real compatibility signal. Reading the official LoRA's safetensors header directly:
+3320 tensors, all under prefix `diffusion_model.`, peft-style `lora_A.weight`/`lora_B.weight`,
+targeting `to_q`/`to_k`/`to_v`/`to_gate_logits`, `adaln_single`, `audio_adaln_single`; and
 `__metadata__ = {'lora_rank': '450', 'lora_alpha': '450', 'model_version': '2.5.0', 'license': …}`.
-**`model_version` is machine-readable** and we should use it.
+**`model_version` is machine-readable.**
 
 ### 4.3 The validator (7 stages — each stage is a test unit)
 
@@ -271,94 +351,202 @@ Accepts either a **Hub repo-id** or a **direct file upload**.
 
 | # | Stage | Rule | On failure |
 |---|---|---|---|
-| 1 | **Size bound** | reject above a configured max | refuse before any download/parse |
-| 2 | **Header-only parse** | read the safetensors header, **never** load the tensor payload to validate | — |
-| 3 | **Format** | must be safetensors with a parseable header | specific message: not-safetensors vs unparseable-header |
-| 4 | **Version** | read `__metadata__.model_version`; compare to 2.5 | **warn** on absent, **reject** on explicit mismatch |
-| 5 | **Convention** | classify keys: `diffusion_model.` / `transformer.` / `text_embedding_projection.` / unknown | on unknown, the error **names the prefixes actually found** |
-| 6 | **Pairing** | require `lora_A`/`lora_B` (or `lora_down`/`lora_up`) to pair up | name the unpaired keys |
-| 7 | **Attach assertion** | **after** `load_lora_weights`, assert the adapter attached to **> 0** modules | raise a specific error if zero — *this is the anti-silent-garbage check* |
+| 1 | **Size bound** | reject above a configured max | refuse before any download or parse |
+| 2 | **Header-only parse** | read the safetensors header, **never** materialise the payload | — |
+| 3 | **Format** | safetensors with a parseable header | distinct messages: not-safetensors vs unparseable-header |
+| 4 | **Version** | read `__metadata__.model_version` | **warn** if absent, **reject** on explicit mismatch |
+| 5 | **Convention** | classify: `diffusion_model.` / `transformer.` / `text_embedding_projection.` / unknown | on unknown, the error **names the prefixes actually found** |
+| 6 | **Pairing** | `lora_A`/`lora_B` (or `lora_down`/`lora_up`) must pair | name the unpaired keys |
+| 7 | **Attach assertion** | **after** `load_lora_weights`, assert the adapter attached to **> 0** modules | specific error if zero — *the anti-silent-garbage check* |
 
-Stage 2 is a hard rule, not a preference: a multi-GB upload must never be fully materialised
-just to find out it is the wrong architecture.
+Stage 2 is a hard rule: a multi-GB upload must never be fully materialised just to discover it
+is the wrong architecture. Stage 7 is the one upstream does not do for us and the one that
+actually protects the user; it runs on **every** load, built-in LoRAs included.
 
-Stage 7 is the one that upstream does not do for us and the one that actually protects the
-user. It must run on every load, including the built-in LoRAs.
+### 4.4 Fusing — the connectors trap
+
+`fuse_lora` / `unfuse_lora` default to `components=["transformer"]` **only**.
+
+**Connector LoRA layers are silently not fused** unless we pass
+`components=["transformer", "connectors"]`. A LoRA that trains the text-conditioning path would
+partially apply — worse than not applying, because it looks like it worked. We always pass both
+components explicitly, and this is a test case.
 
 ---
 
 ## 5. Decision 5 — Resilience doctrine
 
-Five rules. These are binding on all code in the repo.
+Binding on all code in the repo.
 
-### 5.1 Pin every dependency, with upper bounds
+### 5.1 Pin every dependency, with upper bounds — and know what NOT to pin
 
-Evidence from the predecessor's `requirements.txt`: `spaces>=0.30.0` and `torch>=2.4.0` — floors
-with **no ceiling** — alongside exactly one hard pin, `torchaudio==2.10.0`, carrying this
-comment:
+Evidence from the predecessor: `spaces>=0.30.0` and `torch>=2.4.0` — floors with **no ceiling**
+— alongside exactly one hard pin, `torchaudio==2.10.0`, carrying this comment:
 
 > *"HF Spaces ships torch==2.10.0; bare 'torchaudio' lets pip pick an older wheel whose C++ ABI
 > doesn't match → import crashes the whole audio code path… Pin the matching version."*
 
-That comment is a post-mortem. It documents a break that already happened, and the fix was
-applied to exactly one line while ~50 other unbounded lines were left. Every direct dependency
-here gets a floor **and** a ceiling. `requirements.txt` is pending exact pins from the lead and
-is deliberately not written yet.
+That comment is a post-mortem, applied to one line while ~50 stayed unbounded.
+
+**But the inverse mistake is also real, and the 2.3 repo made it.** Its own `AGENTS.md:19` says
+**do not pin `spaces`** — the platform pins its own version (live Spaces report 0.49.3 / 0.50.0 /
+0.50.4 while PyPI is 0.51.1) and a conflicting pin breaks pip resolution at build time. Its
+`requirements.txt:2` then pins `spaces>=0.30.0` anyway. We follow the rule the repo wrote and
+did not keep: **no `spaces` line in `requirements.txt`**, and the import is guarded in code
+(`try: import spaces / except ImportError: spaces = None`) so local dev works.
+
+The full pin set:
+
+| package | pin | why |
+|---|---|---|
+| `torch` | `==2.11.0` | ZeroGPU supports exactly 2.8.0 / 2.9.1 / 2.10.0 / **2.11.0**; ceiling is 2.11.0. CUDA 12.8, sm_120 needs cu128+ |
+| `torchvision` | `==0.26.0` | **trap:** `torchvision 0.28.0` hard-declares `torch==2.13.0`, so a floating torchvision silently upgrades torch past the ceiling |
+| `torchaudio` | `==2.11.0` | must match torch exactly (the ABI break above) |
+| `gradio` | `>=6.24.0,<7` | **5.x is END OF LIFE** (last stable 5.50.0, 2025-11-21) |
+| `diffusers` | `@ git+…@ac56fa2f…` | §1.3 |
+| `transformers` | `>=5.15.1,<6` | |
+| `accelerate` | `>=1.14.0,<2` | |
+| `peft` | `>=0.20.0,<0.21` | LoRA backend |
+| `safetensors` | `>=0.8.0,<0.9` | |
+| `huggingface_hub` | `>=1.28.0,<2` | |
+| `hf_xet` | `>=1.6.0,<2` | |
+| `imageio` | `>=2.37.4,<3` | |
+| `imageio-ffmpeg` | `>=0.6.0,<0.7` | |
+| `av` | `>=18.1.0,<19` | PyAV — required by CRF re-compression (§5.7) |
+| `numpy` | `>=2.5.2,<3` | **numpy 2.** Do NOT pin `<2`: 1.26.4 is 2 years EOL and nothing in the stack caps it |
+| `pillow` | `>=12.3.0,<13` | |
+| `spaces` | **absent, deliberately** | platform-pinned; see above |
+
+**gradio 6 breaking changes that hit us:** `gr.Video` subtitle-tuple return removed;
+`show_download_button` / `show_share_button` → `buttons=[...]`; `gr.Audio` `show_controls` →
+`show_recording_waveform`; `min_length` / `max_length` → event-listener validators.
+
+**Python 3.12 is required, not preferred:** numpy 2.5.2 needs ≥3.12 and `av` 18 needs ≥3.11. The
+default 3.10.13 image silently resolves both *downward* rather than failing.
 
 ### 5.2 One central model-file indirection
 
-Every Hub repo-id, revision, subfolder and filename lives in **one** module —
-`ltx25_studio/model_files.py` — as data, never inlined at a call site. An upstream rename must
-be a one-line change in one file.
+Every Hub repo-id, revision, subfolder, filename **and dtype/quantization choice** (§2.6) lives
+in **one** module — `ltx25_studio/model_files.py` — as data, never inlined at a call site.
 
-A missing file must raise an error naming **both the file and its URL**. This is not
-hypothetical: Lightricks deleted a 2.3 checkpoint from the Hub with no warning and broke a live
-Space. When it happens again, the error message should tell the operator exactly which URL to
-go look at.
+A missing file must raise an error naming **both the file and its URL**. Not hypothetical:
+Lightricks deleted a 2.3 checkpoint from the Hub with no warning and broke a live Space. When it
+happens again, the message should tell the operator which URL to go look at.
 
-Pinning a **revision** (commit SHA) per repo is part of this module's job — a repo whose content
-can change under us is not pinned just because its name is stable.
+Pinning a **revision** per repo is part of this module's job — a repo whose content can change
+under us is not pinned just because its name is stable.
 
-### 5.3 Never return an empty output
+### 5.3 Never return an empty output — and the four layers that let it happen
 
 Any generation that completes without producing a file **must** raise a specific, actionable
 error that the UI renders visibly.
 
-The 2.3 outage hid for a **week** because a mid-graph load failure returned an empty video path,
-and the UI rendered an empty path as a silent form reset. The user saw "nothing happened". No
-error, no log, no signal. Structurally: a success path that can return a falsy artifact is a
-bug, regardless of whether it is currently reachable.
+**The full anatomy of the 2.3 silent reset**, because each layer was individually "reasonable"
+and that is the lesson:
 
-### 5.4 Read audio parameters from config, never hardcode
+1. `models.ensure_models` hit a missing file and did `logger.warning(...) + continue`.
+2. ComfyUI's executor caught every node exception and returned a FAILURE **tuple**, without
+   raising.
+3. An `OutputEvent(video_path="")` was pushed **unconditionally**.
+4. The UI did `event.video_path if event.video_path else gr.update()` — rendering an empty path
+   as a silent form reset.
 
-Mel/audio parameters come from `audio_vae.config` at runtime:
-`audio_sampling_rate`, `audio_hop_length`, `audio_mel_bins`, `audio_vae_mel_compression_ratio`,
+The user saw "nothing happened". No error, no log, no signal. It hid for a **week**.
+
+**Our rules, both halves mandatory:**
+- **An empty path becomes an error AT THE SOURCE**, and every layer propagates it. A success
+  path that can return a falsy artifact is a bug regardless of current reachability.
+- **No "newest file in the output directory" fallback.** The 2.3 one had no run correlation and
+  would show the *previous* run's video for a failed run — a worse failure than showing nothing.
+  **Each run is stamped into its own output subdirectory**, and a run's artifact is only ever
+  looked up inside that run's directory.
+
+### 5.4 Read parameters from config, never hardcode
+
+Mel/audio parameters come from `audio_vae.config` at runtime: `audio_sampling_rate`,
+`audio_hop_length`, `audio_mel_bins`, `audio_vae_mel_compression_ratio`,
 `audio_vae_temporal_compression_ratio`, `audio_latent_channels`.
 
-This mirrors what the pipeline itself does — its constructor reads
-`self.vae.spatial_compression_ratio`, `self.vae.temporal_compression_ratio`,
-`self.audio_vae.mel_compression_ratio`, `self.audio_vae.temporal_compression_ratio` and
-`self.transformer.config.patch_size` from the loaded components, using literals only as
-fallbacks when a component is absent. We follow the same discipline.
+This mirrors the pipeline itself, whose constructor reads `self.vae.spatial_compression_ratio`,
+`self.vae.temporal_compression_ratio`, `self.audio_vae.mel_compression_ratio`,
+`self.audio_vae.temporal_compression_ratio` and `self.transformer.config.patch_size` from the
+loaded components, using literals only as fallbacks. Same discipline. §5.7 extends this to CRF.
 
 ### 5.5 Enforce and surface the hard constraints
 
 | constraint | source | handling |
 |---|---|---|
-| `height % 32 == 0` and `width % 32 == 0` | enforced upstream: `if height % 32 != 0 or width % 32 != 0: raise ValueError(...)` in all three pipelines *and* in the latent-upsample pipeline | validate **before** the call, snap in the UI, show the snapped value |
-| `num_frames % 8 == 1` | **not** hard-raised upstream; it falls out of `latent_num_frames = (num_frames - 1) // self.vae_temporal_compression_ratio + 1`, which silently floors a bad value | validate ourselves. **Derive the modulus from `vae.temporal_compression_ratio`, do not hardcode 8** — same principle as §5.4 |
-| image conditioning CRF | `LTX2_5_IMAGE_CRF = 18` for 2.5, vs the generic `DEFAULT_IMAGE_CRF = 33` | 2.5 image conditioning uses **18**; the default is wrong for us |
-| audio/video length agreement | audio and video frame counts are computed independently (§3.1c) | validate they agree; raise rather than emit a desynced file |
+| `height % 32 == 0`, `width % 32 == 0` | enforced upstream (raises) in all generation pipelines *and* the latent-upsample pipeline | validate before the call, snap in the UI, **show** the snapped value |
+| `num_frames % 8 == 1` | **not** hard-raised upstream. Falls out of `latent_num_frames = (num_frames - 1) // vae.temporal_compression_ratio + 1`, which **silently floors** a bad value | we raise. **The `8` is `vae.temporal_compression_ratio`** — see below |
+| audio/video length agreement | audio and video lengths are computed independently, and a supplied `audio_latents` **overrides** the duration-derived audio length (§5.7) | validate they agree; raise rather than emit a desynced file |
+
+**The `num_frames` modulus is a parameter, not a literal.** Hardcoding `8` would violate §5.4.
+Resolution:
+
+- `constraints.py` takes the ratio as a **parameter with a documented fallback of `8`**, because
+  the UI must validate input *before* any VAE exists.
+- `pipelines.py` **asserts the loaded `vae.temporal_compression_ratio` equals that fallback** at
+  load time, raising loudly if upstream ever changes it.
+
+That gives a working pre-load validator *and* a tripwire. Both are test cases.
 
 **Verified constants** (`diffusers/pipelines/ltx2/utils.py`):
 
-```python
-DISTILLED_SIGMA_VALUES         = [1.0, 0.99375, 0.9875, 0.98125, 0.975, 0.909375, 0.725, 0.421875]  # 8 steps, CFG=1
-STAGE_2_DISTILLED_SIGMA_VALUES = [0.909375, 0.725, 0.421875]                                        # 3 steps
+```
+DISTILLED_SIGMA_VALUES         = [1.0, 0.99375, 0.9875, 0.98125, 0.975, 0.909375, 0.725, 0.421875]   # 8 steps, CFG=1
+STAGE_2_DISTILLED_SIGMA_VALUES = [0.909375, 0.725, 0.421875]                                          # 3 steps
 ```
 
-These live in `constraints.py` as re-exports/asserts against the installed diffusers, so a
-schedule change upstream fails a test instead of silently changing output quality.
+Re-exported and asserted in `constraints.py` against the installed diffusers, so a schedule
+change upstream fails a test instead of silently changing output quality.
+
+### 5.6 Preflight — fail loudly on resources, before the platform kills us
+
+At startup, `preflight.py` measures **free RAM and free disk** and compares them against the
+requirement computed from the `model_files.py` table. If short, it raises a specific error
+naming the numbers:
+
+> `need ~67.2 GiB RAM for the bf16 load, saw 41.3 GiB` (see §2.6 for the quantised fallbacks)
+
+This is the fail-loudly principle applied to the resource budget. It turns an anonymous OOM or a
+`"Workload evicted, storage limit exceeded (150G)"` into a diagnosable message that names the
+fix. It also runs the §1.3 diffusers-version assertion. Test case.
+
+### 5.7 API gotchas that cause silent wrongness
+
+Every row here is a **test case**, not a note. These are the ways this API is wrong-by-default.
+
+| # | Gotcha | Consequence | Our handling |
+|---|---|---|---|
+| 1 | **`LTX2VideoCondition.index` is a LATENT index, not a pixel frame index.** `start_idx = max((latent_start_idx - 1) * vae_temporal_compression_ratio + 1, 0)` | **off-by-8 guaranteed** if a pixel frame number is passed | convert at the boundary in `conditioning.py`; UI speaks pixel frames, the pipeline gets latent indices |
+| 2 | **Out-of-range condition indices are silently SKIPPED** with only a `logger.warning` | a whole conditioning image does nothing, silently | validate range ourselves and **raise**; this is a silent-failure path we convert into a loud one |
+| 3 | **`noise_scale` default differs by class:** `0.0` on `LTX2Pipeline` / `LTX2ImageToVideoPipeline`, `None` on `LTX2ConditionPipeline` (resolving to `sigmas[0]` or 1.0) | copying a call between classes changes behaviour silently | always pass `noise_scale` explicitly; never rely on the default |
+| 4 | **`num_frames` default differs:** `None` (auto-duration) on `LTX2Pipeline`/`ImageToVideo`/`Condition`; hard `121` on `LTX2InContextPipeline` and `LTX2HDRPipeline`, which have **no `duration_head` at all** | auto-duration silently unavailable on two pipelines | registry records per-workflow duration support; auto-duration also **raises** with >1 prompt and `num_frames=None` — validate before the call |
+| 5 | `latents` must be **UNPACKED 5D** `[B,C,F,H,W]`; `audio_latents` **UNPACKED 4D** `[B,C,L,M]` | shape errors, or worse, silent misinterpretation | assert shapes at our boundary |
+| 6 | **`output_type="latent"` returns ALREADY-DENORMALIZED latents** | re-feeding them re-normalizes → corrupted output | drives the mandatory `denormalize=False` in §7.4 |
+| 7 | **Image-conditioning CRF re-compression is applied BY DEFAULT**, needs PyAV + uint8/PIL input; a float tensor **raises** unless `crf=0` | crashes on float input | normalise to uint8/PIL in `conditioning.py`; `av` is a pinned dep for this reason |
+| 8 | **CRF is 18 when `text_encoder.config.model_type in ("gemma4_unified", "gemma4")`, else 33** | hardcoding either number is wrong for the other | **derive from `text_encoder.config.model_type` at runtime** (§5.4) |
+| 9 | `from diffusers.pipelines.ltx2.export_utils import encode_video` is **DEPRECATED**, removal in 0.40.0 — and our pin *is* 0.40.0.dev0 | breaks on the very revision we pin | use `from diffusers.utils import encode_video` |
+| 10 | `spatio_temporal_guidance_blocks` defaults to `[28]` for 2.3/2.5 (`[29]` was 2.0) and is a **mutable shared default** | in-place mutation corrupts every later call in the process | never mutate in place; copy before modifying |
+| 11 | A supplied `audio_latents` **overrides** the duration-derived `audio_num_frames`: upstream logs `"Got audio_latents of shape […], audio_num_frames will be inferred"` then does `_, _, audio_num_frames, _ = audio_latents.shape` | supplying audio **silently redefines audio length** while `num_frames` still governs video → desync | §5.5 validation, with a concrete desync test case |
+| 12 | `fuse_lora`/`unfuse_lora` default `components=["transformer"]` | connector LoRA layers silently unfused | §4.4 — always pass both |
+
+Reference: `_optional_components = ["processor", "prompt_enhancer", "duration_head"]` (plus
+`audio_scheduler` on Condition), and
+`model_cpu_offload_seq = "prompt_enhancer->text_encoder->connectors->duration_head->transformer->vae->audio_vae->vocoder"`.
+Recorded for completeness — **but see §8.4: we do not use accelerate's offload at all.**
+
+### 5.8 Operational lessons from the 2.3 post-mortem
+
+| # | Lesson | Rule |
+|---|---|---|
+| 1 | **ZeroGPU quota attribution rides a contextvar** (`gradio.context.LocalContext.request`). It does **not** cross a plain `threading.Thread` — without it every user is bucketed as Space-anonymous and you get *"Space app has reached its GPU limit"* at **0 minutes used** | any thread we spawn must carry `contextvars.copy_context()`; better, do not spawn plain threads across the GPU boundary |
+| 2 | The `duration=` callable must accept **the exact same positional signature** as the decorated function, trailing kwargs included | otherwise TypeError at schedule time; test the signature match |
+| 3 | **Hidden 1.5× duration multiplier on `large`** (`duration_factor`): `duration=60` is scheduled as 90 s. On `xlarge` the factor is skipped but the request is **doubled** instead | never reason about wall-clock quota from the `duration=` number alone |
+| 4 | Default duration is 60 s. The **max is a server-side, tier-dependent, unpublished cap** | **discover it, never hardcode it.** Empirically ~120 s is the safe ceiling; the official Lightricks LTX Space ships `@spaces.GPU(duration=75, size="xlarge")` |
+| 5 | **Do NOT auto-retry a ZeroGPU timeout** using the captured Gradio request: the `X-IP-Token` ages past TTL during attempt 1, so attempt 2 always 401s with *"Expired ZeroGPU proxy token"* — **masquerading as the root cause** | surface the original timeout; never retry behind the user's back |
+| 6 | `preload_from_hub` is **capped at 10 entries**, and preloaded files are owned by the *build* user and **read-only to runtime uid 1000** — a later lazy `hf_hub_download` fails with `Permission denied (os error 13)` unless the cache is mirrored | §6.2 |
+| 7 | Accumulated generations filled the 2.3 Space's disk and it went unhealthy | §2.7 — sweep on startup and after each run |
 
 ---
 
@@ -367,19 +555,33 @@ schedule change upstream fails a test instead of silently changing output qualit
 | | |
 |---|---|
 | **Space** | `techfreakworm/LTX2.5-Studio`, **private** |
-| **SDK** | gradio |
-| **Hardware** | ZeroGPU — `suggested_hardware: zero-a10g` (the identifier HF uses); account is PRO |
-| **Weights** | README frontmatter `preload_from_hub:` (the mechanism the 2.3 Space uses) |
-| **Secret** | `HF_TOKEN` — required, because `Lightricks/LTX-2.5-Diffusers` is gated |
+| **SDK** | `sdk: gradio`, `sdk_version: 6.24.0` — **a custom Dockerfile forfeits ZeroGPU entirely** |
+| **Python** | `python_version: "3.12"` — required, not optional (§5.1) |
+| **Hardware** | ZeroGPU. `suggested_hardware: zero-a10g` is the **legacy id string the Spaces API still reports — it is NOT an A10G** (§8.1) |
+| **Size** | `size="xlarge"` declared explicitly (§8.5) |
+| **Weights** | README frontmatter `preload_from_hub:` |
+| **Secret** | `HF_TOKEN` — required; `Lightricks/LTX-2.5-Diffusers` is gated |
 | **Git** | GitHub `git@github.com:techfreakworm/ltx2.5-studio.git`; Space and GitHub stay in sync |
 
-Naming precedent in the operator's account: `techfreakworm/LTX2.3-Studio`, `wan-studio`
-(private), `SAM3-cutout-studio` (private).
+Naming precedent: `techfreakworm/LTX2.3-Studio`, `wan-studio` (private), `SAM3-cutout-studio`
+(private).
 
-**`preload_from_hub` must list only the live shards** — see §2.1 Trap A. Getting this list wrong
-does not fail fast; it fails after tens of GB of download.
+### 6.2 `preload_from_hub` hazards
 
-### 6.1 🚨 BLOCKER — repo gate not accepted
+Two, and they interact:
+
+1. **Only live shards** (§2.1 Trap A). A wrong list fails after tens of GB, not fast.
+2. **Capped at 10 entries.** Our subset spans 11 component folders and ~20 individual shard
+   files, so a naive one-file-per-entry list **cannot fit**. Entries take the form
+   `repo_id file1,file2,…`, so one entry can name many files from one repo — the list must be
+   written that way. **Verification item before first deploy:** confirm there is no separate
+   per-entry file-count or line-length limit.
+3. **Ownership.** Preloaded files belong to the *build* user and are read-only to runtime uid
+   1000. Any later lazy `hf_hub_download` into the same cache fails with
+   `Permission denied (os error 13)` unless the cache is mirrored. Design implication: **preload
+   everything we need, or mirror the cache at startup — do not mix the two strategies.**
+
+### 6.3 🚨 BLOCKER — repo gate not accepted
 
 `Lightricks/LTX-2.5-Diffusers` is gated (`gated: auto`) and the operator's token has **not**
 accepted that gate. Verified response:
@@ -391,227 +593,317 @@ click resolves it:
 
 **https://huggingface.co/Lightricks/LTX-2.5-Diffusers**
 
-Until it is accepted, nothing that touches real weights can be built or tested — local or Space.
-Escalated to the orchestrator.
+Until accepted, nothing touching real weights can be built or tested. Everything that does not
+need real weights proceeds. Escalated to the orchestrator.
 
 ---
 
 ## 7. Architecture
 
-### 7.1 Module layout (proposed)
+### 7.1 Module layout
 
 ```
-app.py                       # entrypoint: local + Space. Thin — builds UI, launches.
+app.py                       # entrypoint. `import spaces` FIRST (§8.2), then build + launch.
 ltx25_studio/
-  __init__.py
-  config.py                  # runtime config: device/dtype selection, paths, env, retention policy
-  model_files.py             # §5.2 — THE single source of truth for repo ids, revisions,
-                             #   subfolders, filenames, expected sizes. Data only, no logic.
-  errors.py                  # typed exception hierarchy; every error carries an actionable message
-  constraints.py             # §5.5 — dimension/frame validation & snapping, CRF, sigma schedules
-  pipelines.py               # pipeline construction, component wiring, caching, offload policy
-  conditioning.py            # UI inputs -> list[LTX2VideoCondition]; multishot anchoring (§3.3)
-  audio.py                   # waveform <-> mel <-> audio_vae latents; all params from config (§5.4)
-  modes.py                   # §3.2 registry: 11 modes as data + per-mode kwarg builders
-  generate.py                # orchestration: mode -> stage 1 -> optional stage 2 -> outputs.
-                             #   Owns the never-empty-output guarantee (§5.3).
-  outputs.py                 # encode/mux video+audio, audio-only export, retention/eviction
+  config.py                  # device/dtype selection, paths, retention cap (§2.7), env overrides
+  model_files.py             # §5.2 — THE single source of truth: repo ids, revisions, subfolders,
+                             #   filenames, sizes, AND the dtype/quantization switch (§2.6)
+  errors.py                  # typed exception hierarchy; every error carries an actionable detail
+  preflight.py               # §5.6 — RAM/disk headroom vs the model_files requirement;
+                             #   §1.3 — the diffusers-version fail-fast assertion
+  zerogpu.py                 # §8 — the `spaces` shim, the static @spaces.GPU policy, the
+                             #   duration callable, contextvar propagation, and the
+                             #   "never return CUDA tensors" boundary
+  constraints.py             # §5.5 — dims/frames/CRF/sigmas. Pure functions over numbers.
+  pipelines.py               # construction on CPU, module-scope .to("cuda"), component wiring,
+                             #   and the vae.temporal_compression_ratio tripwire (§5.5)
+  conditioning.py            # UI inputs -> list[LTX2VideoCondition]; pixel->latent index
+                             #   conversion (§5.7 #1); uint8/PIL normalisation (§5.7 #7)
+  audio.py                   # waveform <-> mel <-> audio_vae latents; params from config (§5.4);
+                             #   vocoder decode
+  modes.py                   # §3.3 registry: 11 UI modes as data over the 4 real workflows
+  generate.py                # §7.4 stage graph. OWNS the never-empty invariant (§5.3) and the
+                             #   per-run output directory
+  outputs.py                 # mux video+audio, single-track export, 20 GB oldest-first eviction
   lora/
-    __init__.py
-    inspect.py               # header-only safetensors parse; metadata + key-convention detection
-    validate.py              # the 7-stage validator (§4.3 stages 1-6)
-    apply.py                 # load_lora_weights + the post-attach assertion (§4.3 stage 7)
+    inspect.py               # header-only safetensors parse; metadata + convention detection
+    validate.py              # validator stages 1-6 (§4.3)
+    apply.py                 # load_lora_weights, stage-7 attach assertion, both-component fusing
   ui/
-    __init__.py
     blocks.py                # Gradio Blocks assembly
     components.py            # reusable widgets (condition list, LoRA picker, constraint hints)
-    handlers.py              # thin adapters: UI event -> generate.py -> UI update. No logic.
+    handlers.py              # thin adapters: UI event -> one call -> UI update. No logic.
 ```
 
 ### 7.2 Layering rules
 
 - **Dependencies point inward.** `ui/` may import anything; `generate.py` must not import `ui/`.
   `model_files.py`, `errors.py` and `constraints.py` import nothing from the package.
-- **`modes.py` is data, not branching.** Adding a mode should mean adding a registry entry, not
-  adding an `if` to `generate.py`.
-- **`ui/handlers.py` contains no business logic.** Every handler is: marshal inputs → call one
-  function in `generate.py` or `lora/` → marshal outputs. This is what makes the app testable
-  without a GPU and without Gradio.
-- **Errors cross layers as typed exceptions**, and the UI is the only place that turns an
-  exception into a string for a human. `generate.py` never returns an error-shaped success.
+- **`modes.py` is data, not branching.** Adding a mode is a registry entry, not an `if` in
+  `generate.py`.
+- **`ui/handlers.py` contains no business logic.** Marshal inputs → call one function → marshal
+  outputs. This is what makes the app testable without a GPU and without Gradio.
+- **Errors cross layers as typed exceptions.** The UI is the only place that renders one as a
+  string. `generate.py` never returns an error-shaped success (§5.3).
 
-### 7.3 Rationale for the shape
+### 7.3 Why this shape
 
-The predecessor put backend, models, modes and workflow in four flat top-level modules with
-`ui.py` importing all of them. That works until the failure modes get interesting: the empty-
-output bug (§5.3) lived precisely in the seam between "workflow returned something" and "UI
-rendered it", and there was no layer boundary at which to assert. Here, `generate.py` owns that
-invariant and can be tested for it directly.
+The predecessor put backend, models, modes and workflow in four flat modules with `ui.py`
+importing all of them. That works until the failure modes get interesting: the empty-output bug
+(§5.3) lived precisely in the seam between "workflow returned something" and "UI rendered it",
+and there was no layer boundary at which to assert. Here `generate.py` owns that invariant and
+can be tested for it directly.
+
+### 7.4 The generation stage graph — **classic pipelines PLUS an explicit diffusion decode**
+
+This is the most consequential architectural decision in the document, because the obvious
+implementation silently discards 2.5's headline quality feature.
+
+**`LTX25AutoBlocks` docstring, verbatim:**
+
+> *"Auto blocks for LTX-2.5 supporting text-to-video, image-to-video, condition-to-video and
+> in-context (IC-LoRA) generation (joint video + audio). Identical to `LTX2AutoBlocks` except
+> that the video decoder is `LTX2DiffusionVaeDecoderStep`, **since the diffusion decoder is the
+> native default from LTX-2.5 on.** To decode with the convolutional VAE instead, swap the
+> decode block."*
+
+**But the classic `LTX2ConditionPipeline` / `LTX2ImageToVideoPipeline` decode with
+`self.vae.decode(...)` — the convolutional VAE, NOT the diffusion decoder.** So a naive classic
+call silently gives up what the model card calls *"a new diffusion video decoder [that] replaces
+the VAE reconstruction stage"*. It would not error. It would just be worse, forever, and nobody
+would know why.
+
+**Decision: classic pipelines, with the diffusion decode added as an explicit stage.**
+
+```
+stage 1   LTX2ConditionPipeline(..., sigmas=DISTILLED_SIGMA_VALUES,
+                                     output_type="latent")
+          → latents, audio_latents
+
+optional  LTX2LatentUpsamplePipeline(latents)
+          → upsampled latents
+
+stage 2   same pipeline, latents=upsampled,
+                          sigmas=STAGE_2_DISTILLED_SIGMA_VALUES,
+                          noise_scale=STAGE_2_DISTILLED_SIGMA_VALUES[0],
+                          output_type="latent"
+          → refined latents
+
+decode V  LTX2VideoDiffusionDecodePipeline(latents=..., denormalize=False)   ← see below
+decode A  audio_vae.decode(audio_latents) → mel → vocoder(...) → waveform
+```
+
+**`denormalize=False` is MANDATORY.** `output_type="latent"` returns *already-denormalized*
+latents (§5.7 #6). Passing the default `True` **double-denormalizes and silently corrupts the
+output**. This is a test case.
+
+**Why not the modular path.** The model card's own Option C example uses the classic pipelines,
+so that is the documented, lower-risk API. The modular path (`LTX25ModularPipeline` /
+`LTX25AutoBlocks`, loaded from `modular_model_index.json`) is newer, and its interaction with
+**ZeroGPU's tensor packing** (§8.3) and with **`load_lora_weights`** (§4) is unverified. Given
+LoRA is the headline feature and ZeroGPU is the deploy target, betting both on an unverified
+integration is the wrong trade.
+
+The modular path is recorded here as **the canonical alternative**: if we move to it, the decode
+block is swappable exactly as the docstring describes, and `vae/` (1.452 GB) stays in the subset
+as the conv-VAE fallback either way.
 
 ---
 
-## 8. VRAM and offload
+## 8. ZeroGPU execution model
 
-**The weights do not fit in VRAM.** ~72 GB of components against a ZeroGPU allocation an order
-of magnitude smaller. Therefore:
+**This section replaces the conventional wisdom about diffusion-model offloading. On ZeroGPU
+that wisdom is not merely suboptimal — it is counterproductive.**
 
-- **`enable_model_cpu_offload()` is mandatory**, not a tuning option. It is part of pipeline
-  construction in `pipelines.py`, not a user-facing toggle.
-- **Peak GPU residency ≈ transformer (37.98 GB) + activations.** The transformer is the
-  irreducible resident component during denoising; everything else (text encoder, VAEs, vocoder,
-  upsamplers, decoder) can be paged in and out around it.
-- **The text encoder is the second-largest component (23.9 GB) and is needed only once**, before
-  denoising. It should be evicted after prompt encoding rather than held.
-- **Stage 2 (latent upsample) is a separate pipeline** — `LTX2LatentUpsamplePipeline` — which
-  means it is a separate residency window and can be skipped entirely for the audio-only modes
-  (§3.2 mitigation).
-- **Exact ZeroGPU numbers pending** from the lead; the offload strategy above does not depend on
-  them, but the maximum supported resolution × frame count does.
+### 8.1 The hardware is not what the API says
 
-**Local (Apple Silicon / MPS) is a different regime.** MPS has no `enable_model_cpu_offload()`
-equivalent with the same semantics and unified memory changes the arithmetic entirely. Device
-strategy is selected in `config.py` and the local path is expected to be capability-limited
-rather than identical. Do not assume a code path that works on ZeroGPU works on MPS.
+ZeroGPU is **NVIDIA RTX PRO 6000 Blackwell Server Edition**, partitioned via MIG (sm_120).
+
+| tier | VRAM | quota |
+|---|---:|---|
+| `large` (default) | **48 GB** | 1× |
+| `xlarge` | **96 GB** | 2× |
+
+The Spaces API still reports the legacy id string **`zero-a10g`**. **Do not read that as an
+A10G** — it is a stale identifier, and sizing decisions made from it would be wrong by a factor
+of several.
+
+**VRAM is not our constraint.** 67.2 GiB of weights against `xlarge`'s ~95 GiB leaves ~28 GiB
+for activations. The constraints are CPU RAM and transient disk (§2).
+
+### 8.2 Import order is load-bearing
+
+```python
+import spaces          # MUST be first
+import torch           # only after
+import diffusers       # only after
+```
+
+`import spaces` **must precede** torch / diffusers / transformers, or startup fails with
+`"CUDA has been initialized before importing the spaces package"`. This is why `app.py` is thin
+and why the `spaces` shim lives in `zerogpu.py` with a guarded import for local dev.
+
+### 8.3 The packing model: build on CPU, `.to("cuda")` at module scope
+
+ZeroGPU **replaces** CPU offload with its own disk-packing engine. The correct pattern inverts
+normal GPU-box practice:
+
+1. Build the pipeline **on CPU**, at module scope.
+2. Call `pipe.to("cuda")` **at module scope**. That call is **intercepted**, rewritten to
+   `.to("cpu")`, and every tensor is packed to disk (`~/.zerogpu/tensors`, O_DIRECT). After
+   packing, the main process holds no weights.
+3. Apply `@spaces.GPU(...)` **statically at module import**. Dynamic or inner decoration fails
+   ZeroGPU's startup analyzer with *"No @spaces.GPU function detected during startup"*.
+4. Inside the decorated function real CUDA is live, and a forked worker streams
+   **disk → pinned host memory → VRAM**.
+
+HF's guidance, quoted: **models must be placed on cuda at the root module level.**
+
+**Corollary: do NOT lazy-load models inside the decorated function.** HF documents that
+placements are optimised for startup; lazy loading defeats the packer entirely.
+
+### 8.4 `enable_model_cpu_offload()` must NOT be used
+
+This supersedes an earlier draft of this plan, which called it mandatory. It is the opposite.
+
+`enable_model_cpu_offload()` and `enable_sequential_cpu_offload()` are **counterproductive on
+ZeroGPU**, for a specific mechanical reason: any submodule accelerate parks on CPU is **never
+registered for packing**. Consequently it —
+
+- stays resident in **main-process RAM** (which is our tightest budget, §2),
+- is **fork-inherited by every worker**, multiplying that cost, and
+- is **re-copied host→device on every hook fire**, on top of the packer's own streaming.
+
+So we pay RAM we do not have, to duplicate work the platform already does better. The
+`model_cpu_offload_seq` string recorded in §5.7 is upstream metadata we do not act on.
+
+### 8.5 Never return CUDA tensors across the `@spaces.GPU` boundary
+
+Returning a CUDA tensor from a `@spaces.GPU` function makes unpickling in the main process
+trigger a **blocked lazy CUDA init**, and **the call hangs** — no error, no timeout message, a
+dead request.
+
+**Rule: return file paths, or `.cpu()` tensors. Always.** `zerogpu.py` owns this boundary and it
+is a test case.
+
+### 8.6 Tier and quota
+
+We declare `size="xlarge"` **explicitly** rather than being silently promoted.
+
+Packed bf16 weights (67.2 GiB) exceed `xlarge_threshold = 42.00 GiB`, so **ZeroGPU auto-promotes
+us to `xlarge` and doubles quota cost with no code change** (§2.6). Declaring it explicitly means
+the cost is visible in the source rather than being a surprise in the quota dashboard.
+
+**Quota arithmetic:** PRO gives 2400 s/day. At `duration=75` on `xlarge` (2×), each run is
+charged ~150 s → **~16 runs/day**. Dropping under 42.00 GiB via quantization would return us to
+`large` at 1× — that is the entire quota argument for §2.6's fallback, and it is worth
+approximately double the runs.
+
+Two further traps from §5.8: the hidden **1.5× `duration_factor` on `large`** (so `duration=60`
+schedules as 90 s; `xlarge` skips the factor but doubles the request instead), and the fact that
+the **maximum duration is a server-side, tier-dependent, unpublished cap** — discover it, never
+hardcode it. ~120 s is the empirical safe ceiling; the official Lightricks LTX Space ships
+`@spaces.GPU(duration=75, size="xlarge")`.
+
+### 8.7 Local (Apple Silicon / MPS) is a different regime
+
+MPS has no ZeroGPU packer, no `spaces` decorator semantics, and unified memory changes the
+arithmetic entirely. Device strategy is selected in `config.py`, the `spaces` import is guarded,
+and the local path is expected to be **capability-limited rather than identical**. Do not assume
+a code path that works on ZeroGPU works on MPS, or vice versa.
 
 ---
 
 ## 9. Testing strategy
 
-We are running an **H3 TDD harness**. The gate is:
+We run an **H3 TDD harness**. The gate is:
 
 ```
 .venv/bin/python -m pytest -q
 ```
 
 **Ownership:** a separate teammate owns `tests/**`. The implementer does not create or edit
-anything under `tests/`. This plan's job is to make the units *testable*; writing the tests is
-someone else's.
+anything under `tests/`. This plan's job is to make the units *testable*.
 
-### 9.1 What must be testable without a GPU and without weights
+### 9.1 Testable without a GPU, without weights, without network
 
-This is the design constraint that shapes §7. The following must be exercisable with no CUDA,
-no downloaded weights, and no network:
-
-| unit | how it is tested without weights |
+| unit | how |
 |---|---|
-| `constraints.py` | pure functions over ints — dimension snapping, frame-count validation, sigma schedule shape |
-| `model_files.py` | data-only assertions: every entry has a repo, revision, subfolder, filename; no duplicates; the §2.3 subset sums to the stated total |
-| `lora/inspect.py` | synthesised safetensors **headers** — small fixtures, no real LoRA needed (this is why stage 2 is header-only) |
-| `lora/validate.py` | the 7 stages against crafted good/bad headers, including the wrong-architecture case |
-| `modes.py` | registry completeness (all 11 present), and each mode's kwarg builder produces the expected kwargs for given inputs |
-| `errors.py` | every error type produces a message containing the actionable detail (filename, URL, found-prefixes) |
-| `outputs.py` retention | eviction logic over a temp dir |
-| `generate.py` never-empty invariant | inject a stub pipeline that returns nothing → assert a specific exception, **not** an empty path |
+| `constraints.py` | pure functions over ints — dimension snapping, frame-count validation (with an injected compression ratio), CRF selection from a stubbed `model_type`, sigma schedule shape |
+| `model_files.py` | data assertions: every entry has repo/revision/subfolder/filename; no duplicates; the §2.3 subset sums to 72.185; the dtype switch enumerates the three §2.6 configs |
+| `preflight.py` | inject fake free-RAM/free-disk numbers → assert a specific error naming both numbers; assert the diffusers-version check fires on a wrong version |
+| `lora/inspect.py` | **synthesised safetensors headers** — small fixtures, no real LoRA (this is why §4.3 stage 2 is header-only) |
+| `lora/validate.py` | stages 1–6 against crafted good/bad headers, including the wrong-architecture case |
+| `modes.py` | registry completeness (11 modes over 4 workflows); each mode's kwarg builder produces expected kwargs |
+| `errors.py` | every error type's message contains the actionable detail (filename, URL, found-prefixes, measured numbers) |
+| `conditioning.py` | pixel→latent index conversion (§5.7 #1); out-of-range raises (§5.7 #2) |
+| `outputs.py` | 20 GB oldest-first eviction over a temp dir |
+| `generate.py` | stub pipeline returning nothing → assert a specific exception, **not** an empty path |
+| `zerogpu.py` | the return-boundary rejects/converts CUDA-tensor returns; `duration=` callable signature matches the decorated function |
 
 ### 9.2 GPU-gated tests
 
-Anything that needs real weights is marked and skipped by default (the predecessor used a
-`gpu` marker plus a `--gpu` flag; same pattern is appropriate here). CI and the default local
+Anything needing real weights is marked `gpu` and deselected by default. CI and the default local
 run must be green with zero weights on disk.
 
 ### 9.3 The invariant tests that matter most
 
-Three tests earn their keep more than all the others:
+Ranked by how much silent wrongness they prevent:
 
-1. **A LoRA for the wrong architecture is rejected** — and specifically, that it is rejected at
-   stage 7 if it survives stages 1–6 (§4.3).
-2. **A generation that produces no file raises** — never returns an empty path (§5.3).
-3. **The `preload_from_hub` list contains only live shards** — assertable against the index JSON
-   without downloading anything (§2.1).
+1. **A LoRA for the wrong architecture is rejected** — specifically at stage 7 if it survives
+   stages 1–6 (§4.3).
+2. **A generation that produces no file raises** — never returns an empty path, and there is no
+   newest-file fallback (§5.3).
+3. **`denormalize=False` on the diffusion decode** — the double-denormalization corruption
+   (§7.4) is silent and total.
+4. **Pixel→latent index conversion** — off-by-8 is guaranteed without it (§5.7 #1).
+5. **Audio/video length desync** with a supplied `audio_latents` (§5.7 #11), concrete case.
+6. **The diffusers-version assertion fires** on 0.39.0 (§1.3) — otherwise the failure is late
+   and expensive.
+7. **`vae.temporal_compression_ratio` tripwire** raises if upstream changes it (§5.5).
+8. **`preload_from_hub` names only live shards** — assertable against the index JSON with no
+   download (§2.1).
+9. **`fuse_lora` passes both components** (§4.4).
 
 ---
 
-## 10. Open questions and implementer push-back
+## 10. Resolved questions and technical risks
 
-Recorded rather than silently resolved. **OQ-1 is blocking.**
+All six open questions from the first draft are **resolved**. What remains is one ranked risk
+register.
 
-### 🚨 OQ-1 (BLOCKING) — "pin everything" and "ship duration_head" are currently in conflict
+| # | Question | Resolution |
+|---|---|---|
+| **OQ-1** | Pin a diffusers release, or `main`? | **RESOLVED: pin the exact SHA** `ac56fa2f…` (§1.3). A SHA is more pinned than a range, not less. Plus a startup version assertion, because 0.39.0 fails *late*. |
+| **OQ-2** | Does `diffusion_decoder` have a consumer? | **Moot** — the SHA provides it. Both `diffusion_decoder` (0.834) and `duration_head` (0.004) stay in the subset; duration prediction ships. |
+| **OQ-3** | Is `num_frames % 8 == 1` enforced? | **RESOLVED: no.** Upstream silently floors. We raise; the modulus is a **parameter with an `8` fallback** for pre-load validation, plus a load-time tripwire (§5.5). |
+| **OQ-4** | Gemma-3 or Gemma-4? | **RESOLVED: both, via a union annotation** — `Gemma3ForConditionalGeneration \| Gemma4UnifiedForConditionalGeneration`. LTX-2.5 genuinely is Gemma-4; the proof is that CRF 18 is selected by `model_type in ("gemma4_unified","gemma4")`. **Derive family and CRF at runtime; hardcode neither** (§5.7 #8). |
+| **OQ-5** | Audio length from duration or latent shape? | **RESOLVED: latent shape wins.** Upstream computes it from duration, then overrides from `audio_latents.shape` when supplied. The desync is real and directional (§5.7 #11). |
+| **OQ-6** | Output retention bound? | **RESOLVED: 20 GB**, oldest-first, swept on startup and after each run (§2.7). |
 
-**Evidence.** Inspecting an installed **released** `diffusers==0.37.1`:
+### Technical risk register
 
-- `diffusers/pipelines/__init__.py` exports exactly four LTX2 pipelines:
-  `LTX2Pipeline`, `LTX2ConditionPipeline`, `LTX2ImageToVideoPipeline`,
-  `LTX2LatentUpsamplePipeline`. Plus models `AutoencoderKLLTX2Video`,
-  `AutoencoderKLLTX2Audio`, `LTX2VideoTransformer3DModel`.
-- **Not present at any version on disk:** `LTX2InContextPipeline`, `LTX2ReferenceCondition`,
-  `LTX2HDRPipeline`, `LTX2HDRReferenceCondition`, `LTX2VideoDiffusionDecodePipeline`,
-  `LTX2DurationHead`, `LTX2VocoderWithBWE`, `LTX2VideoHDRProcessor`.
-- `LTX2ConditionPipeline.__init__` in 0.37.1 takes exactly:
-  `scheduler, vae, audio_vae, text_encoder, tokenizer, connectors, transformer, vocoder`.
-  There is **no `duration_head` parameter and no `prompt_enhancer` parameter**. Grepping the
-  whole `pipelines/ltx2/` tree for `duration_head`, `prompt_enhancer`, `min_seconds`,
-  `max_seconds`, `enable_prompt_enhancement` returns **zero hits**.
-- `LTX2_5_IMAGE_CRF` also does not exist in 0.37.1 — only `DISTILLED_SIGMA_VALUES` and
-  `STAGE_2_DISTILLED_SIGMA_VALUES` are in `utils.py` (both matching §5.5 exactly).
+| # | Risk | Why it is uncertain | How it gets settled |
+|---|---|---|---|
+| **1** | **bf16 fits ZeroGPU's CPU RAM and transient disk** | The ~68 GB RAM ceiling is a **community cgroup observation**, not official — HF publishes ZeroGPU RAM as `"-"` / "Dynamic resources". Transient disk peaks at ~144 GB against a 150 GB cap before the packer auto-prunes. | **Measurement on the Space, not argument.** §5.6's preflight turns a failure into a diagnosable message; §2.6's one-line dtype switch makes the fallback cheap. |
+| 2 | ZeroGPU's packer handles the pipeline's tensor graph correctly | Verified for ordinary tensors; **unverified for quantised custom tensor subclasses** (bitsandbytes `Int8Params`/`Params4bit`, torchao) against the packer's `WeakTensorKeyDictionary` | only becomes live if risk #1 forces quantization — measure then |
+| 3 | `preload_from_hub` can express our shard list within 10 entries | entry format is `repo_id file1,file2,…`, so one entry names many files; **a per-entry limit is unconfirmed** | verify before first deploy (§6.2) |
+| 4 | Max `@spaces.GPU` duration on our tier | server-side, tier-dependent, **unpublished** | discover empirically; never hardcode (§5.8 #4) |
+| 5 | Multishot via prompt structure produces usable results | no API support, and the enhancer system prompts actively discourage scene cuts (§3.4) | presented to users as unverified technique, not a feature |
 
-**Conclusion.** The export list in the brief is from `diffusers` **main (unreleased)**, not from
-any published release. That is not a problem in itself — but it collides head-on with §5.1
-"pin every dependency with upper bounds". As written, we cannot both pin diffusers to a release
-*and* ship `duration_head` (§3.5), the diffusion decoder (§2.3, 0.834 GB) or `LTX2_5_IMAGE_CRF`
-(§5.5).
+### 🚨 Live blocker
 
-**Recommendation — pin to a git commit SHA, not to `main`:**
-
-```
-diffusers @ git+https://github.com/huggingface/diffusers@<exact-sha>
-```
-
-A SHA is *more* pinned than a version range, not less: it is byte-for-byte reproducible, it
-cannot drift, and it gets us the full 2.5 feature set. It costs a git clone at build time and it
-means we own upgrades manually — both acceptable. The alternative, `diffusers>=0.37,<0.38`, is a
-smaller build but silently drops duration prediction, the diffusion decoder, HDR and in-context.
-
-**This needs the lead's ruling before `requirements.txt` is written or `pipelines.py` is built,**
-because it decides which components `model_files.py` lists and which modes `modes.py` can offer.
-
-### OQ-2 — the `diffusion_decoder` in the disk budget has no consumer at 0.37.1
-
-The 0.834 GB `diffusion_decoder/` is used via `LTX2VideoDiffusionDecodePipeline`, which does not
-exist in the released package (see OQ-1). If OQ-1 resolves to a release pin, `diffusion_decoder`
-and `duration_head` should come out of the §2.3 subset (−0.838 GB) and the plan should say so
-rather than shipping weights nothing loads.
-
-### OQ-3 — `num_frames % 8 == 1` is a derived rule, not an upstream check
-
-Upstream computes `latent_num_frames = (num_frames - 1) // self.vae_temporal_compression_ratio + 1`
-and **silently floors** a non-conforming value — there is no raise. Two implications:
-
-1. We must validate it ourselves; nothing upstream will catch it.
-2. The `8` is `vae.temporal_compression_ratio`, read from the loaded VAE with `8` only as a
-   fallback default. Hardcoding `8` in our validator would violate §5.4's own principle. §5.5 is
-   written to derive it; flagging it because the brief stated it as a literal.
-
-### OQ-4 — text encoder is Gemma-**3**, not Gemma-4
-
-The pipeline constructors type the text encoder as `Gemma3ForConditionalGeneration` with a
-`GemmaTokenizer | GemmaTokenizerFast`. The brief says "Gemma4-12B". Cosmetic for the disk budget
-(the 23.92 GB figure is unaffected), but `model_files.py` and any user-facing label should not
-claim a model family the loader does not use. Note this is *separate* from the prompt enhancer,
-which genuinely is `google/gemma-4-E2B-it` (§3.4) — that one is a different model and is not in
-the pack anyway.
-
-### OQ-5 — audio/video length desync: which direction?
-
-§3.1(c) states audio frame count is inferred from supplied latents' shape. In 0.37.1's
-`LTX2Pipeline` the derivation reads `audio_num_frames = round(duration_s * audio_latents_per_second)`
-— derived from *duration*, not from the latent shape. The desync risk is real either way, so
-§5.5's "validate that they agree" stands regardless; but the exact mechanism should be re-read on
-whichever diffusers revision OQ-1 selects before `audio.py` is written.
-
-### OQ-6 — output retention is unspecified
-
-§2.5 leaves ~78 GB of headroom, shared between the pip environment, user LoRA uploads and
-outputs. Video outputs are large and a Space that never evicts will fill. Proposing bounded-bytes
-retention with oldest-first eviction in `outputs.py`, configured in `config.py`. Needs a number.
+**`Lightricks/LTX-2.5-Diffusers` gate not accepted** — §6.3. One click at
+https://huggingface.co/Lightricks/LTX-2.5-Diffusers. Blocks everything that touches real weights.
 
 ---
 
 ## 11. Build order
 
 1. ✅ **This document**, committed.
-2. **Scaffold** — venv, `pyproject.toml` (metadata + ruff + pytest with `pythonpath = ["."]`),
-   package with importable stubs matching §7.1, `.gitignore`. **No app logic.**
-3. **Blocked on OQ-1** — `requirements.txt` (pins from the lead) and `model_files.py`.
-4. **Blocked on §6.1** — anything that touches real weights.
-5. Then, TDD, innermost-out: `errors` → `constraints` → `model_files` → `lora/` → `modes` →
-   `generate` → `outputs` → `ui`.
+2. ✅ **Scaffold** — venv, `pyproject.toml`, package stubs, `.gitignore`.
+3. ✅ **`requirements.txt`** — the §5.1 pin set, with **no `spaces` line**.
+4. **TDD, innermost-out**, against the test teammate's failing specs:
+   `errors` → `constraints` → `model_files` → `preflight` → `lora/` → `zerogpu` → `conditioning`
+   → `modes` → `audio` → `generate` → `outputs` → `ui`.
+5. **Blocked on §6.3** — anything that touches real weights, and every `gpu`-marked test.
