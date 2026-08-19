@@ -428,18 +428,25 @@ class ShapedTensor:
 
 
 class FakeMel:
-    """A mel that carries a dtype and the rank the encoder requires.
+    """A mel carrying every attribute the hand-off to the VAE can disagree on.
 
-    4D on purpose: the encoder wants [batch, channels, time, mel], and a 3D fake
-    would make every test agree with the bug rather than with the VAE.
+    4D on purpose, and **on the CPU on purpose**: the encoder wants
+    [batch, channels, time, mel], and the real mel is computed on the waveform's
+    device while the VAE's weights are on the accelerator. A fake that already
+    matched the VAE would pass a hand-off that moves neither.
     """
 
-    def __init__(self, dtype, shape=(1, 2, 401, 64)):
+    def __init__(self, dtype, shape=(1, 2, 401, 64), device="cpu"):
         self.dtype = dtype
         self.shape = shape
+        self.device = device
 
-    def to(self, dtype):
-        return FakeMel(dtype, self.shape)
+    def to(self, **kwargs):
+        return FakeMel(
+            kwargs.get("dtype", self.dtype),
+            self.shape,
+            kwargs.get("device", self.device),
+        )
 
 
 class FakeAudioVae:
@@ -460,6 +467,11 @@ class FakeAudioVae:
     #: dtype that works, which is why three dtype-boundary defects reached the
     #: card before one reached the gate.
     dtype = "bfloat16"
+
+    #: ⚠️ The weights live on the accelerator; the mel is computed wherever the
+    #: waveform is, which is the CPU. A fake VAE on the CPU would pass a
+    #: hand-off that never moves the tensor.
+    device = "cuda"
 
     def __init__(self, sampling_rate=16000):
         # ⚠️ These are the REAL key names, read off audio_vae/config.json at

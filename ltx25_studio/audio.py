@@ -701,30 +701,45 @@ def _validate_mel_rank(mel) -> None:
     )
 
 
-def _matched_dtype(tensor, component, *, name: str):
-    """Cast a tensor to the dtype the component's own weights use.
+def _matched_to_module(tensor, component, *, name: str):
+    """Make a tensor match the module it is about to enter -- **every attribute**.
 
-    **A dtype boundary has two ends.** ``outputs._as_array`` fixes the way *out*
-    -- bf16 tensors into numpy, which has no bfloat16. This is the way *in*: a
-    float32 mel into a bf16 ``conv_in``, which raises ``Input type (float) and
-    bias type (c10::BFloat16) should be the same`` four frames inside someone
-    else's library. Same boundary, opposite direction, same class of defect.
+    Named for the module, not for one attribute. It was ``_matched_dtype`` and
+    it matched exactly one of the two things that have to agree, so a CPU mel
+    reached CUDA weights:
 
-    **Read off the component, never hardcoded.** ``WEIGHT_DTYPE`` is bfloat16
-    today and would be wrong the moment a quantised load lands. The audio VAE
-    knows its own dtype the same way it knows its own config keys and the
-    vocoder knows its own sample rate.
+        Input type (CPUBFloat16Type) and weight type (CUDABFloat16Type)
+        should be the same
+
+    A helper called after a single attribute keeps that attribute and loses the
+    others to whoever tidies it to match its own name.
+
+    **Both are read off the component**, never hardcoded. ``WEIGHT_DTYPE`` is
+    right until a quantised load lands; ``"cuda"`` is right until offload or a
+    second device. The module knows what it is, the same way the audio VAE knows
+    its config keys and the vocoder knows its sample rate.
+
+    ⚠️ **This hand-off has four attributes that can disagree** -- dtype, device,
+    rank and axis order -- and all four have now been wrong here in turn. Rank
+    and axis order are handled by :func:`encoder_layout` and
+    :func:`_validate_mel_rank` because they need reshaping rather than a cast;
+    the two that ``.to()`` can fix live here. **The list is written down so the
+    fifth is looked for rather than waited for.**
     """
-    dtype = getattr(component, "dtype", None)
-    if dtype is None or getattr(tensor, "dtype", None) == dtype:
+    wanted = {}
+    for attribute in ("dtype", "device"):
+        target = getattr(component, attribute, None)
+        if target is not None and getattr(tensor, attribute, None) != target:
+            wanted[attribute] = target
+    if not wanted:
         return tensor
     cast = getattr(tensor, "to", None)
     if not callable(cast):
         raise LTXStudioError(
-            f"the mel handed to {name} is a {type(tensor).__name__}, which cannot be cast to "
-            f"the {dtype} its weights use. A `to_mel=` callable must return a tensor."
+            f"the mel handed to {name} is a {type(tensor).__name__} and cannot be moved to "
+            f"{wanted}. A `to_mel=` callable must return a tensor."
         )
-    return cast(dtype=dtype)
+    return cast(**wanted)
 
 
 def encode_waveform_to_latents(
@@ -770,7 +785,7 @@ def encode_waveform_to_latents(
     # above: every caller reaches the same `conv_in`, and a cast at one of them
     # leaves the others raising from inside diffusers. It also protects an
     # explicitly-passed `to_mel=` from a caller who does not know the VAE dtype.
-    mel = _matched_dtype(mel, audio_vae, name="audio_vae")
+    mel = _matched_to_module(mel, audio_vae, name="audio_vae")
     _validate_mel_rank(mel)
     latents = unpacked_latents(_sampled(audio_vae.encode(mel)))
     validate_audio_latents_shape(getattr(latents, "shape", ()))

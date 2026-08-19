@@ -758,9 +758,10 @@ def test_a_three_dimensional_mel_is_refused_where_the_mistake_is():
 
     class Flat:
         dtype = "bfloat16"
+        device = "cuda"
         shape = (2, 64, 401)
 
-        def to(self, dtype):
+        def to(self, **kwargs):
             return self
 
     with pytest.raises(LTXStudioError) as excinfo:
@@ -773,3 +774,53 @@ def test_a_three_dimensional_mel_is_refused_where_the_mistake_is():
 
     message = str(excinfo.value)
     assert "3D" in message and "time" in message, message
+
+
+def test_the_mel_is_moved_to_the_device_the_weights_are_on():
+    """The second half of the same hand-off, and the fourth attribute of it.
+
+    ``load_waveform`` returns a CPU tensor and the mel is computed on the
+    waveform's device, while the VAE's weights are on the accelerator:
+
+        Input type (CPUBFloat16Type) and weight type (CUDABFloat16Type)
+        should be the same
+    """
+    vae = FakeAudioVae()
+
+    audio.encode_waveform_to_latents(
+        waveform_of(2), audio_vae=vae, sampling_rate=vae.config.sample_rate
+    )
+
+    handed = vae.encoded[-1]
+    assert handed.device == vae.device, (
+        f"the VAE was handed a mel on {handed.device!r} and its weights are on "
+        f"{vae.device!r}; conv_in raises rather than moving it"
+    )
+    assert handed.dtype == vae.dtype, "the dtype half regressed while the device half landed"
+
+
+def test_the_device_is_read_from_the_component_not_hardcoded():
+    """'cuda' is right until offload or a second device, exactly as bfloat16 is."""
+
+    class SecondDevice(FakeAudioVae):
+        device = "cuda:1"
+
+    vae = SecondDevice()
+
+    audio.encode_waveform_to_latents(
+        waveform_of(2), audio_vae=vae, sampling_rate=vae.config.sample_rate
+    )
+
+    assert vae.encoded[-1].device == "cuda:1", (
+        f"the mel went to {vae.encoded[-1].device!r} rather than the component's own "
+        f"device, so a constant is being read somewhere"
+    )
+
+
+def test_a_tensor_already_matching_is_not_moved():
+    """No-op rather than a needless copy of a mel that is already correct."""
+    from ltx25_studio.audio import _matched_to_module
+
+    already = FakeMel("bfloat16", device="cuda")
+
+    assert _matched_to_module(already, FakeAudioVae(), name="audio_vae") is already
