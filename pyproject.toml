@@ -31,7 +31,12 @@ packages = ["ltx25_studio", "ltx25_studio.lora", "ltx25_studio.ui"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
-addopts = "-ra"
+# --continue-on-collection-errors: this is a TDD loop, so specs routinely import
+# symbols that do not exist yet. Without the flag, ONE uncollectable module
+# aborts collection for the whole suite and the 400+ passing tests report
+# nothing — which destroys the signal we steer by. Collection errors still make
+# the run exit non-zero, so nothing sneaks through as a pass.
+addopts = "-ra --continue-on-collection-errors"
 # No `testpaths` on purpose: `tests/` is owned by another teammate and does not
 # exist yet. Pinning testpaths to a missing directory turns `pytest -q` into a
 # usage error (exit 4) instead of an honest "no tests ran" (exit 5).

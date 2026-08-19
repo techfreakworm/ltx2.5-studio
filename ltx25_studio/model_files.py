@@ -340,7 +340,14 @@ def missing_config_files(components: tuple[str, ...] | None = None) -> tuple[str
 def preload_from_hub_entry(components: tuple[str, ...] | None = None) -> str:
     """The single ``preload_from_hub:`` entry for the Space README.
 
-    One repo, so one entry with comma-separated filenames -- which is what keeps
-    us inside the platform's 10-entry cap despite needing far more than 10 files.
+    Format is ``"repo_id file1,file2,... commit_sha"``. One repo means one
+    entry, which is what keeps us inside the platform's 10-entry cap despite
+    needing far more than 10 files.
+
+    **The revision is not optional.** If the preload fetches ``main`` while the
+    app loads a pinned SHA, those are *different cache keys*: the preload is
+    wasted and the app re-downloads 72 GB at runtime, on top of the copy already
+    on disk. Any drift test must compare the whole entry, revision included --
+    not just the file list.
     """
-    return f"{REPO_ID} {','.join(download_allow_list(components))}"
+    return f"{REPO_ID} {','.join(download_allow_list(components))} {REVISION}"
