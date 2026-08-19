@@ -67,7 +67,16 @@ def main() -> int:
     # The base must still be bf16. A cast would have mutated it through the
     # shared modules, which is the silent half of the bug.
     print(f"base.dtype after derive = {base.dtype}  (must still be torch.bfloat16)")
-    ok = shared == checked and (a2 - a1) == 0 and base.dtype == torch.bfloat16
+
+    # Tolerance, not equality. The measured delta is -1024 bytes: the caching
+    # allocator's own bookkeeping moves by a KiB or so across the call, in either
+    # direction, and demanding an exact zero fails on that noise while a real
+    # second copy would be tens of GiB. 1 MiB is far below anything that matters
+    # and far above allocator jitter.
+    tolerance = 1 << 20
+    no_copy = abs(a2 - a1) < tolerance
+    ok = shared == checked and no_copy and base.dtype == torch.bfloat16
+    print(f"no second copy (|delta| < 1 MiB): {no_copy}")
     print("PROBE:", "PASS" if ok else "FAIL")
     return 0 if ok else 1
 
