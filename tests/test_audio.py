@@ -650,3 +650,95 @@ def test_an_explicit_to_mel_is_protected_too():
         "an explicitly-passed to_mel reached the VAE uncast, so the guard lives at the "
         "wrong end of the hand-off"
     )
+
+
+# --------------------------------------------------------------------------
+# the layout audio_vae.encode requires
+#
+# Upstream, autoencoder_kl_ltx2_audio.py:445, in its own words:
+#   # hidden_states expected shape: (batch_size, channels, time, num_mel_bins)
+# torchaudio returns [channels, mel, time] -- unbatched AND with the last two
+# axes reversed. Both must be corrected, and the transpose is the one that
+# hides: the batch fix alone yields a 4D tensor that passes every check.
+# --------------------------------------------------------------------------
+
+
+class ShapedTensor:
+    """Enough tensor to follow a rearrangement, with no torch installed.
+
+    The offline gate has no torch, so a test of the real transform can only
+    skip -- and a skipped test of the axis order is how both half-fixes went
+    unnoticed. This models exactly the two operations the layout step uses.
+    """
+
+    def __init__(self, shape):
+        self.shape = tuple(shape)
+
+    def transpose(self, a, b):
+        axes = list(self.shape)
+        axes[a], axes[b] = axes[b], axes[a]
+        return ShapedTensor(axes)
+
+    def unsqueeze(self, axis):
+        axes = list(self.shape)
+        axes.insert(axis, 1)
+        return ShapedTensor(axes)
+
+
+def test_the_mel_reaches_the_encoder_batched_and_time_major():
+    """torchaudio gives [channels, mel, time]; the encoder wants [B, C, time, mel]."""
+    laid_out = audio.encoder_layout(ShapedTensor((2, 64, 401)))
+
+    assert laid_out.shape == (1, 2, 401, 64), (
+        f"got {laid_out.shape}, expected (1, 2, 401, 64) = {audio.MEL_INPUT_DIMS}. "
+        f"(1, 2, 64, 401) is the batch-only half-fix: 4D, passes every rank check, and is "
+        f"a transposed spectrogram the encoder reads as 64 time steps of 401 bins."
+    )
+
+
+def test_the_real_transform_agrees_with_the_layout_model():
+    """The fixture above is only worth its weight if it matches real torch."""
+    torch = pytest.importorskip("torch", reason="fidelity check needs real torch")
+
+    to_mel = audio.build_mel_front_end(FakeAudioVae(), FakeVocoder())
+    mel = to_mel(torch.zeros((2, 16000), dtype=torch.float32))
+
+    batch, channels, time, mel_bins = mel.shape
+    assert (batch, channels, mel_bins) == (1, 2, 64), tuple(mel.shape)
+    assert time > mel_bins, (
+        f"time ({time}) should exceed mel bins ({mel_bins}) at hop 160; if not, the axes "
+        f"are reversed and ShapedTensor is modelling the wrong rearrangement"
+    )
+
+
+def test_our_latent_layout_agrees_with_the_encoder_input_layout():
+    """Both are (…, time/frames, mel). The validator never needed loosening.
+
+    Pinned because the instinct on a shape mismatch is to relax the check that
+    reported it, and the check was right -- upstream reads the frame count from
+    the same axis: ``_, _, audio_num_frames, _ = audio_latents.shape``.
+    """
+    assert audio.MEL_INPUT_DIMS[-2:] == ("time", "mel")
+    assert audio.AUDIO_LATENT_DIMS[-2:] == ("frames", "mel")
+
+
+def test_a_three_dimensional_mel_is_refused_where_the_mistake_is():
+    """conv2d reads a 3D input as unbatched, so the failure surfaces four steps late."""
+
+    class Flat:
+        dtype = "bfloat16"
+        shape = (2, 64, 401)
+
+        def to(self, dtype):
+            return self
+
+    with pytest.raises(LTXStudioError) as excinfo:
+        audio.encode_waveform_to_latents(
+            waveform_of(2),
+            audio_vae=FakeAudioVae(),
+            sampling_rate=16000,
+            to_mel=lambda waveform: Flat(),
+        )
+
+    message = str(excinfo.value)
+    assert "3D" in message and "time" in message, message

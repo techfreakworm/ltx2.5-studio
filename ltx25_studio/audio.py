@@ -70,9 +70,11 @@ __all__ = [
     "export_sampling_rate_from",
     "mel_front_end_for",
     "build_mel_front_end",
+    "encoder_layout",
     "mel_parameters",
     "MEL_PARAM_SOURCES",
     "MEL_CONVENTIONS",
+    "MEL_INPUT_DIMS",
     "validate_audio_latents_against_video",
     "validate_audio_latents_shape",
 ]
@@ -363,6 +365,23 @@ MEL_CONVENTIONS = MappingProxyType(
     }
 )
 
+#: The layout ``audio_vae.encode`` requires, **quoted from upstream**:
+#: ``# hidden_states expected shape: (batch_size, channels, time, num_mel_bins)``
+#: -- ``autoencoder_kl_ltx2_audio.py:445`` at diffusers ``ac56fa2f…``.
+#:
+#: ⚠️ ``torchaudio`` returns ``[channels, mel, time]``: **unbatched, and with
+#: the last two axes the other way round.** Both have to be corrected, and the
+#: transpose is the one that hides. Supplying only the batch axis gives
+#: ``[1, 2, 64, 401]``, which the encoder reads as 64 time steps of 401 mel bins
+#: -- **a 4D result that passes the rank check, satisfies the validator, and is
+#: a transposed spectrogram.** It would have produced audio, and the audio would
+#: have been wrong with nothing reporting it.
+#:
+#: Note this is ``[B, C, time, mel]`` while the *latents* that come back are
+#: ``[B, C, frames, mel]`` -- the same ordering, which is why
+#: :data:`AUDIO_LATENT_DIMS` was right and needed no loosening.
+MEL_INPUT_DIMS = ("batch", "channels", "time", "mel")
+
 #: Floor before the log, so silence does not become -inf.
 MEL_LOG_FLOOR = 1e-5
 
@@ -384,6 +403,22 @@ def mel_parameters(audio_vae, vocoder):
     return values
 
 
+def encoder_layout(mel):
+    """``[channels, mel, time]`` -> ``[batch, channels, time, mel]``.
+
+    Separated from :func:`build_mel_front_end` so it can be exercised without
+    torch installed. The transform itself needs real tensors; **this rearrangement
+    is where the mistake lives**, and a test that skips in the offline gate is
+    not a test of it -- both half-fixes below pass every other check.
+
+    ``torchaudio`` returns the last two axes the other way round from what the
+    encoder wants, and unbatched. Correcting only the batch axis yields a 4D
+    tensor that satisfies the rank check and is a **transposed spectrogram** --
+    audio out, silently wrong. See :data:`MEL_INPUT_DIMS`.
+    """
+    return mel.transpose(-2, -1).unsqueeze(0)
+
+
 def build_mel_front_end(audio_vae, vocoder):
     """Construct the forward transform, because the checkpoint ships none.
 
@@ -402,7 +437,8 @@ def build_mel_front_end(audio_vae, vocoder):
 
     def to_mel(waveform):
         mel = transform.to(device=waveform.device, dtype=torch.float32)(waveform.float())
-        return torch.log(torch.clamp(mel, min=MEL_LOG_FLOOR))
+        mel = torch.log(torch.clamp(mel, min=MEL_LOG_FLOOR))
+        return encoder_layout(mel)
 
     return to_mel
 
@@ -582,6 +618,29 @@ def match_channel_count(waveform, *, channels: int):
     )
 
 
+def _validate_mel_rank(mel) -> None:
+    """Refuse a mel the encoder would silently misread.
+
+    A 3D mel is treated by ``conv2d`` as *unbatched*, so the batch axis never
+    exists and the latents come back one rank short -- which
+    :func:`validate_audio_latents_shape` then rejects, four steps after the
+    actual mistake. Failing here names the real problem.
+
+    Rank is all this can check. **A transposed 4D mel is indistinguishable from
+    a correct one** at this boundary, which is why the layout is fixed in
+    :func:`build_mel_front_end` and documented in :data:`MEL_INPUT_DIMS` rather
+    than guarded here.
+    """
+    shape = getattr(mel, "shape", None)
+    if shape is None or len(shape) == len(MEL_INPUT_DIMS):
+        return
+    raise LTXStudioError(
+        f"the mel handed to audio_vae.encode is {len(shape)}D {tuple(shape)}, and the encoder "
+        f"expects {len(MEL_INPUT_DIMS)}D {MEL_INPUT_DIMS}. A `to_mel=` callable must return a "
+        f"batched, time-major mel; torchaudio's own output is neither."
+    )
+
+
 def _matched_dtype(tensor, component, *, name: str):
     """Cast a tensor to the dtype the component's own weights use.
 
@@ -643,6 +702,7 @@ def encode_waveform_to_latents(
     # leaves the others raising from inside diffusers. It also protects an
     # explicitly-passed `to_mel=` from a caller who does not know the VAE dtype.
     mel = _matched_dtype(mel, audio_vae, name="audio_vae")
+    _validate_mel_rank(mel)
     latents = _sampled(audio_vae.encode(mel))
     validate_audio_latents_shape(getattr(latents, "shape", ()))
     return latents

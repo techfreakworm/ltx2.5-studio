@@ -394,13 +394,18 @@ class FakeComponent(FakeModule):
 
 
 class FakeMel:
-    """A mel that carries a dtype, so the hand-off to the VAE can be asserted."""
+    """A mel that carries a dtype and the rank the encoder requires.
 
-    def __init__(self, dtype):
+    4D on purpose: the encoder wants [batch, channels, time, mel], and a 3D fake
+    would make every test agree with the bug rather than with the VAE.
+    """
+
+    def __init__(self, dtype, shape=(1, 2, 401, 64)):
         self.dtype = dtype
+        self.shape = shape
 
     def to(self, dtype):
-        return FakeMel(dtype)
+        return FakeMel(dtype, self.shape)
 
 
 class FakeAudioVae:
