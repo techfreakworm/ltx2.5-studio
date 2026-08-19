@@ -59,6 +59,7 @@ __all__ = [
     "audio_params_from",
     "decode_latents_to_waveform",
     "encode_waveform_to_latents",
+    "load_waveform",
     "export_sampling_rate_from",
     "mel_front_end_for",
     "validate_audio_latents_against_video",
@@ -310,6 +311,24 @@ def _sampled(encoded):
         if found is not None:
             return found
     return encoded
+
+
+def load_waveform(source):
+    """A user-supplied audio file -> ``(waveform, sampling_rate)``.
+
+    ``gr.Audio(type="filepath")`` hands us a path, so the file has to be read
+    before anything can encode it. ``torchaudio`` is already a pinned dependency
+    and returns exactly the tensor :func:`encode_waveform_to_latents` expects,
+    at the file's own rate -- which is then resampled to the VAE's rate there,
+    using the VAE's number rather than ours.
+
+    Lazy import for the same reason as ``_resampled``: this module must import
+    with no torch present, because the offline gate has none.
+    """
+    import torchaudio
+
+    waveform, rate = torchaudio.load(str(source))
+    return waveform, int(rate)
 
 
 def encode_waveform_to_latents(waveform, *, audio_vae, sampling_rate: int, to_mel=None):

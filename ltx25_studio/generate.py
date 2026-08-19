@@ -39,7 +39,13 @@ from pathlib import Path
 
 from . import conditioning, constraints, modes
 from .constraints import DEFAULT_FRAME_RATE
-from .errors import DecodeError, EmptyOutputError, EncodeError, ModelLoadError
+from .errors import (
+    DecodeError,
+    EmptyOutputError,
+    EncodeError,
+    GenerationError,
+    ModelLoadError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -269,6 +275,43 @@ def _prepared_conditions(kwargs: dict, request: GenerationRequest) -> None:
     )
 
 
+def _prepared_audio(kwargs: dict, request: GenerationRequest, pipe) -> None:
+    """Encode the user's audio file into the latents the pipeline actually takes.
+
+    **This is the step that did not exist.** There is no ``audio=`` argument on
+    any LTX2 pipeline (PLAN §3.1c) -- audio enters as pre-encoded
+    ``audio_latents``. The UI collected a file into ``request.audio``,
+    ``modes._with_audio`` read ``request.audio_latents``, and *nothing joined
+    them*: both ends were built, the encoder existed and was exported, and its
+    importer count was zero. So the upload was discarded and the model generated
+    fresh audio. The run succeeded, the artifact was valid, every test passed,
+    and only the user's own ears would ever have told them -- while the field's
+    own help text said the encode had happened.
+
+    Skipped when ``audio_latents`` is already set, which is the programmatic
+    route and needs no file.
+    """
+    source = getattr(request, "audio", None)
+    if source is None or kwargs.get("audio_latents") is not None:
+        return
+
+    from . import audio as audio_module
+
+    target = getattr(pipe, "pipeline", pipe)
+    audio_vae = getattr(target, "audio_vae", None)
+    if audio_vae is None:
+        raise GenerationError(
+            f"mode {request.mode!r} was given an audio input but the pipeline exposes no "
+            f"audio_vae to encode it with. Refusing to continue, because generating without "
+            f"it returns a plausible track the user did not ask for and nothing reports it."
+        )
+
+    waveform, rate = audio_module.load_waveform(source)
+    kwargs["audio_latents"] = audio_module.encode_waveform_to_latents(
+        waveform, audio_vae=audio_vae, sampling_rate=rate
+    )
+
+
 def _apply_loras(pipe, request: GenerationRequest):
     """Attach every staged adapter, asserting each actually took.
 
@@ -490,6 +533,8 @@ def generate(
     kwargs = _pipeline_kwargs(spec, request)
     _prepared_conditions(kwargs, request)
     _apply_loras(pipe, request)
+    # After the pipeline exists, because encoding needs its `audio_vae`.
+    _prepared_audio(kwargs, request, pipe)
     try:
         output = pipe(**kwargs)
     except Exception as exc:

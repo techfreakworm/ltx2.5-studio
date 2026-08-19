@@ -395,6 +395,64 @@ class FakeComponent(FakeModule):
         self.peft_config: dict[str, object] = {}
 
 
+class FakeAudioVae:
+    """Duck-types an audio VAE closely enough to really encode a waveform.
+
+    Rich rather than minimal on purpose. ``encode_waveform_to_latents`` reads all
+    six PLAN 5.4 config parameters, *finds* a mel front-end rather than building
+    one, and asserts the latent rank before returning -- so a thinner fake would
+    let a broken encode pass. That is the fixture failure that hid the bfloat16
+    bug, and this path is the one that was connected to nothing.
+
+    Its sampling rate matches the stub loader's, so ``_resampled`` short-circuits
+    and the whole encode runs with no torch present.
+    """
+
+    def __init__(self, sampling_rate=48000):
+        self.config = SimpleNamespace(
+            audio_sampling_rate=sampling_rate,
+            audio_hop_length=256,
+            audio_mel_bins=128,
+            audio_vae_mel_compression_ratio=2,
+            audio_vae_temporal_compression_ratio=4,
+            audio_latent_channels=64,
+            in_channels=2,
+        )
+        self.mels: list = []
+        self.encoded: list = []
+
+    def mel_spectrogram(self, waveform):
+        mel = ("mel", waveform)
+        self.mels.append(waveform)
+        return mel
+
+    def encode(self, mel):
+        self.encoded.append(mel)
+        latents = SimpleNamespace(shape=(1, 64, 16, 128))
+        return SimpleNamespace(latent_dist=SimpleNamespace(sample=lambda: latents))
+
+
+#: What the stub loader hands back: the shape `load_waveform` really returns.
+STUB_WAVEFORM = ("waveform", "stub")
+STUB_SAMPLING_RATE = 48000
+
+
+@pytest.fixture
+def audio_input_ready(monkeypatch):
+    """Make the audio-input path runnable in the offline gate.
+
+    ``load_waveform`` reads a real file with torchaudio, and the gate has
+    neither the file nor torchaudio. Stubbing only the **loader** leaves the rest
+    of the path -- resample, mel front-end, encode, shape assertion -- genuinely
+    exercised, which is the part that was dead.
+    """
+    from ltx25_studio import audio as audio_module
+
+    monkeypatch.setattr(
+        audio_module, "load_waveform", lambda source: (STUB_WAVEFORM, STUB_SAMPLING_RATE)
+    )
+
+
 class FakePipeline:
     """Duck-types the bits of an ``LTX2*Pipeline`` that ``lora/apply.py`` touches.
 
@@ -409,6 +467,10 @@ class FakePipeline:
     _lora_loadable_modules = ["transformer", "connectors"]
 
     def __init__(self, transformer_paths=None, connector_paths=None, dims=None):
+        # The real pipeline carries one, and `generate._prepared_audio` unwraps
+        # to `.pipeline` to find it. A fake without it made the audio-input
+        # modes look like they had nothing to encode with.
+        self.audio_vae = FakeAudioVae()
         self.transformer = FakeComponent(
             TRANSFORMER_MODULE_PATHS if transformer_paths is None else transformer_paths,
             dims=dims,

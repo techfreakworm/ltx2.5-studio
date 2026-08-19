@@ -38,6 +38,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from conftest import FakeAudioVae
 
 from ltx25_studio import generate as generate_module
 from ltx25_studio import modes, outputs
@@ -86,6 +87,9 @@ class FakeOutput:
 class FakePipe:
     def __init__(self):
         self.calls: list[dict] = []
+        # The real pipeline has one, and the audio-input modes cannot be
+        # encoded without it. A fake without it made those modes look fine.
+        self.audio_vae = FakeAudioVae()
 
     def __call__(self, **kwargs):
         self.calls.append(kwargs)

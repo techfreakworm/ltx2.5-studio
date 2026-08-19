@@ -30,6 +30,7 @@ from __future__ import annotations
 from dataclasses import replace
 
 import pytest
+from conftest import STUB_WAVEFORM
 from test_exports_contract import (
     MODE_IDS,
     MODE_TRACK_PAIRS,
@@ -73,6 +74,7 @@ class Wiring:
     def __init__(self):
         self.params: list[dict] = []
         self.results: list = []
+        self.pipes: list = []
 
     @property
     def result(self):
@@ -86,10 +88,24 @@ def wired(monkeypatch, tmp_path):
     real = generate_module.generate
     wiring = Wiring()
 
+    # `values_for` hands the audio modes a path-shaped string, exactly as the UI
+    # hands a real filepath. Nothing used to read it -- that was the bug. Now the
+    # loader does, so it is stubbed; everything downstream of it (resample, mel,
+    # encode, shape assertion) runs for real against the fake audio VAE.
+    from conftest import STUB_SAMPLING_RATE, STUB_WAVEFORM
+
+    from ltx25_studio import audio as audio_module
+
+    monkeypatch.setattr(
+        audio_module, "load_waveform", lambda source: (STUB_WAVEFORM, STUB_SAMPLING_RATE)
+    )
+
     def wired_generate(**params):
         wiring.params.append(params)
+        pipe = FakePipe()
+        wiring.pipes.append(pipe)
         result = real(
-            pipeline_factory=factory_returning(FakePipe()),
+            pipeline_factory=factory_returning(pipe),
             encoder=one_muxed_file_encoder,
             output_root=tmp_path,
             retention_bytes=10**9,
@@ -302,3 +318,86 @@ def test_a_typed_failure_reaches_the_user_rather_than_an_empty_form(mode_id, mon
     assert (video, audio) == (None, None)
     assert status.strip(), "a failed generation returned an empty status string"
     assert "Generation failed" in status
+
+
+# --------------------------------------------------------------------------
+# the audio a user uploads has to reach the model
+#
+# There is no `audio=` argument on any LTX2 pipeline: audio enters as
+# pre-encoded `audio_latents`. The UI wrote `request.audio`, `modes._with_audio`
+# read `request.audio_latents`, and NOTHING JOINED THEM -- both ends built, the
+# encoder exported, its importer count zero. So the upload was discarded, the
+# model generated fresh audio, the run succeeded, the artifact was valid, and
+# 1926 tests passed. Only the user's own ears would have told them.
+# --------------------------------------------------------------------------
+
+AUDIO_INPUT_MODES = [m for m in MODE_IDS if "audio" in modes.get_mode(m).inputs]
+
+
+@pytest.mark.parametrize("mode_id", AUDIO_INPUT_MODES)
+def test_the_uploaded_audio_reaches_the_pipeline_as_latents(
+    mode_id, wired, audio_input_ready, tmp_path
+):
+    """The whole point: the model must be handed what the user supplied."""
+    handlers.on_generate(mode_id, *values_for(mode_id))
+
+    pipe = wired.pipes[-1]
+    sent = pipe.calls[-1]
+    assert sent.get("audio_latents") is not None, (
+        f"{mode_id} was given an audio file and the pipeline received "
+        f"audio_latents=None, so the upload was discarded and the model "
+        f"generated audio the user did not ask for: {sorted(sent)}"
+    )
+
+
+@pytest.mark.parametrize("mode_id", AUDIO_INPUT_MODES)
+def test_the_upload_is_encoded_through_the_audio_vae(mode_id, wired, audio_input_ready):
+    """Not merely present -- produced by the encoder, from the user's waveform.
+
+    Asserting only that ``audio_latents`` is set would pass if something handed
+    the pipeline a constant. This follows the value back to the waveform.
+    """
+    handlers.on_generate(mode_id, *values_for(mode_id))
+
+    audio_vae = wired.pipes[-1].audio_vae
+    assert audio_vae.encoded, f"{mode_id} never called audio_vae.encode"
+    assert audio_vae.mels and audio_vae.mels[-1] == STUB_WAVEFORM, (
+        f"{mode_id} encoded something other than the loaded waveform: {audio_vae.mels}"
+    )
+
+
+@pytest.mark.parametrize("mode_id", [m for m in MODE_IDS if "audio" not in modes.get_mode(m).inputs])
+def test_a_mode_that_takes_no_audio_encodes_nothing(mode_id, wired, audio_input_ready):
+    """The guard must not fire where there is nothing to encode."""
+    handlers.on_generate(mode_id, *values_for(mode_id))
+
+    assert not wired.pipes[-1].audio_vae.encoded, (
+        f"{mode_id} takes no audio input and still ran an encode"
+    )
+
+
+def test_an_audio_input_with_no_audio_vae_is_refused_loudly(monkeypatch, tmp_path):
+    """Silently dropping it is the defect; generating anyway is the worst form."""
+    from conftest import STUB_SAMPLING_RATE, STUB_WAVEFORM
+
+    from ltx25_studio import audio as audio_module
+    from ltx25_studio.errors import GenerationError
+
+    monkeypatch.setattr(
+        audio_module, "load_waveform", lambda source: (STUB_WAVEFORM, STUB_SAMPLING_RATE)
+    )
+    pipe = FakePipe()
+    del pipe.audio_vae
+
+    with pytest.raises(GenerationError) as excinfo:
+        generate_module.generate(
+            mode="audio_to_audio",
+            seed=7,
+            audio="an-upload.wav",
+            pipeline_factory=factory_returning(pipe),
+            encoder=one_muxed_file_encoder,
+            output_root=tmp_path,
+            retention_bytes=10**9,
+        )
+    assert "audio_vae" in str(excinfo.value), excinfo.value
+    assert not pipe.calls, "the pipeline ran anyway, so the user got audio they did not ask for"
