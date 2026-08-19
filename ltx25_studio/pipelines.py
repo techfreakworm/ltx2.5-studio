@@ -68,7 +68,6 @@ __all__ = [
     "stage_2_size_note",
     "STAGE_2_SPATIAL_SCALE",
     "distilled_kwargs",
-    "schedule_from",
     "DISTILLED_GUIDANCE",
     "stage_2_kwargs",
     "upsample_kwargs",
@@ -468,45 +467,6 @@ DISTILLED_GUIDANCE = MappingProxyType(
 )
 
 
-def schedule_from(noise_scale, sigmas=None) -> list[float]:
-    """The sigma schedule for a run that starts **partially** noised.
-
-    **The invariant is ``sigmas[0] == noise_scale``**, and it is upstream's own
-    inference rule, stated in its own comment::
-
-        # Infer noise scale: first (largest) sigma value if using custom sigmas
-        if noise_scale is None:
-            noise_scale = sigmas[0] if sigmas is not None else 1.0
-
-    They are the same quantity. ``noise_scale`` noises the latents to a level and
-    the schedule tells the model what level it is looking at; disagreeing means
-    the model strips a whole schedule's worth of noise from a partly-noised
-    tensor. ✅ Measured: agree -> −10.4 dBFS, disagree -> −87.7 dBFS.
-
-    **One construction, taken by every path that starts partially noised.** The
-    defect was that this reasoning existed in ``stage_2_kwargs``'s docstring --
-    *"re-noising to 1.0 would discard stage 1 entirely"* -- and never reached the
-    audio-input path. A rule written on one branch is not a rule.
-
-    Truncation rather than rescaling: rescaling the whole curve would invent a
-    schedule upstream never publishes.
-
-    ⚠️ **Degenerate at both ends.** At ``noise_scale = 1.0`` the supplied latents
-    contribute nothing (``1.0 * noise + 0.0 * latents``), so it is unconditional
-    generation whatever was passed in. Below the distilled floor of 0.421875 it
-    collapses to a single step. **Neither bound is the usable range** -- that is
-    a measurement, not arithmetic, and "one step" and "bad output" are different
-    claims.
-    """
-    sigmas = DISTILLED_SIGMA_VALUES if sigmas is None else sigmas
-    if noise_scale is None:
-        return [float(s) for s in sigmas]
-    noise_scale = float(noise_scale)
-    if noise_scale >= float(sigmas[0]):
-        return [float(s) for s in sigmas]
-    return [noise_scale] + [float(s) for s in sigmas if float(s) < noise_scale]
-
-
 def distilled_kwargs() -> dict:
     """The distilled recipe. **Every** run gets this, single-stage included.
 
@@ -529,6 +489,23 @@ def distilled_kwargs() -> dict:
     ``num_inference_steps`` is deliberately NOT sent: upstream builds the linear
     schedule from it, and the model card warns that passing it "would hand the
     model a generic linear schedule and quietly cost quality".
+
+    ⏸️ **OPEN, and deliberately not acted on.** For a run given ``noise_scale``
+    -- only the audio-input modes -- ``sigmas[0]`` stays 1.0 while the latents
+    are noised to ``noise_scale``. 📄 That contradicts upstream's own inference
+    rule, ``noise_scale = sigmas[0] if sigmas is not None else 1.0``, and our
+    ``stage_2_kwargs`` honours the same rule.
+
+    **It was diagnosed as the cause of a silent `audio_to_audio` and it was
+    not.** ✅ The silence was a spectrally-sparse test fixture; with realistic
+    audio the mode is healthy at −10.4 dBFS **carrying the full mismatch**, and
+    H10b spans −9.9 to −19.6 dBFS in the right direction with it in place.
+
+    ⚠️ **Truncating the schedule at ``noise_scale`` is not a safe no-op.** It
+    would take an eight-step run to **two** steps at 0.5 and **one** at 0.1 --
+    values that measured healthy on eight. So the fix needs evidence that it
+    *improves* something, not merely that it agrees with the contract, and no
+    instrument we have measures what it would change.
     """
     return {"sigmas": list(DISTILLED_SIGMA_VALUES), **DISTILLED_GUIDANCE}
 
@@ -597,13 +574,7 @@ def stage_2_kwargs(latents, *, audio_latents=None) -> dict:
     kwargs = {
         **distilled_kwargs(),
         "latents": latents,
-        # Built by the same function the audio-input path uses. Here
-        # noise_scale == sigmas[0] already, so this returns the three-step tail
-        # unchanged -- stage 2 keeps its behaviour BY CONSTRUCTION rather than
-        # by two branches happening to agree.
-        "sigmas": schedule_from(
-            STAGE_2_DISTILLED_SIGMA_VALUES[0], STAGE_2_DISTILLED_SIGMA_VALUES
-        ),
+        "sigmas": list(STAGE_2_DISTILLED_SIGMA_VALUES),
         "noise_scale": STAGE_2_DISTILLED_SIGMA_VALUES[0],
         "output_type": "latent",
     }
@@ -689,12 +660,7 @@ class StageRunner:
             # The distilled recipe applies here too. It used to apply ONLY on
             # the stage-2 path, which is how eleven of twelve host runs were
             # generated with a linear schedule and SFT guidance.
-            recipe = distilled_kwargs()
-            # A run given `noise_scale` starts partially noised, so its schedule
-            # must start where its noise actually is. See `schedule_from`.
-            if kwargs.get("noise_scale") is not None:
-                recipe["sigmas"] = schedule_from(kwargs["noise_scale"])
-            return self.pipeline(**kwargs, **recipe)
+            return self.pipeline(**kwargs, **distilled_kwargs())
         self._stage_2_ready()
 
         stage_1 = self.pipeline(**kwargs, **stage_1_kwargs())
