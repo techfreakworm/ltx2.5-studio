@@ -971,3 +971,102 @@ hand-off between our code and a model, every attribute that can disagree eventua
 does — dtype, device, rank, axis order — and fixing them one at a time as they
 surface is not the same as enumerating them.** All four attributes of a single
 tensor hand-off failed today, in sequence, and each was found only by running it.
+
+---
+
+# Final state — all eleven modes execute; one produces silence
+
+`825bfde` (device), `466bbd5` (batching in the product) and `7a8b408` (one
+rearrangement, not two) together make the audio-input path structurally correct.
+
+## H17 — PASS, on a criterion that took three attempts to get right
+
+```
+duration: in 4.000s -> out 4.010s (0.25% drift, tolerance 2%)
+ch0  220 Hz  78.3% RECOVERED     1320 Hz 14.1% RECOVERED
+ch1  440 Hz 110.8% RECOVERED     2640 Hz  5.4% LOST (reported, not gated)
+criteria: (1) length scales with input (2) each fundamental recovered at its own
+          frequency (3) no tone displaced
+```
+
+**The criterion history is kept because both earlier versions were wrong in
+opposite directions**, and a threshold nobody can see is how a green result comes
+to mean less than it appears to:
+
+* **v1 — "≥1 tone per channel."** Passed with 3 of 4 tones missing **by design**.
+* **v2 — "every tone."** Failed on a tone that recovers at **47.5%** once the
+  pairing is swapped, so the loss is the fixture's tone combination against a
+  log-spaced 64-bin mel, not a convention error.
+* **v3 — placement and structure.** A wrong `mel_scale`, `f_min`/`f_max`, `norm` or
+  `center` **displaces** frequencies; it does not attenuate one harmonic and leave
+  the rest in place. So the gates are length-scaling, fundamentals at their own
+  frequencies, and no displacement. Harmonic retention is **reported as fidelity
+  data**.
+
+**v3 is a loosening from v2 and is labelled as one.** Its justification is the swap
+measurement, not that it makes the test green — that distinction is the whole point.
+
+**The length check is the strongest of the three.** The broken path returned exactly
+**29,280 samples for a 4.0 s input and for a 2.0 s input** — invariant to duration —
+and no shape assertion could see it, because the rank was right and
+`validate_audio_latents_shape` **accepted both the correct and the transposed
+tensor.** It catches any axis-order error in either direction without needing to
+know which axis is which.
+
+### The ch1 question, closed
+
+Running the swap discriminator without the transpose:
+
+| pairing | result | 2640 Hz |
+|---|---|---|
+| `ch0 (220, 1320)` `ch1 (440, 2640)` | 3/4 | **5.6%** on ch1 |
+| `ch0 (220, 2640)` `ch1 (440, 1320)` | **4/4** | **47.5%** on ch0 |
+
+**Neither channel-dependent nor simply frequency-dependent.** ch1 recovered 1320 Hz
+at 33.3% when it carried it; 2640 Hz retained 47.5% on ch0 against 5.6% on ch1. It
+tracks the *pairing* — a log-spaced 64-bin mel shares bins differently for
+440 + 2640 than for 440 + 1320. **The same path recovers 4/4 with a different
+pairing**, so nothing structural drops high frequencies. Closed, not carried.
+
+## ⚠️ `audio_to_audio` produces silence — the one open defect
+
+| | `noise_scale` | peak | rms | dBFS |
+|---|---|---|---|---|
+| **input fixture** | — | 0.4000 | 0.182794 | **−14.8** |
+| H10 | 0.5 | 0.0002 | 0.000040 | **−87.9** |
+| H10b_lo | 0.1 | 0.0003 | 0.000045 | **−87.0** |
+| H10b_hi | 0.9 | 0.0005 | 0.000066 | **−83.6** |
+| H8 `text_to_audio` | — | 0.6953 | 0.172677 | −15.3 |
+| H9 `video_to_audio` | — | 0.5078 | 0.128512 | −17.8 |
+
+~70 dB below every other audio mode. **The input fixture was verified rather than
+assumed** — 2ch @ 48000, 5.00 s, peak 0.4000, −14.8 dBFS. Input healthy, output not.
+All three pass `verify_streams` with exit 0.
+
+### H10b is a vacuous pass, and that is the finding
+
+The halves **differ** — `rms 0.000045` vs `0.000066`, a factor of 1.5 — so
+`noise_scale` reaches the model and the audio-input join is genuinely wired. **But
+the difference is between two silences.** Through a broken path two wrong answers
+can still differ, and "differs" is the verdict H10b reports as success.
+
+**Only reporting RMS from both halves makes that visible.** The differ/identical
+verdict alone would have shipped this as the eleventh mode proven and the
+acceptance test passed. A same-seed comparison establishes that a lever moves
+something; it cannot establish that either result is right.
+
+### What narrows it
+
+`audio_to_video` consumed the **same** audio input and produced a valid
+327,420-byte video, so the latents are not breaking the pipeline generally.
+`audio_to_audio` is the **only** mode that passes `audio_latents` into the pipeline;
+`text_to_audio` and `video_to_audio` do not and both are healthy.
+
+**A direction, not a diagnosis:** H17 shows the latents are correct *for
+`audio_vae.decode`*. One candidate for why they are wrong *for the pipeline* is
+scale — H17 measured them at `rms 3.2548`, and if the pipeline expects normalised
+audio latents while receiving raw VAE output, `noise_scale * noise +
+(1 − noise_scale) * latents` is dominated by a mis-scaled term at every
+`noise_scale`, which matches all three readings being silent. **Confirm against
+upstream's audio branch before changing any scale factor** — reasoning from
+correlation to cause has cost this build two changes today.
