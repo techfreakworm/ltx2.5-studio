@@ -275,7 +275,7 @@ def _prepared_conditions(kwargs: dict, request: GenerationRequest) -> None:
     )
 
 
-def _prepared_audio(kwargs: dict, request: GenerationRequest, pipe) -> None:
+def _prepared_audio(kwargs: dict, request: GenerationRequest, pipe) -> tuple[str, ...]:
     """Encode the user's audio file into the latents the pipeline actually takes.
 
     **This is the step that did not exist.** There is no ``audio=`` argument on
@@ -293,7 +293,7 @@ def _prepared_audio(kwargs: dict, request: GenerationRequest, pipe) -> None:
     """
     source = getattr(request, "audio", None)
     if source is None or kwargs.get("audio_latents") is not None:
-        return
+        return ()
 
     from . import audio as audio_module
 
@@ -307,9 +307,13 @@ def _prepared_audio(kwargs: dict, request: GenerationRequest, pipe) -> None:
         )
 
     waveform, rate = audio_module.load_waveform(source)
+    # Anything the encode had to change about the user's file comes back here,
+    # so it reaches `GenerationResult.warnings` rather than the Space log alone.
+    notes: list[str] = []
     kwargs["audio_latents"] = audio_module.encode_waveform_to_latents(
-        waveform, audio_vae=audio_vae, sampling_rate=rate
+        waveform, audio_vae=audio_vae, sampling_rate=rate, notes=notes
     )
+    return tuple(notes)
 
 
 def _apply_loras(pipe, request: GenerationRequest):
@@ -534,7 +538,7 @@ def generate(
     _prepared_conditions(kwargs, request)
     _apply_loras(pipe, request)
     # After the pipeline exists, because encoding needs its `audio_vae`.
-    _prepared_audio(kwargs, request, pipe)
+    audio_notes = _prepared_audio(kwargs, request, pipe)
     try:
         output = pipe(**kwargs)
     except Exception as exc:
@@ -586,7 +590,7 @@ def generate(
         written, spec=spec, mode=request.mode, run_dir=run_dir, notes=encoder_warnings
     )
 
-    warnings = _sweep(root, retention_bytes) + tuple(encoder_warnings)
+    warnings = _sweep(root, retention_bytes) + tuple(encoder_warnings) + audio_notes
 
     return GenerationResult(
         output_path=artifacts["primary"],

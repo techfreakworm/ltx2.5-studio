@@ -238,8 +238,7 @@ def test_a_declared_track_missing_from_a_success_renders_the_loud_error(
         f"Nothing from a broken run may reach the screen."
     )
     assert status == render.empty_output_bug(spec, [dropped]), (
-        f"mode {mode_id!r} lost its {dropped} track but the handler did not report it:"
-        f"\n\n{status}"
+        f"mode {mode_id!r} lost its {dropped} track but the handler did not report it:\n\n{status}"
     )
 
 
@@ -361,12 +360,16 @@ def test_the_upload_is_encoded_through_the_audio_vae(mode_id, wired, audio_input
 
     audio_vae = wired.pipes[-1].audio_vae
     assert audio_vae.encoded, f"{mode_id} never called audio_vae.encode"
-    assert audio_vae.mels and audio_vae.mels[-1] == STUB_WAVEFORM, (
-        f"{mode_id} encoded something other than the loaded waveform: {audio_vae.mels}"
+    assert audio_vae.mels, f"{mode_id} never ran the mel front-end"
+    assert audio_vae.mels[-1].shape == STUB_WAVEFORM.shape, (
+        f"{mode_id} encoded something other than the loaded waveform: "
+        f"{audio_vae.mels[-1].shape} vs {STUB_WAVEFORM.shape}"
     )
 
 
-@pytest.mark.parametrize("mode_id", [m for m in MODE_IDS if "audio" not in modes.get_mode(m).inputs])
+@pytest.mark.parametrize(
+    "mode_id", [m for m in MODE_IDS if "audio" not in modes.get_mode(m).inputs]
+)
 def test_a_mode_that_takes_no_audio_encodes_nothing(mode_id, wired, audio_input_ready):
     """The guard must not fire where there is nothing to encode."""
     handlers.on_generate(mode_id, *values_for(mode_id))
@@ -401,3 +404,35 @@ def test_an_audio_input_with_no_audio_vae_is_refused_loudly(monkeypatch, tmp_pat
         )
     assert "audio_vae" in str(excinfo.value), excinfo.value
     assert not pipe.calls, "the pipeline ran anyway, so the user got audio they did not ask for"
+
+
+def test_a_mono_upload_is_reported_to_the_user_not_only_the_log(monkeypatch, tmp_path):
+    """A note that reaches the Space log alone has not reached the user.
+
+    Most wav files are mono, so this is the ordinary case rather than an edge:
+    the audio is widened so it can be encoded at all, and the person who chose
+    mono is told their file was altered.
+    """
+    from conftest import STUB_SAMPLING_RATE, waveform_of
+
+    from ltx25_studio import audio as audio_module
+
+    monkeypatch.setattr(
+        audio_module, "load_waveform", lambda source: (waveform_of(1), STUB_SAMPLING_RATE)
+    )
+    pipe = FakePipe()
+
+    result = generate_module.generate(
+        mode="audio_to_audio",
+        seed=7,
+        audio="a-mono-recording.wav",
+        pipeline_factory=factory_returning(pipe),
+        encoder=one_muxed_file_encoder,
+        output_root=tmp_path,
+        retention_bytes=10**9,
+    )
+
+    assert pipe.audio_vae.mels[-1].shape[0] == 2, "the VAE was handed mono and would have raised"
+    assert any("mono" in note for note in result.warnings), (
+        f"the upload was altered and the result says nothing about it: {result.warnings}"
+    )

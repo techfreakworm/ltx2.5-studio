@@ -408,16 +408,22 @@ class FakeAudioVae:
     and the whole encode runs with no torch present.
     """
 
-    def __init__(self, sampling_rate=48000):
+    def __init__(self, sampling_rate=16000):
+        # ⚠️ These are the REAL key names, read off audio_vae/config.json at
+        # revision 871165de…, not our semantic ones. The previous fake used our
+        # names, so it agreed with the code and with nothing else -- the reader
+        # raised on the actual checkpoint while every offline test passed.
         self.config = SimpleNamespace(
-            audio_sampling_rate=sampling_rate,
-            audio_hop_length=256,
-            audio_mel_bins=128,
-            audio_vae_mel_compression_ratio=2,
-            audio_vae_temporal_compression_ratio=4,
-            audio_latent_channels=64,
+            sample_rate=sampling_rate,
+            mel_hop_length=160,
+            mel_bins=64,
+            latent_channels=8,
             in_channels=2,
         )
+        # Instance attributes on the model, as upstream sets them in __init__.
+        # They are absent from config.json entirely.
+        self.mel_compression_ratio = 4
+        self.temporal_compression_ratio = 4
         self.mels: list = []
         self.encoded: list = []
 
@@ -432,9 +438,26 @@ class FakeAudioVae:
         return SimpleNamespace(latent_dist=SimpleNamespace(sample=lambda: latents))
 
 
-#: What the stub loader hands back: the shape `load_waveform` really returns.
-STUB_WAVEFORM = ("waveform", "stub")
-STUB_SAMPLING_RATE = 48000
+def waveform_of(channels: int, samples: int = 4096):
+    """A waveform shaped the way ``torchaudio.load`` returns one: [channels, samples].
+
+    A real array rather than a sentinel, because ``match_channel_count`` reads
+    ``.shape[0]`` and widens by fancy indexing. A shapeless stub would sail past
+    the channel check and leave the mono path -- the one most users will hit --
+    untested.
+    """
+    import numpy as np
+
+    return np.zeros((channels, samples), dtype=np.float32)
+
+
+#: What the stub loader hands back. STEREO, matching the fake VAE's in_channels,
+#: so the default seam runs need no conversion and the mono case is explicit.
+STUB_WAVEFORM = waveform_of(2)
+#: Matches the audio VAE's own rate, so `_resampled` short-circuits and the
+#: offline gate needs no torchaudio. The VAE takes 16000; the VOCODER emits
+#: 48000. They are not symmetric and assuming they were is a real trap.
+STUB_SAMPLING_RATE = 16000
 
 
 @pytest.fixture

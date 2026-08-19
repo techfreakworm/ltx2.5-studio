@@ -41,17 +41,22 @@ present (PLAN §9.1).
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
+from types import MappingProxyType
 
 from .constraints import DEFAULT_LENGTH_TOLERANCE_SECONDS, validate_audio_video_agreement
 from .errors import LTXStudioError
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "AUDIO_LATENT_DIMS",
     "AUDIO_LATENT_NDIM",
     "CHANNELS_FIELD",
     "CONFIG_FIELDS",
+    "PARAM_SOURCES",
     "EXPORT_SAMPLING_RATE_FIELD",
     "AudioParams",
     "audio_channels_from",
@@ -60,6 +65,7 @@ __all__ = [
     "decode_latents_to_waveform",
     "encode_waveform_to_latents",
     "load_waveform",
+    "match_channel_count",
     "export_sampling_rate_from",
     "mel_front_end_for",
     "validate_audio_latents_against_video",
@@ -78,16 +84,36 @@ AUDIO_LATENT_NDIM = len(AUDIO_LATENT_DIMS)
 #: ``_, _, audio_num_frames, _ = audio_latents.shape``.
 _FRAMES_AXIS = AUDIO_LATENT_DIMS.index("frames")
 
-#: The parameter names PLAN §5.4 names explicitly. All six are read from
-#: ``audio_vae.config`` at runtime; none has a default anywhere in this package.
-CONFIG_FIELDS = (
-    "audio_sampling_rate",
-    "audio_hop_length",
-    "audio_mel_bins",
-    "audio_vae_mel_compression_ratio",
-    "audio_vae_temporal_compression_ratio",
-    "audio_latent_channels",
+#: The six §5.4 parameters, and **where each one really lives on the loaded
+#: audio VAE**. Our names are the semantic layer; the checkpoint uses its own.
+#:
+#: ⚠️ These are NOT six keys on ``audio_vae.config``. That is what this module
+#: assumed, and every one of the six was wrong: four are config keys under
+#: *different* names, and two are **instance attributes on the model**, set in
+#: ``__init__`` and absent from ``config.json`` entirely. Reading all six off
+#: ``.config`` by our own names raised on the real checkpoint, which made every
+#: runtime path through this module -- the audio-input encode included --
+#: unreachable on real weights while passing offline against a fake that used
+#: our names.
+#:
+#: *Read off ``audio_vae/config.json`` at revision 871165de… and
+#: ``autoencoder_kl_ltx2_audio.py`` at diffusers ac56fa2f…, and cross-checked
+#: against how ``LTX2Pipeline.__init__`` derives the same six.*
+PARAM_SOURCES = MappingProxyType(
+    {
+        "audio_sampling_rate": ("config", "sample_rate"),
+        "audio_hop_length": ("config", "mel_hop_length"),
+        "audio_mel_bins": ("config", "mel_bins"),
+        "audio_latent_channels": ("config", "latent_channels"),
+        # Instance attributes, both LATENT_DOWNSAMPLE_FACTOR. Not in config.json.
+        "audio_vae_mel_compression_ratio": ("model", "mel_compression_ratio"),
+        "audio_vae_temporal_compression_ratio": ("model", "temporal_compression_ratio"),
+    }
 )
+
+#: The parameter names PLAN §5.4 names explicitly. Derived from
+#: :data:`PARAM_SOURCES` so the two cannot disagree.
+CONFIG_FIELDS = tuple(PARAM_SOURCES)
 
 #: Where the export sample rate comes from -- ``vocoder.config``, not the VAE's.
 #: The vocoder resamples, so the rate it emits is the only correct one to write
@@ -169,6 +195,21 @@ def _read(config, field: str, *, owner: str):
     )
 
 
+def _read_param(audio_vae, config, name: str):
+    """One §5.4 parameter, from wherever the checkpoint actually keeps it."""
+    where, field = PARAM_SOURCES[name]
+    if where == "config":
+        return _read(config, field, owner="audio_vae.config")
+    found = getattr(audio_vae, field, None)
+    if found is None:
+        raise LTXStudioError(
+            f"audio_vae does not expose {field!r}, which is where {name!r} comes from. "
+            f"Upstream sets it in the model's __init__ rather than declaring it in "
+            f"config.json, so a checkpoint without it is not the one this app expects."
+        )
+    return found
+
+
 def audio_params_from(audio_vae) -> AudioParams:
     """Read all six §5.4 parameters off a loaded ``audio_vae``.
 
@@ -177,9 +218,7 @@ def audio_params_from(audio_vae) -> AudioParams:
     honouring a number someone assumed while writing this module.
     """
     config = _config_of(audio_vae, name="audio_vae")
-    return AudioParams(
-        **{name: _read(config, name, owner="audio_vae.config") for name in CONFIG_FIELDS}
-    )
+    return AudioParams(**{name: _read_param(audio_vae, config, name) for name in CONFIG_FIELDS})
 
 
 def audio_channels_from(audio_vae) -> int:
@@ -331,7 +370,57 @@ def load_waveform(source):
     return waveform, int(rate)
 
 
-def encode_waveform_to_latents(waveform, *, audio_vae, sampling_rate: int, to_mel=None):
+def match_channel_count(waveform, *, channels: int):
+    """Give the waveform the channel count the audio VAE requires.
+
+    **The VAE is stereo and does not adapt.** Handed one channel it reaches
+    ``conv_in`` and raises ``Given groups=1, weight of size [128, 2, 3, 3],
+    expected input[1, 1, 4, 480002] to have 2 channels, but got 1`` -- four
+    frames inside someone else's conv layer, naming a weight shape rather than
+    anything the user did. Most people's wav files are mono, so that is the
+    single most likely way this feature meets a real user.
+
+    **Mono is upmixed by duplication, and the caller is told.** Duplicating one
+    channel into two adds no information and loses none, so it is a safe default
+    where refusing would reject the common case. It is still reported, because a
+    user who chose mono deliberately deserves to know their audio was altered.
+
+    **More channels than the VAE takes is refused, not downmixed.** That
+    direction *does* lose information, and PLAN 5.4 is explicit that a silent
+    downmix is a quality regression nothing reports.
+
+    ``channels`` is read off the VAE by the caller rather than assumed, so a
+    checkpoint with a different layout is handled by reading, not editing.
+
+    Returns ``(waveform, note)``; ``note`` is ``None`` when nothing changed.
+    """
+    shape = getattr(waveform, "shape", None)
+    if not shape:
+        return waveform, None
+    found = int(shape[0])
+    if found == channels:
+        return waveform, None
+    if found > channels:
+        raise LTXStudioError(
+            f"the audio has {found} channels and this model's audio VAE takes exactly "
+            f"{channels}. Mixing {found} down to {channels} would discard part of the "
+            f"recording, and doing that silently is the quality regression PLAN 5.4 forbids. "
+            f"Supply a {channels}-channel file, or downmix it yourself so the choice is yours."
+        )
+    if found != 1:
+        raise LTXStudioError(
+            f"the audio has {found} channels and this model's audio VAE takes exactly "
+            f"{channels}. Only mono can be widened without inventing a channel."
+        )
+    # Fancy indexing rather than `.repeat`, whose meaning differs between torch
+    # and numpy; this selects row 0 `channels` times and means the same in both.
+    return waveform[[0] * channels], (
+        f"the audio was mono and this model's audio VAE takes {channels} channels, so the "
+        f"single channel was duplicated. No audio was lost, but it is not true stereo."
+    )
+
+
+def encode_waveform_to_latents(waveform, *, audio_vae, sampling_rate: int, to_mel=None, notes=None):
     """waveform -> mel -> ``audio_vae`` latents, ready to pass as ``audio_latents``.
 
     The img2img route of PLAN §3.1(c): the result is combined upstream as
@@ -345,6 +434,14 @@ def encode_waveform_to_latents(waveform, *, audio_vae, sampling_rate: int, to_me
     """
     params = audio_params_from(audio_vae)
     prepared = _resampled(waveform, from_rate=sampling_rate, to_rate=params.audio_sampling_rate)
+    # In the shared helper, not at one call site: every caller reaches the same
+    # conv layer, so a check at one of them leaves the others raising a tensor
+    # shape error from four frames down.
+    prepared, note = match_channel_count(prepared, channels=audio_channels_from(audio_vae))
+    if note:
+        logger.warning(note)
+        if notes is not None:
+            notes.append(note)
     mel = (to_mel or mel_front_end_for(audio_vae))(prepared)
     latents = _sampled(audio_vae.encode(mel))
     validate_audio_latents_shape(getattr(latents, "shape", ()))
