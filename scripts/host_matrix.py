@@ -98,8 +98,12 @@ def make_wav(path, *, seconds=5.0, rate=48000, channels=2):
     with av.open(str(path), mode="w") as container:
         stream = container.add_stream("pcm_s16le", rate=rate)
         stream.layout = "stereo" if channels == 2 else "mono"
+        # `s16` is a PACKED format, so from_ndarray wants one row of interleaved
+        # samples -- (1, n*channels) -- not the (channels, n) planar layout.
+        # Handing it planar data raises "Expected packed array.shape[0] to equal 1".
+        interleaved = (planes.T.reshape(1, -1) * 32767).astype("int16")
         frame = av.AudioFrame.from_ndarray(
-            (planes * 32767).astype("int16"), format="s16", layout=stream.layout.name
+            interleaved, format="s16", layout=stream.layout.name
         )
         frame.sample_rate = rate
         for packet in stream.encode(frame):
@@ -291,6 +295,9 @@ def main() -> int:
         log(f"fixture image  : PIL {fixtures['image'].size}")
     for key, env in (("video", "MATRIX_VIDEO_FIXTURE"), ("audio", "MATRIX_AUDIO_FIXTURE")):
         if any(key in RUNS[r]["needs"] for r in wanted):
+            # Per-key and non-fatal: a fixture this run cannot build must not
+            # cancel the modes that never asked for it. Runs needing a missing
+            # fixture are skipped and named in the summary instead.
             src = os.environ.get(env)
             if key == "audio" and (not src or not Path(src).exists()):
                 # Synthesised rather than taken from an earlier run, deliberately.
@@ -304,7 +311,7 @@ def main() -> int:
             if not src or not Path(src).exists():
                 log(f"MISSING {key} fixture: set {env} to a real file "
                     f"(produce one from an earlier run)")
-                return 2
+                continue
             if key == "video":
                 fixtures["video"] = load_video_frames(src)
                 log(f"fixture video  : {len(fixtures['video'])} PIL frames from {src}")
@@ -331,6 +338,12 @@ def main() -> int:
             output_root=OUTPUT_ROOT,
             **spec_row["extra"],
         )
+        absent = [n for n in spec_row["needs"] if n not in fixtures]
+        if absent:
+            log(f"  SKIPPED: fixture(s) {absent} unavailable")
+            results.append((run_id, mode_id, "SKIPPED", None, None))
+            log("")
+            continue
         for need in spec_row["needs"]:
             if need == "audio":
                 req["audio_latents"] = fixtures["audio"]
@@ -374,8 +387,8 @@ def main() -> int:
     log("=== SUMMARY ===")
     log(f"load {load_seconds:.1f}s (one-off, ~68 GiB off disk)")
     for run_id, mode_id, secs, path, code in results:
-        if secs == "FAILED":
-            log(f"  {run_id:<4} {mode_id:<26} FAILED")
+        if secs in ("FAILED", "SKIPPED"):
+            log(f"  {run_id:<4} {mode_id:<26} {secs}")
         else:
             log(f"  {run_id:<4} {mode_id:<26} {secs:6.1f}s  verify={code}  {path}")
     return 0
