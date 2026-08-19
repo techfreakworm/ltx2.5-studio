@@ -65,21 +65,42 @@ ALL_PREFIXES = (
     DIFFUSERS_CONNECTOR_PREFIX,
 )
 
-#: Module paths the fake transformer exposes; adapter keys that resolve to one of
-#: these are what "attached" means. Mirrors the real target list from PLAN §4.2
-#: (``to_q`` / ``to_k`` / ``to_v`` / ``adaln_single``).
-TRANSFORMER_MODULE_PATHS = (
-    "transformer_blocks.0.attn1.to_q",
-    "transformer_blocks.0.attn1.to_k",
-    "transformer_blocks.0.attn1.to_v",
-    "transformer_blocks.1.attn1.to_q",
-    "adaln_single.linear",
-)
+#: Module paths the fake transformer exposes, with ``(in_features, out_features)``.
+#:
+#: The dimensions are the measured ones from PLAN §4.5: the transformer carries
+#: **two streams** — video at 4096 and audio at 2048, each with a 4x feed-forward
+#: expansion. That is why stage 6.5 compares per module: "contains 2048" is not a
+#: signal, "2048 at a module that expects 4096" is.
+TRANSFORMER_MODULE_DIMS = {
+    "transformer_blocks.0.attn1.to_q": (4096, 4096),
+    "transformer_blocks.0.attn1.to_k": (4096, 4096),
+    "transformer_blocks.0.attn1.to_v": (4096, 4096),
+    "transformer_blocks.1.attn1.to_q": (4096, 4096),
+    "transformer_blocks.0.ff.net.2": (16384, 4096),
+    "transformer_blocks.0.audio_ff.net.0.proj": (2048, 8192),
+    "transformer_blocks.0.audio_ff.net.2": (8192, 2048),
+    "adaln_single.linear": (256, 4096),
+    "audio_adaln_single.linear": (256, 2048),
+}
 
-CONNECTOR_MODULE_PATHS = (
-    "layers.0.proj",
-    "layers.1.proj",
-)
+#: Adapter keys that resolve to one of these are what "attached" means.
+TRANSFORMER_MODULE_PATHS = tuple(TRANSFORMER_MODULE_DIMS)
+
+CONNECTOR_MODULE_DIMS = {
+    "layers.0.proj": (4096, 4096),
+    "layers.1.proj": (4096, 4096),
+}
+
+CONNECTOR_MODULE_PATHS = tuple(CONNECTOR_MODULE_DIMS)
+
+#: Every module dimension the fake pipeline knows about, in one lookup.
+MODULE_DIMS = {**TRANSFORMER_MODULE_DIMS, **CONNECTOR_MODULE_DIMS}
+
+#: What an unmapped module is assumed to be — the video stream's hidden dim.
+DEFAULT_MODULE_DIMS = (4096, 4096)
+
+#: Rank of the synthetic adapters. The real ones range from 32 to 450.
+DEFAULT_RANK = 32
 
 #: The official adapter's metadata, read from its real header (PLAN §4.2).
 OFFICIAL_METADATA = {
@@ -134,25 +155,37 @@ def build_safetensors_bytes(
     return struct.pack("<Q", declared) + blob + (b"\x00" * payload_len)
 
 
-def lora_pair(prefix, module_path, *, style="peft", shape=(8, 8)):
-    """Return the ``{key: (dtype, shape)}`` entries for one LoRA A/B pair."""
+def lora_pair(prefix, module_path, *, style="peft", rank=DEFAULT_RANK, dims=None):
+    """Return the ``{key: (dtype, shape)}`` entries for one LoRA A/B pair.
+
+    Shapes follow the real convention measured in PLAN §4.5:
+    ``lora_A = [rank, in_features]`` and ``lora_B = [out_features, rank]``.
+    Dimensions default to the fake transformer's own, so a fixture built from the
+    real module paths is dimensionally *correct* and passes stage 6.5 — leaving
+    the dimension tests free to break exactly one thing on purpose.
+    """
     if style == "peft":
         down, up = "lora_A.weight", "lora_B.weight"
     elif style == "kohya":
         down, up = "lora_down.weight", "lora_up.weight"
     else:  # pragma: no cover - guard against a typo in a test
         raise ValueError(f"unknown style {style!r}")
+    in_features, out_features = dims or MODULE_DIMS.get(module_path, DEFAULT_MODULE_DIMS)
     base = f"{prefix}{module_path}"
     return {
-        f"{base}.{down}": ("F32", list(shape)),
-        f"{base}.{up}": ("F32", list(shape)),
+        f"{base}.{down}": ("F32", [rank, in_features]),
+        f"{base}.{up}": ("F32", [out_features, rank]),
     }
 
 
-def lora_tensors(prefix, module_paths, *, style="peft"):
+def lora_tensors(prefix, module_paths, *, style="peft", rank=DEFAULT_RANK, dims=None):
+    """``dims`` maps a module path to ``(in_features, out_features)`` overrides."""
     tensors: dict[str, tuple[str, list[int]]] = {}
+    overrides = dims or {}
     for path in module_paths:
-        tensors.update(lora_pair(prefix, path, style=style))
+        tensors.update(
+            lora_pair(prefix, path, style=style, rank=rank, dims=overrides.get(path))
+        )
     return tensors
 
 
@@ -216,6 +249,86 @@ def wrong_architecture_lora(write_safetensors):
     )
 
 
+@pytest.fixture
+def wrong_dimension_lora(write_safetensors):
+    """The ``charlied98/ltxv_2b_lora_soft_draw_v1`` shape — PLAN §4.3 stage 6.5.
+
+    An LTX-**Video-2B** adapter. Its module names are the ones LTX-2.5 uses, so
+    it passes stages 4, 5 and 6, passes diffusers' built-in check, and **passes
+    stage 7** — it really does attach. The only thing wrong with it is that
+    ``to_k.lora_A`` is ``[32, 2048]`` where this model is 4096.
+
+    Stage 6.5 is the only gate that catches this file.
+    """
+    video_stream = (
+        "transformer_blocks.0.attn1.to_q",
+        "transformer_blocks.0.attn1.to_k",
+        "transformer_blocks.0.attn1.to_v",
+    )
+    return write_safetensors(
+        name="ltxv-2b-lora.safetensors",
+        tensors=lora_tensors(
+            NATIVE_PREFIX,
+            video_stream,
+            dims={path: (2048, 2048) for path in video_stream},
+        ),
+        metadata={},
+    )
+
+
+@pytest.fixture
+def two_stream_lora(write_safetensors):
+    """The ``joyfox/LTX-2.3-Transition-LORA`` shape — dimensionally correct.
+
+    It contains 2048-wide tensors, at the audio-stream modules where 2048 is
+    right. A stage 6.5 that tests "does this file contain 2048" instead of
+    "2048 at a module that expects 4096" rejects the most-downloaded LTX LoRA on
+    the Hub.
+    """
+    return write_safetensors(
+        name="two-stream-lora.safetensors",
+        tensors=lora_tensors(NATIVE_PREFIX, TRANSFORMER_MODULE_PATHS),
+        metadata={},
+    )
+
+
+@pytest.fixture
+def ic_lora(write_safetensors):
+    """The ``DoctorDiffusion/LTX-2.3-IC-LoRA-Colorizer`` shape — PLAN §4.3 stage 5.5.
+
+    An in-context LoRA. On the plain pipeline it will not error and will not
+    work — silent garbage arriving through a door stage 7 does not watch.
+    """
+    return write_safetensors(
+        name="ic-lora-colorizer.safetensors",
+        tensors=lora_tensors(NATIVE_PREFIX, TRANSFORMER_MODULE_PATHS),
+        metadata={"reference_downscale_factor": "1"},
+    )
+
+
+@pytest.fixture
+def sd_scripts_lora(write_safetensors):
+    """The ``vrgamedevgirl84/LTX_2.3_Crisp_Enhance_Style_LoRa`` shape — PLAN §4.5.
+
+    No ``model_version`` anywhere, but a rich sd-scripts/musubi metadata block
+    whose ``modelspec.architecture`` is a *better* architecture signal.
+    """
+    return write_safetensors(
+        name="sd-scripts-lora.safetensors",
+        tensors=lora_tensors(NATIVE_PREFIX, TRANSFORMER_MODULE_PATHS),
+        metadata={
+            "ss_ltx_version": "2.3",
+            "ss_base_model_version": "ltx2_v1",
+            "modelspec.architecture": "LTX2/lora",
+            "ss_network_module": "networks.lora_ltx2",
+            "ss_sd_model_name": "ltx-2.3-22b-dev.safetensors",
+            "ss_network_dim": "64",
+            "ss_network_alpha": "32",
+            "ss_lora_target_preset": "full",
+        },
+    )
+
+
 # --------------------------------------------------------------------------
 # fake pipeline (duck-types the diffusers surface we touch)
 # --------------------------------------------------------------------------
@@ -252,15 +365,33 @@ class FakeModule:
         return node
 
 
+class FakeLinear(FakeModule):
+    """A leaf that looks like ``torch.nn.Linear`` to a dimension check.
+
+    Stage 6.5 builds its expectation map by walking the loaded transformer's
+    ``nn.Linear`` modules — never a hardcoded table — so the fake has to carry
+    real ``in_features`` / ``out_features`` for that walk to find anything.
+    """
+
+    def __init__(self, in_features, out_features):
+        super().__init__()
+        self.in_features = in_features
+        self.out_features = out_features
+
+
 class FakeComponent(FakeModule):
     """A pipeline component (``transformer`` / ``connectors``) that peft can decorate."""
 
-    def __init__(self, paths):
+    def __init__(self, paths, dims=None):
         super().__init__()
+        dims = {**MODULE_DIMS, **(dims or {})}
         for path in paths:
+            parts = path.split(".")
             node = self
-            for part in path.split("."):
+            for part in parts[:-1]:
                 node = node._children.setdefault(part, FakeModule())
+            in_features, out_features = dims.get(path, DEFAULT_MODULE_DIMS)
+            node._children.setdefault(parts[-1], FakeLinear(in_features, out_features))
         self.peft_config: dict[str, object] = {}
 
 
@@ -277,12 +408,14 @@ class FakePipeline:
 
     _lora_loadable_modules = ["transformer", "connectors"]
 
-    def __init__(self, transformer_paths=None, connector_paths=None):
+    def __init__(self, transformer_paths=None, connector_paths=None, dims=None):
         self.transformer = FakeComponent(
-            TRANSFORMER_MODULE_PATHS if transformer_paths is None else transformer_paths
+            TRANSFORMER_MODULE_PATHS if transformer_paths is None else transformer_paths,
+            dims=dims,
         )
         self.connectors = FakeComponent(
-            CONNECTOR_MODULE_PATHS if connector_paths is None else connector_paths
+            CONNECTOR_MODULE_PATHS if connector_paths is None else connector_paths,
+            dims=dims,
         )
         self.calls: list[dict] = []
         self.fuse_calls: list[dict] = []
@@ -375,10 +508,16 @@ def fake_pipeline():
 
 @pytest.fixture
 def make_pipeline():
-    def _make(transformer_paths=None, connector_paths=None):
-        return FakePipeline(transformer_paths, connector_paths)
+    def _make(transformer_paths=None, connector_paths=None, dims=None):
+        return FakePipeline(transformer_paths, connector_paths, dims=dims)
 
     return _make
+
+
+@pytest.fixture
+def fake_transformer():
+    """Just the transformer, for the stage 6.5 dimension checks."""
+    return FakeComponent(TRANSFORMER_MODULE_PATHS)
 
 
 # --------------------------------------------------------------------------

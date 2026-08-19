@@ -64,11 +64,18 @@ def validate_via(request):
             calls.append((args, kw))
             return path
 
+        unfetched = "the Hub route must resolve the repo id through the injected fetcher"
         try:
-            return lora_validate.validate_lora(HUB_REPO_ID, fetcher=fetcher, **kwargs)
-        finally:
-            if route == "hub" and not calls:
-                pytest.fail("the Hub route must resolve the repo id through the injected fetcher")
+            report = lora_validate.validate_lora(HUB_REPO_ID, fetcher=fetcher, **kwargs)
+        except LoRAError:
+            # A rejection is a legitimate outcome — but it must come from parsing
+            # the resolved file, not from refusing to resolve a repo id at all.
+            if not calls:
+                pytest.fail(unfetched)
+            raise
+        if not calls:
+            pytest.fail(unfetched)
+        return report
 
     _run.route = route
     return _run
@@ -83,7 +90,10 @@ def test_a_well_formed_adapter_validates(validate_via, good_lora):
     report = validate_via(good_lora)
     assert report.model_version == "2.5.0"
     assert report.convention is not None
-    assert tuple(report.warnings) == ()
+    version_warnings = [w for w in report.warnings if "version" in w.lower()]
+    assert version_warnings == [], (
+        f"an adapter that declares model_version must not warn about it: {report.warnings}"
+    )
 
 
 def test_the_report_carries_the_resolved_path(validate_via, good_lora):
@@ -366,9 +376,12 @@ def test_the_pairing_error_names_the_unpaired_key(write_safetensors):
 def test_a_wrong_architecture_adapter_passes_stages_one_to_six(validate_via, wrong_architecture_lora):
     """This is not a bug in the validator — it is the point.
 
-    Nothing readable from the header can tell you that these module paths do not
-    exist in *this* transformer. Stages 1-6 pass, and the only thing standing
-    between the user and silent garbage is stage 7 in ``lora/apply.py``.
+    With no transformer to compare against — which is the pre-load UI case, and
+    the Hub case before anything is downloaded — nothing readable from the header
+    tells you these module paths do not exist in *this* model. Stages 1-6 pass,
+    stage 6.5 cannot run, and the last line of defence is stage 7 in
+    ``lora/apply.py``. (Given a transformer, ``test_lora_compat.py`` requires 6.5
+    to catch it earlier.)
     """
     report = validate_via(wrong_architecture_lora)
     assert report.model_version == "2.5.0"

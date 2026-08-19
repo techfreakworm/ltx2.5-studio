@@ -236,7 +236,21 @@ def test_component_url_points_at_its_subfolder():
 # THE architecture test (PLAN §5.2)
 # --------------------------------------------------------------------------
 
-FORBIDDEN_LITERALS = (".safetensors", "Lightricks/", "huggingface.co")
+#: Substrings that are never legitimate in code outside ``model_files.py``.
+FORBIDDEN_ANYWHERE = ("Lightricks/", "huggingface.co")
+
+
+def _is_a_hardcoded_filename(value):
+    """True when the literal is a *filename*, not prose that mentions the extension.
+
+    The rule is about coordinates, not vocabulary. ``"transformer/diffusion_
+    pytorch_model-00001-of-00004.safetensors"`` and the f-string fragment
+    ``".safetensors"`` are coordinates and belong in ``model_files.py``; UI help
+    text reading "upload a `.safetensors` adapter" is a sentence, and the UI is
+    the layer whose whole job is sentences.
+    """
+    stripped = value.strip()
+    return stripped.endswith(".safetensors") and not any(c.isspace() for c in stripped)
 
 
 SOURCE_FILES_TO_SWEEP = package_python_files(exclude=("model_files.py",)) + [REPO_ROOT / "app.py"]
@@ -251,12 +265,13 @@ def test_no_hardcoded_hub_strings_outside_model_files(path):
     Filenames, repo ids and Hub URLs belong to ``model_files.py`` and nowhere
     else. Comments and docstrings are exempt; code is not.
     """
-    offenders = [
-        (lineno, value, literal)
-        for lineno, value in code_string_constants(path)
-        for literal in FORBIDDEN_LITERALS
-        if literal in value
-    ]
+    offenders = []
+    for lineno, value in code_string_constants(path):
+        for literal in FORBIDDEN_ANYWHERE:
+            if literal in value:
+                offenders.append((lineno, value, literal))
+        if _is_a_hardcoded_filename(value):
+            offenders.append((lineno, value, ".safetensors"))
     assert not offenders, (
         f"{path.relative_to(REPO_ROOT)} hardcodes Hub coordinates: {offenders}. "
         "Move them into model_files.py (PLAN §5.2)."
