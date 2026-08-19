@@ -156,6 +156,46 @@ convention detector breaking.
 > spending the run to prove the thing it was designed to test never happened.
 > Compare against H1 at the same seed; if they are identical, stage 2 did not run.
 
+## A.4.2 Same-seed comparisons — the class of trap H14 belongs to
+
+H14's *"compare against H1 at the same seed; identical output means stage 2 did
+not run"* generalises. **Anywhere an input can be silently ignored and the run
+still succeeds, a passing run proves nothing.** Stage 2 was caught twice by
+noticing this; the same audit over every request field turns up four more:
+
+| field | if silently ignored | the run still… | comparison that catches it |
+|---|---|---|---|
+| `enable_stage_2` | stage-1 render | succeeds, valid video | **H14** vs H1, same seed |
+| `loras` | base-model output | succeeds, valid video | **H12b** vs H2, same seed |
+| `auto_duration` | falls back to `num_frames=121` | succeeds | **H15**: length must ≠ 121 |
+| `noise_scale` | **the audio input is discarded** | succeeds, valid audio | **H10b** at 0.1 vs 0.9 |
+| `strength` | conditioning has no effect | succeeds, valid video | **H4b** at 0.3 vs 0.9 |
+
+Four additional runs, all cheap, each converting *"it passed"* into *"it did
+something different"*:
+
+| # | Run | Compare against | Fails if |
+|---|---|---|---|
+| **H12b** | H12 **without** the adapter, same seed | H12 | **identical output** — the LoRA changed nothing, whatever stage 7 reported |
+| **H15** | already in A.4 | — | returned length **is** 121, i.e. the default leaked through |
+| **H10b** | `audio_to_audio`, `noise_scale=0.1` and `=0.9`, same seed | each other | **identical audio** — the input clip is not reaching the model |
+| **H4b** | `video_to_video`, `strength=0.3` and `=0.9`, same seed | each other | **identical video** — the conditioning clip is not reaching the model |
+
+**H12b matters most.** Stage 7 asserts *mechanism* — that the adapter attached to
+> 0 modules. H12b asserts *effect* — that attaching changed the output. They can
+disagree: an adapter can attach to modules that do not influence this prompt.
+**Two independent proofs of the headline feature, at the cost of one extra run.**
+
+**H10b is the one nobody would think to run.** `noise_scale=1.0` discards the
+audio input *by design*, so a bug that drops the input entirely is
+indistinguishable from correct operation — the mode produces audio either way and
+every stream check passes. A same-seed pair at two noise scales is the only thing
+in this matrix that can see it.
+
+**These are cheap because they reuse a seed, not because they are small.** Run
+them at the same baseline as everything else; a difference visible only at low
+resolution is not a difference worth having.
+
 ## A.4.1 The undeclared-export direction — covered offline, no run needed
 
 The exports contract is enforced **both ways**: declared-but-missing raises
@@ -203,8 +243,11 @@ notice.
 | H12 | LoRA accepted | — | — | n/a | — | not run |
 | H13a | LoRA rejected (diffusers conv.) | — | — | n/a | n/a | not run — must name the stage |
 | H13b | LoRA rejected (native conv.) | — | — | n/a | n/a | not run — must name the stage |
-| H14 | stage 2 | — | — | — | — | not run |
-| H15 | duration_head | — | — | — | — | not run |
+| H12b | LoRA effect (no adapter, same seed) | — | — | n/a | — | not run — must DIFFER from H12 |
+| H14 | stage 2 | — | — | — | — | not run — must DIFFER from H1 |
+| H10b | noise_scale 0.1 vs 0.9 | — | — | — | — | not run — must DIFFER from each other |
+| H4b | strength 0.3 vs 0.9 | — | — | — | — | not run — must DIFFER from each other |
+| H15 | duration_head | — | — | — | — | not run — length must NOT be 121 |
 | H16 | high resolution | — | — | — | — | not run |
 
 **Both bold columns are required.** *Streams observed* is checkable —
