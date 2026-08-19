@@ -23,6 +23,7 @@ import sys
 import time
 from pathlib import Path
 
+import numpy as np
 import torch
 
 from ltx25_studio import generate as generate_module
@@ -125,6 +126,39 @@ def vocoder_sampling_rate(pipe):
         return None
 
 
+def audio_level(path):
+    """Report level for any artifact carrying audio.
+
+    After H9 -- correct codec, correct rate, 2 channels, verify_streams exit 0,
+    and 50 dB below its siblings -- no audio artifact gets reported here without
+    its level. A structural check cannot see silence.
+    """
+    import av
+
+    try:
+        with av.open(str(path)) as container:
+            streams = [s for s in container.streams if s.type == "audio"]
+            if not streams:
+                return None
+            planes = [f.to_ndarray() for f in container.decode(audio=0)]
+    except Exception as exc:
+        log(f"  audio level: could not probe ({type(exc).__name__}: {exc})")
+        return None
+    if not planes:
+        return None
+    raw = np.concatenate(planes, axis=-1)
+    if np.issubdtype(raw.dtype, np.integer):
+        raw = raw.astype("float32") / 32768.0
+    else:
+        raw = raw.astype("float32")
+    peak = float(np.abs(raw).max())
+    rms = float(np.sqrt((raw**2).mean()))
+    dbfs = 20 * np.log10(rms + 1e-12)
+    flag = "  *** NEAR-SILENT ***" if dbfs < -40 else ""
+    log(f"  audio level: peak {peak:.4f} rms {rms:.6f} = {dbfs:.1f} dBFS{flag}")
+    return dbfs
+
+
 def verify(mode_id: str, path: Path, *, sampling_rate=None) -> int:
     cmd = [sys.executable, str(REPO / "tests" / "verify_streams.py"), mode_id, str(path)]
     cmd += ["--frame-rate", "24"]
@@ -159,6 +193,17 @@ RUNS = {
     # A.4 H14 -- stage 2. Same prompt and seed as H1, so the comparison is the
     # refinement chain and nothing else; the artifact must DIFFER from H1's.
     "H14": dict(mode="text_to_video", needs=(), extra={"enable_stage_2": True}),
+    # H9 strength sweep. video_to_audio lands ~50 dB below every other audio
+    # mode, and modes._conditions applies a video condition at
+    # MAX_VIDEO_CONDITION_STRENGTH = 0.99. If a condition that strong leaves the
+    # shared denoise schedule with almost nothing to do, the audio stream would
+    # come out near-silent exactly as measured. Sweeping the one lever tests the
+    # mechanism directly rather than probing an input property; the level should
+    # climb as strength falls if that is the cause.
+    "H9s_099": dict(mode="video_to_audio", needs=("video",), extra={"strength": 0.99}),
+    "H9s_050": dict(mode="video_to_audio", needs=("video",), extra={"strength": 0.50}),
+    "H9s_020": dict(mode="video_to_audio", needs=("video",), extra={"strength": 0.20}),
+    "H9s_005": dict(mode="video_to_audio", needs=("video",), extra={"strength": 0.05}),
     # A second stage-2 run in the SAME process, to settle whether NATTEN's
     # version->ref lookup fires once per process or once per generation. One
     # stage-2 run cannot distinguish the two; two can. Different seed so it is a
@@ -421,6 +466,7 @@ def main() -> int:
         log(f"  video={result.video_path}  audio={result.audio_path}  seed={result.seed}")
         for w in result.warnings:
             log(f"  warning   {w}")
+        audio_level(result.output_path)
         code = verify(mode_id, result.output_path, sampling_rate=rate)
         results.append((run_id, mode_id, gen_seconds, result.output_path, code))
         log("")
