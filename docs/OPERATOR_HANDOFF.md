@@ -51,36 +51,61 @@ sharing has broken.
 Baseline is **704 × 480 × 121 frames**, seed pinned to **1234**. "Streams" is
 what `tests/verify_streams.py` observed in the container, not a human reading.
 
-| # | Mode | Result | Streams | Size | Time |
+| # | Mode | Result | Streams observed | Size | Time |
 |---|---|---|---|---|---|
-| H1 | `text_to_video` | ✅ pass | h264 @24, no audio | 886,265 B | 25.7 s |
-| H2 | `image_to_video` | ✅ pass | h264 @24, no audio | 577,051 B | ~26 s |
-| H3 | `image_text_to_video` | ✅ pass | h264 @24, no audio | 1,040,007 B | ~26 s |
-| H4 | `video_to_video` | ✅ pass | video only | ⏸️ not recorded | ⏸️ |
-| H5 | `text_to_audio_video` | ✅ pass | h264 + **aac, 2 ch** | ⏸️ not recorded | ⏸️ |
-| H6 | `image_to_audio_video` | ✅ pass | h264 + aac, 2 ch | ⏸️ not recorded | ⏸️ |
-| H7 | `image_text_to_audio_video` | ✅ pass | h264 + aac, 2 ch | ⏸️ not recorded | ⏸️ |
-| H8 | `text_to_audio` | ✅ pass | **pcm_s16le, 2 ch**, no video | ⏸️ not recorded | ⏸️ |
-| H9 | `video_to_audio` | ✅ pass | pcm_s16le, 2 ch, no video | ⏸️ not recorded | ⏸️ |
-| H10 | `audio_to_audio` | ⏸️ **pending** | — | — | — |
-| H11 | `audio_to_video` | ⏸️ **pending** | — | — | — |
+| H1 | `text_to_video` | ✅ | h264 704×480@24, f=121 | 886,265 B | 25.7 s |
+| H2 | `image_to_video` | ✅ | h264 704×480@24, f=121 | 432,486 B | ⏸️ |
+| H3 | `image_text_to_video` | ✅ | h264 704×480@24, f=121 | 1,130,178 B | ⏸️ |
+| H4 | `video_to_video` | ✅ | h264 704×480@24, f=121 | 727,490 B | ⏸️ |
+| H5 | `text_to_audio_video` | ✅ | h264 + **aac 48000 Hz 2 ch** | 1,091,468 B | ⏸️ |
+| H6 | `image_to_audio_video` | ✅ | h264 + aac 48000 Hz 2 ch | 620,537 B | ⏸️ |
+| H7 | `image_text_to_audio_video` | ✅ | h264 + aac 48000 Hz 2 ch | 784,282 B | ⏸️ |
+| H8 | `text_to_audio` | ✅ | **pcm_s16le 48000 Hz 2 ch**, no video | 961,998 B | ⏸️ |
+| H9 | `video_to_audio` | ⚠️ see §4.5 | pcm_s16le 48000 Hz 2 ch, no video | 961,998 B | ⏸️ |
+| H10 | `audio_to_audio` | ⏸️ **not run** | — | — | — |
+| H11 | `audio_to_video` | ⏸️ **not run** | — | — | — |
 
-**Nine of eleven modes have produced a real artifact with the expected stream
-layout.** The two pending ones are the audio-**input** modes; see §4.
+All ✅ measured. `verify_streams.py` returned 0 on every one.
 
-> ⚠️ **Artifact sizes are not reproducible to the byte.** H1 was run twice at the
-> same settings and returned **865,447 B** and later **886,265 B** ✅ — the figure
-> above is the second, from the full run through `get_pipeline`. Sizes here are
-> evidence that a real encode happened and roughly how much came out. **Do not
-> write a check that asserts an exact size**; assert the stream layout, which is
-> what `verify_streams.py` does and what these runs were judged on.
+> ### ⚠️ Structure is not content
+>
+> **Twelve runs produced artifacts with the expected stream structure. Content
+> was inspected for two of them, and one looked wrong** — see **§4.5**. Nothing
+> here should be read as "nine modes produce correct output"; it says they
+> produce well-formed files, which is a weaker and different claim.
+>
+> H8 and H9 are byte-identical in size because uncompressed PCM of equal
+> duration always is. That is why size proves nothing about content, and why it
+> took an RMS measurement to notice.
+
+> ### ⏸️ Sizes differ between the two code paths, and it is not known why
+>
+> Three modes were run both through a **bypass** (`_base_pipeline` plus an
+> injected `StageRunner`) and through the **real** `get_pipeline` path at the
+> same seed:
+>
+> | | bypass | real path |
+> |---|---:|---:|
+> | H1 | 865,447 B | 886,265 B |
+> | H2 | **577,051 B** | **432,486 B** — 25% smaller |
+> | H3 | 1,040,007 B | 1,130,178 B |
+>
+> **This is recorded as open, not as noise.** It may be GPU non-determinism —
+> cuDNN picks convolution algorithms heuristically and small pixel differences
+> compound hard through h264 — or it may be a genuine difference between the two
+> routes. ⏸️ Nobody has established which, and calling it non-determinism would
+> be a guess in the reassuring direction.
+>
+> Either way: **assert stream layout, never an exact size.** A byte-count check
+> here would fail for reasons nobody understands, and be "fixed" by loosening it
+> until it proved nothing.
 
 ### 2.3 Beyond the baseline
 
 | Run | What it proves | Result |
 |---|---|---|
-| **H16** high resolution | usability, not just correctness | ✅ `text_to_audio_video` at **1216 × 704**, aac stereo at 48 kHz |
-| **H15** `duration_head` | the model chose the length, rather than a default leaking through | ✅ returned **97 frames**, not 121 |
+| **H16** high resolution | usability, not just correctness | ✅ `text_to_audio_video` at **1216 × 704** @24, f=121 + aac 48000 Hz 2 ch — **2,331,528 B** |
+| **H15** `duration_head` | the model chose the length, rather than a default leaking through | ✅ **f=97**, not 121 — 704 × 480, 684,374 B |
 | **H14** stage 2 | upsample → 3-step schedule → diffusion decode | ✅ **1408 × 960**, 121 frames, 2,254,799 B, 84.3 s |
 
 H15 is worth understanding: `num_frames` is *omitted* and the duration head
@@ -179,7 +204,29 @@ caches per image or per cold worker is ⏸️ unknown and decides its severity.
    and both documented recipes mention only the spatial one. We download it
    (0.2619 GB) and do **not** wire it in. Not a defect; an open question.
 
-5. **The audio input rate is 16000, the vocoder output is 48000.** 📄 They are
+5. ### ⚠️ `video_to_audio` produced near-silence, and this is unresolved
+
+   H9 produced audio at roughly **−55 dBFS** ✅ — **RMS 58.3 against H8's
+   18013.9 at the same settings, about 309× quieter** — on a 32767 int16
+   ceiling. It is not an echo of H8 (different md5), so it is *something*, but
+   effectively inaudible where H8 is a healthy signal.
+
+   ⏸️ **Not established** whether this is a defect, a property of the
+   conditioning clip, or correct behaviour for the mode. Under investigation,
+   including whether H5/H6/H7 are also quiet — **if they are, this is one defect
+   and every audio artifact counted above is silent.**
+
+   The sentence that matters most in this document:
+
+   > **All twelve artifacts passed every structural check. Content was
+   > inspected for two of them, and one looked wrong.**
+
+   Channels, sample rate, duration, non-emptiness and `verify_streams` exit 0
+   **all pass on H9**. Silence and a healthy signal have identical stream
+   layout. This is the *"output looks right?"* column of the run log failing
+   exactly where it was predicted to — the one column no instrument can fill.
+
+6. **The audio input rate is 16000, the vocoder output is 48000.** 📄 They are
    not symmetric. Anything that assumes one rate for both directions will
    pitch-shift audio without erroring.
 
@@ -345,8 +392,19 @@ priority.
 
 ## 7. If you do one thing
 
-**Run H10b.** It is the one claim this project has not earned: *that a user's
-uploaded audio reaches the model.*
+**Two things, and they are the two claims this project has not earned.**
+
+### First: settle whether the audio is real
+
+`video_to_audio` came back at roughly **−55 dBFS** — see §4.5. Check whether
+H5/H6/H7 are also quiet. **If they are, every audio artifact in §2 is silent**
+and nine passing modes becomes four. Listen to them; no instrument here can
+answer it, which is the whole reason it went unnoticed through twelve green
+runs.
+
+### Second: run H10b
+
+*That a user's uploaded audio reaches the model* is otherwise unproven.
 
 Two `noise_scale` values — 0.1 and 0.9 — at the **same pinned seed**, on
 `audio_to_audio`. **Identical audio means the input is not reaching the model**,
@@ -358,4 +416,5 @@ design**, so a bug that drops the input entirely is indistinguishable from
 correct operation. The mode produces valid audio either way. Every other check
 in the matrix passes either way.
 
-Everything else in §2 has produced an artifact and been observed.
+Everything else in §2 has produced an artifact and had its **structure**
+observed. Structure was never the hard part.
