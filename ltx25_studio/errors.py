@@ -36,8 +36,11 @@ __all__ = [
     "LTXStudioError",
     "LoRAConventionError",
     "LoRAError",
+    "LoRADimensionError",
     "LoRAFormatError",
     "LoRAHeaderError",
+    "LoRAInContextError",
+    "LoRAModuleNotFoundError",
     "LoRANotAttachedError",
     "LoRAPairingError",
     "LoRATooLargeError",
@@ -199,8 +202,8 @@ class LoRATooLargeError(LoRAError):
         self.size_bytes = size_bytes
         self.max_bytes = max_bytes
         super().__init__(
-            f"LoRA {source} is {_gb(size_bytes)}, which exceeds the {_gb(max_bytes)} limit. "
-            f"Refusing before download."
+            f"LoRA {source} is {size_bytes} bytes ({_gb(size_bytes)}), which exceeds the limit of "
+            f"{max_bytes} bytes ({_gb(max_bytes)}). Refusing before download."
         )
 
 
@@ -290,6 +293,71 @@ class LoRAPairingError(LoRAError):
         super().__init__(
             f"LoRA {source} has unpaired low-rank factors: every lora_A/lora_down needs a "
             f"matching lora_B/lora_up. Unpaired keys: {_join(self.unpaired_keys)}."
+        )
+
+
+class LoRAInContextError(LoRAError):
+    """Stage 5.5 -- an in-context (IC) LoRA, which the plain pipeline cannot use.
+
+    Marked by ``reference_downscale_factor`` in ``__metadata__``, which maps to
+    a kwarg on the in-context pipeline that must match the factor the adapter
+    was trained with. Applied to the plain pipeline an IC-LoRA **neither errors
+    nor works** -- the silent-garbage shape again, arriving through a door stage
+    7 does not watch.
+    """
+
+    def __init__(self, *, source, marker, value):
+        self.source = source
+        self.marker = marker
+        self.value = value
+        super().__init__(
+            f"LoRA {source} is an in-context (IC) LoRA: its metadata declares "
+            f"{marker}={value!r}. IC-LoRAs condition on a reference image and only work through "
+            f"the in-context pipeline, which must be given the same {marker}. Applied to the "
+            f"standard pipeline this adapter would load without error and have no effect."
+        )
+
+
+class LoRADimensionError(LoRAError):
+    """Stage 6.5 -- a low-rank factor does not match its target module's shape.
+
+    The gate that catches an adapter trained for a different LTX model. Note the
+    comparison is **per module**: this transformer carries a video stream at 4096
+    and an audio stream at 2048, each with a 4x feed-forward expansion, so
+    "contains 2048" is not a signal -- "2048 at a module that expects 4096" is.
+    """
+
+    def __init__(self, *, source, module, expected, actual, key=""):
+        self.source = source
+        self.module = module
+        self.expected = expected
+        self.actual = actual
+        self.key = key
+        super().__init__(
+            f"LoRA {source} does not fit this model: {actual} at {module}, expected {expected}"
+            f"{f' (key {key})' if key else ''}. The adapter was trained for a different LTX "
+            f"model; applying it would corrupt that module."
+        )
+
+
+class LoRAModuleNotFoundError(LoRAError):
+    """Stage 6.5 -- the adapter targets modules this model does not have.
+
+    Distinct from :class:`LoRADimensionError` on purpose: a wrong *dimension*
+    and a wrong *module* are different diagnoses, and the user needs to know
+    which. Missing modules are what a genuinely foreign adapter looks like.
+    """
+
+    def __init__(self, *, source, missing_modules, module_count):
+        self.source = source
+        self.missing_modules = tuple(missing_modules)
+        self.module_count = module_count
+        super().__init__(
+            f"LoRA {source} targets modules this model does not have: "
+            f"{_join(self.missing_modules[:5])}"
+            f"{' and others' if len(self.missing_modules) > 5 else ''}. "
+            f"{len(self.missing_modules)} of {module_count} targeted modules are absent, so the "
+            f"adapter is built for a different architecture."
         )
 
 
