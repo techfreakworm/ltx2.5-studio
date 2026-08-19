@@ -53,29 +53,30 @@ what `tests/verify_streams.py` observed in the container, not a human reading.
 
 | # | Mode | Result | Streams observed | Size | Time |
 |---|---|---|---|---|---|
-| H1 | `text_to_video` | ✅ | h264 704×480@24, f=121 | 886,265 B | 25.7 s |
-| H2 | `image_to_video` | ✅ | h264 704×480@24, f=121 | 432,486 B | 26.3 s |
-| H3 | `image_text_to_video` | ✅ | h264 704×480@24, f=121 | 1,130,178 B | 26.6 s |
-| H4 | `video_to_video` (strength 0.7) | ✅ | h264 704×480@24, f=121 | 727,490 B | 27.0 s |
-| H5 | `text_to_audio_video` | ✅ | h264 + **aac 48000 Hz 2 ch** | 1,091,468 B | 25.0 s |
-| H6 | `image_to_audio_video` | ✅ | h264 + aac 48000 Hz 2 ch | 620,537 B | 26.6 s |
-| H7 | `image_text_to_audio_video` | ✅ | h264 + aac 48000 Hz 2 ch | 784,282 B | 26.7 s |
-| H8 | `text_to_audio` | ✅ | **pcm_s16le 48000 Hz 2 ch**, no video | 961,998 B | 5.6 s |
-| H9 | `video_to_audio` | ⚠️ §4.5 | pcm_s16le 48000 Hz 2 ch, no video | 961,998 B | 6.0 s |
-| H10 | `audio_to_audio` | ⏸️ **not run** | — | — | — |
-| H11 | `audio_to_video` | ⏸️ **not run** | — | — | — |
+| H1 | `text_to_video` | ✅ | h264 704×480@24, f=121 | 791,782 B | 8.4 s |
+| H2 | `image_to_video` | ✅ | h264 704×480@24, f=121 | 307,583 B | 7.8 s |
+| H3 | `image_text_to_video` | ✅ | h264 704×480@24, f=121 | 775,213 B | 8.0 s |
+| H4 | `video_to_video` | ✅ | h264 704×480@24, f=121 | 708,885 B | 8.6 s |
+| H5 | `text_to_audio_video` | ✅ | h264 + **aac 48000 Hz 2 ch** | 792,803 B | 7.8 s |
+| H6 | `image_to_audio_video` | ✅ | h264 + aac 48000 Hz 2 ch | 374,184 B | 7.9 s |
+| H7 | `image_text_to_audio_video` | ✅ | h264 + aac 48000 Hz 2 ch | 995,843 B | 8.2 s |
+| H8 | `text_to_audio` | ✅ | **pcm_s16le 48000 Hz 2 ch**, no video | 961,998 B | 1.8 s |
+| H9 | `video_to_audio` | ✅ | pcm_s16le 48000 Hz 2 ch, no video | 961,998 B | 2.0 s |
+| H10 | `audio_to_audio` | ✅ | pcm_s16le 48000 Hz 2 ch, **−10.4 dBFS** | 961,998 B | 2.8 s |
+| H11 | `audio_to_video` | ✅ | h264 704×480@24, f=121, no audio | 193,825 B | 8.0 s |
 
-All ✅ measured on the real `get_pipeline` path, no bypass, `verify_streams` 0.
+**Eleven of eleven.** All ✅ measured on the real `get_pipeline` path, no bypass
+and no harness accommodation; `verify_streams` returned 0 on every one.
 
-> **Wall-clock excludes the model load**, which is **14.0 s once** for a whole
-> batch ✅. A reader comparing 5.6 s against 25.7 s is comparing generation, not
-> startup.
->
-> ⚠️ **These sizes predate the schedule-and-guidance fix** (gap **7**). The
-> corrected matrix has since run and **all twelve modes changed** — so treat
-> these as the *before* half of a pair, not as expected values. Corrected
-> timings are in gap 7; **every run is roughly 3× faster**, and the flagship
-> 1216×704 with stereo now takes **21.0 s**.
+| beyond the baseline | | |
+|---|---|---|
+| **H14** stage 2 | 1408 × 960, f=121 | 1,807,646 B · 35.2 s |
+| **H15** `duration_head` | 704 × 480, **f=97** not 121 | 593,527 B · 5.9 s |
+| **H16** high resolution | **1216 × 704** + aac stereo | 1,775,743 B · 21.0 s |
+| **H17** mel round-trip | 4.000 s in → 4.010 s out, **4/4 tones** | strict gate |
+| **H12 / H13a / H13b** | LoRA accepted / rejected / rejected | stage 6.5 |
+
+> **Wall-clock excludes the model load**, which is **14.0 s once** per batch ✅.
 
 > ### ⚠️ Structure is not content
 >
@@ -101,6 +102,61 @@ All ✅ measured on the real `get_pipeline` path, no bypass, `verify_streams` 0.
 > **the saturation is upstream, in the model, not in our writer**. Those files
 > are consistent with each other and sit at the rail; ⏸️ whether that is correct
 > for this model has not been established.
+
+### 2.5 What the recipe fix bought — before / after
+
+Same seed, same geometry on both sides of every pair; **only the distilled
+recipe (gap 7) differs.**
+
+| # | mode | before | after | wall-clock |
+|---|---:|---:|---:|---|
+| H1 | `text_to_video` | 886,265 | 791,782 | 25.7 → **8.4 s** |
+| H2 | `image_to_video` | 432,486 | 307,583 | 26.3 → **7.8 s** |
+| H3 | `image_text_to_video` | 1,130,178 | 775,213 | 26.6 → **8.0 s** |
+| H4 | `video_to_video` | 727,490 | 708,885 | 27.0 → **8.6 s** |
+| H5 | `text_to_audio_video` | 1,091,468 | 792,803 | 25.0 → **7.8 s** |
+| H6 | `image_to_audio_video` | 620,537 | 374,184 | 26.6 → **7.9 s** |
+| H7 | `image_text_to_audio_video` | 784,282 | **995,843** | 26.7 → **8.2 s** |
+| H8 | `text_to_audio` | 961,998 | 961,998 | 5.6 → **1.8 s** |
+| H9 | `video_to_audio` | 961,998 | 961,998 | 6.0 → **2.0 s** |
+| H14 | stage 2 | 2,254,799 | 1,807,646 | 84.3 → **35.2 s** |
+| H15 | `duration_head` | 684,374 | 593,527 | 19.4 → **5.9 s** |
+| H16 | 1216 × 704 | 2,331,528 | 1,775,743 | 68.7 → **21.0 s** |
+
+**Geometry is identical on both sides of every pair** — H14 stays 1408 × 960,
+H15 stays 97 frames, the rest 704 × 480 × 121. *Sizes changed; geometry did
+not* is the shape of the result.
+
+Three things a reader needs:
+
+- **H7 is the only artifact that grew.** h264 size tracks content complexity,
+  so that is neither good nor bad on its own. Flagged, not interpreted.
+- **H8 and H9 are byte-identical** because uncompressed PCM at one duration,
+  rate and channel count always is. **Their change is entirely in level**, not
+  in bytes — see below — so reading this table alone would call them unchanged
+  when they are two of the three that moved most.
+- **~3× faster everywhere.** At `guidance_scale=1.0` with STG and modality
+  zeroed there are no classifier-free branches, so it is one forward pass per
+  step instead of two or three. **The defect cost 3× the compute as well as
+  the quality.**
+
+> ### ⚠️ These pairs are not yet controlled — the audio evidence is
+>
+> **The seed never reached the model** until `4ebb8b9` (gap 8), so both halves
+> of every pair above were unconditionally random. **The pixel differences
+> cannot yet evidence that the recipe fix caused them** — two runs of one mode
+> differed anyway. They need **re-running seeded** before they carry weight.
+>
+> **The audio levels do stand on their own**, because they are systematic and
+> orders of magnitude outside run-to-run variation:
+>
+> | | before | after |
+> |---|---:|---:|
+> | H9 `video_to_audio` | −55.0 dBFS | **−17.8 dBFS** |
+> | H8 `text_to_audio` | −5.2 dBFS, **peak 1.0000** (railed) | **−15.3 dBFS**, peak 0.6953 |
+> | highest peak, any mode | **1.7811** | **1.0050** |
+>
+> A 50 dB gap and a clipped peak going away are not a seed.
 
 > ### ⏸️ Sizes differ between the two code paths, and it is not known why
 >
@@ -302,6 +358,84 @@ caches per image or per cold worker is ⏸️ unknown and decides its severity.
    arriving at ±1.0.** Stage 2's brightness falloff was this too, not stage 2:
    mean `99.48 → 34.44` collapsing before, `82.52 → 110.47` stable after.
 
+
+8. ### ⚠️ The seed reached only the sidecar — **the one open defect**
+
+   `_resolve_seed` ran and the number went into the encoder metadata. **There
+   was no generator anywhere in the package**, so every run was unconditionally
+   random and every *"same seed"* comparison was two independent runs.
+
+   ✅ **Fixed** in `4ebb8b9`: a generator seeded from the request, built on the
+   pipeline's own device, threaded to the pipeline **and** to
+   `audio_vae.encode`'s `.sample()`.
+
+   ⏸️ **What still needs re-running**, because it was measured before the fix:
+   the before/after pixel pairs (§2.5), **H10b**, H12b and H4b. Everything
+   structural is unaffected — H14's exact 2× resolution, H15's 97 frames,
+   H17's frequency recovery, and every audio level.
+
+   > The lever that should have caught it was ours: `decode_kwargs` took a
+   > `generator` argument, **with a docstring explaining why the diffusion
+   > decoder must be seeded**, and read a key nothing ever set. See PLAN §9
+   > rule 12.
+
+9. ### ⏸️ `noise_scale` and `sigmas[0]` disagree — open, deliberately unfixed
+
+   📄 Upstream infers one from the other — *"first (largest) sigma value if
+   using custom sigmas"* — and our `stage_2_kwargs` honours it. The
+   audio-input modes do not: they send `noise_scale` while `sigmas[0]` stays
+   1.0.
+
+   **It was diagnosed as the cause of a silent `audio_to_audio` and it was
+   not** (§4.1). A fix was written, committed and **withdrawn**: truncating the
+   schedule at `noise_scale` takes an eight-step run to **two** steps at 0.5
+   and **one** at 0.1 — values that measured healthy on eight.
+
+   **Agreeing with a contract is not evidence that a change improves
+   anything.** A test pins the current behaviour and explains why, so the next
+   attempt arrives with a measurement rather than with agreement.
+
+---
+
+## 4.1 ⚠️ Known limitation — unusual audio input produces a silent file
+
+**Not a defect we can properly fix, and the most likely way a user meets a
+disappointing result.**
+
+`audio_vae.encode` is **never called by the pipeline**. Our
+`encode_waveform_to_latents` is the only producer of those latents, and
+**nothing anywhere validates their distribution** — not upstream, not us.
+
+So audio that is far from what the model was trained on encodes to latents the
+model cannot use, and the result is **a structurally perfect, inaudible file
+with no error and nothing to act on.** ✅ A real instance, and it cost a day of
+misdiagnosis: a two-tone synthetic fixture at **−14.8 dBFS in** produced
+**−87.9 dBFS out**, with correct codec, channels, rate and duration, and
+`verify_streams` exit 0. The same mode fed a real recording produces **−10.4
+dBFS**.
+
+**Likely triggers:** pure tones, sine sweeps, test signals, near-silence,
+heavily synthesised material. **Ordinary recorded audio is fine** — every
+realistic input tried has worked.
+
+⛔ **Do not "fix" this with an out-of-distribution detector.** Reliable OOD
+detection at that boundary is not something this project can do, and a
+detector that is wrong in either direction is worse than the limitation.
+
+⏸️ **A narrower thing is worth doing and is deliberately not done yet.** We
+measure the input level and can measure the output level, so **a file that
+comes back essentially silent could say so** in `GenerationResult.warnings`.
+The decision that makes it honest is that it must be a **measurement, not a
+diagnosis**: *"this output is −87.9 dBFS, effectively silent"* is a fact about
+the artifact, checkable and cause-free. *"Your audio was out of distribution"*
+is a claim we cannot support.
+
+It is not built because it needs a threshold, a threshold needs evidence, and
+the PR opens with **one** named defect. **Adding an unvalidated heuristic to
+the export path hours beforehand is the same move as shipping a schedule change
+on a contract reading** — which was reverted for that reason. It belongs in the
+next pass, with a measured floor.
+
 ---
 
 ## 5. How to run it
@@ -496,37 +630,31 @@ priority.
 
 ## 7. If you do one thing
 
-**Two things, and they are the two claims this project has not earned.**
+**Re-run the comparisons seeded.** Everything works; the open item is that some
+of the *evidence* was gathered before the seed reached the model.
 
-### First: run H17, the mel round-trip
+### The runs that need repeating, and what each would then establish
 
-**H10 and H11 passing does not establish that the audio-input path is correct**
-— only that it runs. The forward mel transform does not exist in the checkpoint
-and had to be built; **five of its parameters are read from config and the rest
-are conventions** (`power`, `f_min`/`f_max`, `mel_scale`/`norm`, `center`, the
-log and its floor). A wrong choice there produces **well-formed audio that is
-quietly degraded** — which is precisely the failure mode this document keeps
-returning to. `TEST_PLAN` A.5.1 specifies the round-trip and the
-failure-ordered candidate list.
+| run | what it would establish | why it does not yet |
+|---|---|---|
+| **§2.5 before/after pairs** | that the recipe fix caused the pixel differences | both halves were unconditionally random |
+| **H10b** — `noise_scale` 0.1 vs 0.9 | that the user's audio reaches the model | same, plus the audio encode drew unseeded |
+| **H12b** — LoRA effect | that attaching the adapter changed the output | same |
+| **H4b** — `strength` 0.3 vs 0.9 | that the conditioning clip reaches the model | same |
 
-⚠️ Its fixture must have **structure a wrong window would damage** — two tones
-and an envelope. **Noise and silence both survive a wrong analysis window
-looking much the same**, so either would make the test pass while proving
-nothing.
+Add a **same-value control** to each — two runs at *identical* settings. Under
+a working seed its spread should be **zero**, and that is what turns "the halves
+differ" into evidence rather than a coin toss. An earlier control measured 1.8%
+and was read as a bound on the variance; **an unseeded control cannot bound
+anything**, which is the mistake worth not repeating.
 
-### Second: run H10b
+### What is already earned, and does not need repeating
 
-*That a user's uploaded audio reaches the model* is otherwise unproven.
+**Eleven of eleven modes produce artifacts with the expected stream layout on
+the real path.** ✅ H14's exact 2× resolution, H15's 97 frames, H17's round-trip
+recovering 4/4 tones under a strict gate, both LoRA directions, and every audio
+level — all structural or systematic, and none of them depends on seeding.
 
-Two `noise_scale` values — 0.1 and 0.9 — at the **same pinned seed**, on
-`audio_to_audio`. **Identical audio means the input is not reaching the model**,
-however good the file looks and whatever the stream check returns.
+**And read §3 before treating any of this as a deployment.** The Space has
+evicted twice and has never run.
 
-It is the only run that can see this, and the reason is worth understanding
-before deciding to skip it: `noise_scale=1.0` discards the audio input **by
-design**, so a bug that drops the input entirely is indistinguishable from
-correct operation. The mode produces valid audio either way. Every other check
-in the matrix passes either way.
-
-Everything else in §2 has produced an artifact and had its **structure**
-observed. Structure was never the hard part.
