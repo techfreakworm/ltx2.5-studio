@@ -276,11 +276,17 @@ def _check_dimensions(
 def validate_lora(
     source,
     *,
-    max_bytes: int = DEFAULT_MAX_LORA_BYTES,
+    max_bytes: int | None = None,
     fetcher: Callable | None = None,
     transformer=None,
 ) -> LoRAValidation:
-    """Run stages 1-6.5 and return a report, or raise a specific error."""
+    """Run stages 1-6.5 and return a report, or raise a specific error.
+
+    ``max_bytes=None`` uses :data:`DEFAULT_MAX_LORA_BYTES`, so callers that do
+    not care about the bound do not have to name it.
+    """
+    if max_bytes is None:
+        max_bytes = DEFAULT_MAX_LORA_BYTES
     path = _resolve(source, fetcher)
     label = str(path)
     warnings: list[str] = []

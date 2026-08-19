@@ -43,13 +43,19 @@ huggingface_hub>=1.28.0,<2
 hf_xet>=1.6.0,<2
 
 # --- UI -----------------------------------------------------------------------
-# gradio 5.x is END OF LIFE (last stable 5.50.0, 2025-11-21). The Space's
-# frontmatter `sdk_version` is authoritative for the installed gradio; this range
-# must stay compatible with it (currently 6.24.0). Breaking changes from 5.x that
-# affect us: gr.Video subtitle-tuple return removed; show_download_button /
-# show_share_button -> buttons=[...]; gr.Audio show_controls ->
-# show_recording_waveform; min_length / max_length -> event-listener validators.
-gradio>=6.24.0,<7
+# gradio 5.x is END OF LIFE (last stable 5.50.0, 2025-11-21).
+#
+# PINNED EXACTLY, and it MUST EQUAL `sdk_version` in the Space README frontmatter.
+# A range brackets 6.24.0 today and resolves to 6.30 tomorrow while sdk_version
+# still says 6.24.0 — the Space would then serve one gradio and the environment
+# would allow another. A drift test asserts the two agree. Upgrading is
+# deliberately two edits: this line and sdk_version.
+#
+# Breaking changes from 5.x that affect us: gr.Video subtitle-tuple return
+# removed; show_download_button / show_share_button -> buttons=[...]; gr.Audio
+# show_controls -> show_recording_waveform; min_length / max_length ->
+# event-listener validators.
+gradio==6.24.0
 
 # --- media I/O ----------------------------------------------------------------
 # av (PyAV) is not optional: image-conditioning CRF re-compression is applied by

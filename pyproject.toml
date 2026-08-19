@@ -17,6 +17,10 @@ authors = [{ name = "Mayank Gupta", email = "techfreakworm@gmail.com" }]
 dev = [
     "pytest>=9.0,<10",
     "ruff>=0.16,<0.17",
+    # Must match requirements.txt and the Space's sdk_version. Installed into the
+    # shared .venv so test_app.py's headless-build acceptance test actually runs
+    # — a skipped acceptance test proves nothing.
+    "gradio==6.24.0",
 ]
 
 [project.urls]
