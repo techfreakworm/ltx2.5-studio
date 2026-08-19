@@ -260,9 +260,7 @@ def test_audio_only_modes_skip_stage_two(mode_id):
     assert modes.get_mode(mode_id).skip_stage_2 is True
 
 
-@pytest.mark.parametrize(
-    "mode_id", [m for m in EXPECTED_MODE_IDS if m not in AUDIO_ONLY_MODE_IDS]
-)
+@pytest.mark.parametrize("mode_id", [m for m in EXPECTED_MODE_IDS if m not in AUDIO_ONLY_MODE_IDS])
 def test_video_producing_modes_do_not_skip_stage_two(mode_id):
     """The mitigation is for modes whose video is thrown away. Applying it to a
     mode that returns video would silently halve its quality."""
@@ -328,7 +326,10 @@ def test_video_to_video_conditions_at_less_than_full_strength(make_request):
     )
     conditions = kwargs["conditions"]
     assert conditions
-    strengths = [getattr(c, "strength", c.get("strength") if isinstance(c, dict) else None) for c in conditions]
+    strengths = [
+        getattr(c, "strength", c.get("strength") if isinstance(c, dict) else None)
+        for c in conditions
+    ]
     assert all(s is not None and s < 1.0 for s in strengths), strengths
 
 
@@ -379,3 +380,18 @@ def test_builders_are_pure(mode_id, make_request):
         if isinstance(value, scalars):
             assert second[key] == value, f"{mode_id}: {key} differs between calls"
     assert vars(request) == before, f"{mode_id}'s builder mutated the request"
+
+
+def test_the_global_ceiling_is_not_the_lever():
+    """MAX_VIDEO_CONDITION_STRENGTH never binds, so lowering it fixes nothing.
+
+    Pinned because it has been proposed as a fix twice: ``min(request.strength,
+    0.99)`` with a request default of 0.8 never reaches 0.99. Kept after the
+    `video_to_audio` silence turned out to be the distilled recipe rather than
+    condition strength at all -- the constant was wrong both times, and this
+    test is what stops it being reached for a third.
+    """
+    assert modes.MAX_VIDEO_CONDITION_STRENGTH > 0.8, (
+        "the global ceiling now binds at the request default; if that is intended the "
+        "comment saying it never binds needs to go"
+    )

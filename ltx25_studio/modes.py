@@ -64,6 +64,20 @@ IMAGE_CONDITION_STRENGTH = 1.0
 
 #: Video conditioning must stay below 1.0: at full strength the input frames are
 #: pinned and nothing is generated.
+#:
+#: ⚠️ **This ceiling never binds in practice, and it is not the lever anyone
+#: wants.** ``_conditions`` takes ``min(request.strength,
+#: MAX_VIDEO_CONDITION_STRENGTH)`` and ``GenerationRequest.strength`` defaults to
+#: **0.8**, so lowering this constant changes nothing at all.
+#:
+#: Recorded because it has been proposed as a fix twice. When `video_to_audio`
+#: came back at −55 dBFS this was named as the culprit; it was not, and neither
+#: was condition strength. ✅ The cause was the distilled recipe reaching only
+#: the stage-2 path, and with that fixed H9 runs healthy at the **unchanged**
+#: default of 0.8. A sweep showing 0.8 → −55.0 and 0.5 → −5.1 measured a real
+#: interaction with the broken guidance — inside a pipeline that no longer
+#: exists. ``test_the_global_ceiling_is_not_the_lever`` fails if this stops
+#: being true.
 MAX_VIDEO_CONDITION_STRENGTH = 0.99
 
 
