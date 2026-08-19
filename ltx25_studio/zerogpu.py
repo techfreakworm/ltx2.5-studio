@@ -72,7 +72,10 @@ __all__ = [
     "SPACE_HARDWARE",
     "assert_returnable",
     "check_duration_signature",
+    "estimate_duration",
     "gpu_decorator_kwargs",
+    "is_zerogpu",
+    "local_spaces_stub",
     "spaces_version",
 ]
 
@@ -88,6 +91,61 @@ SPACE_HARDWARE = "zero-a10g"
 _MAX_DEPTH = 8
 
 _ATOMIC = (str, bytes, bytearray, int, float, bool, complex, type(None))
+
+
+class _LocalSpacesStub:
+    """Stand-in for ``spaces`` off-Space, so the wiring is identical everywhere.
+
+    The point is that ``app.py`` can write a literal ``@spaces.GPU(...)`` -- the
+    form ZeroGPU's startup analyzer looks for -- without that line becoming
+    conditional. A conditional decorator is how "we wrote the rule down and then
+    did not apply it" happens: the Space path stops being the path anyone runs.
+
+    Locally ``GPU(...)`` returns the function unchanged.
+    """
+
+    __version__ = "local-stub"
+    is_stub = True
+
+    @staticmethod
+    def GPU(*, duration=None, size=None, **kwargs):  # noqa: N802 - mirrors spaces.GPU
+        def decorate(func):
+            return func
+
+        return decorate
+
+
+def local_spaces_stub() -> _LocalSpacesStub:
+    """The off-Space stand-in. See :class:`_LocalSpacesStub`."""
+    return _LocalSpacesStub()
+
+
+def is_zerogpu(spaces_module) -> bool:
+    """True only when the real platform package is present."""
+    return spaces_module is not None and not getattr(spaces_module, "is_stub", False)
+
+
+def estimate_duration(**params) -> int:
+    """Seconds to reserve for one generation.
+
+    **Its signature must match the decorated function exactly** -- ZeroGPU calls
+    the estimator with that function's own arguments, so a drifted signature
+    raises at *schedule* time, once the user is already waiting. Both take
+    ``**params``, and ``check_duration_signature`` asserts it at import.
+
+    Reservation and billing are different meters: the pre-check compares the
+    **requested** duration against remaining quota, while billing is on the
+    **effective** duration times the size multiplier. So an over-generous
+    request costs nothing in billing and everything in schedulability.
+    """
+    from .config import DEFAULT_GPU_DURATION_SECONDS
+
+    seconds = params.get("gpu_duration_seconds") or DEFAULT_GPU_DURATION_SECONDS
+    if params.get("enable_stage_2"):
+        # Stage 2 adds an upsample pass plus three more denoise steps; a timeout
+        # costs the whole reservation and proves nothing.
+        seconds = int(seconds * 1.5)
+    return int(seconds)
 
 
 def spaces_version(spaces_module) -> str | None:

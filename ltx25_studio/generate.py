@@ -29,6 +29,7 @@ depth is testable with no GPU and no weights.
 
 from __future__ import annotations
 
+import contextvars
 import logging
 import secrets
 import uuid
@@ -41,13 +42,53 @@ from .errors import DecodeError, EmptyOutputError, EncodeError, ModelLoadError
 
 logger = logging.getLogger(__name__)
 
+#: Set by ``app.py`` to the ``@spaces.GPU``-decorated entrypoint. When present,
+#: a generation started outside the GPU worker is routed through it so the run
+#: actually reserves a ZeroGPU slot. Unset locally and in tests, where calling
+#: straight through is correct.
+_GPU_DISPATCH: Callable | None = None
+
+#: Re-entrancy guard: the decorated entrypoint calls back into ``generate()``,
+#: and without this it would dispatch to itself forever.
+_IN_GPU_WORKER = contextvars.ContextVar("ltx25_in_gpu_worker", default=False)
+
+
+def set_gpu_dispatch(func: Callable | None) -> None:
+    """Register the GPU entrypoint every generation should be routed through."""
+    global _GPU_DISPATCH
+    _GPU_DISPATCH = func
+
+
+def gpu_dispatch() -> Callable | None:
+    """The registered entrypoint, or None when running without ZeroGPU."""
+    return _GPU_DISPATCH
+
+
+def configured_output_root() -> Path:
+    """The output directory, from config, so the writer and the sweep agree.
+
+    They must resolve to the same place: if the startup sweep cleans one
+    directory while generations fill another, retention silently protects
+    nothing and the disk fills anyway -- which is the failure the sweep exists
+    to prevent.
+    """
+    try:
+        from .config import load_config
+
+        return Path(load_config().output_dir)
+    except Exception:  # a bad cap must not stop a generation from running
+        return Path(DEFAULT_OUTPUT_ROOT)
+
 __all__ = [
     "DEFAULT_OUTPUT_ROOT",
     "MAX_SEED",
     "RANDOM_SEED",
     "GenerationRequest",
     "GenerationResult",
+    "configured_output_root",
     "generate",
+    "gpu_dispatch",
+    "set_gpu_dispatch",
     "stage_2_enabled",
 ]
 
@@ -319,6 +360,19 @@ def generate(
     elif params:
         request = replace(request, **params)
 
+    # Route through the ZeroGPU entrypoint when one is registered and we are not
+    # already inside the worker. Without this the UI calls straight through and
+    # no generation ever reserves a GPU slot.
+    dispatch = _GPU_DISPATCH
+    if dispatch is not None and not _IN_GPU_WORKER.get():
+        return dispatch(
+            request=request,
+            pipeline_factory=pipeline_factory,
+            encoder=encoder,
+            output_root=output_root,
+            retention_bytes=retention_bytes,
+        )
+
     # --- everything cheap first: unknown mode and illegal geometry must not
     # --- cost a model load.
     spec = modes.get_mode(request.mode)
@@ -326,7 +380,7 @@ def generate(
     seed = _resolve_seed(request.seed)
 
     run_id = uuid.uuid4().hex[:12]
-    root = Path(output_root) if output_root is not None else Path(DEFAULT_OUTPUT_ROOT)
+    root = Path(output_root) if output_root is not None else configured_output_root()
     run_dir = root / f"run-{run_id}"
 
     factory = pipeline_factory or _default_pipeline_factory

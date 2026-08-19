@@ -44,11 +44,44 @@ __all__ = [
     "check_diffusers_version",
     "missing_cached_files",
     "require_cache_complete",
+    "run",
 ]
 
 #: The pinned diffusers SHA reports this. A release (0.39.0) would import
 #: ``LTX2Pipeline`` successfully and fail much later and more expensively.
 EXPECTED_DIFFUSERS_VERSION = "0.40.0.dev0"
+
+
+def run(runtime_config, *, strict: bool = False, spaces_module=None) -> str:
+    """Log the startup report, and hard-check the environment when on a Space.
+
+    ``strict`` gates the checks that only make sense with real weights present:
+    the pinned-revision assertion and cache completeness. Off-Space they would
+    fail every local run for no reason; on-Space they are the difference between
+    an immediate, named failure and one that surfaces 70 GB into a download.
+    """
+    import logging
+
+    from . import pipelines
+
+    log = logging.getLogger("ltx25_studio")
+    missing = missing_cached_files()
+    log.info(
+        "%s",
+        pipelines.startup_report(
+            runtime_config,
+            missing_files=missing,
+            gpu_size=getattr(spaces_module, "__version__", None) and "pending pack",
+        ),
+    )
+    if not strict:
+        return "reported"
+
+    import diffusers
+
+    check_diffusers_version(diffusers.__version__)
+    require_cache_complete()
+    return "verified"
 
 
 def check_diffusers_version(found: str) -> None:
