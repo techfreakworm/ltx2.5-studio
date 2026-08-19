@@ -74,9 +74,11 @@ __all__ = [
     "check_duration_signature",
     "estimate_duration",
     "gpu_decorator_kwargs",
+    "host_has_cuda",
     "is_zerogpu",
     "local_spaces_stub",
     "spaces_version",
+    "will_use_gpu",
 ]
 
 #: The Spaces hardware identifier for ZeroGPU. A **legacy** string -- the
@@ -123,6 +125,45 @@ def local_spaces_stub() -> _LocalSpacesStub:
 def is_zerogpu(spaces_module) -> bool:
     """True only when the real platform package is present."""
     return spaces_module is not None and not getattr(spaces_module, "is_stub", False)
+
+
+def host_has_cuda() -> bool:
+    """Does this machine have a usable CUDA device?
+
+    **Never call this on a Space.** Importing torch and touching
+    ``torch.cuda.is_available()`` at module scope is exactly what the
+    ``import spaces``-before-torch rule exists to prevent -- ZeroGPU raises
+    "CUDA has been initialized before importing the spaces package". Which is
+    why :func:`will_use_gpu` short-circuits on ``spaces`` first and this is only
+    ever reached off-Space, where the probe is harmless.
+
+    Returns False rather than raising when torch is absent, so a dev box with no
+    model stack still imports the app.
+    """
+    try:
+        import torch
+
+        return bool(torch.cuda.is_available())
+    except Exception:
+        return False
+
+
+def will_use_gpu(spaces_module) -> bool:
+    """Will this process do GPU work? A **capability** question, not identity.
+
+    The distinction is the whole point. Gating on "are we on ZeroGPU" meant a
+    real 97 GB GPU box downloaded nothing, built nothing and moved nothing to
+    CUDA, because it simply was not a Space. The same lines now do the right
+    thing in both places: on ZeroGPU ``.to("cuda")`` is intercepted and packs to
+    disk, on a plain CUDA box it is a real VRAM move. That difference belongs to
+    the platform, not to us.
+
+    **The ordering is load-bearing, not stylistic.** ``spaces`` is checked first
+    so that on a Space we never probe CUDA at all -- see :func:`host_has_cuda`.
+    """
+    if is_zerogpu(spaces_module):
+        return True
+    return host_has_cuda()
 
 
 def estimate_duration(**params) -> int:

@@ -41,20 +41,43 @@ _log = logging.getLogger("ltx25_studio")
 CONFIG = load_config()
 
 ON_ZEROGPU = zerogpu.is_zerogpu(spaces)
-_log.info("spaces=%s zerogpu=%s", zerogpu.spaces_version(spaces), ON_ZEROGPU)
+
+# CAPABILITY, not identity. Gating the download, the preflight and the CUDA move
+# on "is this a Space" meant a real 97 GB GPU box did none of them, because it
+# simply was not a Space: no weights, no pipeline, no device move, and a
+# non-strict preflight that therefore did not complain either.
+#
+# `will_use_gpu` short-circuits on `spaces` before probing CUDA, so on a Space we
+# never touch torch.cuda at module scope — which is the rule the whole
+# import-order dance exists to protect.
+WILL_USE_GPU = zerogpu.will_use_gpu(spaces)
+_log.info(
+    "spaces=%s zerogpu=%s will_use_gpu=%s",
+    zerogpu.spaces_version(spaces),
+    ON_ZEROGPU,
+    WILL_USE_GPU,
+)
 
 # Weights are fetched HERE, at runtime, not by `preload_from_hub`. On a PRIVATE
 # Space the preload init step runs unauthenticated and a gated repo answers 401,
 # so it cannot work however valid the token is. This process has the secrets.
 # It also removes the read-only-cache class (PLAN §6.2): the runtime user owns
 # the cache it downloaded.
-if ON_ZEROGPU:
+if WILL_USE_GPU:
     preflight.ensure_weights(token=os.environ.get("HF_TOKEN"))
 
-# Version assertion, cache completeness and the resource report. Strict only
-# on-Space — and now genuinely meaningful, because it verifies the download we
-# just performed rather than asserting a preload we did not control.
-preflight.run(CONFIG, strict=ON_ZEROGPU, spaces_module=spaces)
+# Version assertion, cache completeness and the resource report.
+#
+# strict=WILL_USE_GPU is a DECISION, not inheritance. Strict means the pinned
+# diffusers revision and cache completeness are enforced rather than reported,
+# and the rule is: any host that is about to do GPU work must fail loudly on a
+# missing file, not quietly render something wrong. That covers a real GPU box
+# as well as a Space. A laptop with no CUDA gets the report only, because
+# enforcing 72 GB of weights there would fail every local run for no reason.
+#
+# It is also only meaningful because ensure_weights ran first: this verifies the
+# download we just performed, not a preload we never controlled.
+preflight.run(CONFIG, strict=WILL_USE_GPU, spaces_module=spaces)
 
 # PLAN §2.7: sweep on startup as well as after each run. Resolved from the same
 # config the writer uses, so the two cannot drift onto different directories.
@@ -71,7 +94,7 @@ except Exception as _exc:  # noqa: BLE001 - a bad sweep must not stop startup
 # call, rewrites it to .to("cpu") and packs every tensor to disk. Doing it lazily
 # inside the decorated function skips packing entirely and re-transfers from RAM
 # on every cold worker.
-if ON_ZEROGPU:
+if WILL_USE_GPU:
     pipelines.get_pipeline(pipeline="condition", device="cuda")
     pipelines.get_pipeline(pipeline="text2video", device="cuda")
 

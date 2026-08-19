@@ -195,7 +195,7 @@ def test_the_mismatch_message_names_both_signatures():
 
 
 def test_a_missing_trailing_kwarg_is_refused():
-    """"the EXACT same positional signature as the decorated function, trailing
+    """ "the EXACT same positional signature as the decorated function, trailing
     kwargs included"."""
 
     def generate(prompt, *, seed=0, num_frames=121):
@@ -229,3 +229,73 @@ def test_the_module_imports_without_the_spaces_package():
 
     assert "spaces" not in sys.modules or sys.modules["spaces"] is not None
     importlib.reload(zerogpu)
+
+
+# --------------------------------------------------------------------------
+# capability, not identity — and the ordering that keeps it safe on a Space
+# --------------------------------------------------------------------------
+#
+# Gating the weight download, the preflight and the CUDA move on "is this a
+# Space" meant a real 97 GB GPU box did none of them: no weights, no pipeline, no
+# device move, and a non-strict preflight that therefore did not complain either.
+# The UI came up and the first generation went nowhere.
+
+
+class _SpiedProbe:
+    """Records whether the CUDA probe was consulted at all."""
+
+    def __init__(self, result):
+        self.result = result
+        self.calls = 0
+
+    def __call__(self):
+        self.calls += 1
+        return self.result
+
+
+def test_a_space_uses_the_gpu_without_ever_probing_cuda(monkeypatch):
+    """**The load-bearing assertion is the call count, not the return value.**
+
+    ``import spaces`` must precede anything that touches CUDA — ZeroGPU raises
+    "CUDA has been initialized before importing the spaces package" otherwise.
+    So on a Space the probe must never run, and a refactor that reorders the
+    short-circuit has to fail here rather than on the platform.
+    """
+    probe = _SpiedProbe(True)
+    monkeypatch.setattr(zerogpu, "host_has_cuda", probe)
+
+    class RealSpaces:
+        __version__ = "0.51.1"
+
+    assert zerogpu.will_use_gpu(RealSpaces()) is True
+    assert probe.calls == 0, (
+        "will_use_gpu probed CUDA on a Space. The spaces check must short-circuit "
+        "first; touching torch.cuda at module scope there is fatal at startup."
+    )
+
+
+def test_a_plain_cuda_box_uses_the_gpu(monkeypatch):
+    """hinode: same GPU, no `spaces` package. It must still do the work."""
+    monkeypatch.setattr(zerogpu, "host_has_cuda", _SpiedProbe(True))
+    assert zerogpu.will_use_gpu(zerogpu.local_spaces_stub()) is True
+
+
+def test_a_box_with_no_cuda_does_not(monkeypatch):
+    monkeypatch.setattr(zerogpu, "host_has_cuda", _SpiedProbe(False))
+    assert zerogpu.will_use_gpu(zerogpu.local_spaces_stub()) is False
+    assert zerogpu.will_use_gpu(None) is False
+
+
+def test_the_cuda_probe_never_raises_without_torch(monkeypatch):
+    """A dev box with no model stack must still import the app."""
+    import builtins
+
+    real_import = builtins.__import__
+
+    def no_torch(name, *args, **kwargs):
+        if name == "torch":
+            raise ImportError("no torch here")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", no_torch)
+    assert zerogpu.host_has_cuda() is False
