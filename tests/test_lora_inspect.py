@@ -339,6 +339,44 @@ def test_a_missing_file_raises_our_error_not_a_bare_oserror(tmp_path):
 
 
 # --------------------------------------------------------------------------
+# the official adapter's license is a wall of text
+# --------------------------------------------------------------------------
+
+LONG_LICENSE = "LTX-2.5 Community License Agreement. " + ("Section text. " * 800)
+
+
+def test_a_very_long_license_value_parses(write_safetensors):
+    """The official adapter's ``__metadata__`` carries the full licence text.
+    Reading it must not be a special case."""
+    path = write_safetensors(
+        name="licensed.safetensors",
+        tensors=lora_tensors(NATIVE_PREFIX, TRANSFORMER_MODULE_PATHS),
+        metadata=OFFICIAL_METADATA | {"license": LONG_LICENSE},
+    )
+    result = lora_inspect.inspect_lora(path)
+    assert result.metadata["license"] == LONG_LICENSE, "nothing may be silently truncated"
+    assert result.model_version == "2.5.0"
+
+
+def test_an_error_message_does_not_dump_the_license_text(write_safetensors):
+    """An error is read by a human. Ten kilobytes of licence text in it is not a
+    message, it is a denial of service on the person reading it."""
+    from ltx25_studio.errors import LoRAError
+    from ltx25_studio.lora import validate as lora_validate
+
+    path = write_safetensors(
+        name="licensed-and-wrong.safetensors",
+        tensors=lora_tensors("unet.", ("down_blocks.0.resnets.0.conv1",)),
+        metadata=OFFICIAL_METADATA | {"license": LONG_LICENSE},
+    )
+    with pytest.raises(LoRAError) as excinfo:
+        lora_validate.validate_lora(path)
+    message = str(excinfo.value)
+    assert LONG_LICENSE not in message
+    assert len(message) < 1000, f"error message is {len(message)} characters long"
+
+
+# --------------------------------------------------------------------------
 # the fixtures are honest
 # --------------------------------------------------------------------------
 

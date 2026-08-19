@@ -28,6 +28,15 @@ from ltx25_studio import errors
 # --------------------------------------------------------------------------
 
 ERROR_SPECS = {
+    # -- configuration (PLAN §5.1; env-driven config) ---------------------
+    "ConfigError": (
+        {
+            "variable": "LTX25_TRANSFORMER_PRECISION",
+            "value": "fp4",
+            "legal": ("bf16", "fp8"),
+        },
+        ["LTX25_TRANSFORMER_PRECISION", "fp4", "bf16", "fp8"],
+    ),
     # -- constraints (PLAN §5.5) -----------------------------------------
     "FrameCountError": (
         {"num_frames": 120, "temporal_compression_ratio": 8, "nearest": (113, 121)},
@@ -160,6 +169,7 @@ BASE_ERROR_NAMES = (
 )
 
 BASE_OF = {
+    "ConfigError": "LTXStudioError",
     "FrameCountError": "ConstraintError",
     "DimensionError": "ConstraintError",
     "AudioVideoDesyncError": "ConstraintError",
@@ -281,6 +291,26 @@ def test_error_can_be_raised_and_caught_as_the_root(name):
 # --------------------------------------------------------------------------
 # no error may escape the spec
 # --------------------------------------------------------------------------
+
+
+def test_a_misconfiguration_is_not_a_generation_failure():
+    """``ui/`` has to tell an operator who set a Space variable wrong from a user
+    whose run failed. Those are different messages to different people, so
+    ``ConfigError`` must not sit inside the generation family."""
+    config_error = _get("ConfigError")
+    assert not issubclass(config_error, _get("GenerationError"))
+    assert not issubclass(config_error, _get("ConstraintError"))
+    assert issubclass(config_error, _get("LTXStudioError"))
+
+
+def test_a_config_error_refuses_rather_than_falling_back():
+    """PLAN §5.1's whole posture: an unrecognised value fails at startup naming
+    the variable and the legal values. A silent fallback to the default is how a
+    Space runs for a week in a configuration nobody chose."""
+    kwargs, _ = ERROR_SPECS["ConfigError"]
+    message = str(_get("ConfigError")(**kwargs))
+    assert "fp4" in message
+    assert "bf16" in message and "fp8" in message
 
 
 def test_every_error_class_is_covered_by_this_spec():

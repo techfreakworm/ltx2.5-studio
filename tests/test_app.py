@@ -116,7 +116,7 @@ def test_the_blocks_build_with_no_gpu_and_no_weights():
     gradio = pytest.importorskip("gradio")
     from ltx25_studio.ui import blocks
 
-    demo = blocks.build_blocks()
+    demo = blocks.build_ui()
     assert isinstance(demo, gradio.Blocks)
 
 
@@ -139,4 +139,4 @@ def test_building_the_blocks_twice_is_safe():
     pytest.importorskip("gradio")
     from ltx25_studio.ui import blocks
 
-    assert blocks.build_blocks() is not blocks.build_blocks()
+    assert blocks.build_ui() is not blocks.build_ui()

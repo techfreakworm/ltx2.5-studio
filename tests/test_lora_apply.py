@@ -135,6 +135,26 @@ def test_the_fake_pipeline_reproduces_the_peft_config_trap(fake_pipeline, wrong_
     assert fake_pipeline.get_list_adapters()["transformer"]
 
 
+def test_stage_seven_alone_would_not_have_caught_a_wrong_dimension_adapter(
+    fake_pipeline, wrong_dimension_lora
+):
+    """**Necessary but NOT sufficient. Do not delete stage 6.5 as redundant.**
+
+    This loads the LTX-Video-2B adapter the way diffusers would, bypassing our
+    validator entirely, and shows the "attached > 0" criterion being *satisfied*
+    by an adapter built for a different model. Its module names are the ones
+    LTX-2.5 uses, so it really does attach; only its dimensions are wrong.
+
+    Stage 7 answers "did anything happen?". It cannot answer "was it the right
+    thing?" — that is stage 6.5's job (``test_lora_compat.py``).
+    """
+    attached = fake_pipeline.load_lora_weights(wrong_dimension_lora, adapter_name="user_lora")
+    assert attached > 0, (
+        "the fixture no longer reproduces the case: a 2048-dim adapter with matching module "
+        "names must still ATTACH, which is precisely why stage 7 cannot be the last check"
+    )
+
+
 def test_an_adapter_matching_nothing_in_either_component_raises(make_pipeline, good_lora):
     """Same failure from the other direction: the adapter is fine, the pipeline
     is a different architecture."""
