@@ -44,6 +44,7 @@ from .errors import LTXStudioError, MissingModelFileError
 __all__ = [
     "EXPECTED_DIFFUSERS_VERSION",
     "cache_repo_dir",
+    "snapshot_dir",
     "check_diffusers_version",
     "missing_cached_files",
     "ensure_weights",
@@ -184,12 +185,41 @@ def cache_repo_dir(hub_cache: str | os.PathLike[str] | None = None) -> Path:
     return root / f"models--{model_files.REPO_ID.replace('/', '--')}"
 
 
+def snapshot_dir(
+    hub_cache: str | os.PathLike[str] | None = None,
+    revision: str | None = None,
+) -> Path:
+    """The local snapshot directory for the pinned revision.
+
+    **Construct every pipeline from this path, never from the repo id.** Passing
+    the repo id sends ``from_pretrained`` through hub resolution, which fetches
+    the repo's tree manifest and then downloads *everything the manifest lists*
+    -- 48 files, including the dead 8-shard ``transformer/`` set and the dead
+    single-file ``connectors/`` copy: **44.33 GB** that ``model_files`` already
+    documents as paid "for nothing". A complete 37/37 cache does not prevent it.
+
+    ``local_files_only=True`` is NOT the fix. It switches on a strict
+    completeness check against that same manifest, which demands the 14 dead
+    files the allow-list excludes **on purpose** -- so it turns a working load
+    into a hard refusal. A snapshot directory has no manifest and no repo to
+    resolve against, so the refetch becomes structurally impossible rather than
+    merely disabled.
+
+    Nor may we rely on what happens to work today: with no cached
+    ``trees/<revision>.json`` diffusers falls back to *"Will try to load from
+    local cache"* and succeeds. The first run that reaches the Hub writes that
+    manifest, and every load afterwards behaves differently. **Depending on the
+    absence of a cache metadata file is not a design.**
+    """
+    return cache_repo_dir(hub_cache) / "snapshots" / (revision or model_files.REVISION)
+
+
 def missing_cached_files(
     hub_cache: str | os.PathLike[str] | None = None,
     revision: str | None = None,
 ) -> tuple[str, ...]:
     """Allow-list paths that are not present in the cache snapshot."""
-    snapshot = cache_repo_dir(hub_cache) / "snapshots" / (revision or model_files.REVISION)
+    snapshot = snapshot_dir(hub_cache, revision)
     return tuple(
         path for path in model_files.download_allow_list() if not (snapshot / path).exists()
     )

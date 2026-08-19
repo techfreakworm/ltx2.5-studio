@@ -219,6 +219,29 @@ def derive_pipeline(base, target_cls):
     return target_cls(**shared)
 
 
+def _snapshot_path():
+    """The local directory every component loads from.
+
+    Loading by repo id makes ``from_pretrained`` resolve against the Hub and
+    pull the **whole** repo -- 44.33 GB of shards the allow-list exists to
+    exclude -- even with a verified-complete 37/37 cache. See
+    ``preflight.snapshot_dir`` for why ``local_files_only=True`` is not the fix.
+    """
+    from . import preflight
+
+    path = preflight.snapshot_dir()
+    if not path.is_dir():
+        raise ModelLoadError(
+            component=BASE_KIND,
+            reason=(
+                f"no local snapshot at {path}. Weights are fetched by "
+                f"`preflight.ensure_weights()`, which must run before any pipeline is "
+                f"constructed; loading by repo id instead would refetch the whole repo."
+            ),
+        )
+    return path
+
+
 def _base_pipeline(*, dtype=None, device: str | None = None):
     """Load the model ONCE. Every workflow is derived from this."""
     if _BASE_CACHE_KEY in _CACHE:
@@ -251,8 +274,7 @@ def _base_pipeline(*, dtype=None, device: str | None = None):
         # The checkpoint is bf16 and WEIGHT_DTYPE is bfloat16, so this is a
         # no-op load rather than a conversion. Do not "helpfully" add a cast.
         built = LTX2ConditionPipeline.from_pretrained(
-            model_files.REPO_ID,
-            revision=model_files.REVISION,
+            _snapshot_path(),
             torch_dtype=dtype or getattr(torch, WEIGHT_DTYPE),
         )
     except Exception as exc:
@@ -326,8 +348,7 @@ def _stage_2_parts(base, *, dtype=None, device: str | None = None):
         spec = model_files.get_component(component)
         try:
             return cls.from_pretrained(
-                model_files.REPO_ID,
-                revision=model_files.REVISION,
+                _snapshot_path(),
                 subfolder=spec.subfolder,
                 torch_dtype=weight_dtype,
             )

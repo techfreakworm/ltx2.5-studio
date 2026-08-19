@@ -712,3 +712,171 @@ def test_a_video_only_two_stage_run_returns_the_decoder_output_unchanged():
     result = runner(prompt="a lighthouse", enable_stage_2=True)
 
     assert result is decoder._output, "a video-only run was given an audio field it never had"
+
+
+# --------------------------------------------------------------------------
+# what `from_pretrained` is pointed at
+#
+# `require_cache_complete()` passing does NOT imply "no network needed to
+# construct". Those are two claims and only the first was ever asserted: with a
+# verified 37/37 cache, loading by repo id still resolved against the Hub and
+# began fetching 48 files -- the 44.33 GB of dead shards `model_files` already
+# documents as paid for nothing.
+# --------------------------------------------------------------------------
+
+
+class LoadRecorder:
+    """Stands in for a diffusers class and records how it was asked to load."""
+
+    def __init__(self, result=None):
+        self.calls = []
+        self._result = result
+
+    def from_pretrained(self, target, **kwargs):
+        self.calls.append({"target": target, **kwargs})
+        return self._result if self._result is not None else FakeModel()
+
+    def __call__(self, **kwargs):
+        self.calls.append(kwargs)
+        return FakeModel()
+
+    @property
+    def target(self):
+        assert self.calls, "from_pretrained was never called"
+        return self.calls[-1]["target"]
+
+
+class FakeModel:
+    """Enough of a loaded component to survive construction."""
+
+    vae = None
+    scheduler = "scheduler"
+    dtype = "bfloat16"
+
+    def __init__(self):
+        self.moved_to = None
+        self.processor = None
+        self.tiled = False
+
+    def to(self, device):
+        self.moved_to = device
+        return self
+
+    def set_attn_processor(self, processor):
+        self.processor = processor
+
+    def enable_tiling(self):
+        self.tiled = True
+
+
+def install_fake_stack(monkeypatch, snapshot, **classes):
+    """Put a fake `torch` and `diffusers` tree on `sys.modules`."""
+    import sys
+    import types
+
+    from ltx25_studio import preflight
+
+    monkeypatch.setattr(preflight, "snapshot_dir", lambda *a, **k: snapshot)
+
+    torch = types.ModuleType("torch")
+    torch.bfloat16 = "bfloat16"
+    monkeypatch.setitem(sys.modules, "torch", torch)
+
+    made = {}
+    for name in (
+        "diffusers",
+        "diffusers.models",
+        "diffusers.models.autoencoders",
+        "diffusers.models.autoencoders.ltx2_diffusion_decoder",
+        "diffusers.pipelines",
+        "diffusers.pipelines.ltx2",
+        "diffusers.pipelines.ltx2.latent_upsampler",
+        "diffusers.pipelines.ltx2.pipeline_ltx2_diffusion_decode",
+    ):
+        module = types.ModuleType(name)
+        made[name] = module
+        monkeypatch.setitem(sys.modules, name, module)
+
+    defaults = {
+        "diffusers": (
+            "LTX2ConditionPipeline",
+            "LTX2Pipeline",
+            "LTX2LatentUpsamplePipeline",
+            "LTX2VideoDiffusionDecoderModel",
+        ),
+        "diffusers.models.autoencoders.ltx2_diffusion_decoder": (
+            "LTX2VideoVaeNeighborhoodNattenProcessor",
+        ),
+        "diffusers.pipelines.ltx2.latent_upsampler": ("LTX2LatentUpsamplerModel",),
+        "diffusers.pipelines.ltx2.pipeline_ltx2_diffusion_decode": (
+            "LTX2VideoDiffusionDecodePipeline",
+        ),
+    }
+    recorders = {}
+    for module_name, attrs in defaults.items():
+        for attr in attrs:
+            recorder = classes.get(attr) or LoadRecorder()
+            recorders[attr] = recorder
+            setattr(made[module_name], attr, recorder)
+
+    pipelines.clear_cache()
+    return recorders
+
+
+def test_the_base_loads_from_the_local_snapshot_not_the_repo_id(tmp_path, monkeypatch):
+    """Loading by repo id resolves against the Hub and refetches the whole repo."""
+    from ltx25_studio import model_files
+
+    snapshot = tmp_path / "snapshots" / model_files.REVISION
+    snapshot.mkdir(parents=True)
+    recorders = install_fake_stack(monkeypatch, snapshot)
+
+    pipelines._base_pipeline()
+
+    target = recorders["LTX2ConditionPipeline"].target
+    assert target == snapshot, f"the base was not loaded from the local snapshot: {target}"
+    assert model_files.REPO_ID not in str(target), (
+        f"the base was loaded by repo id ({target}), which resolves against the Hub and "
+        f"refetches 44.33 GB of shards the allow-list exists to exclude"
+    )
+
+
+def test_the_stage_2_parts_load_from_the_local_snapshot_too(tmp_path, monkeypatch):
+    """The upsampler and decoder are separate loads with the same failure mode."""
+    from ltx25_studio import model_files
+
+    snapshot = tmp_path / "snapshots" / model_files.REVISION
+    snapshot.mkdir(parents=True)
+    recorders = install_fake_stack(monkeypatch, snapshot)
+
+    pipelines._stage_2_parts(FakeModel())
+
+    for name in ("LTX2LatentUpsamplerModel", "LTX2VideoDiffusionDecoderModel"):
+        call = recorders[name].calls[-1]
+        assert call["target"] == snapshot, f"{name} was not loaded from the snapshot"
+        assert call["subfolder"], f"{name} was loaded without a subfolder"
+
+
+def test_construction_refuses_when_there_is_no_local_snapshot(tmp_path, monkeypatch):
+    """Better to name the missing snapshot than to quietly load by repo id."""
+    from ltx25_studio import model_files
+
+    missing = tmp_path / "snapshots" / model_files.REVISION
+    install_fake_stack(monkeypatch, missing)
+
+    with pytest.raises(ModelLoadError) as excinfo:
+        pipelines._base_pipeline()
+    assert "ensure_weights" in str(excinfo.value), (
+        f"the error does not say how to get the weights: {excinfo.value}"
+    )
+
+
+def test_the_snapshot_the_loader_uses_is_the_one_the_completeness_check_checks():
+    """One derivation, or the guarantee is about a different directory."""
+    from ltx25_studio import preflight
+
+    checked = preflight.snapshot_dir(hub_cache="/tmp/hub-cache-probe")
+    assert str(checked).startswith("/tmp/hub-cache-probe"), checked
+    assert checked.name == pipelines.model_files.REVISION, (
+        f"the snapshot path does not end in the pinned revision: {checked}"
+    )
