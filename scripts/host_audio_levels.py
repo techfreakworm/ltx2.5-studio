@@ -3,10 +3,10 @@
     ./scripts/hinode_run.sh host_audio_levels.py
 
 `verify_streams` proves a mode declared audio and the container has an audio
-stream with the right codec, rate and channel count. It cannot tell whether there
-is any *sound* in it — and a track at -55 dBFS passes every structural check while
-being inaudible. That is the same failure family as an empty output: valid-shaped
-and useless.
+stream with the right codec, rate and channel count. It cannot tell how much *sound*
+is in it — and a track 50 dB below its siblings passes every structural check.
+That is the same failure family as an empty output: valid-shaped and not what
+anyone wanted.
 
 So this reports peak, rms and dBFS per artifact, and flags:
 
