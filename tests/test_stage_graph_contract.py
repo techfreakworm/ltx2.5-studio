@@ -247,7 +247,7 @@ def test_the_users_prompt_survives_into_both_stages():
 
 @pytest.mark.parametrize("missing", ["upsampler", "decoder", "both"])
 def test_stage_2_without_its_parts_raises_rather_than_falling_back(missing):
-    """"Refusing to silently fall back to a single-stage render, which would look
+    """ "Refusing to silently fall back to a single-stage render, which would look
     like it worked and be visibly worse."
 
     This is §5.3's doctrine applied to quality instead of to files: the failure
@@ -286,7 +286,7 @@ def test_a_refused_stage_2_does_not_burn_a_render_first(missing):
 
 
 def test_a_stage_that_returns_no_latents_stops_the_graph():
-    """"Refusing to continue with nothing" — the never-empty rule, mid-graph.
+    """ "Refusing to continue with nothing" — the never-empty rule, mid-graph.
 
     This is the exact shape of the 2.3 outage: a mid-graph step produced nothing
     and the layers below turned it into a falsy value rather than an error.
@@ -332,7 +332,7 @@ def test_the_startup_report_is_a_non_empty_string(runtime_config):
 
 
 def test_the_startup_report_names_the_resolved_precision(runtime_config):
-    """"So the running configuration is never inferred."
+    """ "So the running configuration is never inferred."
 
     A report that omits the precision leaves the single most expensive
     configuration question — what dtype are we actually running — to guesswork.
@@ -540,4 +540,141 @@ def test_the_shared_modules_keep_their_dtype(component):
         f"{component} was recast while deriving. On a card this OOMs at twice the bytes; "
         f"where it fits, it silently halves precision — and on ZeroGPU a cast also "
         f"materialises anonymous memory, so the post-pack prune frees nothing."
+    )
+
+
+# --------------------------------------------------------------------------
+# two stages: the call shapes upstream actually requires
+#
+# Every test below fails against the graph as first written. That graph ran,
+# returned a video, and passed the whole suite -- which is why these assert the
+# shape of each call rather than that a call happened.
+# --------------------------------------------------------------------------
+
+
+class FakeTensor:
+    """Enough of a tensor to be cast and compared."""
+
+    def __init__(self, tag):
+        self.tag = tag
+
+    def to(self, dtype):
+        return FakeTensor(f"{self.tag}@{dtype}")
+
+    def __eq__(self, other):
+        return isinstance(other, FakeTensor) and other.tag == self.tag
+
+    def __repr__(self):
+        return f"FakeTensor({self.tag!r})"
+
+
+class Staged:
+    """A stage output carrying video latents and, optionally, audio latents."""
+
+    def __init__(self, tag, audio=None):
+        self.frames = FakeTensor(tag)
+        self.audio = audio
+
+
+class FakeAudioVae:
+    dtype = "bfloat16"
+
+    def __init__(self):
+        self.decoded = []
+
+    def decode(self, latents, return_dict=True):
+        self.decoded.append(latents)
+        return (FakeTensor(f"mel<-{latents.tag}"),)
+
+
+class FakeVocoder:
+    def __init__(self):
+        self.mels = []
+
+    def __call__(self, mel):
+        self.mels.append(mel)
+        return FakeTensor(f"waveform<-{mel.tag}")
+
+
+class AudioPipeline(Recorder):
+    """A pipeline that emits audio latents, as the six audio modes do."""
+
+    def __init__(self, *, audio=True):
+        super().__init__("pipeline")
+        self.audio_vae = FakeAudioVae()
+        self.vocoder = FakeVocoder()
+        self._output = Staged("video-latents", audio=FakeTensor("audio-latents") if audio else None)
+
+
+def two_stage(*, audio=True):
+    pipeline = AudioPipeline(audio=audio)
+    upsampler = Recorder("upsampler", output=Staged("upsampled"))
+    decoder = Recorder("decoder", output=Staged("decoded"))
+    runner = pipelines.StageRunner(
+        pipeline, kind="text2video", upsampler=upsampler, decoder=decoder
+    )
+    return runner, pipeline, upsampler, decoder
+
+
+def test_the_upsample_asks_for_latents_not_pixels():
+    """The default is ``"pil"``, and taking it silently ruins the render.
+
+    Without ``output_type="latent"`` the upsampler runs ``vae.decode`` and hands
+    back images -- the convolutional decode stage 2 exists to replace -- and
+    those images are then passed to stage 2 as its ``latents``.
+    """
+    runner, _pipeline, upsampler, _decoder = two_stage()
+
+    runner(prompt="a lighthouse", enable_stage_2=True)
+
+    assert upsampler.kwargs.get("output_type") == "latent", (
+        "the upsampler was not asked for latents, so it VAE-decoded to images: "
+        f"{sorted(upsampler.kwargs)}"
+    )
+
+
+def test_stage_2_is_not_given_a_size():
+    """Stage 2 takes its size from the upsampled latents.
+
+    Forwarding the request's stage-1 height/width asks for a render half the size
+    of the latents it was just handed.
+    """
+    runner, pipeline, _upsampler, _decoder = two_stage()
+
+    runner(prompt="a lighthouse", height=544, width=960, enable_stage_2=True)
+
+    stage_1, stage_2 = pipeline.calls
+    assert stage_1["height"] == 544, "stage 1 lost the requested size"
+    leaked = sorted(k for k in ("height", "width") if k in stage_2)
+    assert not leaked, f"stage 2 was given a size it must infer: {leaked}"
+
+
+def test_the_audio_latents_reach_stage_2():
+    """Stage 1 returns ``(video_latents, audio_latents)``; both must go forward.
+
+    Keeping only ``frames`` means stage 2 starts the audio from scratch, so the
+    track that ships is not the one the video was denoised alongside.
+    """
+    runner, pipeline, _upsampler, _decoder = two_stage()
+
+    runner(prompt="a lighthouse", enable_stage_2=True)
+
+    _stage_1, stage_2 = pipeline.calls
+    assert stage_2.get("audio_latents") == FakeTensor("audio-latents"), (
+        f"stage 1's audio latents did not reach stage 2: {sorted(stage_2)}"
+    )
+
+
+def test_the_diffusion_decode_is_seeded_with_the_run_generator():
+    """The decoder is a diffusion model and draws its own noise.
+
+    An unseeded decode makes two same-seed runs differ for a reason unrelated to
+    what they were comparing -- which is what TEST_PLAN A.4.1 relies on.
+    """
+    runner, _pipeline, _upsampler, decoder = two_stage()
+
+    runner(prompt="a lighthouse", generator="gen-42", enable_stage_2=True)
+
+    assert decoder.kwargs.get("generator") == "gen-42", (
+        f"the diffusion decode was left unseeded: {sorted(decoder.kwargs)}"
     )

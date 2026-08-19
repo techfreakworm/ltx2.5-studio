@@ -65,6 +65,8 @@ __all__ = [
     "get_pipeline",
     "stage_1_kwargs",
     "stage_2_kwargs",
+    "upsample_kwargs",
+    "STAGE_2_STRIPPED_KEYS",
     "startup_report",
 ]
 
@@ -170,6 +172,11 @@ BASE_KIND = "condition"
 #: Cache key for the raw base pipeline, distinct from the StageRunner entries.
 _BASE_CACHE_KEY = "__base__"
 
+#: The stage-2 parts are built once and shared by every workflow, exactly as the
+#: base is. They are ~2.1 GB of weights that no other component shares, so
+#: building them per workflow would pay for them twice.
+_STAGE_2_CACHE_KEY = "__stage_2__"
+
 
 def derive_pipeline(base, target_cls):
     """Build ``target_cls`` from ``base``'s ALREADY-LOADED modules.
@@ -273,6 +280,92 @@ def _base_pipeline(*, dtype=None, device: str | None = None):
     return built
 
 
+def _stage_2_parts(base, *, dtype=None, device: str | None = None):
+    """Build the latent upsampler and the diffusion decoder, once, sharing the base.
+
+    **The diffusion decoder is never a pipeline component.** ``model_index.json``
+    declares it, but every ``LTX2*Pipeline`` rejects it -- upstream is explicit
+    that it "is a diffusion model in its own right rather than a pipeline
+    component, so it is driven by ``LTX2VideoDiffusionDecodePipeline``". Loading
+    the base and expecting the decoder to arrive with it silently gets you a
+    pipeline with no decoder and a warning nobody reads.
+
+    Both stage-2 pipelines are thin wrappers: the upsampler shares the base's
+    ``vae`` and the decoder shares its ``scheduler``, so the only new weights are
+    the two model checkpoints themselves.
+    """
+    if _STAGE_2_CACHE_KEY in _CACHE:
+        return _CACHE[_STAGE_2_CACHE_KEY]
+
+    try:
+        import torch
+        from diffusers import LTX2LatentUpsamplePipeline, LTX2VideoDiffusionDecoderModel
+        from diffusers.models.autoencoders.ltx2_diffusion_decoder import (
+            LTX2VideoVaeNeighborhoodNattenProcessor,
+        )
+        from diffusers.pipelines.ltx2.latent_upsampler import LTX2LatentUpsamplerModel
+        from diffusers.pipelines.ltx2.pipeline_ltx2_diffusion_decode import (
+            LTX2VideoDiffusionDecodePipeline,
+        )
+    except ImportError as exc:
+        raise ModelLoadError(
+            component="diffusion_decoder",
+            reason=(
+                f"the stage-2 classes are not importable ({exc}). The diffusion decoder also "
+                f"needs the `kernels` package, which fetches the NATTEN kernel from the Hub; "
+                f"a local `natten` install is explicitly not used."
+            ),
+        ) from exc
+
+    # Same rule as the base load, and the same reason: the checkpoints are bf16,
+    # so this is a no-op rather than a conversion. See `_base_pipeline`.
+    weight_dtype = dtype or getattr(torch, WEIGHT_DTYPE)
+
+    def _load(cls, component):
+        spec = model_files.get_component(component)
+        try:
+            return cls.from_pretrained(
+                model_files.REPO_ID,
+                revision=model_files.REVISION,
+                subfolder=spec.subfolder,
+                torch_dtype=weight_dtype,
+            )
+        except Exception as exc:
+            raise ModelLoadError(component=component, reason=str(exc)) from exc
+
+    upsampler_model = _load(LTX2LatentUpsamplerModel, "latent_upsampler")
+    decoder_model = _load(LTX2VideoDiffusionDecoderModel, "diffusion_decoder")
+
+    # ⚠️ Neither of these is an optimisation; both are required to run at all.
+    #
+    # The decoder's default FlexAttention processor is uncompiled, so it
+    # materialises the full score matrix and needs **tens of GB** at video
+    # resolutions. `set_attention_backend` is not an alternative -- no backend
+    # other than `flex` accepts the BlockMask. Every attention module in the
+    # decoder is the same neighborhood attention, so one call swaps them all.
+    decoder_model.set_attn_processor(LTX2VideoVaeNeighborhoodNattenProcessor())
+    # Tiling bounds peak memory by the tile size rather than by the video size.
+    decoder_model.enable_tiling()
+
+    if device:
+        # These weights are NOT shared with the base, so `_base_pipeline`'s
+        # `.to(device)` does not reach them. Without this the stage-2 path dies
+        # on a CPU/CUDA mismatch the first time anyone ticks the box.
+        upsampler_model.to(device)
+        decoder_model.to(device)
+
+    upsampler = LTX2LatentUpsamplePipeline(vae=base.vae, latent_upsampler=upsampler_model)
+    # `vae` is deliberately omitted: it is optional here and consulted only to
+    # denormalize, which `DIFFUSION_DECODE_DENORMALIZE` never asks for.
+    decoder = LTX2VideoDiffusionDecodePipeline(
+        diffusion_decoder=decoder_model, scheduler=base.scheduler
+    )
+
+    parts = (upsampler, decoder)
+    _CACHE[_STAGE_2_CACHE_KEY] = parts
+    return parts
+
+
 def get_pipeline(*, pipeline: str = BASE_KIND, dtype=None, device: str | None = None):
     """The runner for one workflow, sharing one loaded copy of the model."""
     if pipeline in _CACHE:
@@ -286,7 +379,8 @@ def get_pipeline(*, pipeline: str = BASE_KIND, dtype=None, device: str | None = 
 
         built = derive_pipeline(base, LTX2Pipeline)
 
-    runner = StageRunner(built, kind=pipeline)
+    upsampler, decoder = _stage_2_parts(base, dtype=dtype, device=device)
+    runner = StageRunner(built, kind=pipeline, upsampler=upsampler, decoder=decoder)
     _CACHE[pipeline] = runner
     return runner
 
@@ -316,23 +410,59 @@ def stage_1_kwargs() -> dict:
     return {"sigmas": list(DISTILLED_SIGMA_VALUES), "output_type": "latent"}
 
 
-def stage_2_kwargs(latents) -> dict:
+def upsample_kwargs(latents) -> dict:
+    """Spatial x2 latent upsample.
+
+    ``output_type="latent"`` is **mandatory and is not the default**. The default
+    is ``"pil"``, which makes the upsampler run ``vae.decode`` and hand back
+    images -- the convolutional decode that stage 2 exists to replace -- which
+    would then be passed to stage 2 as its ``latents``. Nothing raises: the call
+    succeeds and the render is wrong.
+    """
+    return {"latents": latents, "output_type": "latent"}
+
+
+#: Stage 2 takes its size from the upsampled latents, so these must not be sent.
+#: Upstream's recipe is explicit: *"Stage 2 takes its size from the upsampled
+#: latents, so pass no height/width."* Forwarding the request's stage-1 values
+#: would ask for a render half the size of the latents it was handed.
+STAGE_2_STRIPPED_KEYS = ("height", "width")
+
+
+def stage_2_kwargs(latents, *, audio_latents=None) -> dict:
     """Stage-2 refinement over upsampled latents.
 
     ``noise_scale`` is the first stage-2 sigma: the upsampled latents are already
     partly denoised, so re-noising to 1.0 would discard stage 1 entirely.
+
+    ``audio_latents`` carries stage 1's audio forward. Without it stage 2 starts
+    the audio from scratch, so the track that ships is not the one the video was
+    denoised alongside.
     """
-    return {
+    kwargs = {
         "latents": latents,
         "sigmas": list(STAGE_2_DISTILLED_SIGMA_VALUES),
         "noise_scale": STAGE_2_DISTILLED_SIGMA_VALUES[0],
         "output_type": "latent",
     }
+    if audio_latents is not None:
+        kwargs["audio_latents"] = audio_latents
+    return kwargs
 
 
-def decode_kwargs(latents) -> dict:
-    """Diffusion decode. ``denormalize=False`` is not optional."""
-    return {"latents": latents, "denormalize": DIFFUSION_DECODE_DENORMALIZE}
+def decode_kwargs(latents, *, generator=None) -> dict:
+    """Diffusion decode. ``denormalize=False`` is not optional.
+
+    The diffusion decoder is a diffusion model in its own right and **draws its
+    own noise**, so it takes a generator like any other sampler. Omitting it
+    makes the decode unseeded, and two runs at the same seed then differ for a
+    reason that has nothing to do with what they were comparing -- which is
+    exactly what the same-seed matrix in ``docs/TEST_PLAN.md`` A.4.1 relies on.
+    """
+    kwargs = {"latents": latents, "denormalize": DIFFUSION_DECODE_DENORMALIZE}
+    if generator is not None:
+        kwargs["generator"] = generator
+    return kwargs
 
 
 class StageRunner:
@@ -343,13 +473,26 @@ class StageRunner:
 
     **Single stage** (default): one denoise, decoded by the pipeline itself.
 
-    **Two stages**: stage 1 emits latents, the latent upsamplers enlarge them,
-    stage 2 refines with the three-step schedule, and the **diffusion decoder**
-    turns the result into frames -- not ``vae.decode``. Upstream's own
+    **Two stages**: stage 1 renders at half resolution and emits latents, the
+    spatial x2 latent upsampler enlarges them, stage 2 refines with the
+    three-step schedule at full resolution, and the **diffusion decoder** turns
+    the result into frames -- not ``vae.decode``. Upstream's own
     ``LTX25AutoBlocks`` says the diffusion decoder "is the native default from
     LTX-2.5 on", so decoding with the convolutional VAE silently forfeits the
     single biggest 2.5 quality feature. It would not error. It would just be
     permanently worse.
+
+    Only ``latent_upsampler`` (spatial) takes part. ``temporal_latent_upsampler``
+    is a second checkpoint of the same class on the other axis, but upstream's
+    component table lists only the spatial one as belonging to this recipe and
+    neither documented recipe uses the temporal one -- so it is deliberately not
+    wired in rather than guessed into the graph.
+
+    **Every stage call here is shaped, not merely made.** The upsample must ask
+    for ``output_type="latent"``, stage 2 must NOT be given a size, stage 1's
+    audio latents must be carried forward, the decode must be seeded, and the
+    decoder's video-only output must be reunited with the audio. Get any one
+    wrong and the run still succeeds and still returns a video.
     """
 
     def __init__(self, pipeline, *, kind, upsampler=None, decoder=None):
@@ -373,9 +516,15 @@ class StageRunner:
             )
 
         stage_1 = self.pipeline(**kwargs, **stage_1_kwargs())
-        upsampled = self.upsampler(latents=_latents_of(stage_1))
-        stage_2 = self.pipeline(**kwargs, **stage_2_kwargs(_latents_of(upsampled)))
-        return self.decoder(**decode_kwargs(_latents_of(stage_2)))
+        upsampled = self.upsampler(**upsample_kwargs(_latents_of(stage_1)))
+        stage_2 = self.pipeline(
+            **{k: v for k, v in kwargs.items() if k not in STAGE_2_STRIPPED_KEYS},
+            **stage_2_kwargs(_latents_of(upsampled), audio_latents=_audio_of(stage_1)),
+        )
+        decoded = self.decoder(
+            **decode_kwargs(_latents_of(stage_2), generator=kwargs.get("generator"))
+        )
+        return decoded
 
 
 def _with_real_conditions(kwargs: dict) -> dict:
@@ -432,6 +581,17 @@ def _latents_of(output):
             reason="a staged call returned no latents; refusing to continue with nothing",
         )
     return latents
+
+
+def _audio_of(output):
+    """Stage 1's audio latents, when the mode produces audio at all.
+
+    ``output_type="latent"`` skips the vocoder, so this is a latent tensor rather
+    than a waveform. Video-only modes have no such field, so absence is normal
+    and must not raise -- unlike :func:`_latents_of`, where absence means a stage
+    returned nothing and continuing would be meaningless.
+    """
+    return getattr(output, "audio", None)
 
 
 def startup_report(runtime_config, *, cached_files=None, missing_files=None, gpu_size=None) -> str:

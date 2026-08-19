@@ -46,6 +46,17 @@ safetensors>=0.8.0,<0.9
 huggingface_hub>=1.28.0,<2
 hf_xet>=1.6.0,<2
 
+# `kernels` is required by the DIFFUSION DECODER, i.e. by stage 2 -- not by the
+# single-stage path, which is why nothing missed it until stage 2 was wired.
+# It fetches the NATTEN kernel from the Hub at runtime; upstream is explicit that
+# a local `natten` install is NOT used, so installing natten instead does nothing.
+#
+# Without it the decoder falls back to an uncompiled FlexAttention processor that
+# materialises the full score matrix and needs TENS OF GB at video resolutions.
+# `set_attention_backend` is not an escape: no backend other than `flex` accepts
+# the BlockMask. See ltx25_studio/pipelines.py::_stage_2_parts.
+kernels>=0.16.0,<0.17
+
 # --- UI -----------------------------------------------------------------------
 # gradio 5.x is END OF LIFE (last stable 5.50.0, 2025-11-21).
 #
