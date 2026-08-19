@@ -65,6 +65,7 @@ __all__ = [
     "decode_latents_to_waveform",
     "encode_waveform_to_latents",
     "load_waveform",
+    "deinterleaved",
     "match_channel_count",
     "export_sampling_rate_from",
     "mel_front_end_for",
@@ -352,22 +353,86 @@ def _sampled(encoded):
     return encoded
 
 
+def deinterleaved(chunks, *, channels: int, planar: bool):
+    """Decoded ``av`` frames -> one ``(channels, samples)`` array.
+
+    **Packed formats interleave, and most wav files are packed.** ``pcm_s16le``
+    reports ``is_planar = False``, so each decoded frame arrives as
+    ``(1, samples * channels)`` in L,R,L,R order rather than as
+    ``(channels, samples)``.
+
+    ``reshape(-1, channels).T`` is the de-interleave. ``reshape(channels, -1)``
+    is the bug that is easier to write: it puts the first half of the recording
+    in the left channel and the second half in the right. The array has the
+    right shape, every check downstream passes, and the audio is destroyed.
+    """
+    import numpy as np
+
+    if planar:
+        return np.concatenate(chunks, axis=1)
+    flat = np.concatenate([chunk.reshape(-1) for chunk in chunks])
+    return flat.reshape(-1, channels).T
+
+
+def _as_float_samples(data):
+    """Integer PCM -> float in [-1, 1], the range the mel front-end expects.
+
+    ``pcm_s16le`` decodes to ``int16``. Handing those values to the VAE unscaled
+    would be a signal four orders of magnitude too loud.
+    """
+    import numpy as np
+
+    if np.issubdtype(data.dtype, np.floating):
+        return data.astype(np.float32, copy=False)
+    info = np.iinfo(data.dtype)
+    return data.astype(np.float32) / float(max(abs(info.min), info.max))
+
+
 def load_waveform(source):
     """A user-supplied audio file -> ``(waveform, sampling_rate)``.
 
-    ``gr.Audio(type="filepath")`` hands us a path, so the file has to be read
-    before anything can encode it. ``torchaudio`` is already a pinned dependency
-    and returns exactly the tensor :func:`encode_waveform_to_latents` expects,
-    at the file's own rate -- which is then resampled to the VAE's rate there,
-    using the VAE's number rather than ours.
+    **Decoded with ``av``, not ``torchaudio.load``.** At torchaudio 2.11.0 --
+    our pin -- ``torchaudio.load`` dispatches to TorchCodec, which raises
+    ``ImportError: TorchCodec is required``. Installing it is a dead end: it
+    needs *system* FFmpeg shared libraries (``libavutil.so.56``), which are
+    absent on the host with no sudo to add them and cannot be assumed of the
+    Space image either.
 
-    Lazy import for the same reason as ``_resampled``: this module must import
-    with no torch present, because the offline gate has none.
+    ``av`` is already a non-optional dependency -- image conditioning needs it --
+    and **bundles its own FFmpeg**, which is exactly why it works where
+    torchcodec does not. No new dependency, for a job a required one already
+    does.
+
+    Returns a torch tensor because that is what the rest of the path needs:
+    ``torchaudio.functional.resample`` and the VAE's own mel front-end.
+    torchaudio stays a dependency for exactly that reason -- only its **I/O** is
+    behind TorchCodec. *Verified at the pinned tag: ``functional.py`` at
+    torchaudio v2.11.0 references torchcodec zero times and imports only
+    ``math``, ``warnings``, ``torch``, ``torchaudio`` and ``.filtering``.*
     """
-    import torchaudio
+    import av
+    import numpy as np
+    import torch
 
-    waveform, rate = torchaudio.load(str(source))
-    return waveform, int(rate)
+    with av.open(str(source)) as container:
+        if not container.streams.audio:
+            raise LTXStudioError(
+                f"{source} carries no audio stream, so there is nothing to encode. "
+                f"Supply an audio file rather than a silent or video-only one."
+            )
+        stream = container.streams.audio[0]
+        rate = int(stream.rate)
+        channels = int(getattr(stream.layout, "nb_channels", 0) or stream.channels)
+        planar = bool(stream.format.is_planar)
+        chunks = [frame.to_ndarray() for frame in container.decode(stream)]
+
+    if not chunks:
+        raise LTXStudioError(
+            f"{source} decoded to no audio at all. The file may be truncated or empty."
+        )
+
+    data = _as_float_samples(deinterleaved(chunks, channels=channels, planar=planar))
+    return torch.from_numpy(np.ascontiguousarray(data)), rate
 
 
 def match_channel_count(waveform, *, channels: int):

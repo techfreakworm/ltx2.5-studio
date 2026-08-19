@@ -342,3 +342,119 @@ def test_a_file_at_another_rate_is_resampled_to_the_vaes(monkeypatch):
     assert seen == {"from_rate": 44100, "to_rate": 16000}, (
         f"the upload was not resampled to the VAE's own rate: {seen}"
     )
+
+
+# --------------------------------------------------------------------------
+# decoding the file the user uploaded
+#
+# `torchaudio.load` is unreachable at our pinned torchaudio 2.11.0: it
+# dispatches to TorchCodec, which needs SYSTEM FFmpeg shared libraries that the
+# host does not have and cannot be given. `av` is already non-optional and
+# bundles its own FFmpeg, which is why it works where torchcodec cannot.
+# --------------------------------------------------------------------------
+
+av = pytest.importorskip("av", reason="the media stack is a pinned runtime dependency")
+np = pytest.importorskip("numpy")
+
+
+def write_stereo_wav(path, *, left, right, rate=16000):
+    """A real wav whose two channels are DIFFERENT.
+
+    Identical channels would satisfy a shape assertion while proving nothing
+    about de-interleaving -- the same fixture trap as a float32 fixture over a
+    bfloat16 bug. Here the left channel ramps and the right is constant, so any
+    mix-up between them is visible in the values.
+    """
+    planes = np.stack([left, right])
+    with av.open(str(path), "w") as container:
+        stream = container.add_stream("pcm_s16le", rate=rate)
+        stream.layout = av.AudioLayout("2c")
+        stream.codec_context.open()
+        frame = av.AudioFrame.from_ndarray(planes, format="fltp", layout="2c")
+        frame.sample_rate = rate
+        resampler = av.AudioResampler(
+            format=stream.format.name, layout=stream.layout.name, rate=stream.rate
+        )
+        fifo = av.audio.fifo.AudioFifo()
+        for resampled in resampler.resample(frame):
+            fifo.write(resampled)
+        while True:
+            chunk = fifo.read()
+            if chunk is None:
+                break
+            for packet in stream.encode(chunk):
+                container.mux(packet)
+        for packet in stream.encode(None):
+            container.mux(packet)
+    return path
+
+
+def decoded_frames(path):
+    with av.open(str(path)) as container:
+        stream = container.streams.audio[0]
+        channels = int(getattr(stream.layout, "nb_channels", 0) or stream.channels)
+        planar = bool(stream.format.is_planar)
+        return [f.to_ndarray() for f in container.decode(stream)], channels, planar
+
+
+def test_the_fixture_really_is_a_packed_format(tmp_path):
+    """Otherwise the test below exercises the branch that was never the problem."""
+    path = write_stereo_wav(
+        tmp_path / "probe.wav",
+        left=np.linspace(0.1, 0.9, 256, dtype=np.float32),
+        right=np.full(256, -0.5, dtype=np.float32),
+    )
+    chunks, channels, planar = decoded_frames(path)
+
+    assert not planar, "pcm_s16le is packed; a planar fixture would not test de-interleaving"
+    assert channels == 2
+    assert chunks[0].shape[0] == 1, (
+        f"a packed frame should arrive as one interleaved row, got {chunks[0].shape}"
+    )
+
+
+def test_the_channels_come_back_separated_not_split_down_the_middle(tmp_path):
+    """``reshape(channels, -1)`` is the bug: it splits the file in half.
+
+    With a ramping left channel and a constant right one, that mutation gives
+    two channels that both vary -- so the values catch it where a shape check
+    could not.
+    """
+    samples = 512
+    left = np.linspace(0.1, 0.9, samples, dtype=np.float32)
+    right = np.full(samples, -0.5, dtype=np.float32)
+    path = write_stereo_wav(tmp_path / "stereo.wav", left=left, right=right)
+
+    chunks, channels, planar = decoded_frames(path)
+    data = audio.deinterleaved(chunks, channels=channels, planar=planar)
+
+    assert data.shape == (2, samples), f"not (channels, samples): {data.shape}"
+    recovered_left = data[0].astype(np.float32) / 32768.0
+    recovered_right = data[1].astype(np.float32) / 32768.0
+    assert recovered_right.std() < 1e-3, (
+        f"the right channel should be constant and varies by {recovered_right.std():.4f} -- "
+        f"the channels were split down the middle rather than de-interleaved"
+    )
+    assert recovered_left[-1] > recovered_left[0] + 0.5, (
+        f"the left channel should ramp across the whole file: "
+        f"{recovered_left[0]:.3f} -> {recovered_left[-1]:.3f}"
+    )
+
+
+def test_integer_pcm_is_scaled_into_the_range_the_mel_expects():
+    """int16 handed over unscaled is a signal four orders of magnitude too loud."""
+    loudest = np.array([[32767, -32768]], dtype=np.int16)
+
+    scaled = audio._as_float_samples(loudest)
+
+    assert scaled.dtype == np.float32
+    assert abs(scaled).max() <= 1.0, f"not normalised: {scaled}"
+
+
+def test_a_planar_file_is_concatenated_rather_than_reshaped():
+    """The other branch, which must not be de-interleaved."""
+    chunks = [np.array([[1.0, 2.0], [9.0, 8.0]]), np.array([[3.0], [7.0]])]
+
+    data = audio.deinterleaved(chunks, channels=2, planar=True)
+
+    assert data.tolist() == [[1.0, 2.0, 3.0], [9.0, 8.0, 7.0]], data
