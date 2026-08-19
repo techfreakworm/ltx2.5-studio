@@ -68,11 +68,6 @@ from collections.abc import Mapping, Sequence
 
 from .errors import LTXStudioError
 
-try:  # pragma: no cover - present only on a Space
-    import spaces
-except ImportError:  # the dev box, and the test suite
-    spaces = None
-
 __all__ = [
     "SPACE_HARDWARE",
     "assert_returnable",
@@ -95,9 +90,15 @@ _MAX_DEPTH = 8
 _ATOMIC = (str, bytes, bytearray, int, float, bool, complex, type(None))
 
 
-def spaces_version() -> str | None:
-    """The platform's ``spaces`` version, or None when it is not installed."""
-    return getattr(spaces, "__version__", None) if spaces is not None else None
+def spaces_version(spaces_module) -> str | None:
+    """The platform's ``spaces`` version, for the startup log.
+
+    Takes the module rather than importing it: ``spaces`` is a deploy-environment
+    package, and importing it from library code makes the library unimportable
+    off-Space. ``app.py`` owns that import -- it is also the only place where the
+    before-torch ordering can actually be guaranteed.
+    """
+    return getattr(spaces_module, "__version__", None) if spaces_module is not None else None
 
 
 def _looks_like_a_cuda_tensor(value) -> bool:
