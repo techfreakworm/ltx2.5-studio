@@ -1,7 +1,14 @@
 #!/usr/bin/env python
 """Verify a produced artifact against the mode's DECLARED exports.
 
-    python tests/verify_streams.py <mode_id> <file> [--frame-rate 24] [--sampling-rate 24000]
+    python tests/verify_streams.py <mode_id> <file> [--frame-rate 24] [--sampling-rate <hz>]
+
+**Do not hardcode a sampling rate.** The vocoder knows its own
+(``vocoder.config.output_sampling_rate``, 48000 at the pinned revision) and
+``audio.export_sampling_rate_from()`` is the one place that reads it;
+``scripts/host_matrix.py`` passes that value through. A second copy of the
+number here would be a second thing to be wrong. Omitting the flag skips the
+rate check rather than assuming one.
 
 Part A's pass criterion is the expected stream layout per mode, not that a file
 appeared. Read by eye across sixteen runs, that is sixteen chances for a

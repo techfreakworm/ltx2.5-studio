@@ -44,6 +44,54 @@ above happens first regardless.
 **The margin is negative, not tight.** Steady state afterwards would be fine at
 ~72 GB. It is the peak that evicts us.
 
+### 1.1 A different mechanism, which fits the timing the peak does not
+
+⚠️ **Candidate cause, not settled — the Space has not been re-run.**
+
+`from_pretrained` was resolving against the Hub and starting a naive snapshot of
+**48 files** even with a verified-complete 37/37 cache, pulling the dead 8-shard
+`transformer/` set and the dead single-file `connectors/` copy: **44.33 GB** on
+top of the 72.19 GB we intend. ✅ Measured on the host, cache 68 → 109 GiB and
+still climbing when it was killed. That is **116.52 GB before packing begins at
+all**.
+
+**Why this displaces the peak as the explanation of the actual failure.** The
+Space died during `Loading pipeline components 6/9` / `Loading checkpoint shards
+2/4` — *inside* `from_pretrained`. The packed-copy arithmetic in §1 requires
+packing to have started, and packing begins only **after** `from_pretrained`
+returns. The peak was right as a constraint and wrong as the cause, and the
+contradiction was visible in a log we had already read.
+
+✅ **Fixed** in `preflight.snapshot_dir()` — construction now loads from the local
+snapshot directory, which has no manifest and no repo to resolve against, so the
+refetch is structurally impossible rather than merely disabled.
+
+⛔ **`local_files_only=True` is not the fix**, and was never recorded here as one.
+Tested on the host: it switches on a strict completeness check against that same
+manifest, which demands the 14 dead files the allow-list excludes **on purpose**,
+turning a working load into a hard refusal.
+
+### 1.2 The allow-list is not an optimisation — it is what makes the Space possible
+
+✅ Read off the cached manifest, not inferred: the full repo is **56 files,
+164,192,096,189 bytes (164.19 GB)**.
+
+> **The full repo does not fit ZeroGPU's 150 GB cap even with nothing else on
+> disk** — no packed copy, no image, no CUDA.
+
+Our 37-file / 72.19 GB allow-list is therefore load-bearing rather than frugal.
+What it excludes:
+
+| excluded | GB |
+|---|---:|
+| dead `-of-00008` `transformer/` set | 37.99 |
+| dead single-file `connectors/` copy | 6.34 |
+| `transformer_full/` (full/SFT DiT; we run the distilled one) | 37.98 |
+| standalone distilled LoRA | 9.70 |
+| **total excluded** | **92.01** |
+
+72.19 + 92.01 = 164.20, which reconciles with the manifest total to rounding.
+
 ---
 
 ## 2. What is already fixed, and what it bought
