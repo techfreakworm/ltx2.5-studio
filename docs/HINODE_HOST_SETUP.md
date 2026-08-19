@@ -1157,3 +1157,71 @@ was the one input never treated as a variable. This sits alongside the harness
 failures already recorded, and it is the same lesson from the other side: **a
 harness that cannot fail the way production fails is one problem; a harness whose
 inputs are never varied is the other.**
+
+## The H10 silence: content, not the `noise_scale`/`sigmas[0]` mismatch
+
+| audio content | `noise_scale` | mismatch vs `sigmas[0]=1.0`? | output |
+|---|---|---|---|
+| **realistic** (H8's own wav) | 0.5 | **yes** | **−10.4 dBFS — healthy** |
+| synthetic two tones | 0.5 | **yes** | −87.9 dBFS — silent |
+| synthetic two tones | **1.0** | **no** | **−7.6 dBFS, peak 1.0000 — healthy** |
+
+A diagnosis circulated that our `noise_scale=0.5` disagreeing with the recipe's
+`sigmas[0]=1.0` over-denoises toward the mean and produces the silence — upstream
+infers `noise_scale = sigmas[0] if sigmas is not None else 1.0`, and our stage-2
+path already honours that while the audio-input path does not.
+
+**The first row refutes it as the cause.** Realistic content at `noise_scale=0.5`
+carries the full mismatch and comes back healthy. And the `1.0` run — designed as a
+two-outcome discriminator — **cannot separate the hypotheses**, because at 1.0 the
+content is discarded *and* it is the only setting where our two values agree. Both
+stories predict it.
+
+**Holding `noise_scale` fixed and varying content flips the outcome. Content is
+sufficient; the mismatch is not necessary.**
+
+The mismatch is still probably real and worth fixing **as a separate quality item**:
+it could cost fidelity on real inputs in a way no level reading would show. It is
+not the silence cause.
+
+### Why a tone pair fails silently rather than loudly
+
+`audio_vae.encode` **is never called anywhere in the pipeline** — `retrieve_latents`
+is used once, for the *video* condition, and `audio_vae.decode` once at line 2101.
+So **our `encode_waveform_to_latents` is the only producer of audio latents in the
+system, and nothing upstream validates their distribution.**
+
+Two pure sines are a **valid input to our encoder and an out-of-distribution input
+to the model**, and no layer between them can tell the difference. That is the
+mechanism behind the retraction above, and it is why the fixture could be wrong for
+five runs without anything complaining.
+
+## Correcting an over-read of my own control
+
+I reported the same-`noise_scale` control as vindicating H10b's differ-verdict:
+47% between `noise_scale` halves against 1.8% between two runs at the same setting.
+**That was over-read.**
+
+At the time there was **no generator anywhere in the package** — `_resolve_seed` ran
+and the number went into the encoder kwargs as metadata only, so every run was
+unconditionally random. **1.8% on a single pair is not a bound on the variance**; one
+comparison cannot establish a distribution. H10b stays **uncontrolled** until real
+seeding lands, and building a control that is itself unseeded does not fix that.
+
+### What survives the missing seed, and what does not
+
+**Stands** — nothing here is a same-seed comparison:
+
+* every dBFS figure, including −55.0 → −17.8 and the 70 dB fixture gap
+* peaks 1.7811 → 1.0050
+* H14's 1408×960 (only the upsampler produces that), H15's 97 frames
+* H17's tone placement and 0.25% length drift
+* all stream layouts, both LoRA verdicts, the 44.33 GB refetch
+* the transpose A/B — 0.610 s against 4.010 s is not run-to-run variance
+
+**Confounded** — H10b, the twelve-mode `mean|diff|` pairing table, H4b and H12b as
+designed. **So "all twelve modes moved" is NOT established.** The audio levels moving
+is established; the pixel diffs cannot carry it.
+
+Eleven of eleven modes still produce correct, verified artifacts. What is outstanding
+is the **evidence quality of three comparisons**, not the function of any mode.
