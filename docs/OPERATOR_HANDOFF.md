@@ -193,8 +193,9 @@ picks. Had it returned 121 — the default — the run would have looked identic
 to a pass while proving the opposite. **97 is the whole result.**
 
 **H14's proof is its resolution, not a comparison.** ✅ 1408 × 960 against H1's
-704 × 480 at 886,265 B and 25.7 s is **exactly 2× in both dimensions** — a size
-only the spatial upsampler can produce. That is stronger evidence than the
+704 × 480 is **exactly 2× in both dimensions** — a size only the spatial
+upsampler can produce, and **the one claim here that no vintage or seed can
+affect**, since geometry is identical across every before/after pair. That is stronger evidence than the
 same-seed diff the matrix planned, because a same-seed comparison shows *a*
 difference while this shows *the specific* difference stage 2 exists to make.
 
