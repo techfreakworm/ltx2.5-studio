@@ -168,41 +168,38 @@ def load_video_frames(path, limit=BASE_FRAMES):
 
 
 def encode_audio_latents(pipe, wav_path):
-    """Encode a wav into audio latents via the loaded audio_vae.
+    """Encode a wav into audio latents through the APP's own audio path.
 
     There is no ``audio=`` argument on any LTX2 pipeline (PLAN §3.1c) — audio
-    enters as pre-encoded ``audio_latents``. So an audio-input mode cannot be
-    exercised without running the real encoder, which is itself worth proving.
-    """
-    import av
-    import numpy as np
+    enters as pre-encoded ``audio_latents``. Rather than hand-roll that, this
+    calls ``audio.load_waveform`` and ``audio.encode_waveform_to_latents``, which
+    is what the UI path uses: waveform -> resample to the VAE's own rate -> the
+    VAE's own mel front-end -> ``audio_vae.encode``, with the latent shape
+    asserted before it can reach the pipeline.
 
+    Using the real helpers is the point. My first attempt built the tensor here
+    and handed ``audio_vae.encode`` a raw waveform, which failed with
+    ``expected input[1, 1, 4, 480002] to have 2 channels`` — the VAE consumes a
+    **mel spectrogram**, not samples, and the mel front-end is deliberately
+    *found* on the VAE rather than constructed, because the FFT and window sizes
+    are not in its config and any guess yields a mel it was never trained on.
+    So a fixture that skips these helpers is not a shortcut, it is a different
+    and wrong computation.
+    """
     from ltx25_studio import audio as audio_module
 
-    planes = []
-    with av.open(str(wav_path)) as container:
-        for frame in container.decode(audio=0):
-            planes.append(frame.to_ndarray())
-    raw = np.concatenate(planes, axis=-1) if planes else np.zeros((2, 1), dtype="float32")
-    if raw.ndim == 1:
-        raw = raw[None, :]
-    channels = audio_module.audio_channels_from(pipe.audio_vae)
-    if raw.shape[0] == 1 and channels > 1:
-        raw = np.repeat(raw, channels, axis=0)
-    raw = raw[:channels]
-    if raw.dtype != np.float32:
-        info = np.iinfo(raw.dtype) if np.issubdtype(raw.dtype, np.integer) else None
-        raw = raw.astype("float32") / (info.max if info else 1.0)
-    wave = torch.from_numpy(raw)[None].to(device=pipe.audio_vae.device, dtype=pipe.audio_vae.dtype)
-    log(f"  audio_vae.encode input {tuple(wave.shape)} channels={channels}")
-    with torch.no_grad():
-        posterior = pipe.audio_vae.encode(wave)
-        latent = getattr(posterior, "latent_dist", None)
-        latent = latent.sample() if latent is not None else getattr(posterior, "latent", posterior)
-        if hasattr(latent, "sample"):
-            latent = latent.sample()
-    log(f"  audio latents {tuple(latent.shape)} dtype={latent.dtype}")
-    return latent
+    waveform, rate = audio_module.load_waveform(wav_path)
+    log(f"  load_waveform: {tuple(waveform.shape)} @ {rate} Hz")
+    params = audio_module.audio_params_from(pipe.audio_vae)
+    log(f"  audio_vae params: rate={params.audio_sampling_rate} "
+        f"mel_bins={params.audio_mel_bins} hop={params.audio_hop_length}")
+    waveform = waveform.to(device=pipe.audio_vae.device, dtype=pipe.audio_vae.dtype)
+    latents = audio_module.encode_waveform_to_latents(
+        waveform, audio_vae=pipe.audio_vae, sampling_rate=rate
+    )
+    log(f"  audio latents {tuple(latents.shape)} dtype={latents.dtype}  "
+        f"(dims {audio_module.AUDIO_LATENT_DIMS})")
+    return latents
 
 
 def main() -> int:
