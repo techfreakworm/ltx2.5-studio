@@ -1,8 +1,22 @@
 # LTX-2.5 Studio — Design Plan
 
-**Status:** design locked, implementation not started.
+**Status:** implemented; not yet run on a GPU. The matrix in
+[`docs/TEST_PLAN.md`](TEST_PLAN.md) is what proves it works.
 **Branch:** `soma/ltx25-studio` · **Remote:** `git@github.com:techfreakworm/ltx2.5-studio.git`
 **Target:** private Hugging Face Space `techfreakworm/LTX2.5-Studio` (gradio SDK, ZeroGPU).
+
+> ### ⚠️ Read this before you trust the test suite
+>
+> **This suite was green at 1102 passing tests while five blockers were live in the tree.**
+> At that moment the app could not reach a GPU, could not apply a LoRA, and reported every
+> successful run in its three flagship modes as an internal error. Nothing was failing.
+>
+> The ~700 tests added since are almost entirely **seam and reachability** tests, not more unit
+> coverage — because more tests of the original shape would have found none of it. §9.1.1
+> explains the pattern and the one check that catches it.
+>
+> If you are about to trust a green gate here the way we did: that is the mistake this document
+> exists to warn you out of.
 
 This document is the contract for the build. Every section is either a **decision** (settled,
 build to it) or a **risk** (§10, needs measurement not argument). Where a claim was verified
@@ -1273,8 +1287,10 @@ that asks the program what it actually reached. Stated as the person who kept mi
 
 > **I probed the path I had in mind rather than the paths other code takes.**
 
-**The numbers make it concrete.** The gate went green at **1102 tests with all five blockers
-still in the tree**. It stands at ~1800 now, and the difference is almost entirely **seam and
+**The numbers make it concrete, and this is the load-bearing fact of the whole build:
+the gate was green at 1102 passing tests with all five blockers still in the tree.** Nothing was
+failing. The app could not reach a GPU, could not apply a LoRA, and reported successful runs as
+internal errors — at 1102 passing, zero failing. It stands at ~1800 now, and the difference is almost entirely **seam and
 reachability tests — not more unit coverage**. More tests of the same shape would have found none
 of them.
 
