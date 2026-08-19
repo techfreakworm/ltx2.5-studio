@@ -156,7 +156,7 @@ convention detector breaking.
 > spending the run to prove the thing it was designed to test never happened.
 > Compare against H1 at the same seed; if they are identical, stage 2 did not run.
 
-## A.4.2 Same-seed comparisons — the class of trap H14 belongs to
+## A.4.1 Same-seed comparisons — the class of trap H14 belongs to
 
 H14's *"compare against H1 at the same seed; identical output means stage 2 did
 not run"* generalises. **Anywhere an input can be silently ignored and the run
@@ -196,7 +196,20 @@ in this matrix that can see it.
 them at the same baseline as everything else; a difference visible only at low
 resolution is not a difference worth having.
 
-## A.4.1 The undeclared-export direction — covered offline, no run needed
+> ⚠️ **Pin the seed explicitly. `seed=-1` means "draw a fresh one".**
+>
+> That is the documented behaviour — the drawn value comes back on
+> `GenerationResult.seed` so a good output stays reproducible. But it means a
+> comparison pair run at the default seed has **two different seeds**, so the
+> outputs differ for that reason alone and **every check above passes
+> vacuously.**
+>
+> Set an explicit integer seed on both halves of every pair, and record it in the
+> run log. Otherwise these six runs prove nothing while appearing to prove
+> everything — which is the failure mode they were added to catch, turned on
+> themselves.
+
+## A.4.2 The undeclared-export direction — covered offline, no run needed
 
 The exports contract is enforced **both ways**: declared-but-missing raises
 `EmptyOutputError`; written-but-undeclared is dropped and noted on
