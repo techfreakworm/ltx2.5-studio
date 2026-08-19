@@ -26,7 +26,8 @@ TOKEN_FILE="${LTX25_HF_TOKEN_FILE:-$HOME/.cache/huggingface/token}"
 # anything sensitive.
 FORWARD=""
 for var in SMOKE_MODE SMOKE_W SMOKE_H SMOKE_FRAMES SMOKE_PROMPT SMOKE_SEED \
-           SMOKE_STAGE_2 SMOKE_OUTPUT_ROOT LTX25_DISK_ROOT "$@"; do
+           SMOKE_STAGE_2 SMOKE_OUTPUT_ROOT LTX25_DISK_ROOT \
+           MATRIX_RUNS MATRIX_OUTPUT_ROOT MATRIX_VIDEO_FIXTURE MATRIX_AUDIO_FIXTURE "$@"; do
   case "$var" in
     *=*) FORWARD="$FORWARD export ${var%%=*}='${var#*=}';" ;;
     *)   [ -n "${!var:-}" ] && FORWARD="$FORWARD export $var='${!var}';" ;;
