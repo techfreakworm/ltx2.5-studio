@@ -337,3 +337,145 @@ def test_audio_is_reached_for_the_sampling_rate_it_owns(tmp_path):
         "it on every run with a vocoder. It did not run, so either the claim is stale or the "
         "rate is being sourced from somewhere it should not be."
     )
+
+
+# --------------------------------------------------------------------------
+# level 3: discovered, not declared — "reached by nothing" for the whole package
+# --------------------------------------------------------------------------
+#
+# Levels 1 and 2 check modules somebody thought to list. This level globs the
+# package and asserts nothing is reached by *neither* startup nor a generation,
+# so a module added tomorrow and wired to nothing fails without anyone having to
+# remember to add it here. That is the property the hand-written checks cannot
+# have: ``lora/apply.py`` shipped dead carrying 19 passing specs precisely
+# because nobody thought to look for it.
+
+
+def _package_modules() -> set[str]:
+    """Every importable module under the package, discovered from disk."""
+    found = set()
+    for path in PACKAGE_ROOT.rglob("*.py"):
+        if "__pycache__" in path.parts:
+            continue
+        parts = [p for p in path.relative_to(PACKAGE_ROOT).with_suffix("").parts if p != "__init__"]
+        found.add(".".join(("ltx25_studio", *parts)))
+    return found
+
+
+def _synthetic_lora(directory: Path) -> Path:
+    """A well-formed adapter that attaches to ``conftest``'s fake transformer.
+
+    Built from the shared fixtures rather than a second implementation, so it
+    cannot drift from what the LoRA suite considers a valid file.
+    """
+    from conftest import (
+        NATIVE_PREFIX,
+        OFFICIAL_METADATA,
+        TRANSFORMER_MODULE_PATHS,
+        build_safetensors_bytes,
+        lora_tensors,
+    )
+
+    target = directory / "adapter.safetensors"
+    target.write_bytes(
+        build_safetensors_bytes(
+            lora_tensors(NATIVE_PREFIX, TRANSFORMER_MODULE_PATHS), OFFICIAL_METADATA
+        )
+    )
+    return target
+
+
+class _LoRAPipe(_Pipe):
+    """A pipe an adapter can actually attach to, so stage 7 really runs."""
+
+    def __init__(self):
+        from conftest import FakePipeline
+
+        self.pipeline = FakePipeline()
+        self.pipeline.vocoder = _Pipe.vocoder
+
+
+@pytest.fixture(scope="module")
+def executed_by_a_full_generation(tmp_path_factory) -> set[Path]:
+    """Package files that RAN during one generation exercising every path.
+
+    An image mode, a shot row and a staged LoRA in a single call — the three
+    inputs that reach ``conditioning.py`` and ``lora/apply.py``, the two modules
+    that shipped dead. Execution rather than import, because by the time this
+    runs the suite has already imported most of the package and an import-based
+    measure would report everything as reached.
+    """
+    from ltx25_studio import generate as generate_module
+
+    directory = tmp_path_factory.mktemp("full")
+    lora = _synthetic_lora(directory)
+
+    def call():
+        generate_module.generate(
+            mode="image_to_video",
+            seed=7,
+            width=SIZE,
+            height=SIZE,
+            conditions=[["a wide establishing shot", 8, 0.8]],
+            loras=({"source": str(lora), "weight": 1.0},),
+            pipeline_factory=lambda **_: _LoRAPipe(),
+            encoder=None,
+            output_root=directory,
+            retention_bytes=10**9,
+        )
+
+    return executed_package_files(call)
+
+
+def test_lora_apply_runs_when_the_request_stages_an_adapter(executed_by_a_full_generation):
+    """Blocker #5, as an assertion.
+
+    ``lora/apply.py`` had no importer anywhere in the package while carrying 19
+    passing specs. A user could upload an adapter, watch it validate, generate,
+    and receive base-model output — the exact silent garbage the whole validator
+    exists to prevent, arriving because the last step was never called.
+    """
+    assert module_file("ltx25_studio.lora.apply") in executed_by_a_full_generation, (
+        "a generation staging a LoRA never executed lora/apply.py, so stage 7 — the attach "
+        "assertion that is the entire point of the validator — did not run. An adapter that "
+        "attaches to zero modules would produce base-model output and report success."
+    )
+
+
+def test_no_package_module_is_reached_by_nothing(loaded_modules, executed_by_a_full_generation):
+    """The check that cannot miss a module nobody thought to list.
+
+    Every module under ``ltx25_studio/`` must be reached by **something**: loaded
+    when the app starts, or executed by a generation. A module in neither set is
+    dead — complete, documented, possibly fully specced, and wired to nothing.
+    That was true of ``zerogpu.py``, of ``lora/apply.py``, and of
+    ``enforce_retention``, and none of them failed a test.
+
+    Discovered by globbing rather than declared, so a module added tomorrow and
+    wired to nothing fails here without anyone remembering to update a list.
+    """
+    reached_files = executed_by_a_full_generation
+    every = _package_modules()
+
+    def directly_reached(module: str) -> bool:
+        return module in loaded_modules or module_file(module) in reached_files
+
+    def is_reached(module: str) -> bool:
+        if directly_reached(module):
+            return True
+        # A package ``__init__`` holds only re-exports, so its module-level code
+        # runs once per process -- already done by the time this suite gets
+        # here, which means the tracer cannot watch it run again. It is also
+        # unreachable-by-definition-impossible: importing ``lora.apply``
+        # executes ``lora/__init__.py`` first, necessarily. So a package counts
+        # as reached exactly when something inside it is.
+        prefix = f"{module}."
+        return any(c.startswith(prefix) and directly_reached(c) for c in every)
+
+    orphans = sorted(module for module in every if not is_reached(module))
+    assert not orphans, (
+        f"these modules are reached by nothing — neither `import app` nor a generation that "
+        f"exercises an image, a shot row and a staged LoRA: {orphans}. Either wire them in or "
+        f"delete them; a module that exists and is called by nothing is the shape that shipped "
+        f"four blockers on this build, every one of them with green tests."
+    )
