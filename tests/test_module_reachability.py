@@ -113,31 +113,125 @@ EAGER_MODULES = tuple(m for m in PLAN_MODULES if m not in LAZY_MODULES)
 # --------------------------------------------------------------------------
 
 
-def _modules_loaded_by_importing_app() -> frozenset[str]:
-    """What a real ``import app`` pulls in, measured in a clean interpreter.
+#: Run in a **fresh interpreter**: import the app, record what that loaded, then
+#: drive one real generation under ``sys.settrace`` and record what executed.
+#:
+#: Both halves must happen in the same clean process. Measuring reachability from
+#: inside the suite is order-dependent in a way that is easy to miss: a package
+#: ``__init__.py`` executes only on first import, so once any earlier test has
+#: imported ``ltx25_studio.lora`` the tracer can never watch it run again, and
+#: the package looks unreachable when it is reached on every LoRA generation.
+#: This file shipped exactly that false positive. A subprocess has no history to
+#: be confused by.
+_PROBE = r"""
+import json, sys, tempfile
+sys.path.insert(0, "tests")
 
-    A subprocess rather than an in-process reload: this suite has already
-    imported most of the package by the time it gets here, so an in-process
-    check would pass trivially — and purging ``sys.modules`` mid-run to fix that
-    would hand every other test a different copy of classes it holds references
-    to. The isolation is the point; one interpreter start is the price.
+import app                                    # what a real startup loads
+after_import = sorted(sys.modules)
+
+import numpy as np
+from pathlib import Path
+from conftest import (
+    NATIVE_PREFIX, OFFICIAL_METADATA, TRANSFORMER_MODULE_PATHS,
+    FakePipeline, build_safetensors_bytes, lora_tensors,
+)
+from ltx25_studio import generate as generate_module
+
+PKG = str(Path(app.__file__).parent / "ltx25_studio")
+RATE, COUNT, SIZE = 48000, 2, 64
+
+
+class Out:
+    def __init__(self):
+        self.frames = np.zeros((COUNT, SIZE, SIZE, 3), np.uint8)
+        tone = np.linspace(0.0, 1.0, RATE // 20, dtype=np.float32)
+        self.audio = np.stack([tone, tone * 0.5])
+
+
+class Pipe:
+    def __init__(self):
+        self.pipeline = FakePipeline()
+        vocoder = type("V", (), {"config": type("C", (), {"output_sampling_rate": RATE})})()
+        self.pipeline.vocoder = vocoder
+        self.vocoder = vocoder
+
+    def __call__(self, **kwargs):
+        return Out()
+
+
+executed = set()
+
+
+def tracer(frame, event, _arg):
+    if event == "call" and frame.f_code.co_filename.startswith(PKG):
+        executed.add(frame.f_code.co_filename)
+    return None
+
+
+with tempfile.TemporaryDirectory() as directory:
+    adapter = Path(directory) / "adapter.safetensors"
+    adapter.write_bytes(
+        build_safetensors_bytes(
+            lora_tensors(NATIVE_PREFIX, TRANSFORMER_MODULE_PATHS), OFFICIAL_METADATA
+        )
+    )
+    sys.settrace(tracer)
+    try:
+        generate_module.generate(
+            mode="image_to_video", seed=7, width=SIZE, height=SIZE,
+            conditions=[["a wide establishing shot", 8, 0.8]],
+            loras=({"source": str(adapter), "weight": 1.0},),
+            pipeline_factory=lambda **_: Pipe(), encoder=None,
+            output_root=directory, retention_bytes=10**9,
+        )
+    finally:
+        sys.settrace(None)
+
+print("@@PROBE@@" + json.dumps({"after_import": after_import, "executed": sorted(executed)}))
+"""
+
+
+def _probe_a_clean_interpreter() -> dict:
+    """What startup loads and what a full generation executes, with no history.
+
+    One subprocess covers both questions. Purging ``sys.modules`` in-process to
+    get the same isolation would hand every other test a different copy of
+    classes it holds references to — a subtle and horrible bug to debug — so the
+    interpreter start is the price of not doing that.
     """
-    script = "import app, json, sys; print(json.dumps(sorted(sys.modules)))"
     finished = subprocess.run(
-        [sys.executable, "-c", script],
+        [sys.executable, "-c", _PROBE],
         cwd=str(REPO_ROOT),
         capture_output=True,
         text=True,
-        timeout=120,
+        timeout=180,
     )
-    if finished.returncode != 0:
-        pytest.fail(f"`import app` failed in a clean interpreter:\n{finished.stderr[-2000:]}")
-    return frozenset(json.loads(finished.stdout.strip().splitlines()[-1]))
+    marker = "@@PROBE@@"
+    if finished.returncode != 0 or marker not in finished.stdout:
+        pytest.fail(
+            "the clean-interpreter reachability probe failed:\n"
+            f"stdout tail:\n{finished.stdout[-1500:]}\n\nstderr tail:\n{finished.stderr[-2500:]}"
+        )
+    payload = json.loads(finished.stdout.split(marker, 1)[1].splitlines()[0])
+    return {
+        "after_import": frozenset(payload["after_import"]),
+        "executed": {Path(f) for f in payload["executed"]},
+    }
 
 
 @pytest.fixture(scope="module")
-def loaded_modules() -> frozenset[str]:
-    return _modules_loaded_by_importing_app()
+def clean_probe() -> dict:
+    return _probe_a_clean_interpreter()
+
+
+def _modules_loaded_by_importing_app(probe) -> frozenset[str]:
+    return probe["after_import"]
+
+
+@pytest.fixture(scope="module")
+def loaded_modules(clean_probe) -> frozenset[str]:
+    return _modules_loaded_by_importing_app(clean_probe)
 
 
 @pytest.mark.parametrize("module", EAGER_MODULES)
@@ -220,8 +314,67 @@ def executed_package_files(call) -> set[Path]:
 
 
 def module_file(dotted: str) -> Path:
-    relative = dotted.replace("ltx25_studio.", "").replace(".", "/")
-    return PACKAGE_ROOT / f"{relative}.py"
+    """The file a dotted name lives in — ``__init__.py`` for a package.
+
+    Getting this wrong is not a cosmetic bug: mapping ``ltx25_studio.lora`` to a
+    ``lora.py`` that does not exist makes the package permanently unmatchable by
+    file, so its reachability silently falls through to a weaker check. That was
+    the mechanism behind this file's own order-dependent false positive.
+    """
+    relative = dotted.removeprefix("ltx25_studio").strip(".").replace(".", "/")
+    direct = PACKAGE_ROOT / f"{relative}.py" if relative else None
+    if direct is not None and direct.exists():
+        return direct
+    return (PACKAGE_ROOT / relative / "__init__.py") if relative else PACKAGE_ROOT / "__init__.py"
+
+
+def test_module_file_resolves_a_package_to_its_init():
+    """Regression: a package lives in ``__init__.py``, not ``<name>.py``.
+
+    This mapping was wrong, and the way it was wrong is worth remembering,
+    because it did not look like a bug: ``ltx25_studio.lora`` resolved to a
+    ``lora.py`` that does not exist, so the package could never match by file
+    and its reachability silently fell through to a weaker check. A lookup that
+    returns a plausible path for a file that is not there fails *quietly* —
+    which is the whole class this file exists to catch, reproduced inside the
+    instrument meant to catch it.
+    """
+    for dotted in ("ltx25_studio", "ltx25_studio.lora", "ltx25_studio.ui"):
+        resolved = module_file(dotted)
+        assert resolved.name == "__init__.py", f"{dotted} is a package; got {resolved.name}"
+        assert resolved.is_file(), f"{dotted} resolved to {resolved}, which does not exist"
+    for dotted in ("ltx25_studio.audio", "ltx25_studio.lora.apply"):
+        resolved = module_file(dotted)
+        assert resolved.is_file() and resolved.name != "__init__.py", resolved
+
+
+def test_a_package_reached_only_by_a_lazy_generation_import_is_not_a_false_positive(clean_probe):
+    """The order-dependent false positive this file shipped, pinned.
+
+    ``ltx25_studio.lora`` is imported by nothing at startup and by ``generate``
+    only when a request stages an adapter. Its ``__init__.py`` therefore executes
+    exactly once, on that first lazy import — so an in-suite tracer that runs
+    after any earlier test has already imported it can never watch it execute,
+    and the package looks dead while being reached on every LoRA run.
+
+    Measuring in a clean interpreter is what makes this answerable at all. If
+    someone moves the discovery back in-process to save the subprocess, this is
+    the test that should stop them.
+    """
+    lora = "ltx25_studio.lora"
+    assert lora not in clean_probe["after_import"], (
+        f"{lora} is now loaded at startup, so this test no longer covers the lazy case it "
+        f"was written for — point it at whatever is lazy now, do not delete it"
+    )
+    reached = module_file(lora) in clean_probe["executed"] or any(
+        module_file(m) in clean_probe["executed"]
+        for m in _package_modules()
+        if m.startswith(f"{lora}.")
+    )
+    assert reached, (
+        f"{lora} was not reached by a generation that stages an adapter. Either stage 7 is "
+        f"disconnected again, or the probe has stopped measuring first-import execution."
+    )
 
 
 def test_the_instrument_distinguishes_executed_from_merely_present():
@@ -442,7 +595,7 @@ def test_lora_apply_runs_when_the_request_stages_an_adapter(executed_by_a_full_g
     )
 
 
-def test_no_package_module_is_reached_by_nothing(loaded_modules, executed_by_a_full_generation):
+def test_no_package_module_is_reached_by_nothing(clean_probe):
     """The check that cannot miss a module nobody thought to list.
 
     Every module under ``ltx25_studio/`` must be reached by **something**: loaded
@@ -454,7 +607,12 @@ def test_no_package_module_is_reached_by_nothing(loaded_modules, executed_by_a_f
     Discovered by globbing rather than declared, so a module added tomorrow and
     wired to nothing fails here without anyone remembering to update a list.
     """
-    reached_files = executed_by_a_full_generation
+    # From the clean-interpreter probe, NOT the in-process trace: measured
+    # inside the suite, a package __init__ that some earlier test already
+    # imported can never be seen to execute again, and this assertion reported
+    # a false positive on exactly that. A fresh process has no such history.
+    loaded_modules = clean_probe["after_import"]
+    reached_files = clean_probe["executed"]
     every = _package_modules()
 
     def directly_reached(module: str) -> bool:
