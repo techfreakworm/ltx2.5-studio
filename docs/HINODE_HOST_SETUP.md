@@ -137,3 +137,153 @@ That is what ZeroGPU ships; the same pin resolves to cu130 from PyPI. Both satis
 `cu128+`, so the pin is portable — the comment is just narrower than reality.
 
 A version string is not proof of a working kernel. Always launch one.
+
+## The weight download — HOST-PROVEN
+
+Run through the app's own resolver (`scripts/host_download_weights.py` →
+`preflight.ensure_weights` → `model_files.download_allow_list()`), not a
+hand-written file list. Running the real resolver on a second host is what
+independently proves it.
+
+| measurement | value |
+|---|---|
+| files | **37 / 37** |
+| wall clock | **774.2 s (12.90 min)**, ~93 MB/s |
+| free before | 140,107,329,536 B (140.107 GB) |
+| free after | 67,920,973,824 B (67.921 GB) |
+| **consumed** | **72,186,355,712 B (72.186 GB)** |
+| resolver's prediction | 72.185 GB — agreement to ~1 MB |
+| `missing_cached_files()` | 0 |
+| `require_cache_complete()` | PASS |
+
+Free space on `/home/wakeuser` was **145,616,388,096 B (145.616 GB)** before any
+setup; the venv and the torch trio account for the ~5.5 GB between that and the
+pre-download figure. The shared `.cache` went from ~56 GB to 110 GiB total, of
+which 68 GiB is our snapshot.
+
+**The cache is provably complete for construction.** Every load since has run with
+`HF_HUB_OFFLINE=1`, and the pipeline constructs entirely from cache — the Hub is
+unreachable and it still works:
+
+```
+Couldn't connect to the Hub: ... offline mode is enabled ... Will try to load from local cache.
+```
+
+That is the permission-bug class from PLAN §6.2 eliminated by measurement rather
+than by argument: if nothing is ever fetched lazily, a lazy fetch cannot hit a
+read-only cache.
+
+Two notes about that shared directory. It holds ~20 GB of stale
+`models--ByteDance--Sa2VA-*/blobs/*.incomplete` files belonging to another
+project — **left alone**. And the `xet` chunk cache stayed negligible (2.5 MB), so
+`hf_xet` added no meaningful disk here.
+
+## What one loaded copy costs — HOST-PROVEN
+
+`LTX2ConditionPipeline` (`BASE_KIND`), bf16, moved to the card:
+
+| | |
+|---|---|
+| `torch.cuda.memory_allocated()` | 70,190,959,616 B (**65.370 GiB**) |
+| `torch.cuda.memory_reserved()` | 66.607 GiB |
+| `nvidia-smi` used | 69,810 MiB |
+| peak host RSS | **20.05 GiB** only — safetensors is mmap-backed |
+| components on `cuda:0` | all 7 weight-bearing ones |
+
+Per component (parameters + buffers), summing to 65.249 GiB:
+
+| component | GiB |
+|---|---|
+| `transformer` | 35.368 |
+| `text_encoder` | 22.277 |
+| `connectors` | 5.909 |
+| `vae` | 1.352 |
+| `vocoder` | 0.240 |
+| `audio_vae` | 0.099 |
+| `duration_head` | 0.004 |
+
+Peak during a 512×320×25 generation was **68.879 GiB** — roughly 3.5 GiB of
+activations on top of the weights at that size.
+
+**ZEROGPU-PENDING inference, not a host result:** 65.370 GiB of weights cannot fit
+a `large` (48 GB) MIG slice, so `xlarge` promotion is structural rather than
+optional. The footprint is measured; the slice behaviour is not testable here.
+
+## `derive_pipeline` and `from_pipe` — the two-copy trap
+
+`get_pipeline(pipeline="text2video", device="cuda")` **OOMs the card** unless the
+dtype is passed to `from_pipe`. The cause is in diffusers:
+
+```
+pipeline_utils.py:2155   dtype = _resolve_dtype(kwargs.pop("dtype", None), torch_dtype) or torch.float32
+pipeline_utils.py:2253   new_pipeline.to(dtype=dtype)
+```
+
+With no dtype, `from_pipe` defaults to **float32** and casts every shared module.
+`t.to(float32)` on bf16 allocates new tensors at twice the bytes, so the "derived"
+pipeline is a second copy — and because `nn.Module.to()` mutates in place and the
+modules really are shared, **the base pipeline would silently become fp32 too** if
+it ever fit. Passing the base's own dtype makes every `t.to()` a no-op returning
+`self`:
+
+| `from_pipe(base, dtype=base.dtype)` | measured |
+|---|---|
+| components shared by identity | **9 / 9** |
+| cuda allocated delta | **−1024 B** (allocator bookkeeping) |
+| total for BOTH pipelines | 65.370 GiB |
+| `base.dtype` afterwards | still `torch.bfloat16` |
+| `only in base` | `['audio_scheduler']` — as `derive_pipeline` predicts |
+
+`scripts/host_probe_from_pipe.py` asserts all three properties. It compares the
+delta against a 1 MiB tolerance rather than zero: a real second copy is tens of
+GiB, while the allocator's own bookkeeping moves by a KiB in either direction, and
+a check that fails on noise teaches its reader to ignore it.
+
+## Stage 2 is unreachable — HOST-PROVEN
+
+`get_pipeline` always builds `StageRunner(built, kind=pipeline)`, so `upsampler`
+and `decoder` stay `None`. Any `enable_stage_2=True` request raises:
+
+```
+ModelLoadError: failed to load pipeline component 'latent_upsampler': stage 2 was
+requested but the latent upsampler or the diffusion decoder was not loaded.
+Refusing to silently fall back to a single-stage render, which would look like it
+worked and be visibly worse.
+```
+
+An honest refusal rather than a silent downgrade — but the headline stage-2 quality
+path (PLAN §7.4) has nothing behind it yet. This is wiring, not a missing
+dependency: `latent_upsampler` and `temporal_latent_upsampler` are downloaded, and
+`LTX2LatentUpsamplePipeline` / `LTX2VideoDiffusionDecodePipeline` both import.
+Note also that `model_index.json` declares `diffusion_decoder` while
+`LTX2ConditionPipeline` rejects it — *"config attributes {'diffusion_decoder': …}
+were passed … but are not expected and will be ignored"* — so it must be built
+separately.
+
+## First real generation — HOST-PROVEN
+
+`SMOKE_MODE=image_text_to_video SMOKE_W=512 SMOKE_H=320 SMOKE_FRAMES=25`. The
+`condition` pipeline with a prompt and no image attached — `_conditions()` returns
+empty, so this is text-to-video through the base workflow, chosen because
+`text_to_video` routes to `text2video` and is blocked by the `from_pipe` trap
+above.
+
+```
+pipeline loaded and moved to cuda in 14.1s
+cuda allocated 65.370 GiB  reserved 66.607 GiB
+ASSERT every weight-bearing component is on cuda: PASS
+=== GENERATION COMPLETED in 5.3s ===
+output_path : outputs/run-e8872ced78e4/output.mp4      93,351 bytes
+peak cuda   : 68.879 GiB
+container   : mov,mp4,m4a,3gp,3g2,mj2 (QuickTime / MOV)   duration 1.042 s
+  [0] type=video codec=h264  512x320 pix_fmt=yuv420p avg_rate=24 declared_frames=25
+DECODED     : {'video': 25}
+```
+
+25 frames declared **and 25 decoded** — the header is not the check. 8 distilled
+steps in 5.3 s.
+
+The dropped-audio warning fired and reached the result, which is PLAN §5.3
+working rather than incidental: the model is jointly audio-visual with no video-off
+switch, so a video-only mode renders audio and pays for it either way, and the user
+is told instead of silently losing it.
