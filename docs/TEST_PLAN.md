@@ -1,126 +1,160 @@
 # LTX-2.5 Studio — Test Plan
 
-Two matrices, for two different questions. **They are not interchangeable and a
-result from one does not answer the other.**
+Two matrices, for two different questions. **Neither answers the other's.**
 
 | | **Part A — hinode** | **Part B — ZeroGPU** |
 |---|---|---|
-| answers | **is the application correct?** | **does it fit the platform?** |
+| answers | **does the app work?** | does it fit the platform? |
 | hardware | RTX PRO 6000 Blackwell, **unpartitioned**, 97887 MiB | same silicon, MIG-partitioned |
-| RAM | 124 GB | ~68 GB (community observation) |
-| disk | 136 GB free, persistent | 150 GB cap, **wiped on cold start** |
-| tensor packing | none | O_DIRECT to `~/.zerogpu/tensors` |
-| budget | time only | **2400 GPU-s/day**; an xlarge multiplier is *assumed*, see §B.1 |
-| status | **critical path** | **parked** |
+| RAM / disk | 124 GB / 136 GB persistent | ~68 GB / 150 GB, wiped on cold start |
+| budget | **wall-clock only** | 2400 GPU-s/day |
+| status | **ACTIVE — the whole objective** | ⏸️ **PARKED** |
 
-**Label every claim.** A mode that works on hinode is **HOST-PROVEN**; whether it
-fits ZeroGPU is **ZEROGPU-PENDING** and hinode cannot speak to it. The reverse is
-also true: a ZeroGPU disk failure says nothing about whether the mode is correct.
+**Label every claim.** A mode that works here is **HOST-PROVEN**. Whether it fits
+ZeroGPU is **ZEROGPU-PENDING**, and nothing in Part A can speak to it.
+
+**`host-runner` executes this matrix. Nobody else drives the box.**
 
 ---
 
-# Part A — hinode: is the application correct?
+# Part A — hinode
 
-No quota, so the constraint is wall-clock rather than seconds-of-GPU. That
-changes the design of the matrix, not just its size: on ZeroGPU we deliberately
-proved **code paths** and skipped modes whose paths were already covered. Here we
-can afford to run every mode at a resolution someone would actually use, and the
-right thing to buy with that budget is **output we can look at**, not more green
-ticks.
+**The objective, in one sentence: every one of the 11 modes produces a real file
+you can open, and the LoRA validator works in both directions against the real
+adapters.**
 
-## A.0 Before any run
+There is no quota here, so the economies that shaped Part B are gone. Part B
+grouped modes by shared code path and skipped the ones already covered. **Do not
+do that here.** Each mode gets its own run and its own artifact, because the
+operator wants to see each one work — and because the failures this build has
+actually produced were things that *ran and were wrong*, which only looking at
+the output catches.
 
-| check | why |
+## A.0 Preconditions — check these before the first run
+
+| check | why it matters |
 |---|---|
-| `HF_TOKEN` exported **in the launching environment** | `ensure_weights` runs here now (capability gating). Not merely present in an interactive shell — it must survive `nohup`/`tmux` |
-| startup log shows `will_use_gpu=True` | if False, the app silently does no GPU work at all — the defect this gating fixed |
-| `weights cached : 37/37` | 26/37 means the download is incomplete; the run would fail later and more confusingly |
-| `dtype : bf16 (fixed; no precision switch)` | there is no precision lever; if you are reaching for one, read PLAN §2.6 |
-| **module identity** across the two pipelines | `pipe_a.transformer is pipe_b.transformer`. Equality passes with two copies loaded — 134 GiB against a 96 GiB card |
-| `audio_scheduler` present on the condition pipeline | the one component the two classes do not share. If sharing dropped it, the joint audio degrades in a way the **video output never reveals** |
+| `HF_TOKEN` **exported in the launching environment** | not merely present in an interactive shell — it must survive `nohup`/`tmux`. Without it, startup fails at `model_index.json (1 of 37; GatedRepoError)` |
+| startup log: `will_use_gpu=True` | if `False` the app does **no GPU work at all** and the UI still comes up |
+| startup log: `weights cached : 37/37 files` | anything less means an incomplete download; the failure would surface later and more confusingly |
+| startup log: `dtype : bf16 (fixed; no precision switch)` | there is no precision lever — if you are looking for one, see PLAN §2.6 |
+| `pipe_a.transformer is pipe_b.transformer` | **identity, not equality.** Two copies is 134 GiB against a 96 GiB card — an OOM on the second build |
+| `audio_scheduler` present on the condition pipeline | the one component the two classes do not share. If sharing dropped it, the joint audio degrades in a way **the video never reveals** |
 
-## A.1 The matrix — all eleven modes, real resolutions
+## A.1 Resolution and length
 
-Baseline **704×480, 121 frames** unless stated. Ordered by risk: the earliest
-failure should be the cheapest to diagnose.
+**Baseline: 704 × 480, 121 frames** (16 latents). Part B's 256×256×9 existed only
+to ration quota and should not be reused here — **a 9-frame clip passes several
+things by accident**: the `num_frames % 8 == 1` arithmetic, the pixel→latent
+anchor conversion, and the stereo mux all have more room to be wrong at 121
+frames than at 9.
 
-| # | Run | Mode(s) | Config | Proves |
+All values verified legal against `constraints.py`: 704×480 and 1216×704 are both
+multiples of 32; 121 and 241 frames are both `k·8+1`.
+
+## A.2 The matrix — 11 modes, each producing a file
+
+**"Expected streams" is the pass criterion**, not "it produced a file". A mode
+that declares `exports=("audio","video")` and hands back a silent video is the
+exact defect that shipped here once already.
+
+| # | Mode | Inputs | Config | **Expected streams in the artifact** |
 |---|---|---|---|---|
-| H1 | first light | `text_to_video` | baseline | the entire stack: load → single denoise → **diffusion decode** → muxed mp4 |
-| H2 | joint audio-visual | `text_to_audio_video` | baseline | the flagship. Audio and video in one container, **stereo, 24 kHz** |
-| H3 | image conditioning | `image_to_video` | baseline + 1 image | `LTX2VideoCondition`, VAE encode, **CRF-18** branch, **pixel→latent** index |
-| H4 | image + prompt | `image_text_to_video` | baseline + image + prompt | prompt survives alongside a condition |
-| H5 | video conditioning | `video_to_video` | baseline + clip, strength 0.7 | multi-frame condition — **never CRF-recompressed**, a different branch from H3 |
-| H6 | joint from image | `image_to_audio_video` | baseline + image | H2 ∩ H3 |
-| H7 | joint from image+text | `image_text_to_audio_video` | baseline + image + prompt | the fullest first-class path |
-| H8 | audio-only export | `text_to_audio` | min resolution | audio track extracted; **video still rendered internally** |
-| H9 | audio from video | `video_to_audio` | min resolution + clip | as H8 from a conditioned source |
-| H10 | audio→audio | `audio_to_audio` | min resolution + clip | waveform → mel → `audio_vae` → **4D latents** + `noise_scale` |
-| H11 | audio→video | `audio_to_video` | baseline + clip | audio-latent input, video out — pays audio encode **on top** |
-| H12 | **LoRA, positive** | `image_to_video` + adapter | baseline | stage 7 attaches to **> 0 modules** on real weights |
-| H13 | **LoRA, negative** | same + 2B adapter | baseline | **rejected** naming module/expected/actual |
-| H14 | stage 2 | `text_to_video`, `enable_stage_2=True` | baseline | upsample → STAGE_2 sigmas → **`denormalize=False`** |
-| H15 | duration head | `text_to_video`, no `num_frames` | tight min/max | auto-duration |
-| H16 | high resolution | `text_to_audio_video` | **1216×704** | the resolution a user would actually pick |
+| H1 | `text_to_video` | prompt | baseline | **video only** — h264. No audio stream |
+| H2 | `image_to_video` | image | baseline | **video only** |
+| H3 | `image_text_to_video` | image + prompt | baseline | **video only** |
+| H4 | `video_to_video` | clip, strength 0.7 | baseline | **video only** |
+| H5 | `text_to_audio_video` | prompt | baseline | **video + audio** — h264 + aac, **2 ch**, rate from the vocoder |
+| H6 | `image_to_audio_video` | image | baseline | **video + audio**, 2 ch |
+| H7 | `image_text_to_audio_video` | image + prompt | baseline | **video + audio**, 2 ch |
+| H8 | `text_to_audio` | prompt | min res, stage 2 skipped | **audio only** — no video stream in the file |
+| H9 | `video_to_audio` | clip | min res, stage 2 skipped | **audio only** |
+| H10 | `audio_to_audio` | audio clip | min res, stage 2 skipped | **audio only** |
+| H11 | `audio_to_video` | audio clip | baseline | **video only, no audio stream.** The audio is an *input* here; encoding it is a cost, not an output |
 
-**H14 must pass `enable_stage_2=True` explicitly.** It defaults off, so a run that
-omits it silently exercises the stage-1 path and reports a pass — spending the run
-to prove the thing it was designed to test did not happen.
+**H8–H10 still render video internally** and discard it — that is the model, not a
+bug. Expect them to take as long as a video mode. `GenerationResult.warnings`
+should carry the dropped-audio note naming the counterpart mode.
 
-**H13's fixture and the both-directions check** are unchanged from §B.5 — the
-positive adapter is `AhsanHareem/reelbids-ltx25-camera-lora` (4096 dims, empty
-metadata), the negative is `charlied98/ltxv_2b_lora_soft_draw_v1` (2048 at
-`attn1.to_k`).
+**H1–H4 and H11 must have NO audio stream.** If `ffprobe` shows one, `exports` is
+not deciding the container's contents and the contract is one-directional again.
 
-## A.2 What hinode CANNOT tell us
+## A.3 The LoRA validator — both directions, real adapters
 
-Recorded so a green Part A is not mistaken for a shippable Space:
+Stage 7 needs a real load, so it belongs here rather than in the offline suite.
 
-- **tensor packing** — does not run here at all
-- **the 150 GB ceiling** — §7.4 arithmetic says even one pipeline may not fit
-- **~68 GB RAM** — hinode has 124 GB, so a run that fits here may OOM there
-- **the `size` kwarg against the platform's own `spaces`** — still first-contact
-- **`preflight` strict on a Space** — different filesystem, different cache
+| # | Adapter | Expected |
+|---|---|---|
+| H12 | `joyfox/LTX-2.3-Transition-LORA` (0.39 GB, ungated) | **ACCEPTED.** Mixed dims — 4096 at attention, 2048 at `audio_ff`, 16384 at `ff.net.2` — and none of that is a mismatch. Stage 7 reports **> 0 modules attached** |
+| H13 | `charlied98/ltxv_2b_lora_soft_draw_v1` (LTX-Video-**2B**) | **REJECTED**, naming module / expected / actual: `2048 at transformer_blocks.0.attn1.to_k, expected 4096` |
 
-A mode passing H1–H16 is **HOST-PROVEN**. Every one of them remains
-**ZEROGPU-PENDING**.
+**H12 is the false-positive guard.** It contains 2048-wide tensors *at the audio
+modules, where 2048 is correct*. A validator that rejects it has learned "contains
+2048" instead of "2048 where 4096 belongs", and would reject the most-downloaded
+LTX LoRA on the Hub.
 
-## A.3 Run log
+**H13 is the whole point of the validator.** It passes stages 4, 5 and 6, passes
+diffusers' only built-in check, and **would pass stage 7 too** — its module names
+match. Only stage 6.5 catches it.
 
-Filled in as runs complete. Wall-clock rather than GPU-seconds, because the
-constraint here is time, not quota.
+## A.4 The two features that need their own run
 
-| Run | Mode | Result | Wall clock | Output looks right? | Notes |
-|---|---|---|---|---|---|
-| H1 | text_to_video | — | — | — | not run |
-| H2 | text_to_audio_video | — | — | — | not run |
-| H3 | image_to_video | — | — | — | not run |
-| H4 | image_text_to_video | — | — | — | not run |
-| H5 | video_to_video | — | — | — | not run |
-| H6 | image_to_audio_video | — | — | — | not run |
-| H7 | image_text_to_audio_video | — | — | — | not run |
-| H8 | text_to_audio | — | — | — | not run |
-| H9 | video_to_audio | — | — | — | not run |
-| H10 | audio_to_audio | — | — | — | not run |
-| H11 | audio_to_video | — | — | — | not run |
-| H12 | LoRA positive | — | — | — | not run |
-| H13 | LoRA negative | — | — | n/a | not run |
-| H14 | stage 2 | — | — | — | not run |
-| H15 | duration head | — | — | — | not run |
-| H16 | high resolution | — | — | — | not run |
+| # | Feature | Config | Expected |
+|---|---|---|---|
+| H14 | **stage 2** | `text_to_video`, **`enable_stage_2=True`** | upsample → 3-step schedule → diffusion decode. Visibly more detail than H1 at the same prompt/seed |
+| H15 | **duration_head** | `text_to_video`, **omit `num_frames`**, `min_seconds`/`max_seconds` | length chosen by the model, within the bounds |
 
-**"Output looks right?" is a required column, not decoration.** Every failure this
-build has produced was something that *ran* and was wrong — a silent video, a
-double-denormalized decode, an adapter that attached to nothing. A green exit code
-is the weakest evidence available here, and hinode is the first place we can
-afford to actually look at the artifact.
+> ⚠️ **H14 must pass `enable_stage_2=True` explicitly.** It defaults **off**, so a
+> run that omits it quietly exercises the stage-1 path **and reports a pass** —
+> spending the run to prove the thing it was designed to test never happened.
+> Compare against H1 at the same seed; if they are identical, stage 2 did not run.
+
+## A.5 One high-resolution run
+
+| # | Mode | Config | Purpose |
+|---|---|---|---|
+| H16 | `text_to_audio_video` | **1216 × 704**, 121 frames | the resolution a user would actually choose. Everything above is a correctness check; this is the one that says whether it is usable |
+
+## A.6 Run log
+
+| Run | Mode | Result | Wall clock | **Streams observed** | **Output looks right?** | Notes |
+|---|---|---|---|---|---|---|
+| H1 | text_to_video | — | — | — | — | not run |
+| H2 | image_to_video | — | — | — | — | not run |
+| H3 | image_text_to_video | — | — | — | — | not run |
+| H4 | video_to_video | — | — | — | — | not run |
+| H5 | text_to_audio_video | — | — | — | — | not run |
+| H6 | image_to_audio_video | — | — | — | — | not run |
+| H7 | image_text_to_audio_video | — | — | — | — | not run |
+| H8 | text_to_audio | — | — | — | — | not run |
+| H9 | video_to_audio | — | — | — | — | not run |
+| H10 | audio_to_audio | — | — | — | — | not run |
+| H11 | audio_to_video | — | — | — | — | not run |
+| H12 | LoRA accepted | — | — | n/a | — | not run |
+| H13 | LoRA rejected | — | — | n/a | n/a | not run |
+| H14 | stage 2 | — | — | — | — | not run |
+| H15 | duration_head | — | — | — | — | not run |
+| H16 | high resolution | — | — | — | — | not run |
+
+**Both bold columns are required.** *Streams observed* is checkable —
+`ffprobe -show_streams` against the expected layout in A.2. *Output looks right?*
+is the judgement, and it is the one no test can make: every failure this build
+produced was something that ran, exited zero, and was wrong.
+
+## A.7 What hinode cannot tell us
+
+So a green Part A is not mistaken for a shippable Space: **no tensor packing, no
+150 GB ceiling, 124 GB RAM against ~68, and the `spaces` integration is
+first-contact.** All of Part A is **HOST-PROVEN / ZEROGPU-PENDING**.
 
 ---
 
 # Part B — ZeroGPU: does it fit the platform?
 
-**Parked.** Retained unchanged because it is the matrix we return to, and because
-its economics do not apply to hinode and must not leak into Part A.
+> ⏸️ **PARKED.** Retained unchanged because it is the matrix we return to, and
+> because its economics — a 2400 GPU-s/day budget — **do not apply to hinode and
+> must not leak into Part A**. Findings to date are in
+> [`docs/ZEROGPU_DISK.md`](ZEROGPU_DISK.md).
 
 ## B.1 The economics
 
