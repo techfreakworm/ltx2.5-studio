@@ -133,6 +133,15 @@ def is_zerogpu(spaces_module) -> bool:
     return spaces_module is not None and not getattr(spaces_module, "is_stub", False)
 
 
+# ---------------------------------------------------------------------------
+# PARKED — the mmap-backing guard. Not wired into any live path.
+#
+# ZeroGPU-only: it cannot fire off-Space, and ZeroGPU is parked until the app is
+# proven on a dedicated GPU host. These helpers are kept rather than deleted
+# because they are tested and mutation-checked, and re-enabling is one call in
+# `pipelines._base_pipeline`. See docs/ZEROGPU_DISK.md for what they are for.
+# ---------------------------------------------------------------------------
+
 #: What ZeroGPU's post-pack cleanup unlinks, from `ZEROGPU_MMAP_AUTOPRUNE_PATTERN`.
 #: We assert on the SAME basis it prunes on, rather than on a proxy for it.
 AUTOPRUNE_PATTERN = "*/huggingface/hub/models--*/blobs/*"

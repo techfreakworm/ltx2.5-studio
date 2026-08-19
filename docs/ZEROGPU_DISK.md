@@ -1,9 +1,22 @@
-# LTX-2.5 Studio on ZeroGPU — the disk problem, and four ways out
+# ZeroGPU disk — PARKED. Findings to date.
 
-**A decision document.** The app is finished and correct; it does not fit ZeroGPU's
-ephemeral disk. There are four routes out, they trade money against quality
-against risk differently, and **the choice is the operator's**. Nothing here has
-been implemented.
+> ## ⏸️ This is not an active workstream.
+>
+> **ZeroGPU is parked.** The sequence is: prove the app works on a dedicated GPU
+> host **first**, then return to platform logistics. This file exists so the
+> findings are not lost, **not** so anyone acts on them.
+>
+> **No further research has been done and none should be** until the app is
+> proven. Several questions below are marked ❓ deliberately — they are open, and
+> opening them is future work rather than a gap.
+>
+> **The two things to re-read on return** are **§1 — the packing-peak arithmetic**
+> and **§6 — the mmap precondition and the guard for it**. Both stand alone;
+> everything else is context for choosing between options.
+
+The app does not fit ZeroGPU's ephemeral disk. Four routes out are recorded below
+with what each costs. **Nothing here is implemented, and the choice is the
+operator's.**
 
 **Every claim is labelled.** ✅ *verified against source* · ⚠️ *inferred* ·
 ❓ *assumed, and the assumption decides the answer*. This document exists because
@@ -204,7 +217,28 @@ separately?" decides this document.
 
 ---
 
-## 6. What this does not decide
+## 6. The guard to build on return
+
+`zerogpu.check_mmap_backed()` and its helpers **exist, are tested and are
+mutation-checked**, but are deliberately **not wired into any live path** — they
+are ZeroGPU-only and cannot fire elsewhere.
+
+**What they do:** walk `/proc/self/maps`, resolve each model parameter's
+`data_ptr()` back to its backing file, and require a match against the autoprune
+glob. Anything that materialises tensors into anonymous memory — a dtype cast, a
+`.clone()`, an eager `low_cpu_mem_usage=False`, a non-safetensors path — leaves
+nothing for the prune to unlink. It then frees **nothing**, and the Space dies at
+**steady state** with 72 GB it cannot account for and no error explaining why.
+
+**To re-enable:** one call in `pipelines._base_pipeline()` after
+`from_pretrained` and before any device move, raising `ModelLoadError` when it
+reports a violation. The tests already cover the cast case, the wrong-file case,
+and weakening the predicate itself.
+
+**Why it is not on now:** it was escalated to a requirement mid-refocus. It is a
+ZeroGPU requirement, and ZeroGPU is parked.
+
+## 7. What this does not decide
 
 The app itself is being proven on a dedicated GPU host, which answers *is the
 application correct?* and **cannot** answer *does it fit ZeroGPU?* — there is no
