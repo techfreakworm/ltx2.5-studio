@@ -339,7 +339,7 @@ def _sweep(root: Path, retention_bytes: int | None) -> tuple[str, ...]:
     return tuple(f"evicted old run {path}" for path in evicted)
 
 
-def _artifacts_for(written, *, spec, mode: str, run_dir: Path) -> dict:
+def _artifacts_for(written, *, spec, mode: str, run_dir: Path, notes=None) -> dict:
     """Map what the encoder wrote onto the tracks the mode promised.
 
     **A mode's ``exports`` tuple is a contract, not a hint.** Declaring
@@ -356,6 +356,19 @@ def _artifacts_for(written, *, spec, mode: str, run_dir: Path) -> dict:
     tracks -- or a mapping of track name to path when it writes them separately.
     """
     if isinstance(written, dict):
+        # The encoder is the only layer that knows what it actually wrote, so
+        # this is the only place the contract can be checked in BOTH directions.
+        # Declared-but-missing raises. Written-but-undeclared does NOT: the
+        # registry is what decides a mode's exports, so an over-generous encoder
+        # is over-generous rather than wrong, and failing a run that produced a
+        # perfectly good video would be the harsher answer to the milder problem.
+        # It is dropped and noted, never silently widened into the result.
+        extra = sorted(set(written) - set(spec.exports))
+        if extra and notes is not None:
+            notes.append(
+                f"the encoder produced {', '.join(extra)} for mode {mode!r}, which declares "
+                f"exports={list(spec.exports)}; the extra track was not returned"
+            )
         resolved = {
             kind: _require_artifact(written.get(kind), mode=mode, run_dir=run_dir, track=kind)
             for kind in spec.exports
@@ -504,7 +517,9 @@ def generate(
     except Exception as exc:
         raise EncodeError(path=str(run_dir), reason=str(exc)) from exc
 
-    artifacts = _artifacts_for(written, spec=spec, mode=request.mode, run_dir=run_dir)
+    artifacts = _artifacts_for(
+        written, spec=spec, mode=request.mode, run_dir=run_dir, notes=encoder_warnings
+    )
 
     warnings = _sweep(root, retention_bytes) + tuple(encoder_warnings)
 
