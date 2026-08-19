@@ -22,11 +22,9 @@
 # float silently drags torch past the ceiling. torchaudio must match torch
 # exactly or the C++ ABI mismatch crashes the whole audio path on import.
 #
-# NOTE for whoever bumps these: the drift test guarding this trio checks that
-# torch and torchaudio agree, but does NOT yet cover torchvision — which is
-# where the trap actually lives. torchvision 0.26.0 hard-declares torch==2.11.0
-# so the current pin is self-consistent, but the guard has a hole exactly here.
-# Verify the torchvision <-> torch pairing by hand until that test covers it.
+# NOTE for whoever bumps these: tests/test_torch_trio_drift.py guards all three
+# together — torch, torchaudio AND torchvision — so a mismatched bump fails the
+# gate rather than the Space. Bump them as a set and let the test confirm it.
 torch==2.11.0
 torchvision==0.26.0
 torchaudio==2.11.0
