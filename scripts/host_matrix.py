@@ -154,7 +154,8 @@ def audio_level(path):
     peak = float(np.abs(raw).max())
     rms = float(np.sqrt((raw**2).mean()))
     dbfs = 20 * np.log10(rms + 1e-12)
-    flag = "  *** NEAR-SILENT ***" if dbfs < -40 else ""
+    # "very quiet", not "silent": -55 dBFS is faint and still audible.
+    flag = "  *** VERY QUIET (<-40 dBFS) ***" if dbfs < -40 else ""
     log(f"  audio level: peak {peak:.4f} rms {rms:.6f} = {dbfs:.1f} dBFS{flag}")
     return dbfs
 

@@ -10,7 +10,8 @@ and useless.
 
 So this reports peak, rms and dBFS per artifact, and flags:
 
-* **NEAR-SILENT** below -40 dBFS — present but effectively inaudible
+* **VERY-QUIET** below -40 dBFS — faint, not silent. -55 dBFS is audible when
+  turned up, so the flag means "far below its siblings", not "nothing there"
 * **clipping** above 1.0 — the decoder overshooting full scale
 * **near-mono** when |L-R| is a negligible fraction of the signal's own level;
   judged relative rather than absolutely, because an absolute threshold calls a
@@ -71,7 +72,10 @@ def main() -> int:
             continue
         flags = []
         if info["dbfs"] < -40:
-            flags.append("NEAR-SILENT")
+            # "very quiet", not "silent". -55 dBFS is faint but plainly audible
+            # when turned up, and calling it silence overstates the measurement --
+            # which invited a real disagreement with someone who had listened.
+            flags.append("VERY-QUIET (<-40 dBFS)")
         if info["peak"] > 1.0:
             flags.append("clipping")
         if info["ratio"] is not None and info["ratio"] <= 0.01:

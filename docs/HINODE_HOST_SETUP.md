@@ -611,3 +611,61 @@ defaults in force** — `stg_scale 1.0`, `modality_scale 3.0`,
 and with `num_inference_steps=8` and no `sigmas`, so **only H14 used the distilled
 schedule**. When the distilled-guidance fix lands, levels and timings should be
 expected to move and this table is the *before*.
+
+## Provenance of the H9 condition clip
+
+Recorded because it was briefly unrecoverable, and because it changes what a human
+reviewer would be judging.
+
+```
+/home/wakeuser/ltx25-studio/outputs/run-938787102035/output.mp4
+  704 x 480, 121 frames, h264 yuv420p, 24 fps, 865,447 bytes
+  streams: [('video', 'h264')]        HAS AUDIO STREAM: False
+```
+
+* It is **H1's own generated output** — `text_to_video`, sports-car sunset prompt,
+  seed 1234, from the first (bypassed) batch. **A generated clip, not real footage.**
+* **H4 and H9 shared it**, and both H9 runs (`run-781803794dad`,
+  `run-c1b06b0cf577`) used this same file.
+* It carries **no audio stream**, and in any case **only the frames reach the
+  model** — `load_video_frames` decodes to PIL images, so the condition is purely
+  visual by construction.
+
+So *"does the generated audio match the video that conditioned it?"* would be asked
+of a synthetic, silent, model-generated clip. That is a weaker test than real
+footage: the visual content is itself a model artifact, so a poor audio match could
+reflect the source rather than the conditioning path. **The strong version of that
+test needs real footage with sustained audio-relevant motion**, which is not on the
+box.
+
+## "Very quiet", not "near-silent"
+
+The −55 dBFS figure survived every check: per-channel (ch0 −55.0, ch1 −55.0, so not
+a summing artifact), both H9 files (−55.0 and −54.5), correct `int16 ÷ 32768`
+normalisation (the same code yields `peak 1.000000` exactly for H8, which a broken
+normalisation could not), an independent tool agreeing at int16 RMS **58.3**, and a
+tensor measurement upstream of the file entirely.
+
+**But −55 dBFS is faint, not inaudible.** Turned up it is plainly audible, so a
+listener reporting "not silent" and a meter reporting "50 dB below its siblings" are
+both right. The flag in `host_audio_levels.py` now reads **VERY-QUIET** rather than
+NEAR-SILENT, because the stronger word invited a disagreement the measurement never
+supported.
+
+What the measurement does establish is narrower and still decisive: **the level is
+not a property of the input.** Same mode, same silent generated clip, same seed,
+only `strength` changed — 0.8 gives −55.0 dBFS and 0.5 gives −5.1. The mode is
+capable of a healthy level from that exact condition.
+
+One discrepancy kept rather than smoothed: the tensor probe read `rms 0.000370`
+while the files read `0.001779`, about 4.8×. Different runs of the same mode, so
+run-to-run variation rather than a conflict between methods. Both are ~50 dB down.
+
+## Run provenance is now durable
+
+Every run previously wrote `<script>.log` and the next run destroyed it, which is
+how the fixture behind a recorded result became unreadable. Logs are timestamped,
+and each launch appends the SHA, script and forwarded environment to an append-only
+`/home/wakeuser/ltx25-logs/RUNS.manifest`; a symlink keeps the stable name for
+polling. It records the **inputs** rather than the output, because that was the
+irrecoverable half — a result whose inputs are unknown is not a measurement.
