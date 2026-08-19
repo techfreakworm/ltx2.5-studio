@@ -538,3 +538,76 @@ value, not at the artifact.**
 
 Each guarded against the failure that was imagined rather than the failures
 available. **A harness construct validated only against success is not validated.**
+
+## `video_to_audio` near-silence — cause found: the condition strength default
+
+Sweeping the one lever, same seed 1234 throughout:
+
+| `strength` | rms | dBFS | |
+|---|---|---|---|
+| 0.99 | 0.011720 | −38.6 | near-silent |
+| **0.80** — the default that produced H9 | 0.001779 | **−55.0** | near-silent |
+| **0.50** | 0.556122 | **−5.1** | **healthy, matches text-only** |
+| 0.20 | 0.264710 | −11.5 | healthy |
+| 0.05 | 0.218849 | −13.2 | healthy |
+
+**The culprit is `GenerationRequest.strength = 0.8`, not `MAX_VIDEO_CONDITION_STRENGTH`.**
+`modes._conditions` computes `min(request.strength, MAX_VIDEO_CONDITION_STRENGTH)`, so
+with strength defaulting to 0.8 the 0.99 ceiling never binds — lowering that
+constant would change nothing.
+
+Two things to hold when choosing a fix:
+
+* **It is not monotonic.** 0.8 gives −55.0 while 0.99 gives −38.6, and 0.5 is louder
+  than 0.2. There is a cliff between 0.5 and 0.8, not a gradient, so a new default
+  should not be interpolated from these points.
+* **H4 `video_to_video` at strength 0.7 produced good video.** Strong conditioning is
+  exactly what video-to-video fidelity wants and what ruins the audio branch, so one
+  global default cannot serve both. A per-mode condition strength is the shape that
+  fits.
+
+Corroborating, and free — the levels sort by **condition type**, not by mode:
+
+| condition | dBFS |
+|---|---|
+| none (text only) — H8, H5, H16 | −5.2, −5.2, −5.9, −6.0, −6.1, −6.2 |
+| image, one frame at index 0 — H6, H7 | −8.2, −12.1, −12.9, −15.2 |
+| video, all 121 frames at 0.8 — H9 | −54.5, −55.0 |
+
+Which also rules something out: all three joint audio+video modes ran with the same
+SFT guidance defaults (`audio_guidance_scale` at 7.0 rather than the distilled 1.0)
+and H5 came out at −6.0. **That deviation is real and worth fixing on its own
+merits, but it is not what silences H9.** The image-condition modes sitting 3–9 dB
+below text-only is the same effect, much milder — one anchored frame against 121.
+
+## Output quality sign-off, and the one exception
+
+The operator reviewed the artifacts and signed off: *"visuals are good, audios are
+good. All verified visually."* That closes the *"output looks right?"* column for
+prompt adherence, motion coherence and audio correctness across the real-path
+modes, the 1216×704 flagship, and both audio-only modes — and it validates the
+16000/48000 rate handling **by ear**, which is the strongest form that claim could
+take.
+
+**One exception, recorded rather than reconciled:**
+
+| | |
+|---|---|
+| **CONFIRMED — OPERATOR-VERIFIED** | the five healthy audio artifacts and every video mode |
+| **PENDING — not operator-verified** | H9 `video_to_audio` |
+
+The sign-off predates the dBFS measurements, and H9 sat among five healthy
+artifacts in that gallery. At −55 dBFS with a 1.46% peak it is effectively
+inaudible, and **near-silence in one card among twenty-five does not announce
+itself** — so it is likelier it went unregistered than that it was judged fine.
+Both facts belong side by side: signed off by ear, and measured 50 dB below its
+siblings. A human verdict is worth what it was actually applied to.
+
+## The pre-guidance-fix baseline
+
+Every figure in this document is from the current pins with the **SFT guidance
+defaults in force** — `stg_scale 1.0`, `modality_scale 3.0`,
+`audio_guidance_scale 7.0`, `audio_stg_scale 1.0`, `audio_modality_scale 3.0` —
+and with `num_inference_steps=8` and no `sigmas`, so **only H14 used the distilled
+schedule**. When the distilled-guidance fix lands, levels and timings should be
+expected to move and this table is the *before*.
