@@ -77,6 +77,38 @@ def make_image(width: int, height: int):
     return img
 
 
+def make_wav(path, *, seconds=5.0, rate=48000, channels=2):
+    """A synthetic stereo wav to drive the audio-INPUT modes.
+
+    Two tones an octave apart, one per channel, plus an amplitude envelope. Not
+    silence and not identical channels: silence encodes to a degenerate latent
+    that tells us nothing, and duplicated channels would hide a mono downmix in
+    exactly the place the stereo path is supposed to be checked.
+    """
+    import av
+    import numpy as np
+
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    n = int(seconds * rate)
+    t = np.arange(n, dtype="float32") / rate
+    envelope = 0.4 * (1.0 - np.exp(-3.0 * t)) * (0.6 + 0.4 * np.sin(2 * np.pi * 0.7 * t))
+    left = envelope * np.sin(2 * np.pi * 220.0 * t)
+    right = envelope * np.sin(2 * np.pi * 440.0 * t)
+    planes = np.stack([left, right])[:channels]
+    with av.open(str(path), mode="w") as container:
+        stream = container.add_stream("pcm_s16le", rate=rate)
+        stream.layout = "stereo" if channels == 2 else "mono"
+        frame = av.AudioFrame.from_ndarray(
+            (planes * 32767).astype("int16"), format="s16", layout=stream.layout.name
+        )
+        frame.sample_rate = rate
+        for packet in stream.encode(frame):
+            container.mux(packet)
+        for packet in stream.encode(None):
+            container.mux(packet)
+    return path
+
+
 def vocoder_sampling_rate(pipe):
     from ltx25_studio import audio as audio_module
 
@@ -237,6 +269,15 @@ def main() -> int:
     for key, env in (("video", "MATRIX_VIDEO_FIXTURE"), ("audio", "MATRIX_AUDIO_FIXTURE")):
         if any(key in RUNS[r]["needs"] for r in wanted):
             src = os.environ.get(env)
+            if key == "audio" and (not src or not Path(src).exists()):
+                # Synthesised rather than taken from an earlier run, deliberately.
+                # Every audio-EXPORTING mode is currently broken by the bf16
+                # encode defect, so there is no generated wav to borrow — and an
+                # audio *input* fixture is a different path from the broken
+                # encoder anyway, so making one here keeps H10/H11 runnable.
+                src = str(Path(OUTPUT_ROOT).parent / "fixture-audio.wav")
+                make_wav(src, seconds=5.0)
+                log(f"synthesised audio fixture -> {src}")
             if not src or not Path(src).exists():
                 log(f"MISSING {key} fixture: set {env} to a real file "
                     f"(produce one from an earlier run)")
