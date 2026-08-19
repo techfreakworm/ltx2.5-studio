@@ -123,9 +123,10 @@ Three separate resource ceilings, and the tightest one is not the obvious one.
 |---|---|---|---|
 | **VRAM** (`xlarge`) | ~95 GiB | 67.2 GiB weights | ~28 GiB for activations — **comfortable** |
 | **CPU RAM** | **~68 GB** (community cgroup observation, *not* an official figure — HF publishes ZeroGPU RAM as `"-"` / "Dynamic resources") | ~72 GB | **marginal — risk #1** |
-| **Ephemeral disk** | 150 GB, **wiped on every restart/rebuild** | ~144 GB transient peak | **marginal — risk #1** |
+| **Ephemeral disk** | 150 GB, **wiped on every restart/rebuild** | **152–156 GB peak** (§2.5) | **EXCEEDS THE CAP — settled, not a risk** |
 
-**VRAM was never the problem.** The problems are RAM and transient disk.
+**VRAM was never the problem.** The problems are CPU RAM and the startup disk peak — and the
+second is now settled rather than uncertain: it does not fit (§2.5).
 
 ### 2.1 Trap A — duplicate shard sets
 
@@ -232,17 +233,42 @@ but it is larger than a ±0.001 assertion tolerance. `model_files.py` carries th
 values, so any test asserting on sizes should use a tolerance of ±0.01, not ±0.001. The accounting is complete; there is no
 unexplained remainder.
 
-### 2.5 The transient disk peak
+### 2.5 The startup disk peak — negative margin, not tight margin
 
-Startup holds **two** copies: the HF cache (~72 GB) *and* the packed copy ZeroGPU writes to
-`~/.zerogpu/tensors` (~72 GB) ≈ **144 GB against a 150 GB cap**. The 2.3 project was evicted
-with exactly this: `"Workload evicted, storage limit exceeded (150G)"`.
+> **Authoritative section for this arithmetic.** The mechanism is §8.3; the
+> consequence for the deploy is §7.4. If those and this ever disagree, this one
+> is wrong — do not reconcile by editing the other two.
+>
+> *Provenance: verified against `spaces` 0.51.1 source (`zero/torch/patching.py`,
+> `zero/configs.json`), not inferred.*
 
-**Mitigating fact:** the packer auto-prunes the HF cache blobs after packing —
-`ZEROGPU_MMAP_AUTOPRUNE_PATTERN` = `~/.cache/huggingface/hub/models--*/blobs/*` — logging
-`"Cleaned NGB of tensor files ... after packing"`. So the 144 GB peak is **transient**. It is
-still a peak, and 6 GB of margin is not much. This is why §5.6's preflight measures free disk
-and says a number rather than letting the platform evict us anonymously.
+Startup holds **two** copies: the HF cache (~72.19 GB) *and* the packed copy ZeroGPU writes to
+`~/.zerogpu/tensors` (~72.19 GB). The 2.3 project was evicted with exactly this:
+`"Workload evicted, storage limit exceeded (150G)"`.
+
+**The packer does auto-prune the HF blobs** — `ZEROGPU_MMAP_AUTOPRUNE_PATTERN` =
+`~/.cache/huggingface/hub/models--*/blobs/*`, logging `"Cleaned NGB of tensor files ... after
+packing"`. **That is verified, and it does not save us**, because the unlink runs *strictly
+after* `_pack()` returns:
+
+| | GB |
+|---|---:|
+| HF cache snapshot | 72.19 |
+| ZeroGPU packed copy (**one** pipeline, post-`from_pipe`) | 72.19 |
+| **peak, before the prune can run** | **144.37** |
+| the image itself — torch + CUDA | **+8–12** |
+| **total against a 150 GB cap** | **152–156** |
+
+**The margin is negative, not tight.** An earlier draft of this section read it as
+*"6 GB of margin is not much"* — that figure never counted the image, which is not optional and
+is present for the whole window. The prune is real; it simply happens **after** the peak it
+would have to prevent.
+
+Steady state afterwards is fine at ~72 GB. **It is the peak that evicts us, not the residency**,
+and the two have different fixes — which is why they are stated separately here.
+
+§5.6's preflight measures free disk and reports a number, so an eviction arrives as a
+diagnosable message rather than anonymously.
 
 Remaining headroom after packing: `150 − 72.19 ≈ 77.8 GB` for the pip environment, user LoRA
 uploads and outputs. `transformer_full/` (37.98 GB) fits in that — which is why it is opt-in
@@ -1177,28 +1203,20 @@ This fix removes **one of three** causes of the 150 GB eviction. It does not mak
 the Space work, and recording it as if it did would be the same confidently-wrong
 statement as the `expected_weights=53.20GB` line deleted in §2.6.
 
-The packed copy is **separate from** the HF cache snapshot, so even the fixed,
-single-pipeline case is:
+The packed copy is **separate from** the HF cache snapshot, and the prune that would reclaim it
+runs only *after* packing completes. **The authoritative arithmetic is §2.5**; the short version
+is that even the fixed, single-pipeline case peaks at 144.37 GB before the image is counted, and
+152–156 GB with it, against a 150 GB cap.
 
-| | GB |
-|---|---:|
-| HF cache snapshot | 72.19 |
-| ZeroGPU packed copy (one pipeline) | 72.19 |
-| **subtotal** | **144.37** |
-| headroom left for the image | **5.63** |
-| a `python:3.12` image carrying torch + CUDA | **~8–12** |
+**So one pipeline does not fit either.** Double-loading took it to 216.56 GB; the Xet chunk cache
+would have taken it to 288.74 GB. The eviction was **over-determined** — three independent
+causes, and the smallest of them absorbed two cycles of tuning.
 
-**So one pipeline does not fit either.** Double-loading took it to 216.56 GB; the
-Xet chunk cache would have taken it to 288.74 GB. The eviction was
-**over-determined** — three independent causes, and the smallest of them absorbed
-two cycles of tuning.
-
-**The unknown that decides it, named rather than assumed:** whether ZeroGPU frees
-the snapshot after packing. If it does, one pipeline fits comfortably. If it does
-not, **bf16 on `storage: None` is structurally infeasible for this checkpoint
-set**, and the answer is persistent storage, a public Space with `preload_from_hub`
-(§6.2), or smaller checkpoints. That is an operator decision and this plan does
-not assume its outcome.
+**Settled, not open.** ZeroGPU *does* free the snapshot — verified in `spaces` 0.51.1 — and it
+frees it too late, because the unlink follows `_pack()`. So **bf16 on `storage: None` is
+structurally infeasible for this checkpoint set**, and the routes are persistent storage, a
+public Space with `preload_from_hub` (§6.2), or smaller checkpoints. All three are operator
+decisions; none is a knob we can turn.
 
 **The base is always the superset class**, `LTX2ConditionPipeline`. Deriving
 superset → subset can only drop `audio_scheduler`, which the subset does not
@@ -1311,7 +1329,7 @@ easy to break and both silent when broken:
    silently rather than loudly.
 
 **And the unlink runs strictly AFTER `_pack()` completes**, so both copies
-coexist for the whole packing window — which is the 144.37 GB peak in §7.4.
+coexist for the whole packing window — which is the peak in §2.5, the authoritative arithmetic.
 Steady state afterwards is fine at ~72 GB. **It is the peak that evicts us, not
 the residency.**
 
@@ -1566,7 +1584,7 @@ register.
 
 | # | Risk | Why it is uncertain | How it gets settled |
 |---|---|---|---|
-| **1** | **bf16 fits ZeroGPU's transient disk at all** — now doubted, not merely uncertain | Snapshot 72.19 + packed copy 72.19 = **144.37 GB**, leaving 5.63 GB for an image that needs ~8–12. **One pipeline does not fit** unless ZeroGPU frees the snapshot after packing, which is **unverified**. The ~68 GB RAM ceiling remains a community cgroup observation, not an official figure. | Settled by whether the snapshot is freed. If not, the routes are persistent storage, a public Space with preload, or smaller checkpoints — an operator decision, not a knob. **ZeroGPU is parked; hinode is the critical path.** |
+| **1** | ~~bf16 fits ZeroGPU's transient disk~~ — **SETTLED: it does not.** | **Not a risk any more, a finding.** The snapshot **IS** freed after packing (verified, `spaces` 0.51.1) — and the unlink runs *strictly after* `_pack()`, so the 144.37 GB peak precedes it, and with an 8–12 GB image the total is **152–156 GB against a 150 GB cap**. See §2.5 for the authoritative arithmetic. The ~68 GB RAM ceiling remains a community cgroup observation, separate and still open. | **No longer settled by measurement — it is settled.** The routes are persistent storage, a public Space with `preload_from_hub` (§6.2), or smaller checkpoints. All three are operator decisions, none is a knob we can turn. **ZeroGPU is parked; hinode is the critical path.** |
 | 2 | ZeroGPU's packer handles the pipeline's tensor graph correctly | Verified for ordinary tensors; **unverified for quantised custom tensor subclasses** (bitsandbytes `Int8Params`/`Params4bit`, torchao) against the packer's `WeakTensorKeyDictionary` | only becomes live if risk #1 forces quantization — measure then |
 | 3 | ~~`preload_from_hub` 10-entry cap~~ | **RETIRED.** We are one repo → one entry with comma-separated filenames. Fits comfortably (§6.2). | — |
 | 4 | Max `@spaces.GPU` duration on our tier | server-side, tier-dependent, **unpublished** | discover empirically; never hardcode (§5.8 #4) |
