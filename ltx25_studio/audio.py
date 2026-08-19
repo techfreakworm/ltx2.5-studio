@@ -263,8 +263,23 @@ def validate_audio_latents_shape(shape) -> tuple[int, ...]:
     contact with a real encode it rejected a 3-D tensor the VAE itself had
     accepted without complaint -- the batch axis was missing, so ``conv2d``
     silently treated the input as unbatched. The instinct was to loosen this
-    check; the check was correct and the input was wrong. See
-    :func:`unpacked_latents`.
+    check; the check was correct and the input was wrong.
+
+    ⚠️ **But do not read acceptance here as more than it means.** ✅ Measured on
+    the card, one process, the transpose as the only difference::
+
+        latents (1, 8, 101, 16)  ACCEPTED   reconstruction 4.010 s   4/4 tones
+        latents (1, 8,  16, 101)  ACCEPTED   reconstruction 0.610 s   0/4 tones
+
+    **Rank is preserved by transposition, so this cannot distinguish a correct
+    tensor from its transpose.** It accepted the wrong one just as readily, and
+    that variant lost every tone and pinned the output to a fixed length.
+
+    What does catch it is **the reconstruction length scaling with the input
+    length** -- an axis-order error in either direction makes the output
+    duration-invariant, and no knowledge of which axis is which is required.
+    ``test_the_frame_count_tracks_the_input_duration`` is the offline half;
+    TEST_PLAN A.5.1 (H17) is the end-to-end one.
 
     ``audio_latents`` is **unpacked** ``[B, C, L, M]``. Upstream does not
     reliably raise on a wrong rank -- the documented failure is "shape errors,
