@@ -32,6 +32,8 @@ __all__ = [
     "DISTILLED_SIGMA_VALUES",
     "LTX2_5_IMAGE_CRF",
     "STAGE_2_DISTILLED_SIGMA_VALUES",
+    "LTX2_5_TEXT_ENCODER_TYPES",
+    "image_crf_for",
     "is_valid_num_frames",
     "nearest_valid_num_frames",
     "snap_dimension",
@@ -79,6 +81,21 @@ DEFAULT_LENGTH_TOLERANCE_SECONDS = 0.05
 
 #: The shortest legal clip: one frame, at any compression ratio.
 MIN_NUM_FRAMES = 1
+
+
+#: Text-encoder ``model_type`` values that identify an LTX-2.5 stack.
+LTX2_5_TEXT_ENCODER_TYPES = ("gemma4_unified", "gemma4")
+
+
+def image_crf_for(model_type: str) -> int:
+    """CRF for image-conditioning re-compression, derived not hardcoded.
+
+    Upstream selects 18 when ``text_encoder.config.model_type`` is a gemma4
+    variant and 33 otherwise. Writing either number down makes the code wrong for
+    the other, so it is read from the loaded text encoder at runtime (PLAN §5.4,
+    §5.7 row 8).
+    """
+    return LTX2_5_IMAGE_CRF if model_type in LTX2_5_TEXT_ENCODER_TYPES else DEFAULT_IMAGE_CRF
 
 
 def _check_ratio(temporal_compression_ratio: int) -> int:
