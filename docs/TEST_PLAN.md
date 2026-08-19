@@ -281,6 +281,18 @@ then `center`. Each is one line in `audio.MEL_CONVENTIONS`.
 **H10 and H11 passing does not substitute for this.** They will produce
 well-formed audio with a wrong mel — that is what "reported as nothing" means.
 
+> ⚠️ **And the reverse: H17 passing does not clear the app's path.** The
+> round-trip validates the **mel conventions**. It ran through the `to_mel=`
+> seam with the harness supplying `wave.to(device=vae.device, dtype=vae.dtype)`
+> — so it stepped over a hand-off the application did not do, and H10/H11 still
+> failed on `Input type (CPUBFloat16Type) and weight type (CUDABFloat16Type)`
+> **after H17 was already green.**
+>
+> **A harness that moves a tensor the app does not is the same shape as a
+> float32 fixture over a bfloat16 defect.** *The mel is right* and *the app
+> hands it over correctly* are two different claims, and one green result
+> would otherwise be read as covering both.
+
 ---
 
 ## A.6 Run log
