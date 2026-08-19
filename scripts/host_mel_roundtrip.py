@@ -111,22 +111,9 @@ def main() -> int:
     dev_wave = wave.to(device=vae.device, dtype=vae.dtype)
 
     log("\n=== stage 1: forward mel ===")
-    built = audio_module.build_mel_front_end(vae, vocoder)
-
-    # `build_mel_front_end` computes in float32 -- correct, an STFT in bf16 loses
-    # precision exactly where the log floor matters -- but returns float32, and the
-    # VAE is bf16, so `audio_vae.encode` raises
-    #   "Input type (float) and bias type (c10::BFloat16) should be the same".
-    #
-    # Wrapping it here rather than editing audio.py does two things: it uses the
-    # documented `to_mel=` seam that the module's own error message points at, and
-    # it establishes the one-line cast is SUFFICIENT and not merely necessary --
-    # so the fix ships already verified instead of hopefully.
-    def to_mel(waveform):
-        return built(waveform).to(dtype=vae.dtype)
-
-    log(f"  wrapping build_mel_front_end with a cast to {vae.dtype} "
-        f"(the proposed one-line fix, applied via the to_mel= seam)")
+    # The app's own transform, unwrapped. `encode_waveform_to_latents` casts to the
+    # VAE's dtype itself as of 5aa5d7b, so a wrapper here would test the wrapper.
+    to_mel = audio_module.build_mel_front_end(vae, vocoder)
     mel = to_mel(dev_wave)
     log(f"  mel {tuple(mel.shape)} dtype={mel.dtype} "
         f"min {float(mel.min()):.4f} max {float(mel.max()):.4f} "
@@ -135,17 +122,13 @@ def main() -> int:
         log("  *** mel is nearly constant -- the transform is not producing structure ***")
 
     log("\n=== stage 2: audio_vae.encode ===")
-    # BATCHED. An unbatched (channels, samples) waveform yields an unbatched
-    # (channels, mel, frames) mel, conv2d accepts that as a single sample, and the
-    # latents come back 3D -- which validate_audio_latents_shape correctly refuses,
-    # since AUDIO_LATENT_DIMS is 4D [batch, channels, frames, mel]. Batching the
-    # waveform is what makes the rank right, and it is the layout the pipeline's own
-    # audio_latents kwarg expects.
-    batched = dev_wave.unsqueeze(0) if dev_wave.dim() == 2 else dev_wave
-    log(f"  waveform batched: {tuple(dev_wave.shape)} -> {tuple(batched.shape)}")
-    log(f"  mel of batched  : {tuple(to_mel(batched).shape)}")
+    # UNBATCHED (channels, samples) -- what `load_waveform` actually returns and
+    # what `match_channel_count` expects. This is the shape a user's upload takes,
+    # so it is the one worth testing; batching it instead tests a shape no caller
+    # produces.
+    log(f"  waveform as load_waveform returns it: {tuple(dev_wave.shape)}")
     latents = audio_module.encode_waveform_to_latents(
-        batched, audio_vae=vae, sampling_rate=rate, to_mel=to_mel
+        dev_wave, audio_vae=vae, sampling_rate=rate, to_mel=to_mel
     )
     log(f"  latents {tuple(latents.shape)} dtype={latents.dtype} "
         f"absmax {float(latents.float().abs().max()):.4f} "
