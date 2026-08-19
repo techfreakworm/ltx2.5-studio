@@ -504,6 +504,32 @@ def test_audio_is_reached_for_the_sampling_rate_it_owns(tmp_path):
 # because nobody thought to look for it.
 
 
+#: Non-UI modules that legitimately never run during a generation, each with the
+#: reason it does not. Everything else outside ``ui/`` must be reached by the
+#: generation path itself.
+#:
+#: Measured, not assumed — and kept short and checkable on purpose. A rule with a
+#: vague exception set is a rule somebody disables; a rule whose exceptions each
+#: carry a testable reason survives contact with a future reader who thinks the
+#: list looks wrong.
+STARTUP_ONLY = {
+    "ltx25_studio": "the package __init__; re-exports only",
+    "ltx25_studio.config": (
+        "resolved once at startup; generation receives the values, not the module"
+    ),
+    "ltx25_studio.errors": (
+        "executes only when something raises, and a successful run raises nothing"
+    ),
+    "ltx25_studio.model_files": (
+        "the weight table; read by preflight and by pipelines loading real weights"
+    ),
+    "ltx25_studio.pipelines": (
+        "bypassed offline by the injected pipeline_factory; exercised for real on the Space"
+    ),
+    "ltx25_studio.preflight": "startup resource and version checks, by definition",
+}
+
+
 def _package_modules() -> set[str]:
     """Every importable module under the package, discovered from disk."""
     found = set()
@@ -615,8 +641,33 @@ def test_no_package_module_is_reached_by_nothing(clean_probe):
     reached_files = clean_probe["executed"]
     every = _package_modules()
 
+    def on_generation_path(module: str) -> bool:
+        return module_file(module) in reached_files
+
     def directly_reached(module: str) -> bool:
-        return module in loaded_modules or module_file(module) in reached_files
+        """Reached in a way that counts *for this module*.
+
+        Scoped deliberately, and the scoping is the point. ``conditioning.py``
+        sat in ``sys.modules`` the entire time it was dead, because
+        ``ui/handlers.py`` imported it for a live readout — so for business
+        logic, "loaded" launders exactly the defect being hunted. Non-``ui/``
+        modules must therefore be reached by the **generation path**; only
+        ``ui/`` modules and the documented :data:`STARTUP_ONLY` set may qualify
+        on being loaded alone.
+
+        **Do not widen this back to "loaded or executed".** That version was
+        written first and it was silent on a business-logic module imported only
+        by ``ui/handlers.py`` — blocker #4's shape for any module without a
+        hand-written targeted test. It was caught by someone treating this file
+        as a black box and asking what it *should* detect; reasoning forward
+        from the implementation reproduces the blind spot instead of finding it.
+        """
+        if on_generation_path(module):
+            return True
+        is_ui = module.split(".")[:2] == ["ltx25_studio", "ui"]
+        if is_ui or module in STARTUP_ONLY:
+            return module in loaded_modules
+        return False
 
     def is_reached(module: str) -> bool:
         if directly_reached(module):
