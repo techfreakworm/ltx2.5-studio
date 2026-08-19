@@ -53,7 +53,7 @@ what `tests/verify_streams.py` observed in the container, not a human reading.
 
 | # | Mode | Result | Streams | Size | Time |
 |---|---|---|---|---|---|
-| H1 | `text_to_video` | ✅ pass | h264 @24, no audio | 865,447 B | ~26 s |
+| H1 | `text_to_video` | ✅ pass | h264 @24, no audio | 886,265 B | 25.7 s |
 | H2 | `image_to_video` | ✅ pass | h264 @24, no audio | 577,051 B | ~26 s |
 | H3 | `image_text_to_video` | ✅ pass | h264 @24, no audio | 1,040,007 B | ~26 s |
 | H4 | `video_to_video` | ✅ pass | video only | ⏸️ not recorded | ⏸️ |
@@ -68,17 +68,30 @@ what `tests/verify_streams.py` observed in the container, not a human reading.
 **Nine of eleven modes have produced a real artifact with the expected stream
 layout.** The two pending ones are the audio-**input** modes; see §4.
 
+> ⚠️ **Artifact sizes are not reproducible to the byte.** H1 was run twice at the
+> same settings and returned **865,447 B** and later **886,265 B** ✅ — the figure
+> above is the second, from the full run through `get_pipeline`. Sizes here are
+> evidence that a real encode happened and roughly how much came out. **Do not
+> write a check that asserts an exact size**; assert the stream layout, which is
+> what `verify_streams.py` does and what these runs were judged on.
+
 ### 2.3 Beyond the baseline
 
 | Run | What it proves | Result |
 |---|---|---|
 | **H16** high resolution | usability, not just correctness | ✅ `text_to_audio_video` at **1216 × 704**, aac stereo at 48 kHz |
 | **H15** `duration_head` | the model chose the length, rather than a default leaking through | ✅ returned **97 frames**, not 121 |
-| **H14** stage 2 | upsample → 3-step schedule → diffusion decode | ⏸️ **pending** |
+| **H14** stage 2 | upsample → 3-step schedule → diffusion decode | ✅ **1408 × 960**, 121 frames, 2,254,799 B, 84.3 s |
 
 H15 is worth understanding: `num_frames` is *omitted* and the duration head
 picks. Had it returned 121 — the default — the run would have looked identical
 to a pass while proving the opposite. **97 is the whole result.**
+
+**H14's proof is its resolution, not a comparison.** ✅ 1408 × 960 against H1's
+704 × 480 at 886,265 B and 25.7 s is **exactly 2× in both dimensions** — a size
+only the spatial upsampler can produce. That is stronger evidence than the
+same-seed diff the matrix planned, because a same-seed comparison shows *a*
+difference while this shows *the specific* difference stage 2 exists to make.
 
 ### 2.4 The LoRA validator, both directions
 
@@ -119,6 +132,12 @@ filesystem. ZeroGPU is none of those things, so Part A cannot answer:
 - **The private-Space fetch path** — weights download at runtime because
   `preload_from_hub` 401s on a private repo.
 
+**One hinode number with a direct ZeroGPU consequence.** Stage 2 peaked at
+**83.897 GiB** ✅, against 70.497 GiB for a single-stage run. So **stage 2 cannot
+run on a `large` 48 GB MIG slice at all**, and on `xlarge` (96 GB) it leaves
+roughly **11 GiB** before any packing overhead. That is measured on an
+unpartitioned card; the packing overhead is ⏸️ unknown and comes off that margin.
+
 One live risk that Part A *has* surfaced: the stage-2 diffusion decoder resolves
 a **NATTEN kernel from the Hub at generation time** 📄, which is the only
 network dependency that fires *after* the user presses Generate. Whether it
@@ -138,10 +157,14 @@ caches per image or per cold worker is ⏸️ unknown and decides its severity.
    the input by design, so a bug that drops it entirely is indistinguishable
    from correct operation.
 
-2. **H14 — stage 2 — has not run.** ⏸️ It was unreachable (never wired into
-   `StageRunner`), and fixing that surfaced six further defects in the stage
-   graph, each of which would have produced a valid-looking video. All are
-   fixed; none is exercised. **Treat stage 2 as unproven.**
+2. **Stage 2 works; its NATTEN fetch is still uncharacterised.** ✅ H14 ran and
+   produced 1408 × 960. But the diffusion decoder resolves its NATTEN kernel
+   through a **version → ref lookup that goes over the network even when the
+   kernel files are cached** 📄, and **whether that fires once per process or
+   once per generation is ⏸️ unknown**. It cannot be grepped after the fact —
+   the run log contains **zero** natten mentions — so answering it needs
+   deliberate instrumentation. On a private Space this is the 401 class again,
+   except firing *after* the user presses Generate.
 
 3. **`connectors: 0` on every accepted adapter.** ✅ observed. Stage 7 asserts
    *total* modules attached > 0, which passes on the transformer alone — so an
@@ -274,18 +297,65 @@ which **function** — the name was in the same frame object — and the probe d
 construction. **Either fix alone would still have missed it.** "Sharpen the
 instrument" was the obvious response and would not have worked.
 
-### ⏸️ The staffing conclusion
+### Staffing — two makers and a lead who verifies
 
-**Not recorded here yet, deliberately.** It was reached in discussion and exists
-in no document I can find, and writing it from memory would make this the second
-place a fact lives and the first place it is wrong. It needs to be stated by the
-person who reached it.
+**Not five, and not one.** This build ran briefly with five teammates and settled
+at two: one implementer owning the code, one runner owning the hardware. The
+three stood down were not underused — they were **a coordination cost with no
+matching throughput**, and the collision they produced (two agents assigned
+`outputs.py`; a cross-boundary change landing under a commit message about other
+files) cost more than their output was worth. Two makers with **disjoint, stated
+file ownership** is the shape that worked, and the line held all day under
+pressure: the runner found four product defects and edited none of them.
+
+**The scarce resource was execution on real hardware, not review capacity.** At
+the point the suite reported **1926 passing** ✅, six of eleven modes were broken,
+the audio-input path was connected to nothing, stage 2 was unreachable, and every
+runtime path through `audio.py` raised on real weights. None of that was found by
+reviewing harder — it was found by an afternoon on a real GPU. **Another reviewer
+would have added agreement, not information.** Budget for one more agent is
+better spent on a second executor with *different* hardware than on a second
+reviewer.
+
+**A lead who cannot edit is forced to verify by observation rather than by
+reading their own diff**, and that constraint turned out to be a feature. Every
+claim the lead checked was checked by running something — `git merge-base
+--is-ancestor` rather than trusting a commit message, `av` on the container
+rather than trusting a verifier's exit code, `pgrep` on the box rather than
+trusting a status report. That caught the box silently trailing the tip **three
+times**, a stale bypass premise, and a wait loop that had frozen a teammate. A
+lead who could edit would have been tempted to fix those, and would have stopped
+looking.
+
+**The default-REJECT verifier role was filled by reality rather than by an
+agent.** The plan called for an independent verifier holding a default-REJECT
+stance; in practice the hardware held it. It rejected the `from_pipe` cast, the
+bf16 encode, the missing audio parameters and the unreachable stage 2 without
+being asked, and without any possibility of being talked round. **Where a real
+gate exists, prefer it to a reviewer agent — an agent can be persuaded and a
+`RuntimeError` cannot.**
+
+**What it cost.** Message-crossing: three times a blocking item was buried inside
+a long message and lost a cycle behind work already in flight. The fix is
+mechanical and worth adopting from the start — **one blocker, one message,
+nothing else in it.** Long messages are for context; short ones are for
+priority.
 
 ---
 
 ## 7. If you do one thing
 
-Run **H10b** and **H14**. They are the two claims this project has not earned:
-that a user's uploaded audio reaches the model, and that stage 2 does anything
-at all. Both are built, both are tested offline, and **neither has produced an
-artifact.** Everything else in §2 has.
+**Run H10b.** It is the one claim this project has not earned: *that a user's
+uploaded audio reaches the model.*
+
+Two `noise_scale` values — 0.1 and 0.9 — at the **same pinned seed**, on
+`audio_to_audio`. **Identical audio means the input is not reaching the model**,
+however good the file looks and whatever the stream check returns.
+
+It is the only run that can see this, and the reason is worth understanding
+before deciding to skip it: `noise_scale=1.0` discards the audio input **by
+design**, so a bug that drops the input entirely is indistinguishable from
+correct operation. The mode produces valid audio either way. Every other check
+in the matrix passes either way.
+
+Everything else in §2 has produced an artifact and been observed.
