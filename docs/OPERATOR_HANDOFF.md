@@ -144,8 +144,10 @@ Three things a reader needs:
 >
 > **The seed never reached the model** until `4ebb8b9` (gap 8), so both halves
 > of every pair above were unconditionally random. **The pixel differences
-> cannot yet evidence that the recipe fix caused them** — two runs of one mode
-> differed anyway. They need **re-running seeded** before they carry weight.
+> cannot evidence that the recipe fix caused them** — two runs of one mode
+> differed anyway. ✅ Seeding is now fixed and verified byte-identical, so the
+> **seeded gallery supersedes this table** for attribution; these figures remain
+> as the record of what the defect cost.
 >
 > **The audio levels do stand on their own**, because they are systematic and
 > orders of magnitude outside run-to-run variation:
@@ -360,7 +362,7 @@ caches per image or per cold worker is ⏸️ unknown and decides its severity.
    mean `99.48 → 34.44` collapsing before, `82.52 → 110.47` stable after.
 
 
-8. ### ⚠️ The seed reached only the sidecar — **the one open defect**
+8. ### ✅ The seed reached only the sidecar — **fixed, and verified byte-identical**
 
    `_resolve_seed` ran and the number went into the encoder metadata. **There
    was no generator anywhere in the package**, so every run was unconditionally
@@ -370,10 +372,23 @@ caches per image or per cold worker is ⏸️ unknown and decides its severity.
    pipeline's own device, threaded to the pipeline **and** to
    `audio_vae.encode`'s `.sample()`.
 
-   ⏸️ **What still needs re-running**, because it was measured before the fix:
-   the before/after pixel pairs (§2.5), **H10b**, H12b and H4b. Everything
-   structural is unaffected — H14's exact 2× resolution, H15's 97 frames,
-   H17's frequency recovery, and every audio level.
+   ✅ **Verified on the card.** Two runs at identical seed and configuration:
+
+   ```
+   run-a1d35aaaab06/output.wav   md5 2988f01159a5322afb28abb6e9a73d26
+   run-b9dde07ed8bb/output.wav   md5 2988f01159a5322afb28abb6e9a73d26
+   ```
+
+   > **`seed` determines the output byte-for-byte, on GPU, with no
+   > deterministic-algorithm flags set.** That is a stronger property than was
+   > expected — the weaker *"seed-consistent but not bit-reproducible"* was
+   > drafted and never needed.
+
+   **The remaining consequence is narrow**: the §2.5 comparison table was
+   measured *before* this worked, so its pixel diffs cannot attribute the change
+   to the recipe fix. The seeded gallery replaces it. Everything structural was
+   never affected — H14's exact 2× resolution, H15's 97 frames, H17's frequency
+   recovery, and every audio level.
 
    > The lever that should have caught it was ours: `decode_kwargs` took a
    > `generator` argument, **with a docstring explaining why the diffusion
@@ -582,6 +597,34 @@ which **function** — the name was in the same frame object — and the probe d
 **one mode**, so a path reachable from no other mode was invisible by
 construction. **Either fix alone would still have missed it.** "Sharpen the
 instrument" was the obvious response and would not have worked.
+
+### The one time source-reading and measurement confirmed each other
+
+Every other pairing today went the other way: one corrected the other, and the
+lesson was about which to trust when they disagreed. Once, they agreed.
+
+A reproducibility control failed — two runs at one seed, 8.7% apart — and the
+obvious reading was an unseeded draw somewhere. Instead of hunting, **every
+noise source in the pinned pipeline was enumerated**: `_create_noised_state`,
+the conditioning mask, `prepare_*_latents`, the decode timestep, the condition
+VAE encode. All threaded the generator; the encode used `sample_mode="argmax"`
+and was deterministic regardless. **Source said it should already be
+reproducible.**
+
+Rather than write either sentence — *"the seed is attached to nothing"* or
+*"we are seed-consistent but not bit-reproducible"* — a scoping run was
+requested. Before it ran, the control was re-checked: **it had been measured
+against a tree that predated the seeding fix.** At the tip, two runs are
+byte-identical.
+
+> **The true claim was stronger than either draft**: `seed` determines the
+> output byte-for-byte, on GPU, with no deterministic-algorithm flags. Both
+> drafted sentences were weaker *and* wrong, and both would have shipped if the
+> reluctance to write an unmeasured claim had not held for one more exchange.
+
+**Refusing to write a sentence you cannot yet support is the same discipline as
+refusing to change a threshold to make a test green** — and it is the cheaper
+of the two, because nobody has to notice you did it.
 
 ### Staffing — two makers and a lead who verifies
 
