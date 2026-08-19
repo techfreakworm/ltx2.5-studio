@@ -43,6 +43,7 @@ __all__ = [
     "cache_repo_dir",
     "check_diffusers_version",
     "missing_cached_files",
+    "ensure_weights",
     "require_cache_complete",
     "run",
 ]
@@ -50,6 +51,74 @@ __all__ = [
 #: The pinned diffusers SHA reports this. A release (0.39.0) would import
 #: ``LTX2Pipeline`` successfully and fail much later and more expensively.
 EXPECTED_DIFFUSERS_VERSION = "0.40.0.dev0"
+
+
+def ensure_weights(
+    *,
+    token=None,
+    components: tuple[str, ...] | None = None,
+    hub_cache=None,
+    progress=None,
+) -> tuple[Path, ...]:
+    """Download every allow-listed file **at runtime, as the runtime user**.
+
+    This replaces ``preload_from_hub``, which cannot work for a **private**
+    Space: the preload runs as a separate platform-managed init step that does
+    not see Space secrets, so a gated repo returns ``401 Unauthenticated`` even
+    with a valid token configured. (401, not 403 -- the request arrives with no
+    credentials at all, which is why the same URL fetches fine by hand.)
+
+    Downloading here costs a cold start per restart, and buys two things:
+
+    * **The token is available.** This process has the Space secrets.
+    * **It removes the permission bug class entirely** (PLAN §6.2). Preloaded
+      files are owned by the *build* user and read-only to runtime uid 1000, so
+      any later lazy fetch fails with ``Permission denied (os error 13)`` -- the
+      2.3 failure. When the runtime user downloads its own cache, it owns it.
+
+    Fails loudly per file, naming the file and its URL, on the same contract as
+    :func:`require_cache_complete`. A partial download must not become a
+    confusing error three layers later.
+    """
+    import logging
+
+    from huggingface_hub import hf_hub_download
+
+    log = logging.getLogger("ltx25_studio")
+    paths = model_files.download_allow_list(components)
+    total_gb = model_files.total_size_gb(components)
+    log.info("fetching %d files (%.2f GB) at revision %s", len(paths), total_gb,
+             model_files.REVISION)
+    fetched: list[Path] = []
+    for index, path in enumerate(paths, 1):
+        # Progress is not decoration. This is a 72 GB cold start on every restart,
+        # and a log that goes quiet for forty minutes is indistinguishable from a
+        # log that has stopped.
+        log.info("  [%2d/%d] %s", index, len(paths), path)
+        if progress is not None:
+            progress(index / len(paths), f"fetching {path}")
+        try:
+            fetched.append(
+                Path(
+                    hf_hub_download(
+                        repo_id=model_files.REPO_ID,
+                        filename=path,
+                        revision=model_files.REVISION,
+                        token=token,
+                        cache_dir=str(hub_cache) if hub_cache else None,
+                    )
+                )
+            )
+        except Exception as exc:
+            raise MissingModelFileError(
+                filename=f"{path} ({index} of {len(paths)}; {exc.__class__.__name__})",
+                url=(
+                    f"{model_files.HUB_BASE_URL}/{model_files.REPO_ID}/blob/"
+                    f"{model_files.REVISION}/{path}"
+                ),
+            ) from exc
+    log.info("fetched %d/%d files", len(fetched), len(paths))
+    return tuple(fetched)
 
 
 def run(runtime_config, *, strict: bool = False, spaces_module=None) -> str:

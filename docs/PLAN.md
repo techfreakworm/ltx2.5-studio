@@ -883,7 +883,67 @@ Recorded for completeness — **but see §8.4: we do not use accelerate's offloa
 Naming precedent: `techfreakworm/LTX2.3-Studio`, `wan-studio` (private), `SAM3-cutout-studio`
 (private).
 
-### 6.2 Download strategy — DECIDED
+### 6.2 Download strategy — REVISED: runtime download, not `preload_from_hub`
+
+**`preload_from_hub` cannot work for a PRIVATE Space, and this was found the
+expensive way — by a `RUNTIME_ERROR` after a successful build.**
+
+```
+Initialization step 'preload' failed with exit code: 1
+GatedRepoError: 401 Client Error
+Cannot access gated repo .../LTX-2.5-Diffusers/.../audio_vae/config.json
+```
+
+**401 is unauthenticated, not unauthorised.** The preload runs as a separate,
+platform-managed init step that does not receive Space secrets, so the request
+arrives with no credentials at all. Verified both directions:
+
+| Space | privacy | repo gate | preload |
+|---|---|---|---|
+| `techfreakworm/LTX2.3-Studio` | **public** | `gated=manual` (stricter) | works — RUNNING |
+| `techfreakworm/LTX2.5-Studio` | **private** | `gated=auto` (looser) | **401** |
+
+Privacy is the differentiating variable — not the gate, not the token. The same
+URL at the same revision fetches 200 by hand.
+
+**So the 37 files are downloaded at runtime by `preflight.ensure_weights()`**,
+inside the app process, where the token exists. Same
+`model_files.download_allow_list()`, so the single-source property is unchanged.
+
+**This is the better design even if the diagnosis above is wrong**, which is why
+it was chosen over simply making the Space public: it **removes the ownership bug
+class entirely**. Preloaded files belong to the *build* user and are read-only to
+runtime uid 1000, so any later lazy fetch fails `Permission denied (os error 13)`
+— the 2.3 failure. When the runtime user downloads its own cache, it owns it, and
+that class cannot occur. A fix that holds even if the root-cause analysis is
+wrong is worth more than one that depends on it.
+
+#### 6.2.1 The cost: a 72 GB refetch on every cold start
+
+Measured on the live Space:
+
+```
+storage   : None
+gcTimeout : 172800 s = 48 hours
+```
+
+There is **no persistent storage**, so the full **72.186 GB** is refetched on
+every cold start — restart, rebuild, or 48 hours idle. `startup_duration_timeout:
+1h` covers it. **This is accepted for the development phase**, not endorsed.
+
+Two routes back to preloading, either of which restores it:
+
+1. **Make the Space public** — the plan, once every mode is verified.
+2. **Attach persistent storage** — the cache survives, so the refetch stops
+   mattering.
+
+The `preload_from_hub` block is therefore **kept in `README.md`, commented**,
+with its re-enable conditions beside it and a drift test asserting it still
+matches `model_files.preload_from_hub_entry()`. A commented block drifts *more*
+readily than a live one — nothing exercises it, so nothing ever points at it, and
+it is trusted on exactly the day it is re-enabled.
+
+### 6.2.2 Original strategy, superseded
 
 **`preload_from_hub:` with the file list generated from `model_files.py` (§5.2), plus a runtime
 fallback that fetches anything missing.**

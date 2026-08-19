@@ -121,38 +121,94 @@ def test_the_gradio_pin_equals_the_readme_sdk_version():
 # --------------------------------------------------------------------------
 
 
-def test_the_readme_preload_entry_matches_model_files():
-    """PLAN §2.1 Trap A: a hand-written list that names the dead shard set does
-    not fail fast — it fails after tens of gigabytes of download."""
-    entries = frontmatter_list("preload_from_hub")
+def test_the_readme_declares_no_preload_block():
+    """A PRIVATE Space cannot preload a gated repo.
+
+    The preload runs as a separate platform-managed init step that does not see
+    Space secrets, so the request arrives unauthenticated and the repo answers
+    **401** — not 403 — however valid the configured token is. Verified: the
+    same URL at the same revision fetches 200 by hand, and the public 2.3 Space
+    preloads a *more* restrictive `gated=manual` repo successfully. Privacy is
+    the differentiating variable.
+
+    So the block must stay absent, and this test exists to stop someone
+    reinstating it from the plan and getting a RUNTIME_ERROR that says nothing
+    about privacy.
+    """
+    assert not frontmatter_list("preload_from_hub"), (
+        "README declares preload_from_hub, which cannot work for a private Space: "
+        "the preload init step runs unauthenticated and a gated repo returns 401. "
+        "Weights are fetched at runtime by preflight.ensure_weights()."
+    )
+
+
+def test_the_commented_preload_block_has_not_drifted():
+    """The disabled block must still equal what ``model_files`` generates.
+
+    **A commented-out block drifts more readily than a live one.** Nothing
+    exercises it, so no failure ever points at it — and it will be trusted on the
+    day someone re-enables it, which is precisely when a stale file list is most
+    expensive. That is the same drift class that produced the short_description
+    rejection, aimed at a target that cannot fail loudly by itself.
+
+    So this test is the only thing standing between the block and rot.
+    """
+    commented = [
+        line.lstrip("#").strip()
+        for line in README.read_text().splitlines()
+        if line.lstrip().startswith("#") and model_files.REPO_ID in line
+    ]
+    entries = [line.lstrip("- ").strip() for line in commented if line.startswith("- ")]
     assert entries, (
-        "README frontmatter has no preload_from_hub entries. Generate the block from "
-        "model_files.preload_from_hub_entry() (PLAN §5.2, §6.2)."
+        "the commented preload_from_hub block is gone from README.md. It is kept "
+        "deliberately so the Space can flip back to preloading when it goes public; "
+        "regenerate it from model_files.preload_from_hub_entry()."
     )
     expected = model_files.preload_from_hub_entry()
-    assert entries == [expected], (
-        f"README preload_from_hub has drifted from model_files.py.\n"
-        f"  README:      {entries}\n"
-        f"  model_files: [{expected!r}]"
+    assert entries[0] == expected, (
+        "the COMMENTED preload block has drifted from model_files.py. Nothing "
+        "exercises it, so this test is the only thing that would notice.\n"
+        f"  README   : {entries[0][:90]}…\n"
+        f"  generated: {expected[:90]}…"
     )
 
 
-def test_the_preload_entry_carries_the_pinned_revision():
-    """Without the SHA the preload and the app resolve **different cache keys**,
-    so the Space re-downloads 72 GB at runtime having already preloaded it."""
-    expected = model_files.preload_from_hub_entry()
-    assert model_files.REVISION in expected, (
-        f"preload entry omits revision {model_files.REVISION}: {expected!r}"
+def test_the_commented_block_says_why_it_is_disabled_and_when_to_re_enable():
+    """A disabled mechanism with no stated re-enable condition is a trap.
+
+    Someone will eventually find it, see no reason attached, and either turn it
+    on into the same 401 or delete it as dead weight.
+    """
+    text = README.read_text()
+    assert "401" in text, "the commented block must say WHY it is disabled"
+    assert "public" in text and "persistent storage" in text, (
+        "the commented block must state the conditions under which it is re-enabled"
     )
 
 
-def test_there_is_exactly_one_preload_entry():
-    """PLAN §6.2: ``preload_from_hub`` is capped at 10 entries; one file per entry
-    would not fit. One repo, comma-separated filenames."""
-    entries = frontmatter_list("preload_from_hub")
-    if not entries:
-        pytest.skip("preload_from_hub not generated yet — covered by the drift test above")
-    assert len(entries) == 1, f"expected one comma-joined entry, got {len(entries)}"
+def test_the_runtime_download_still_comes_from_model_files():
+    """The single-source property survives the move off `preload_from_hub`.
+
+    The guard is repointed, not deleted: whatever fetches the weights must take
+    its file list from `model_files.download_allow_list()`, so an upstream
+    re-shard is still a regenerate rather than a hand-patch (PLAN §5.2, §2.1).
+    """
+    allow_list = model_files.download_allow_list()
+    assert len(allow_list) == 37, f"the allow-list is {len(allow_list)} paths, expected 37"
+    assert not any("-of-00008" in path for path in allow_list), (
+        "a dead transformer shard is in the download list (PLAN §2.1, Trap A)"
+    )
+
+    source = (REPO_ROOT / "ltx25_studio" / "preflight.py").read_text()
+    assert "download_allow_list" in source, (
+        "preflight.ensure_weights no longer reads model_files.download_allow_list(); "
+        "the download list has drifted away from its single source."
+    )
+    assert "model_files.REVISION" in source, (
+        "the runtime download does not pin the revision. Without it the download and "
+        "the app resolve different cache keys and the fetch is wasted (PLAN §6.2)."
+    )
+
 
 
 # --------------------------------------------------------------------------

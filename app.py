@@ -18,6 +18,7 @@ its effect differs.
 """
 
 import logging
+import os
 
 try:  # noqa: I001 - import order is load-bearing; see the module docstring
     import spaces
@@ -42,8 +43,17 @@ CONFIG = load_config()
 ON_ZEROGPU = zerogpu.is_zerogpu(spaces)
 _log.info("spaces=%s zerogpu=%s", zerogpu.spaces_version(spaces), ON_ZEROGPU)
 
+# Weights are fetched HERE, at runtime, not by `preload_from_hub`. On a PRIVATE
+# Space the preload init step runs unauthenticated and a gated repo answers 401,
+# so it cannot work however valid the token is. This process has the secrets.
+# It also removes the read-only-cache class (PLAN §6.2): the runtime user owns
+# the cache it downloaded.
+if ON_ZEROGPU:
+    preflight.ensure_weights(token=os.environ.get("HF_TOKEN"))
+
 # Version assertion, cache completeness and the resource report. Strict only
-# on-Space, where real weights exist to check against.
+# on-Space — and now genuinely meaningful, because it verifies the download we
+# just performed rather than asserting a preload we did not control.
 preflight.run(CONFIG, strict=ON_ZEROGPU, spaces_module=spaces)
 
 # PLAN §2.7: sweep on startup as well as after each run. Resolved from the same
