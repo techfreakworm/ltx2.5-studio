@@ -15,23 +15,27 @@ suggested_hardware: zero-a10g
 pinned: false
 short_description: Every LTX-2.5 mode, with user-uploadable LoRA at inference time.
 #
-# ┌──────────────────────────────────────────────────────────────────────────┐
-# │  preload_from_hub: PLACEHOLDER — DO NOT HAND-WRITE THIS LIST.            │
-# └──────────────────────────────────────────────────────────────────────────┘
-# The weight allow-list is *generated* from `ltx25_studio/model_files.py`, which is
+# GENERATED — do not hand-edit. Emitted by `model_files.preload_from_hub_entry()`,
 # the single source of truth for every repo id, revision, subfolder and filename
-# (PLAN §5.2). A drift test asserts the block committed here equals what that
-# module declares, so hand-editing it will fail the suite — which is the point.
+# (PLAN §5.2). `tests/test_deploy_drift.py` asserts this block equals what that
+# function returns, so an upstream re-shard is a regenerate, never a hand-patch.
 #
 # Why it must be generated: the model repo ships the same weights TWICE in two
-# different shardings (PLAN §2.1, "Trap A"). A hand-written list that names the
-# dead shard set does not fail fast — it fails after tens of gigabytes of
-# download. The live shard names are read from the index JSONs at generation
-# time, so an upstream re-shard is picked up instead of silently breaking us.
+# different shardings (PLAN §2.1, "Trap A"). A hand-written list naming the dead
+# shard set does not fail fast — it fails after tens of gigabytes of download.
+# The live shard names are read from the index JSONs rather than hardcoded.
 #
-# Shape, when filled in: ONE entry (one repo, comma-separated filenames), not 33.
-# `preload_from_hub` is capped at 10 entries and a naive one-file-per-entry list
-# would not fit (PLAN §6.2).
+# Why it is ONE entry: `preload_from_hub` is capped at 10 entries and this is 37
+# files; one repo with comma-separated filenames fits, a file-per-entry list
+# would not (PLAN §6.2). The trailing SHA is the pinned revision — without it the
+# preload and the runtime resolve DIFFERENT cache keys and the Space re-downloads
+# 72 GB it has already preloaded.
+#
+# Regenerate with:
+#   .venv/bin/python -c "from ltx25_studio import model_files; \
+#     print(model_files.preload_from_hub_entry())"
+preload_from_hub:
+  - Lightricks/LTX-2.5-Diffusers audio_vae/config.json,audio_vae/diffusion_pytorch_model.safetensors,connectors/config.json,connectors/diffusion_pytorch_model-00001-of-00002.safetensors,connectors/diffusion_pytorch_model-00002-of-00002.safetensors,connectors/diffusion_pytorch_model.safetensors.index.json,diffusion_decoder/config.json,diffusion_decoder/diffusion_pytorch_model.safetensors,duration_head/config.json,duration_head/diffusion_pytorch_model.safetensors,latent_upsampler/config.json,latent_upsampler/diffusion_pytorch_model.safetensors,model_index.json,scheduler/scheduler_config.json,temporal_latent_upsampler/config.json,temporal_latent_upsampler/diffusion_pytorch_model.safetensors,text_encoder/config.json,text_encoder/generation_config.json,text_encoder/model-00001-of-00005.safetensors,text_encoder/model-00002-of-00005.safetensors,text_encoder/model-00003-of-00005.safetensors,text_encoder/model-00004-of-00005.safetensors,text_encoder/model-00005-of-00005.safetensors,text_encoder/model.safetensors.index.json,tokenizer/chat_template.jinja,tokenizer/tokenizer.json,tokenizer/tokenizer_config.json,transformer/config.json,transformer/diffusion_pytorch_model-00001-of-00004.safetensors,transformer/diffusion_pytorch_model-00002-of-00004.safetensors,transformer/diffusion_pytorch_model-00003-of-00004.safetensors,transformer/diffusion_pytorch_model-00004-of-00004.safetensors,transformer/diffusion_pytorch_model.safetensors.index.json,vae/config.json,vae/diffusion_pytorch_model.safetensors,vocoder/config.json,vocoder/diffusion_pytorch_model.safetensors 871165de037793df7d75c23a02dd7f45fd364c97
 ---
 
 # 🎬 LTX-2.5 Studio
