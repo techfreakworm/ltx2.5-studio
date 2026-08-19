@@ -7,9 +7,9 @@ testable without a GPU and without Gradio.
 Two things follow from taking that rule seriously, and both are deliberate:
 
 **This module does not import Gradio.** Handlers return plain values -- paths,
-strings, tuples of booleans -- and ``blocks.py`` is the only place that turns a
-boolean into a ``gr.update(visible=...)``. So every decision a handler makes can
-be asserted on directly, with no Blocks context and no browser.
+strings, :class:`FieldUpdate` value objects -- and ``blocks.py`` is the only
+place that turns one into a ``gr.update(...)``. So every decision a handler
+makes can be asserted on directly, with no Blocks context and no browser.
 
 **No handler ever returns a no-op update.** PLAN §5.3's week-long outage was a
 handler returning ``gr.update()`` for an empty path -- indistinguishable, on
@@ -26,6 +26,7 @@ job (PLAN §5.6), not an import side effect here.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
 from .. import constraints, modes
@@ -33,6 +34,7 @@ from . import render
 from .fields import FIELD_KEYS, TOGGLEABLE_FIELDS
 
 __all__ = [
+    "FieldUpdate",
     "export_flags",
     "on_auto_duration_toggle",
     "on_clear_loras",
@@ -63,21 +65,51 @@ def _as_int(value: Any) -> int | None:
 # ---------------------------------------------------------------------------
 
 
-def on_mode_change(mode_id: str) -> tuple[str, tuple[bool, ...]]:
-    """Briefing text plus one visibility flag per toggleable field, in spec order.
+@dataclass(frozen=True)
+class FieldUpdate:
+    """What one control should look like for the selected mode.
 
-    The flags come from ``TOGGLEABLE_FIELDS``, which ``blocks.py`` also uses to
+    A plain value object rather than a ``gr.update`` so the decision stays
+    testable without Gradio; ``blocks.py`` does the one-line translation.
+    ``value is None`` means "leave whatever the user typed alone".
+    """
+
+    visible: bool = True
+    interactive: bool = True
+    value: Any = None
+
+
+def on_mode_change(mode_id: str) -> tuple[str, tuple[FieldUpdate, ...]]:
+    """Briefing text plus one :class:`FieldUpdate` per toggleable field, in spec order.
+
+    The updates come from ``TOGGLEABLE_FIELDS``, which ``blocks.py`` also uses to
     build the ``outputs=`` list -- one tuple, read twice, so the two orderings
-    cannot drift apart (see ``fields.py``).
+    cannot drift apart (see ``fields.py``). Bundling visibility, interactivity
+    and value into one object per field keeps it that way: a second parallel
+    tuple for "which ones are disabled" is exactly the shape this design exists
+    to avoid.
     """
     try:
         mode = modes.get_mode(mode_id)
+        updates = []
+        for spec in TOGGLEABLE_FIELDS:
+            interactive = spec.interactive_when is None or bool(spec.interactive_when(mode))
+            forced = None if interactive or spec.forced_value is None else spec.forced_value(mode)
+            updates.append(
+                FieldUpdate(
+                    visible=spec.visible_when is None or bool(spec.visible_when(mode)),
+                    interactive=interactive,
+                    value=forced,
+                )
+            )
     except Exception as exc:  # noqa: BLE001 -- an unknown mode must still render
-        return render.failure(exc), tuple(True for _ in TOGGLEABLE_FIELDS)
-    return (
-        render.mode_briefing(mode),
-        tuple(bool(spec.visible_when(mode)) for spec in TOGGLEABLE_FIELDS),
-    )
+        # Deliberately wraps the whole walk, not just the lookup: the predicates
+        # read registry attributes, so a registry that changes shape under us
+        # must surface as a visible message rather than a 500 with a form frozen
+        # in the previous mode's shape.
+        return render.failure(exc), tuple(FieldUpdate() for _ in TOGGLEABLE_FIELDS)
+
+    return render.mode_briefing(mode), tuple(updates)
 
 
 def export_flags(mode_id: str) -> tuple[bool, bool]:
@@ -165,34 +197,6 @@ def on_auto_duration_toggle(auto: Any) -> tuple[bool, bool, bool]:
 # ---------------------------------------------------------------------------
 
 
-def _validator():
-    """Resolve the validator entry point.
-
-    Tolerant about *where* it lives because ``lora/`` is being written in
-    parallel; intolerant about it being missing, because a LoRA panel that
-    quietly does nothing is precisely the failure PLAN §4.2 is about.
-    """
-    from .. import lora
-
-    candidates = [lora]
-    try:
-        from ..lora import validate as validate_module
-
-        candidates.append(validate_module)
-    except ImportError:  # pragma: no cover -- module layout still in flux
-        pass
-
-    for module in candidates:
-        for name in ("validate_lora", "validate"):
-            found = getattr(module, name, None)
-            if callable(found):
-                return found
-    raise NotImplementedError(
-        "no LoRA validator found: expected a callable `validate_lora` on "
-        "`ltx25_studio.lora` or `ltx25_studio.lora.validate` (PLAN §4.3)."
-    )
-
-
 def on_validate_lora(
     repo_id: str | None, upload: Any, applied: list[dict[str, Any]] | None
 ) -> tuple[str, list[dict[str, Any]], str]:
@@ -219,7 +223,9 @@ def on_validate_lora(
     source = str(source)
 
     try:
-        report = _validator()(source)
+        from ..lora import validate_lora
+
+        report = validate_lora(source)
     except Exception as exc:  # noqa: BLE001 -- every failure must reach the user
         return (render.lora_rejected(source, exc), staged, render.applied_loras(staged))
 

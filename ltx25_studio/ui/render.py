@@ -106,8 +106,9 @@ def mode_briefing(mode: Any) -> str:
     mitigations = []
     if getattr(mode, "min_resolution", False):
         mitigations.append(
-            "runs at the **minimum legal resolution** (the resolution controls are hidden "
-            "because the video is discarded — paying for pixels nobody sees would be waste)"
+            "runs at the **minimum legal resolution** — the resolution controls are greyed "
+            "out and show the size that will actually be used, because the video is rendered "
+            "and discarded and paying for pixels nobody sees would be waste"
         )
     if getattr(mode, "skip_stage_2", False):
         mitigations.append("**skips stage-2 refinement** for the same reason")

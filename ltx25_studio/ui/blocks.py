@@ -148,11 +148,16 @@ def build_ui() -> gr.Blocks:
         def _on_mode_change(mode_id: str) -> list[Any]:
             """Booleans in, ``gr.update``s out. The decision itself is in
             ``handlers`` so it can be asserted on without a Blocks context."""
-            text, flags = handlers.on_mode_change(mode_id)
+            text, updates = handlers.on_mode_change(mode_id)
             shows_video, shows_audio = handlers.export_flags(mode_id)
             return [
                 text,
-                *(gr.update(visible=flag) for flag in flags),
+                *(
+                    gr.update(visible=u.visible, interactive=u.interactive)
+                    if u.value is None
+                    else gr.update(visible=u.visible, interactive=u.interactive, value=u.value)
+                    for u in updates
+                ),
                 gr.update(visible=shows_video),
                 gr.update(visible=shows_audio),
             ]

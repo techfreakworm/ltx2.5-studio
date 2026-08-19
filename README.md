@@ -80,7 +80,9 @@ does not know this reads the runtime as a bug.
 
 For the audio-only modes the app applies the mitigations it can — minimum legal
 resolution, stage-2 refinement skipped, only the requested track exported — and it tells
-you it is doing so rather than hiding it.
+you it is doing so rather than hiding it. The resolution controls stay on screen for those
+modes, greyed out and showing the size that will actually be used, so you can always see
+what ran rather than being left to guess why one mode is faster than another.
 
 ---
 

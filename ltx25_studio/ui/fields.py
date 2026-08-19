@@ -69,6 +69,14 @@ class Field:
     #: ``gr.State``, which cannot take a ``visible=`` update and would raise if
     #: one were sent to it).
     visible_when: Callable[[Any], bool] | None = None
+    #: Greyed-out rather than hidden. For a value the backend *overrides*: hiding
+    #: it reads as a broken app and leaves the cost explanation nothing to attach
+    #: to, whereas a disabled control showing the value that will actually be used
+    #: answers "what ran?" -- which matters most when comparing runtimes.
+    interactive_when: Callable[[Any], bool] | None = None
+    #: Value to force when ``interactive_when`` is False, so a disabled control
+    #: shows the real number instead of a stale one the run will ignore.
+    forced_value: Callable[[Any], Any] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -120,10 +128,28 @@ def _controls_resolution(mode: Any) -> bool:
 
     Modes whose video is discarded run at the **minimum legal resolution** --
     that is not a preference, it is the mitigation that stops an audio export
-    costing a full-resolution render. Offering a resolution control the backend
-    overrides would be exactly the kind of dead toggle §3.5 refuses to ship.
+    costing a full-resolution render, and it is not user-overridable.
+
+    So the control is **disabled, not hidden**, and forced to the value that will
+    actually be used. Hiding it would read as a broken app and would leave the
+    cost explanation with nothing to attach to; showing a stale 704 next to a run
+    that rendered 256 would be worse still.
     """
     return not mode.min_resolution
+
+
+def _forced_resolution(mode: Any) -> Any:
+    """``modes.MIN_RESOLUTION`` when the mitigation applies, else no change.
+
+    Read from the registry rather than restated here -- the number the UI shows
+    and the number ``build_kwargs`` sends are then the same constant by
+    construction, not by coincidence.
+    """
+    if not mode.min_resolution:
+        return None
+    from .. import modes
+
+    return modes.MIN_RESOLUTION
 
 
 # NOTE — there is deliberately no `enable_stage_2` control here yet.
@@ -232,7 +258,8 @@ FIELDS: tuple[Field, ...] = (
         group="shape",
         default=704,
         options={"minimum": 32, "step": 32, "precision": 0},
-        visible_when=_controls_resolution,
+        interactive_when=_controls_resolution,
+        forced_value=_forced_resolution,
     ),
     Field(
         key="height",
@@ -242,7 +269,8 @@ FIELDS: tuple[Field, ...] = (
         group="shape",
         default=480,
         options={"minimum": 32, "step": 32, "precision": 0},
-        visible_when=_controls_resolution,
+        interactive_when=_controls_resolution,
+        forced_value=_forced_resolution,
     ),
     Field(
         key="auto_duration",
@@ -343,8 +371,12 @@ FIELDS: tuple[Field, ...] = (
 #: The ordering contract. Built once, read everywhere -- see the module docstring.
 FIELD_KEYS: tuple[str, ...] = tuple(f.key for f in FIELDS)
 
-#: Only these take a ``visible=`` update when the mode changes, in this order.
-TOGGLEABLE_FIELDS: tuple[Field, ...] = tuple(f for f in FIELDS if f.visible_when is not None)
+#: Only these take an update when the mode changes, in this order. A field with
+#: neither predicate is never touched by the selector; a ``gr.State`` has neither
+#: and must not be, since it has no ``visible``/``interactive`` property at all.
+TOGGLEABLE_FIELDS: tuple[Field, ...] = tuple(
+    f for f in FIELDS if f.visible_when is not None or f.interactive_when is not None
+)
 
 
 def field_by_key(key: str) -> Field:
