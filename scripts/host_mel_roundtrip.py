@@ -151,6 +151,70 @@ def peak_bins(profile, rate, n_fft=1024, count=4):
     return sorted(round(float(freqs[i]), 1) for i in idx)
 
 
+def ab_transpose(vae, vocoder, wave, rate, tones, src):
+    """Round-trip WITH and WITHOUT `unpacked_latents`' transpose, in one process.
+
+    Comparing across commits proves a difference exists somewhere between them.
+    Running both variants side by side in one process, over one input, with one
+    line as the only difference, proves which line. That is the difference between
+    evidence of a regression and evidence of its cause.
+
+    Every step is the app's own helper except the transpose itself, so this is not
+    a reimplementation of the path -- it is the path, forked at one point.
+    """
+    import torch
+
+    log("\n=== A/B: the ONLY difference is unpacked_latents' transpose ===")
+    prepared, note = audio_module.match_channel_count(
+        wave, channels=audio_module.audio_channels_from(vae)
+    )
+    if note:
+        log(f"  {note}")
+    mel = audio_module.build_mel_front_end(vae, vocoder)(prepared)
+    mel = mel.unsqueeze(0) if mel.dim() == 3 else mel
+    mel = audio_module._matched_to_module(mel, vae, name="audio_vae")
+    raw = audio_module._sampled(vae.encode(mel))
+    log(f"  encode output (before any transpose): {tuple(raw.shape)}")
+
+    results = {}
+    for label, latents in (
+        ("WITHOUT transpose", raw),
+        ("WITH transpose (current tree)", audio_module.unpacked_latents(raw)),
+    ):
+        log(f"\n  --- {label} --- latents {tuple(latents.shape)}")
+        try:
+            audio_module.validate_audio_latents_shape(tuple(latents.shape))
+            log("      validate_audio_latents_shape: accepted")
+        except Exception as exc:
+            log(f"      validate_audio_latents_shape REJECTED: {exc}")
+            continue
+        out, out_rate = audio_module.decode_latents_to_waveform(
+            latents, audio_vae=vae, vocoder=vocoder
+        )
+        rec = out.detach().float().cpu().numpy()
+        while rec.ndim > 2:
+            rec = rec[0]
+        seconds = rec.shape[1] / out_rate
+        log(f"      reconstruction {rec.shape} @ {out_rate} = {seconds:.3f} s "
+            f"(input {src.shape[1] / rate:.3f} s)")
+        retained = []
+        for c in range(min(src.shape[0], rec.shape[0])):
+            for f in (tones[0] if c == 0 else tones[1]):
+                e_in = band_energy(src[c], rate, f)
+                e_out = band_energy(rec[c], out_rate, f)
+                pct = 100 * (e_out / e_in if e_in else 0)
+                retained.append((c, f, pct))
+                log(f"      ch{c} {f:7.1f} Hz: {pct:5.1f}% retained"
+                    f"  {'RECOVERED' if pct > 10 else 'LOST'}")
+        results[label] = (seconds, retained)
+
+    log("\n  VERDICT:")
+    for label, (seconds, retained) in results.items():
+        good = sum(1 for _, _, pct in retained if pct > 10)
+        log(f"    {label:<30} {seconds:.3f}s, {good}/{len(retained)} tones recovered")
+    return results
+
+
 def main() -> int:
     pipe = pipelines._base_pipeline(device="cuda")
     vae, vocoder = pipe.audio_vae, pipe.vocoder
@@ -278,6 +342,9 @@ def main() -> int:
             log("       *** output is >34 dB below input -- reconstruction failed ***")
             ok = False
     log(f"  criterion: {'ALL tones must be recovered' if REQUIRE_ALL_TONES else '>=1 tone per channel'}")
+    if os.environ.get("MEL_AB") == "1":
+        ab_transpose(vae, vocoder, dev_wave, rate, tones, src)
+
     log(f"\nH17 VERDICT: {'PASS -- the constructed mel reconstructs' if ok else 'FAIL -- see TEST_PLAN A.5.1 candidate order: log/floor -> mel_scale/norm -> power -> center'}")
     return 0 if ok else 1
 
