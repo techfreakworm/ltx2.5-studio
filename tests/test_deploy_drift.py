@@ -243,3 +243,67 @@ def test_the_python_requirement_agrees_with_the_frontmatter():
     assert "3.12" in requires, (
         f"pyproject requires-python {requires!r} should agree with the Space's python_version"
     )
+
+
+# --------------------------------------------------------------------------
+# limits the PLATFORM enforces — not just fields we agree with ourselves about
+# --------------------------------------------------------------------------
+#
+# Everything above this line checks that the frontmatter is *internally
+# consistent*: sdk_version matches the gradio pin, the preload entry matches
+# model_files, the revision is carried. All true, all local, and all of it
+# passed while a field was four characters too long for the platform to accept.
+#
+# HF rejected the push at YAML metadata verification with:
+#     short_description length must be less than or equal to 60 characters long
+#
+# That is the same shape as every other defect on this build: the cheap half was
+# thorough and the expensive half was absent. The expensive half here is
+# "constraints the platform actually enforces", and the only reason we know this
+# one exists is that it rejected us. Anything asserted below is a limit we have
+# SEEN enforced or that HF documents — deliberately not a guess, because
+# inventing a limit would fail a valid deploy for a rule nobody imposes.
+
+#: Proven by rejection on 2026-08-19.
+MAX_SHORT_DESCRIPTION = 60
+
+#: Documented Space SDKs.
+VALID_SDKS = {"gradio", "streamlit", "docker", "static"}
+
+#: Documented card colours.
+VALID_COLORS = {"red", "yellow", "green", "blue", "indigo", "purple", "pink", "gray"}
+
+
+def test_short_description_is_within_the_platform_limit():
+    """HF rejects the push outright above 60 characters.
+
+    Cheap to fail and cheap to fix — but it fails at *push* time, which on a
+    build this size means a round trip through whoever holds push rights.
+    """
+    value = frontmatter_scalars().get("short_description", "")
+    assert len(value) <= MAX_SHORT_DESCRIPTION, (
+        f"short_description is {len(value)} characters; HF rejects the push above "
+        f"{MAX_SHORT_DESCRIPTION}. Value: {value!r}"
+    )
+
+
+def test_the_sdk_is_one_the_platform_accepts():
+    assert frontmatter_scalars().get("sdk") in VALID_SDKS
+
+
+@pytest.mark.parametrize("field", ["colorFrom", "colorTo"])
+def test_the_card_colours_are_ones_the_platform_accepts(field):
+    """An unrecognised colour is rejected at the same verification step."""
+    value = frontmatter_scalars().get(field)
+    assert value in VALID_COLORS, f"{field}={value!r} is not one of {sorted(VALID_COLORS)}"
+
+
+def test_the_preload_block_stays_within_the_ten_entry_cap():
+    """PLAN §6.2: the platform caps preload_from_hub at 10 entries.
+
+    We use exactly one, so this has enormous headroom — it exists to fail if
+    anyone ever splits the block per component, which is the shape that would
+    quietly exceed it.
+    """
+    entries = frontmatter_list("preload_from_hub")
+    assert len(entries) <= 10, f"preload_from_hub has {len(entries)} entries; the cap is 10"

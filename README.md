@@ -29,7 +29,11 @@ startup_duration_timeout: 1h
 models:
   - Lightricks/LTX-2.5-Diffusers
 pinned: false
-short_description: Every LTX-2.5 mode, with user-uploadable LoRA at inference time.
+# HF ENFORCES <= 60 CHARACTERS and rejects the push if it is longer. The rejection
+# happens at YAML metadata verification, before anything builds, so it is cheap —
+# but nothing offline had modelled the limit, so our own drift suite passed it.
+# tests/test_deploy_drift.py now asserts it.
+short_description: Every LTX-2.5 mode, plus user-uploadable LoRA.
 #
 # GENERATED — do not hand-edit. Emitted by `model_files.preload_from_hub_entry()`,
 # the single source of truth for every repo id, revision, subfolder and filename
