@@ -50,7 +50,22 @@ source /home/wakeuser/ltx25-env.sh
 cd \"\$LTX25_STUDIO_DIR\"
 export HF_TOKEN=\"\$TOK\"
 $FORWARD
-LOG=/home/wakeuser/ltx25-logs/$LOG_NAME.log
+STAMP=\$(date -u +%Y%m%dT%H%M%SZ)
+LOG=/home/wakeuser/ltx25-logs/$LOG_NAME-\$STAMP.log
+# Provenance, appended and never overwritten. A per-run log that a later run
+# clobbers means the inputs of a recorded result become unrecoverable -- which is
+# exactly what happened when the fixture path behind an H9 run could no longer be
+# read back. The manifest is the durable record; the log is the detail.
+{
+  echo \"---\"
+  echo \"stamp     \$STAMP\"
+  echo \"script    scripts/$SCRIPT\"
+  echo \"synced    \$(cat /home/wakeuser/ltx25-studio/.synced_sha 2>/dev/null)\"
+  echo \"env       $FORWARD\"
+  echo \"log       \$LOG\"
+} >> /home/wakeuser/ltx25-logs/RUNS.manifest
 nohup ./.venv/bin/python scripts/$SCRIPT > \"\$LOG\" 2>&1 &
 echo \"started pid \$! -> \$LOG\"
+# Stable name for polling, pointing at this run.
+ln -sf \"\$LOG\" /home/wakeuser/ltx25-logs/$LOG_NAME.log
 "
