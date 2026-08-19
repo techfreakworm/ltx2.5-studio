@@ -364,6 +364,14 @@ def _stage_2_parts(base, *, dtype=None, device: str | None = None):
     # resolutions. `set_attention_backend` is not an alternative -- no backend
     # other than `flex` accepts the BlockMask. Every attention module in the
     # decoder is the same neighborhood attention, so one call swaps them all.
+    #
+    # Two operational traps, both upstream's and neither settable from here:
+    #   * it resolves `get_kernel("shi-labs/natten", version=1)` -- the version is
+    #     HARDCODED in diffusers, so we cannot pin it by revision the way we pin
+    #     everything else, and the version->ref lookup goes over the network even
+    #     when the kernel files are already cached.
+    #   * `DIFFUSERS_DISABLE_REMOTE_CODE` set in the environment makes this raise.
+    # Constructing it lazily is what keeps both of those out of app startup.
     decoder_model.set_attn_processor(LTX2VideoVaeNeighborhoodNattenProcessor())
     # Tiling bounds peak memory by the tile size rather than by the video size.
     decoder_model.enable_tiling()
@@ -400,8 +408,16 @@ def get_pipeline(*, pipeline: str = BASE_KIND, dtype=None, device: str | None = 
 
         built = derive_pipeline(base, LTX2Pipeline)
 
-    upsampler, decoder = _stage_2_parts(base, dtype=dtype, device=device)
-    runner = StageRunner(built, kind=pipeline, upsampler=upsampler, decoder=decoder)
+    # NOT built here. The weights are already guaranteed by
+    # `preflight.require_cache_complete()` -- all three components are in the
+    # allow-list -- so the startup loudness is not lost. What cannot be checked
+    # at startup is the NATTEN kernel, which resolves over the network, and
+    # checking it would reimpose the very network dependency this defers.
+    runner = StageRunner(
+        built,
+        kind=pipeline,
+        stage_2_factory=lambda: _stage_2_parts(base, dtype=dtype, device=device),
+    )
     _CACHE[pipeline] = runner
     return runner
 
@@ -516,16 +532,22 @@ class StageRunner:
     wrong and the run still succeeds and still returns a video.
     """
 
-    def __init__(self, pipeline, *, kind, upsampler=None, decoder=None):
+    def __init__(self, pipeline, *, kind, upsampler=None, decoder=None, stage_2_factory=None):
         self.pipeline = pipeline
         self.kind = kind
         self.upsampler = upsampler
         self.decoder = decoder
+        #: Built on the first stage-2 request, never at construction. The parts
+        #: are ~2.1 GB of weights AND a NATTEN kernel resolved over the network,
+        #: and eight of the eleven modes never touch them. Building eagerly
+        #: turned a dependency of one branch into a hard requirement for every
+        #: mode -- when NATTEN could not resolve, nothing loaded at all.
+        self._stage_2_factory = stage_2_factory
 
-    def __call__(self, *, enable_stage_2: bool = False, **kwargs):
-        kwargs = _with_real_conditions(kwargs)
-        if not enable_stage_2:
-            return self.pipeline(**kwargs)
+    def _stage_2_ready(self):
+        """Obtain the stage-2 parts, building them if this is the first request."""
+        if (self.upsampler is None or self.decoder is None) and self._stage_2_factory:
+            self.upsampler, self.decoder = self._stage_2_factory()
         if self.upsampler is None or self.decoder is None:
             raise ModelLoadError(
                 component="latent_upsampler",
@@ -535,6 +557,12 @@ class StageRunner:
                     "which would look like it worked and be visibly worse."
                 ),
             )
+
+    def __call__(self, *, enable_stage_2: bool = False, **kwargs):
+        kwargs = _with_real_conditions(kwargs)
+        if not enable_stage_2:
+            return self.pipeline(**kwargs)
+        self._stage_2_ready()
 
         stage_1 = self.pipeline(**kwargs, **stage_1_kwargs())
         upsampled = self.upsampler(**upsample_kwargs(_latents_of(stage_1)))

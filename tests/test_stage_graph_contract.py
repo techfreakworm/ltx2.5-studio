@@ -884,3 +884,72 @@ def test_the_snapshot_the_loader_uses_is_the_one_the_completeness_check_checks()
     assert checked.name == pipelines.model_files.REVISION, (
         f"the snapshot path does not end in the pinned revision: {checked}"
     )
+
+
+# --------------------------------------------------------------------------
+# stage 2 is a branch, not a startup cost
+#
+# Building the parts in `get_pipeline` turned a dependency of ONE branch into a
+# hard requirement for all eleven modes: the diffusion decoder resolves a NATTEN
+# kernel over the network, and when that failed nothing loaded at all -- eight
+# modes that never touch stage 2 included.
+# --------------------------------------------------------------------------
+
+
+def test_getting_a_pipeline_does_not_build_the_stage_2_parts(tmp_path, monkeypatch):
+    from ltx25_studio import model_files
+
+    snapshot = tmp_path / "snapshots" / model_files.REVISION
+    snapshot.mkdir(parents=True)
+    recorders = install_fake_stack(monkeypatch, snapshot)
+
+    pipelines.get_pipeline()
+
+    for name in ("LTX2LatentUpsamplerModel", "LTX2VideoDiffusionDecoderModel"):
+        assert not recorders[name].calls, (
+            f"{name} was loaded just to hand back a pipeline, so every mode now pays "
+            f"stage 2's weights and its network dependency"
+        )
+
+
+def test_a_single_stage_run_never_builds_the_stage_2_parts():
+    """The default path must not touch the branch it does not use."""
+    built = []
+    runner = pipelines.StageRunner(
+        Recorder("pipeline"),
+        kind="text2video",
+        stage_2_factory=lambda: (built.append(1), (Recorder("up"), Recorder("dec")))[1],
+    )
+
+    runner(prompt="a lighthouse")
+
+    assert not built, "a single-stage run built the stage-2 parts"
+
+
+def test_the_stage_2_parts_are_built_once_and_reused():
+    """Two stage-2 runs, one build -- or every run pays for the weights again."""
+    calls = []
+
+    def factory():
+        calls.append(1)
+        return Recorder("upsampler", output=Staged("up")), Recorder("decoder", output=Staged("dec"))
+
+    runner = pipelines.StageRunner(
+        AudioPipeline(audio=False), kind="text2video", stage_2_factory=factory
+    )
+
+    runner(prompt="a", enable_stage_2=True)
+    runner(prompt="b", enable_stage_2=True)
+
+    assert len(calls) == 1, f"the stage-2 parts were built {len(calls)} times, not once"
+
+
+def test_stage_2_still_refuses_when_the_parts_cannot_be_had():
+    """Laziness must not become a silent fallback to a single-stage render."""
+    runner = pipelines.StageRunner(Recorder("pipeline"), kind="text2video")
+
+    with pytest.raises(ModelLoadError) as excinfo:
+        runner(prompt="a lighthouse", enable_stage_2=True)
+    assert "single-stage" in str(excinfo.value), (
+        f"the refusal no longer explains what it is refusing to do: {excinfo.value}"
+    )
