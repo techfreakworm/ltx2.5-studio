@@ -472,6 +472,35 @@ table — so it stays correct across checkpoints. The derived
 `num_attention_heads × attention_head_dim = 32 × 128 = 4096` is one entry in that map, not the
 rule.
 
+#### 5.7.1 The anchor is a frame, and the conversion is lossy
+
+**Ruling: the user types a pixel frame. `conditioning.py` converts frame → latent.** Users think
+in frames — "put my second shot at frame 24". A latent index is an artefact of the VAE's 8:1
+temporal compression and means nothing to someone generating a video. This keeps the conversion
+in exactly one place, which is what this row assigns to `conditioning.py`, and it *handles* the
+trap rather than explaining it: labelling the field LATENT would make the off-by-8 the user's
+problem.
+
+**The lossy direction must not be silent.** Frame → latent is 8:1, so a run of frames collapses
+onto one anchor. The readout says so rather than snapping quietly:
+
+```
+| shot | anchor (frame) | lands on latent | frames sharing it |
+| 2    | `25`           | **4**           | 25–32             |
+| 3    | `30`           | **4**           | 25–32 ⟵           |
+
+⟵ Temporal compression is 8:1, so these anchors snap. Frame `30` anchors at the
+  same place as frame `25` — frames 25–32 all share latent **4**.
+```
+
+`conditioning.latent_group_for()` owns that arithmetic; the UI words the answer and computes none
+of it. A second copy in the render layer would eventually disagree with the real one, and **a
+readout that disagrees with what runs is worse than no readout**.
+
+*Historical note:* the two halves of this once disagreed — the column was labelled
+"Anchor (LATENT index)" while `normalise_condition` treated it as a pixel frame — because an
+instruction asked for both at once. Wiring them naively would have double-converted every anchor.
+
 #### Stage 5.5 — why IC-LoRAs must be refused rather than loaded
 
 `DoctorDiffusion/LTX-2.3-IC-LoRA-Colorizer` carries
@@ -694,6 +723,20 @@ and that is the lesson:
 
 The user saw "nothing happened". No error, no log, no signal. It hid for a **week**.
 
+**The `exports` tuple is a contract, checked in BOTH directions** (`generate._artifacts_for`):
+
+* **declared but missing → raises.** A mode promising a track and producing nothing is the
+  never-empty bug one level up.
+* **written but undeclared → dropped and noted, not raised.** The registry decides a mode's
+  exports, so an over-generous encoder is over-generous rather than wrong; failing a run that
+  produced a perfectly good video is the harsher answer to the milder problem. The extra track
+  never reaches the result, and the drop is surfaced on `GenerationResult.warnings`.
+
+Enforcing only the first direction is what let a mode declare `exports=("audio","video")` and
+return `audio_path=None`, so the UI reported every successful joint-mode run as an internal
+error. One-directional contracts have now failed here twice; the direction that is *not* checked
+is the one that bites.
+
 **Our rules, both halves mandatory:**
 - **An empty path becomes an error AT THE SOURCE**, and every layer propagates it. A success
   path that can return a falsy artifact is a bug regardless of current reachability.
@@ -778,7 +821,7 @@ Every row here is a **test case**, not a note. These are the ways this API is wr
 
 | # | Gotcha | Consequence | Our handling |
 |---|---|---|---|
-| 1 | **`LTX2VideoCondition.index` is a LATENT index, not a pixel frame index.** `start_idx = max((latent_start_idx - 1) * vae_temporal_compression_ratio + 1, 0)` | **off-by-8 guaranteed** if a pixel frame number is passed | convert at the boundary in `conditioning.py`; UI speaks pixel frames, the pipeline gets latent indices |
+| 1 | **`LTX2VideoCondition.index` is a LATENT index, not a pixel frame index.** `start_idx = max((latent_start_idx - 1) * vae_temporal_compression_ratio + 1, 0)` | **off-by-8 guaranteed** if a pixel frame number is passed | convert at the boundary in `conditioning.py`. **The user types a FRAME** (§5.7.1); the pipeline gets a latent index |
 | 2 | **Out-of-range condition indices are silently SKIPPED** with only a `logger.warning` | a whole conditioning image does nothing, silently | validate range ourselves and **raise**; this is a silent-failure path we convert into a loud one |
 | 3 | **`noise_scale` default differs by class:** `0.0` on `LTX2Pipeline` / `LTX2ImageToVideoPipeline`, `None` on `LTX2ConditionPipeline` (resolving to `sigmas[0]` or 1.0) | copying a call between classes changes behaviour silently | always pass `noise_scale` explicitly; never rely on the default |
 | 4 | **`num_frames` default differs:** `None` (auto-duration) on `LTX2Pipeline`/`ImageToVideo`/`Condition`; hard `121` on `LTX2InContextPipeline` and `LTX2HDRPipeline`, which have **no `duration_head` at all** | auto-duration silently unavailable on two pipelines | registry records per-workflow duration support; auto-duration also **raises** with >1 prompt and `num_frames=None` — validate before the call |
@@ -1011,6 +1054,14 @@ decode A  audio_vae.decode(audio_latents) → mel → vocoder(...) → waveform
 latents (§5.7 #6). Passing the default `True` **double-denormalizes and silently corrupts the
 output**. This is a test case.
 
+**Stage 2 is opt-in, and the registry overrides the request.** `GenerationRequest.enable_stage_2`
+defaults to **off**: it is a real quota cost on a metered Space and the user should own that
+trade. But a mode whose `skip_stage_2` is set generates video nobody sees (§3.2), so upscaling it
+is pure quota — `generate.stage_2_enabled()` forces it off there, because honouring the toggle
+would be honouring a mistake. `StageRunner` owns the graph so `generate.py` carries no branch on
+it, and requesting stage 2 without the upsampler loaded **raises** rather than quietly rendering
+single-stage, which would look like it worked and be visibly worse.
+
 **Why not the modular path.** The model card's own Option C example uses the classic pipelines,
 so that is the documented, lower-risk API. The modular path (`LTX25ModularPipeline` /
 `LTX25AutoBlocks`, loaded from `modular_model_index.json`) is newer, and its interaction with
@@ -1119,6 +1170,39 @@ the **maximum duration is a server-side, tier-dependent, unpublished cap** — d
 hardcode it. ~120 s is the empirical safe ceiling; the official Lightricks LTX Space ships
 `@spaces.GPU(duration=75, size="xlarge")`.
 
+### 8.6.1 Where §8 actually executes — and why the decorator is unconditional
+
+Everything above is a rule about `app.py`, and for a while every one of them existed only as
+prose: no executable `@spaces.GPU`, no executable `.to("cuda")`, and `zerogpu.py` imported by
+nothing. The app would have deployed, started, and never touched a GPU.
+
+What it looks like now, and each line is load-bearing:
+
+```python
+import spaces                      # FIRST, before anything that initialises CUDA
+CONFIG = load_config()             # unguarded: a bad LTX25_* reaches the operator
+preflight.run(CONFIG, strict=ON_ZEROGPU)
+pipelines.get_pipeline(..., device="cuda")     # module scope -> the packer runs
+_GPU_KWARGS = zerogpu.gpu_decorator_kwargs(spaces.GPU, duration=..., size=...)
+
+@spaces.GPU(**_GPU_KWARGS)         # literal, static, UNCONDITIONAL
+def run_generation(**params):
+    return zerogpu.assert_returnable(_GENERATE(**params))
+
+zerogpu.check_duration_signature(run_generation, zerogpu.estimate_duration)
+generate_module.set_gpu_dispatch(run_generation)
+```
+
+**The decorator is unconditional on purpose.** Off-Space, `spaces` is a stub whose `GPU()` returns
+the function unchanged, so the wiring is identical everywhere and only its *effect* differs. A
+decorator behind an `if` is precisely how a documented rule quietly stops being applied: the Space
+path stops being the path anyone runs, nothing local exercises it, and the docstring keeps
+reassuring. Making the stub carry the difference means **the line you run locally is the line that
+runs on the Space**.
+
+`_GENERATE` is bound at import rather than resolved by attribute, because a wrapper installed
+after startup would otherwise send the worker back through itself.
+
 ### 8.7 Local (Apple Silicon / MPS) is a different regime
 
 MPS has no ZeroGPU packer, no `spaces` decorator semantics, and unified memory changes the
@@ -1154,6 +1238,60 @@ anything under `tests/`. This plan's job is to make the units *testable*.
 | `outputs.py` | 20 GB oldest-first eviction over a temp dir |
 | `generate.py` | stub pipeline returning nothing → assert a specific exception, **not** an empty path |
 | `zerogpu.py` | the return-boundary rejects/converts CUDA-tensor returns; `duration=` callable signature matches the decorated function |
+
+### 9.1.1 The lesson this build actually taught
+
+> **A module can be complete, documented, specced and green, and still be connected to nothing.**
+>
+> *And it can be imported, and still be connected to nothing that matters.*
+
+The corollary is the part that took five separate blockers to learn, every one of them found
+**after** the gate first went green:
+
+| # | What was disconnected | How it looked |
+|---|---|---|
+| 1 | `generate` ↔ `handlers` disagreed about what success is | every successful run in the three flagship modes reported as an internal error |
+| 2 | `zerogpu` wired to nothing | the app would have deployed, started, and **never touched a GPU** |
+| 3 | `generate` ↔ its own GPU entrypoint | the worker resolved `generate` by attribute and re-entered itself |
+| 4 | `conditioning` reached only from a UI readout | raw dataframe rows went to the pipeline; the pixel→latent conversion never ran |
+| 5 | `lora/apply` — **importer count zero**, 19 passing specs | the entire LoRA validator was itself never applied |
+
+**#5 is the one to remember.** Nine validation stages, a header-only parser, a per-module
+dimension check — a machine built specifically to stop silent garbage — and it was silently doing
+nothing. A user would upload an adapter, watch it validate, generate, receive base-model output,
+and be told it worked.
+
+**Why the usual checks miss this class.** Unit tests prove a module correct *in isolation*, which
+is exactly what a disconnected module is. A probe you design tests the mental model you already
+have — and a wrong mental model is precisely what a seam bug is made of. `conditioning` was
+`import app: yes` and would have passed any "is it imported" check, because the UI's live readout
+loaded it; it was the *generation path* that never touched it.
+
+**The check that does catch it**, and the only one here that does not depend on the checker
+already suspecting the answer:
+
+```
+import app                                    # 1. load the entrypoint
+evict every ltx25_studio.* that import loaded  # 2. clear the slate
+run one real generation                        # 3. image + shot row + staged LoRA
+diff sys.modules again                         # 4. what loaded is what the path reaches
+```
+
+Not *"is it imported"* but **"is it reached by the path that does the work"**. It cannot miss a
+module nobody remembered to think about, which is the whole point. `tests/test_module_reachability.py`
+pins it.
+
+### 9.1.2 Process finding: history that misdescribes itself
+
+`git log -- ltx25_studio/outputs.py` returns a commit whose message describes `conditioning.py`
+and `lora/apply.py`. An uncommitted change by another agent was swept into `3d53dd3` by a
+`git add ltx25_studio/` that was not path-scoped.
+
+Recorded because the next reader deserves the warning: **history that misdescribes its own
+contents is a slow-acting trap**, the same failure as documentation that reassures, relocated
+into the log. The root cause was structural — three agents sharing one worktree with files
+reassigned mid-flight — so the mitigation is structural too: stage by explicit path, never by
+directory, whenever more than one agent can write.
 
 ### 9.2 GPU-gated tests
 
