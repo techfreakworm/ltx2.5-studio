@@ -327,8 +327,15 @@ def main() -> int:
                     fixtures["video"] = load_video_frames(src)
                     log(f"fixture video  : {len(fixtures['video'])} PIL frames from {src}")
                 else:
-                    fixtures["audio"] = encode_audio_latents(base, src)
-                    log(f"fixture audio  : latents from {src}")
+                    # The PATH, not pre-encoded latents. cbfbe87 made
+                    # generate() encode request.audio itself, and that join is
+                    # exactly what was missing — the UI wrote request.audio,
+                    # _with_audio read request.audio_latents, and nothing
+                    # connected them, so these modes silently discarded the
+                    # upload and generated fresh audio. Passing latents here
+                    # would bypass the fix and re-prove nothing.
+                    fixtures["audio"] = src
+                    log(f"fixture audio  : file {src} (generate() encodes it)")
             except Exception as exc:
                 log(f"fixture {key} FAILED to build: {type(exc).__name__}: {exc}")
                 log(f"  runs needing {key!r} will be SKIPPED; the rest proceed")
@@ -362,10 +369,7 @@ def main() -> int:
             log("")
             continue
         for need in spec_row["needs"]:
-            if need == "audio":
-                req["audio_latents"] = fixtures["audio"]
-            else:
-                req[need] = fixtures[need]
+            req[need] = fixtures[need]
         if spec.min_resolution:
             log(f"  (registry forces min resolution {modes.MIN_RESOLUTION} for this mode)")
 
