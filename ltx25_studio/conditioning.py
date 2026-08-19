@@ -29,11 +29,14 @@ Pure integer arithmetic at module level. ``diffusers`` is imported lazily inside
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 
 from .constraints import DEFAULT_TEMPORAL_COMPRESSION_RATIO, image_crf_for
 from .errors import ConstraintError
 
 __all__ = [
+    "SHOT_ROW_ANCHOR",
+    "ConditionSpec",
     "build_conditions",
     "image_crf_for",
     "latent_index_for",
@@ -43,6 +46,31 @@ __all__ = [
     "pixel_to_latent_index",
     "validate_condition_index",
 ]
+
+
+#: A shot-list row as ``gr.Dataframe(type="array")`` hands it over:
+#: ``(prompt segment, anchor, strength)``. The UI declares the same order in
+#: ``ui/fields.SHOT_COLUMNS``; if either moves, the other must move with it, and
+#: reading the prompt cell as a frame number is precisely the silent failure the
+#: shared declaration exists to stop.
+SHOT_ROW_PROMPT = 0
+SHOT_ROW_ANCHOR = 1
+SHOT_ROW_STRENGTH = 2
+
+
+@dataclass(frozen=True)
+class ConditionSpec:
+    """A conditioning input, normalised and range-checked, before diffusers.
+
+    ``index`` is always a **latent** index by the time a spec exists -- the
+    conversion happens in :func:`normalise_condition`, so nothing downstream has
+    to remember which unit it is holding.
+    """
+
+    source: object
+    kind: str = "image"
+    index: int = 0
+    strength: float = 1.0
 
 
 def pixel_index_for(
@@ -103,13 +131,30 @@ def validate_condition_index(pixel_frame: int, *, num_frames: int) -> int:
     )
 
 
-def normalise_condition(condition, *, num_frames: int, temporal_compression_ratio: int) -> dict:
+def normalise_condition(
+    condition,
+    *,
+    num_frames: int,
+    temporal_compression_ratio: int = DEFAULT_TEMPORAL_COMPRESSION_RATIO,
+) -> dict:
     """One UI condition -> validated fields ready for ``LTX2VideoCondition``.
 
     Accepts the ``dict`` the UI sends or any object with the same attributes, so
     the UI never has to construct a diffusers type itself.
     """
-    if isinstance(condition, dict):
+    if isinstance(condition, (list, tuple)):
+        # A raw shot-list row. Reaching the pipeline unconverted is the bug this
+        # function exists to prevent, so it is handled here rather than refused.
+        cells = list(condition)
+
+        def cell(position, default=None):
+            value = cells[position] if len(cells) > position else None
+            return default if value is None else value
+
+        source = cell(SHOT_ROW_PROMPT)
+        pixel_frame = int(cell(SHOT_ROW_ANCHOR, 0) or 0)
+        strength = float(cell(SHOT_ROW_STRENGTH, 1.0))
+    elif isinstance(condition, dict):
         source = condition.get("source", condition.get("frames"))
         pixel_frame = int(condition.get("index", 0) or 0)
         strength = float(condition.get("strength", 1.0))
@@ -139,18 +184,18 @@ def build_conditions(
     *,
     num_frames: int,
     temporal_compression_ratio: int = DEFAULT_TEMPORAL_COMPRESSION_RATIO,
-    crf: int | None = None,
-):
-    """Convert UI conditions into ``LTX2VideoCondition`` objects.
+) -> tuple[ConditionSpec, ...]:
+    """Normalise every condition into a range-checked :class:`ConditionSpec`.
 
-    ``diffusers`` is imported here rather than at module scope so the whole
-    package stays importable -- and unit-testable -- with no GPU and no weights.
+    Pure arithmetic -- no diffusers, so it runs on every path including the ones
+    with no model present. That matters: this is where an out-of-range anchor is
+    caught, and upstream would skip it with only a log line and generate anyway.
 
-    The returned list is always the same length as the input. If a condition
-    cannot be built, this raises; it never returns a quietly shorter list.
+    The returned list is always the same length as the input. A condition that
+    cannot be built raises; it never comes back quietly shorter, because a shot
+    that vanishes between the form and the model is the quietest failure there
+    is.
     """
-    from diffusers.pipelines.ltx2.pipeline_ltx2_condition import LTX2VideoCondition
-
     built = []
     for condition in conditions:
         fields = normalise_condition(
@@ -158,12 +203,12 @@ def build_conditions(
             num_frames=num_frames,
             temporal_compression_ratio=temporal_compression_ratio,
         )
-        kwargs = {
-            "frames": fields["source"],
-            "index": fields["index"],
-            "strength": fields["strength"],
-        }
-        if crf is not None:
-            kwargs["crf"] = crf
-        built.append(LTX2VideoCondition(**kwargs))
-    return built
+        built.append(
+            ConditionSpec(
+                source=fields["source"],
+                kind=getattr(condition, "kind", "image"),
+                index=fields["index"],
+                strength=fields["strength"],
+            )
+        )
+    return tuple(built)

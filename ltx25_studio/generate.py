@@ -37,7 +37,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
-from . import constraints, modes
+from . import conditioning, constraints, modes
 from .constraints import DEFAULT_FRAME_RATE
 from .errors import DecodeError, EmptyOutputError, EncodeError, ModelLoadError
 
@@ -79,6 +79,7 @@ def configured_output_root() -> Path:
         return Path(load_config().output_dir)
     except Exception:  # a bad cap must not stop a generation from running
         return Path(DEFAULT_OUTPUT_ROOT)
+
 
 __all__ = [
     "DEFAULT_OUTPUT_ROOT",
@@ -244,6 +245,60 @@ def _pipeline_kwargs(spec, request: GenerationRequest) -> dict:
     return kwargs
 
 
+def _prepared_conditions(kwargs: dict, request: GenerationRequest) -> None:
+    """Normalise every condition before it reaches the pipeline.
+
+    This is the step that was missing: the UI's dataframe rows travelled through
+    ``modes._conditions`` untouched and arrived at the pipeline as raw lists, so
+    **the pixel-to-latent index conversion never ran** and an out-of-range anchor
+    was never caught. Upstream skips a bad condition with only a log line and
+    generates anyway -- the shot does nothing, nobody is told, and the metered
+    run is spent regardless.
+
+    Conversion to ``LTX2VideoCondition`` happens later, in ``StageRunner``, where
+    diffusers is present. The normalisation here is pure arithmetic and always
+    runs, which is what makes it a guard rather than a formatting step.
+    """
+    raw = kwargs.get("conditions")
+    if not raw:
+        return
+    kwargs["conditions"] = conditioning.build_conditions(
+        raw,
+        num_frames=request.num_frames,
+        temporal_compression_ratio=constraints.DEFAULT_TEMPORAL_COMPRESSION_RATIO,
+    )
+
+
+def _apply_loras(pipe, request: GenerationRequest):
+    """Attach every staged adapter, asserting each actually took.
+
+    Stage 7 lives in ``lora/apply.py`` and was reachable from nothing: a user
+    could upload an adapter, watch it validate, generate, and receive
+    base-model output -- the precise silent garbage the whole validator exists
+    to prevent, arriving because the last step was never called.
+    """
+    staged = getattr(request, "loras", ()) or ()
+    if not staged:
+        return ()
+    from .lora import apply as lora_apply
+
+    target = getattr(pipe, "pipeline", pipe)
+    reports = []
+    for position, entry in enumerate(staged):
+        if isinstance(entry, dict):
+            source = entry.get("source")
+            weight = float(entry.get("weight", 1.0))
+        else:
+            source = entry
+            weight = 1.0
+        reports.append(
+            lora_apply.apply_lora(
+                target, source, adapter_name=f"user_lora_{position}", weight=weight
+            )
+        )
+    return tuple(reports)
+
+
 def _decoded(output, mode: str):
     """Reject a pipeline that ran and produced nothing, before we try to encode it."""
     if output is None:
@@ -400,6 +455,8 @@ def generate(
     if progress is not None:
         progress(0.2, "generating")
     kwargs = _pipeline_kwargs(spec, request)
+    _prepared_conditions(kwargs, request)
+    _apply_loras(pipe, request)
     try:
         output = pipe(**kwargs)
     except Exception as exc:

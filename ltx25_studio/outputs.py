@@ -545,10 +545,12 @@ def write_output(
             )
             if warnings is not None:
                 warnings.extend(notes)
+            written = ("video", "audio") if not notes and audio is not None else ("video",)
         else:
             _write_audio(audio, target, sampling_rate=sampling_rate)
+            written = ("audio",)
     except LTXStudioError:
         raise
     except Exception as exc:
         raise EncodeError(path=str(target), reason=str(exc)) from exc
-    return target
+    return dict.fromkeys(written, target)

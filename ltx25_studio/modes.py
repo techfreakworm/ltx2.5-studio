@@ -32,6 +32,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from types import MappingProxyType
 
+from .conditioning import ConditionSpec
 from .errors import UnknownModeError
 
 __all__ = [
@@ -63,21 +64,6 @@ IMAGE_CONDITION_STRENGTH = 1.0
 #: Video conditioning must stay below 1.0: at full strength the input frames are
 #: pinned and nothing is generated.
 MAX_VIDEO_CONDITION_STRENGTH = 0.99
-
-
-@dataclass(frozen=True)
-class ConditionSpec:
-    """A conditioning input, before it becomes an ``LTX2VideoCondition``.
-
-    Deliberately inert. ``conditioning.py`` turns these into real conditions --
-    including the pixel-frame to latent-index conversion, which is a trap this
-    module has no business knowing about.
-    """
-
-    source: object
-    kind: str
-    index: int = 0
-    strength: float = IMAGE_CONDITION_STRENGTH
 
 
 @dataclass(frozen=True)

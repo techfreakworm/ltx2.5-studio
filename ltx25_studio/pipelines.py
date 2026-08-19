@@ -258,6 +258,7 @@ class StageRunner:
         self.decoder = decoder
 
     def __call__(self, *, enable_stage_2: bool = False, **kwargs):
+        kwargs = _with_real_conditions(kwargs)
         if not enable_stage_2:
             return self.pipeline(**kwargs)
         if self.upsampler is None or self.decoder is None:
@@ -274,6 +275,49 @@ class StageRunner:
         upsampled = self.upsampler(latents=_latents_of(stage_1))
         stage_2 = self.pipeline(**kwargs, **stage_2_kwargs(_latents_of(upsampled)))
         return self.decoder(**decode_kwargs(_latents_of(stage_2)))
+
+
+def _with_real_conditions(kwargs: dict) -> dict:
+    """Turn normalised condition specs into real ``LTX2VideoCondition`` objects.
+
+    The last possible moment, and the only layer that may import diffusers. The
+    specs arriving here have already been range-checked and had their indices
+    converted from pixel frames to latent indices by ``conditioning.py``; this
+    only changes their type.
+    """
+    specs = kwargs.get("conditions")
+    if not specs:
+        return kwargs
+    try:
+        from diffusers.pipelines.ltx2.pipeline_ltx2_condition import LTX2VideoCondition
+    except ImportError:
+        return kwargs  # no diffusers: the specs travel as-is (tests, local dev)
+    from . import conditioning
+
+    # Specs arriving from generate() are already range-checked and already carry
+    # LATENT indices, so re-normalising them would convert a second time and
+    # move every anchor. Anything that is NOT a spec reached us by another route
+    # and has had no checking at all -- normalise that, so a future call site
+    # cannot hand diffusers a raw row and have it silently skipped upstream.
+    num_frames = int(kwargs.get("num_frames") or 0)
+    prepared = []
+    for spec in specs:
+        if isinstance(spec, conditioning.ConditionSpec):
+            prepared.append(spec)
+            continue
+        fields = conditioning.normalise_condition(spec, num_frames=num_frames)
+        prepared.append(
+            conditioning.ConditionSpec(
+                source=fields["source"], index=fields["index"], strength=fields["strength"]
+            )
+        )
+
+    kwargs = dict(kwargs)
+    kwargs["conditions"] = [
+        LTX2VideoCondition(frames=spec.source, index=spec.index, strength=spec.strength)
+        for spec in prepared
+    ]
+    return kwargs
 
 
 def _latents_of(output):
