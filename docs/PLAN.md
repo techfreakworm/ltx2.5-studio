@@ -1165,6 +1165,41 @@ other workflow from those same modules. There is no configuration in which two
 copies are wanted, which is why this was fixed before the measurement confirming
 its magnitude landed — the fix is correct in every branch.
 
+**Settled by inspection, not assumption.** `diffusers/pipelines/pipeline_utils.py`
+at the pinned revision has **no module-level cache of any kind** — no `lru_cache`,
+no loaded-module map — and `load_sub_model` calls `load_method(...)`
+unconditionally, so every call materialises fresh. Our own `_CACHE` was keyed on
+the *workflow name*, so it never deduplicated across the two.
+
+##### ⚠️ Necessary, and NOT sufficient for ZeroGPU
+
+This fix removes **one of three** causes of the 150 GB eviction. It does not make
+the Space work, and recording it as if it did would be the same confidently-wrong
+statement as the `expected_weights=53.20GB` line deleted in §2.6.
+
+The packed copy is **separate from** the HF cache snapshot, so even the fixed,
+single-pipeline case is:
+
+| | GB |
+|---|---:|
+| HF cache snapshot | 72.19 |
+| ZeroGPU packed copy (one pipeline) | 72.19 |
+| **subtotal** | **144.37** |
+| headroom left for the image | **5.63** |
+| a `python:3.12` image carrying torch + CUDA | **~8–12** |
+
+**So one pipeline does not fit either.** Double-loading took it to 216.56 GB; the
+Xet chunk cache would have taken it to 288.74 GB. The eviction was
+**over-determined** — three independent causes, and the smallest of them absorbed
+two cycles of tuning.
+
+**The unknown that decides it, named rather than assumed:** whether ZeroGPU frees
+the snapshot after packing. If it does, one pipeline fits comfortably. If it does
+not, **bf16 on `storage: None` is structurally infeasible for this checkpoint
+set**, and the answer is persistent storage, a public Space with `preload_from_hub`
+(§6.2), or smaller checkpoints. That is an operator decision and this plan does
+not assume its outcome.
+
 **The base is always the superset class**, `LTX2ConditionPipeline`. Deriving
 superset → subset can only drop `audio_scheduler`, which the subset does not
 take. The reverse would silently drop it from the pipeline that *does* use it,
@@ -1477,7 +1512,7 @@ register.
 
 | # | Risk | Why it is uncertain | How it gets settled |
 |---|---|---|---|
-| **1** | **bf16 fits ZeroGPU's CPU RAM and transient disk** | The ~68 GB RAM ceiling is a **community cgroup observation**, not official — HF publishes ZeroGPU RAM as `"-"` / "Dynamic resources". Transient disk peaks at ~144 GB against a 150 GB cap before the packer auto-prunes. | **Measurement on the Space, not argument.** §5.6's preflight turns a failure into a diagnosable message; §2.6's one-line dtype switch makes the fallback cheap. |
+| **1** | **bf16 fits ZeroGPU's transient disk at all** — now doubted, not merely uncertain | Snapshot 72.19 + packed copy 72.19 = **144.37 GB**, leaving 5.63 GB for an image that needs ~8–12. **One pipeline does not fit** unless ZeroGPU frees the snapshot after packing, which is **unverified**. The ~68 GB RAM ceiling remains a community cgroup observation, not an official figure. | Settled by whether the snapshot is freed. If not, the routes are persistent storage, a public Space with preload, or smaller checkpoints — an operator decision, not a knob. **ZeroGPU is parked; hinode is the critical path.** |
 | 2 | ZeroGPU's packer handles the pipeline's tensor graph correctly | Verified for ordinary tensors; **unverified for quantised custom tensor subclasses** (bitsandbytes `Int8Params`/`Params4bit`, torchao) against the packer's `WeakTensorKeyDictionary` | only becomes live if risk #1 forces quantization — measure then |
 | 3 | ~~`preload_from_hub` 10-entry cap~~ | **RETIRED.** We are one repo → one entry with comma-separated filenames. Fits comfortably (§6.2). | — |
 | 4 | Max `@spaces.GPU` duration on our tier | server-side, tier-dependent, **unpublished** | discover empirically; never hardcode (§5.8 #4) |
