@@ -361,9 +361,10 @@ def test_the_upload_is_encoded_through_the_audio_vae(mode_id, wired, audio_input
     audio_vae = wired.pipes[-1].audio_vae
     assert audio_vae.encoded, f"{mode_id} never called audio_vae.encode"
     assert audio_vae.mels, f"{mode_id} never ran the mel front-end"
-    assert audio_vae.mels[-1].shape == STUB_WAVEFORM.shape, (
+    # Batched by the time it reaches the transform: (batch, channels, samples).
+    assert audio_vae.mels[-1].shape == (1, *STUB_WAVEFORM.shape), (
         f"{mode_id} encoded something other than the loaded waveform: "
-        f"{audio_vae.mels[-1].shape} vs {STUB_WAVEFORM.shape}"
+        f"{audio_vae.mels[-1].shape} vs {(1, *STUB_WAVEFORM.shape)}"
     )
 
 
@@ -432,7 +433,11 @@ def test_a_mono_upload_is_reported_to_the_user_not_only_the_log(monkeypatch, tmp
         retention_bytes=10**9,
     )
 
-    assert pipe.audio_vae.mels[-1].shape[0] == 2, "the VAE was handed mono and would have raised"
+    # -2 is the channel axis once the waveform is batched; reading axis 0 here
+    # would read the batch and pass whatever the channel count actually was.
+    assert pipe.audio_vae.mels[-1].shape[-2] == 2, (
+        "the VAE was handed mono and would have raised"
+    )
     assert any("mono" in note for note in result.warnings), (
         f"the upload was altered and the result says nothing about it: {result.warnings}"
     )

@@ -393,6 +393,40 @@ class FakeComponent(FakeModule):
         self.peft_config: dict[str, object] = {}
 
 
+class ShapedTensor:
+    """Enough tensor to follow a rearrangement, with no torch installed.
+
+    The offline gate has none, so a test of a real transform can only skip --
+    and a skipped test of an axis order is how two half-fixes went unnoticed.
+    This models exactly the operations the layout steps use.
+    """
+
+    def __init__(self, shape, dtype="float32"):
+        self.shape = tuple(shape)
+        self.dtype = dtype
+
+    def transpose(self, a, b):
+        axes = list(self.shape)
+        axes[a], axes[b] = axes[b], axes[a]
+        return ShapedTensor(axes, self.dtype)
+
+    def unsqueeze(self, axis):
+        axes = list(self.shape)
+        axes.insert(axis, 1)
+        return ShapedTensor(axes, self.dtype)
+
+    def to(self, dtype):
+        return ShapedTensor(self.shape, dtype)
+
+    def __getitem__(self, key):
+        # Models `waveform[None]`, which is how the batch axis is added --
+        # `[None]` rather than `.unsqueeze(0)` because it means the same in
+        # torch and numpy and the offline gate has no torch.
+        if key is None:
+            return self.unsqueeze(0)
+        raise TypeError(f"ShapedTensor only models [None] indexing, got {key!r}")
+
+
 class FakeMel:
     """A mel that carries a dtype and the rank the encoder requires.
 
@@ -455,7 +489,11 @@ class FakeAudioVae:
 
     def encode(self, mel):
         self.encoded.append(mel)
-        latents = SimpleNamespace(shape=(1, 64, 16, 128))
+        # ⚠️ MEL-MAJOR [B, C, M, L], which is what the real VAE emits -- axis 3
+        # tracks duration, axis 2 is pinned at mel_bins / mel_compression_ratio.
+        # Upstream wants [B, C, L, M], so `unpacked_latents` has to swap them. A
+        # fake emitting the already-correct order would pass a missing transpose.
+        latents = ShapedTensor((1, 8, 16, 100))
         return SimpleNamespace(latent_dist=SimpleNamespace(sample=lambda: latents))
 
 

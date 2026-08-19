@@ -21,6 +21,7 @@ from conftest import (
     FakeAudioVae,
     FakeMel,
     FakeVocoder,
+    ShapedTensor,
     code_string_constants,
     waveform_of,
 )
@@ -248,8 +249,8 @@ def test_a_mono_upload_reaches_the_vae_as_stereo():
         waveform_of(1), audio_vae=vae, sampling_rate=vae.config.sample_rate, notes=notes
     )
 
-    assert vae.mels[-1].shape[0] == 2, (
-        f"the audio VAE was handed {vae.mels[-1].shape[0]} channel(s); it takes 2 and "
+    assert vae.mels[-1].shape[-2] == 2, (
+        f"the audio VAE was handed {vae.mels[-1].shape[-2]} channel(s); it takes 2 and "
         f"raises a raw conv2d shape error rather than anything actionable"
     )
     assert notes, "the audio was altered and nothing was recorded for the user"
@@ -663,36 +664,66 @@ def test_an_explicit_to_mel_is_protected_too():
 # --------------------------------------------------------------------------
 
 
-class ShapedTensor:
-    """Enough tensor to follow a rearrangement, with no torch installed.
+def test_the_mel_reaches_the_encoder_time_major():
+    """A batched waveform gives [B, C, mel, time]; the encoder wants [B, C, time, mel].
 
-    The offline gate has no torch, so a test of the real transform can only
-    skip -- and a skipped test of the axis order is how both half-fixes went
-    unnoticed. This models exactly the two operations the layout step uses.
+    `(1, 2, 64, 401)` is the shape that hides: it is 4D, passes every rank check
+    downstream, and is a transposed spectrogram the encoder reads as 64 time
+    steps of 401 mel bins.
     """
-
-    def __init__(self, shape):
-        self.shape = tuple(shape)
-
-    def transpose(self, a, b):
-        axes = list(self.shape)
-        axes[a], axes[b] = axes[b], axes[a]
-        return ShapedTensor(axes)
-
-    def unsqueeze(self, axis):
-        axes = list(self.shape)
-        axes.insert(axis, 1)
-        return ShapedTensor(axes)
-
-
-def test_the_mel_reaches_the_encoder_batched_and_time_major():
-    """torchaudio gives [channels, mel, time]; the encoder wants [B, C, time, mel]."""
-    laid_out = audio.encoder_layout(ShapedTensor((2, 64, 401)))
+    laid_out = audio.encoder_layout(ShapedTensor((1, 2, 64, 401)))
 
     assert laid_out.shape == (1, 2, 401, 64), (
-        f"got {laid_out.shape}, expected (1, 2, 401, 64) = {audio.MEL_INPUT_DIMS}. "
-        f"(1, 2, 64, 401) is the batch-only half-fix: 4D, passes every rank check, and is "
-        f"a transposed spectrogram the encoder reads as 64 time steps of 401 bins."
+        f"got {laid_out.shape}, expected (1, 2, 401, 64) = {audio.MEL_INPUT_DIMS}"
+    )
+
+
+def test_the_waveform_is_batched_only_after_the_channel_count_is_settled():
+    """The two guards contradict each other in any other order.
+
+    `match_channel_count` reads channels off axis 0 and the encoder needs 4D.
+    Batching first makes a stereo clip look mono; not batching leaves the
+    latents one rank short.
+    """
+    batched = audio.batched(ShapedTensor((2, 4096)))
+
+    assert batched.shape == (1, 2, 4096), batched.shape
+    assert audio.batched(batched).shape == (1, 2, 4096), (
+        "an already-batched waveform was batched again"
+    )
+
+
+def test_a_batched_waveform_is_refused_by_the_channel_check():
+    """It used to read the batch axis as the channel count and 'widen' stereo."""
+    with pytest.raises(LTXStudioError) as excinfo:
+        audio.match_channel_count(ShapedTensor((1, 2, 64000)), channels=2)
+
+    message = str(excinfo.value)
+    assert "3D" in message and "UNBATCHED" in message, message
+
+
+def test_the_encode_output_is_put_into_upstreams_latent_layout():
+    """The VAE emits [B, C, M, L]; upstream reads [B, C, L, M].
+
+    Established by experiment: halving the input halves axis 3 while axis 2
+    stays at mel_bins / mel_compression_ratio. Upstream's own packer says
+    `[B, C, L, M] --> [B, L, C * M]`.
+    """
+    swapped = audio.unpacked_latents(ShapedTensor((1, 8, 16, 100)))
+
+    assert swapped.shape == (1, 8, 100, 16), (
+        f"got {swapped.shape}; the frames axis must be axis 2, which is where "
+        f"audio_frames_from_latents and upstream both read it"
+    )
+
+
+def test_the_frame_count_is_read_from_the_axis_the_transpose_produces():
+    """The transpose and AUDIO_LATENT_DIMS have to agree, or both are wrong."""
+    swapped = audio.unpacked_latents(ShapedTensor((1, 8, 16, 100)))
+
+    assert audio.audio_frames_from_latents(swapped.shape) == 100, (
+        "the frame count does not come back as the axis that tracks duration; "
+        "AUDIO_LATENT_DIMS and unpacked_latents disagree"
     )
 
 

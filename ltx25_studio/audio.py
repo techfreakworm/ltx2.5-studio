@@ -71,6 +71,8 @@ __all__ = [
     "mel_front_end_for",
     "build_mel_front_end",
     "encoder_layout",
+    "batched",
+    "unpacked_latents",
     "mel_parameters",
     "MEL_PARAM_SOURCES",
     "MEL_CONVENTIONS",
@@ -258,6 +260,13 @@ def export_sampling_rate_from(vocoder) -> int:
 def validate_audio_latents_shape(shape) -> tuple[int, ...]:
     """Return the shape unchanged, or raise naming the rank we got.
 
+    ✅ **Confirmed against real weights**, and it was right. On its first
+    contact with a real encode it rejected a 3-D tensor the VAE itself had
+    accepted without complaint -- the batch axis was missing, so ``conv2d``
+    silently treated the input as unbatched. The instinct was to loosen this
+    check; the check was correct and the input was wrong. See
+    :func:`unpacked_latents`.
+
     ``audio_latents`` is **unpacked** ``[B, C, L, M]``. Upstream does not
     reliably raise on a wrong rank -- the documented failure is "shape errors,
     **or worse, silent misinterpretation**" -- so the assertion lives at our
@@ -404,7 +413,7 @@ def mel_parameters(audio_vae, vocoder):
 
 
 def encoder_layout(mel):
-    """``[channels, mel, time]`` -> ``[batch, channels, time, mel]``.
+    """``[..., mel, time]`` -> ``[..., time, mel]``.
 
     Separated from :func:`build_mel_front_end` so it can be exercised without
     torch installed. The transform itself needs real tensors; **this rearrangement
@@ -416,7 +425,7 @@ def encoder_layout(mel):
     tensor that satisfies the rank check and is a **transposed spectrogram** --
     audio out, silently wrong. See :data:`MEL_INPUT_DIMS`.
     """
-    return mel.transpose(-2, -1).unsqueeze(0)
+    return mel.transpose(-2, -1)
 
 
 def build_mel_front_end(audio_vae, vocoder):
@@ -595,6 +604,14 @@ def match_channel_count(waveform, *, channels: int):
     shape = getattr(waveform, "shape", None)
     if not shape:
         return waveform, None
+    if len(shape) != 2:
+        raise LTXStudioError(
+            f"the waveform is {len(shape)}D {tuple(shape)} and this expects an UNBATCHED "
+            f"(channels, samples). Given a batched one it would read the batch axis as the "
+            f"channel count -- a (1, 2, N) stereo clip looks like mono, is 'widened' by "
+            f"duplication, and reaches the VAE with a batch of 2 and the user told their "
+            f"audio was mono. Batch after this runs, not before."
+        )
     found = int(shape[0])
     if found == channels:
         return waveform, None
@@ -616,6 +633,49 @@ def match_channel_count(waveform, *, channels: int):
         f"the audio was mono and this model's audio VAE takes {channels} channels, so the "
         f"single channel was duplicated. No audio was lost, but it is not true stereo."
     )
+
+
+def batched(waveform):
+    """Add the batch axis the encoder requires, after the channel count is settled.
+
+    **Order matters and the two guards disagree unless it is respected.**
+    :func:`match_channel_count` reads the channel count off axis 0, so it must
+    see an unbatched ``(channels, samples)``; the encoder needs 4D, which needs
+    a batch. Batching *after* the channel check is the only order that satisfies
+    both -- batching first makes a stereo clip look mono, and not batching at
+    all makes the latents come back one rank short.
+    """
+    shape = getattr(waveform, "shape", None)
+    if shape is None or len(shape) != 2:
+        return waveform
+    # `[None]` rather than `.unsqueeze(0)`: it means the same thing in torch and
+    # in numpy, and the offline gate has no torch. Same reason as the fancy
+    # indexing in `match_channel_count`.
+    return waveform[None]
+
+
+def unpacked_latents(latents):
+    """``audio_vae.encode`` output ``[B, C, M, L]`` -> upstream's ``[B, C, L, M]``.
+
+    ✅ Established by experiment on real weights: halving the input duration
+    halves **axis 3** (100 → 50) while axis 2 stays pinned at
+    ``mel_bins / mel_compression_ratio`` = 16. So the VAE emits mel-major.
+
+    📄 Upstream wants length-major, and says so in
+    ``pipeline_ltx2_condition.prepare_audio_latents``: *"latents expected to be
+    unpacked (4D) with shape [B, C, L, M]"*, with ``_pack_audio_latents`` doing
+    ``latents.transpose(1, 2).flatten(2, 3)  # [B, C, L, M] --> [B, L, C * M]``.
+
+    **This is why :data:`AUDIO_LATENT_DIMS` was right and must not be
+    "corrected".** Our constant, ``validate_audio_latents_shape`` and
+    ``audio_frames_from_latents`` all agree with upstream; the missing step was
+    here. Swapping the constant instead would have made every reader agree with
+    every other reader and all of them wrong -- PLAN §5.7 row 5 exactly.
+    """
+    swap = getattr(latents, "transpose", None)
+    if swap is None:
+        return latents
+    return swap(-2, -1)
 
 
 def _validate_mel_rank(mel) -> None:
@@ -680,6 +740,13 @@ def encode_waveform_to_latents(
     ``sampling_rate`` is the rate of the *incoming* waveform; the VAE's own rate
     comes from its config and wins. The returned shape is asserted before it can
     reach the pipeline.
+
+    **Returns unpacked, UN-NORMALISED, un-noised 4D ``[B, C, L, M]``.** That is
+    the whole job and stopping there is deliberate:
+    ``prepare_audio_latents`` upstream calls ``_pack_audio_latents``,
+    ``_normalize_audio_latents`` and ``_create_noised_state`` itself, so
+    anything applied here would be applied twice. *"Should this normalise?" is
+    the obvious next question and the answer is no.*
     """
     params = audio_params_from(audio_vae)
     prepared = _resampled(waveform, from_rate=sampling_rate, to_rate=params.audio_sampling_rate)
@@ -691,6 +758,8 @@ def encode_waveform_to_latents(
         logger.warning(note)
         if notes is not None:
             notes.append(note)
+    # AFTER the channel check, never before -- see `batched`.
+    prepared = batched(prepared)
     mel = (to_mel or mel_front_end_for(audio_vae, vocoder))(prepared)
     # ⚠️ Cast HERE, at the hand-off, not inside the transform. The mel is
     # computed in float32 on purpose -- an STFT in bf16 would lose precision
@@ -703,7 +772,7 @@ def encode_waveform_to_latents(
     # explicitly-passed `to_mel=` from a caller who does not know the VAE dtype.
     mel = _matched_dtype(mel, audio_vae, name="audio_vae")
     _validate_mel_rank(mel)
-    latents = _sampled(audio_vae.encode(mel))
+    latents = unpacked_latents(_sampled(audio_vae.encode(mel)))
     validate_audio_latents_shape(getattr(latents, "shape", ()))
     return latents
 
