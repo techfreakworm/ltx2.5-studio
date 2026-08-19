@@ -18,13 +18,50 @@ This package's exports are the authoritative interface; import from
 ``ltx25_studio.lora``, not from the submodules.
 """
 
+from ..errors import (
+    LoRAConventionError,
+    LoRADimensionError,
+    LoRAError,
+    LoRAFormatError,
+    LoRAHeaderError,
+    LoRAInContextError,
+    LoRAModuleNotFoundError,
+    LoRANotAttachedError,
+    LoRAPairingError,
+    LoRATooLargeError,
+    LoRATruncatedError,
+    LoRAVersionError,
+)
 from .inspect import LoRAInspection, inspect_lora, read_safetensors_header
-from .validate import DEFAULT_MAX_LORA_BYTES, LoRAValidation, validate_lora
+from .validate import (
+    DEFAULT_MAX_LORA_BYTES,
+    MIN_RESOLVED_FRACTION,
+    WARN_RESOLVED_FRACTION,
+    LoRAValidation,
+    validate_lora,
+)
 
+#: Re-exported so a caller catching LoRA failures needs one import, not two.
+#: The error types live in ``ltx25_studio.errors`` (one hierarchy, one root);
+#: these are aliases, not duplicates.
 __all__ = [
     "DEFAULT_MAX_LORA_BYTES",
+    "MIN_RESOLVED_FRACTION",
+    "WARN_RESOLVED_FRACTION",
+    "LoRAConventionError",
+    "LoRADimensionError",
+    "LoRAError",
+    "LoRAFormatError",
+    "LoRAHeaderError",
+    "LoRAInContextError",
     "LoRAInspection",
+    "LoRAModuleNotFoundError",
+    "LoRANotAttachedError",
+    "LoRAPairingError",
+    "LoRATooLargeError",
+    "LoRATruncatedError",
     "LoRAValidation",
+    "LoRAVersionError",
     "inspect_lora",
     "read_safetensors_header",
     "validate_lora",

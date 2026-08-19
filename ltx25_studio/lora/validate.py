@@ -47,8 +47,10 @@ __all__ = [
     "DEFAULT_MAX_LORA_BYTES",
     "IC_LORA_MARKER",
     "LORA_SUFFIX_PAIRS",
+    "MIN_RESOLVED_FRACTION",
     "SUPPORTED_ARCHITECTURE_TOKEN",
     "SUPPORTED_SERIES",
+    "WARN_RESOLVED_FRACTION",
     "LoRAValidation",
     "validate_lora",
 ]
@@ -70,6 +72,21 @@ SUPPORTED_SERIES = "2.5"
 
 #: Substring an ``modelspec.architecture`` value must contain to be this family.
 SUPPORTED_ARCHITECTURE_TOKEN = "ltx2"
+
+#: Fraction of an adapter's targeted modules that must exist in this model.
+#:
+#: Stage 7 catches the extreme -- an adapter that attaches to *nothing*. The
+#: dangerous middle is unguarded without a threshold: an adapter that attaches to
+#: a fifth of its targets produces a model that is neither the base nor the
+#: fine-tune, and output that looks plausible and is wrong. That is the exact
+#: silent-garbage class this validator exists to eliminate.
+#:
+#: A genuine LTX-2.5 adapter resolves ~100% against the real transformer, and a
+#: 2.3 adapter resolves nearly all of it -- so these thresholds should never fire
+#: for a legitimate upload, which is what makes it safe for the lower one to be
+#: hard rather than advisory.
+MIN_RESOLVED_FRACTION = 0.5
+WARN_RESOLVED_FRACTION = 0.9
 
 _LORA_SUBSTRING = "lora"
 
@@ -262,15 +279,24 @@ def _check_dimensions(
                     source=source, module=module, expected=want, actual=actual, key=key
                 )
 
-    if missing and len(missing) == targeted:
+    if not targeted or not missing:
+        return
+
+    resolved_fraction = (targeted - len(missing)) / targeted
+    if resolved_fraction < MIN_RESOLVED_FRACTION:
         raise LoRAModuleNotFoundError(
             source=source, missing_modules=tuple(sorted(missing)), module_count=targeted
         )
-    if missing:
-        warnings.append(
-            f"{len(missing)} of {targeted} targeted modules are absent from this transformer "
-            f"and will not receive the adapter: {', '.join(sorted(missing)[:5])}."
-        )
+    severity = (
+        "Most of the adapter will apply, but treat unexpected output as suspect"
+        if resolved_fraction < WARN_RESOLVED_FRACTION
+        else "This is a small enough fraction to be a normal version difference"
+    )
+    warnings.append(
+        f"{len(missing)} of {targeted} targeted modules "
+        f"({resolved_fraction:.0%} resolved) are absent from this transformer and will not "
+        f"receive the adapter: {', '.join(sorted(missing)[:5])}. {severity}."
+    )
 
 
 def validate_lora(
