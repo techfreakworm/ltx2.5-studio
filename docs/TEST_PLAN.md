@@ -191,8 +191,19 @@ expected and actual dims. One run, both directions.
 per-module) and `vrgamedevgirl84/LTX_2.3_Crisp_Enhance_Style_LoRa` (0.705 GB — the
 metadata-present case, `ss_ltx_version: "2.3"`, `modelspec.architecture: "LTX2/lora"`).
 
-**No synthetic adapter is needed.** Real fixtures cover every branch and are strictly more
-informative.
+**Real fixtures are better where they apply -- but synthetic ones are not optional.** An earlier
+draft of this section said "no synthetic adapter is needed". That was wrong, and the distinction
+matters:
+
+| what it proves | fixture |
+|---|---|
+| the validator accepts a real adapter, rejects a real wrong-architecture one | **real** files (above) |
+| a **header-truncated** file, a **corrupt length prefix**, a header that is not JSON | **synthetic only** -- no real adapter is corrupt on demand |
+| the payload is **provably never read** | **synthetic only** -- it needs a known payload size to count bytes against |
+
+You cannot download a broken file that is broken in exactly the way you want to test. The
+stdlib-built fixtures (`struct` + `json`, PLAN §4.6) are the only way to construct those cases,
+and they are what makes stages 1-3 testable at all.
 
 ---
 

@@ -165,7 +165,8 @@ Measured from the Hub's own byte counts, not estimated. The `GB` column is decim
 | `audio_vae/` | 0.1065 | index | audio VAE (mel ↔ latent) |
 | `tokenizer/` | 0.0322 | index | `GemmaTokenizer` |
 | `duration_head/` | 0.0038 | index | duration prediction |
-| `scheduler/`, `model_index.json` | ~0 | index | `FlowMatchEulerDiscreteScheduler` |
+| `scheduler/` | ~0 | index | `FlowMatchEulerDiscreteScheduler` -- config-only, but every pipeline constructor needs it, and it uses `scheduler_config.json`, not `config.json` |
+| `model_index.json` (repo root) | ~0 | — | the component manifest |
 | **TOTAL** | **72.185** | | **= 67.23 GiB, 44% of the repo — we skip 92.005 GB** |
 
 **`model_index.json`, verbatim** — this is the authority for what the pipeline expects:
@@ -258,15 +259,26 @@ trade a *known* uncertainty for an *unverified* one:
   we cannot tolerate: quietly, as a quality regression.
 
 So bf16 ships, `size="xlarge"` is **declared explicitly** rather than being silently promoted
-(§8.5), and dtype/quantization is **one switch in `model_files.py`** so moving to fp8 or fp8+int8
-is a one-line change. This is **technical risk #1** (§10), and it is to be settled by
+(§8.5), and dtype/quantization is **one switch** -- the `LTX25_TRANSFORMER_PRECISION` /
+`LTX25_TEXT_ENCODER_PRECISION` variables resolved in `config.py` (§5.1).
+
+**⚠️ Flipping precision is a REBUILD, not a runtime switch.** Preloading is all-or-nothing
+(§6.2): preloaded files are owned by the build user and read-only to the runtime, so a quantised
+variant needing *different files* cannot be fetched on demand into that cache. If a future
+precision setting changes the file list, the Space must be rebuilt with a new `preload_from_hub`
+block. Setting the variable alone changes how the existing weights are loaded -- nothing more. This is **technical risk #1** (§10), and it is to be settled by
 measurement on the Space, not by argument.
 
 ### 2.7 Output retention — 20 GB, evicted oldest-first
 
 `outputs/` is capped at **20 GB**, bounded-bytes, oldest-first eviction, as a single constant in
-`config.py` overridable by env. Swept **on startup as well as after each run**, logging what was
-evicted.
+`config.py` overridable by env. Swept **on startup** (`app.py`) **and after every successful
+generation** (`generate.py`), logging each eviction and surfacing it on the result's warnings.
+
+Both call sites are deliberately **non-fatal**: the user's video exists and is fine, so a
+retention failure must not turn a good run into an error, and a bad cap must not stop the app
+from starting. A policy that exists but is never called prevents nothing -- which is precisely
+what was true here until the call sites were added.
 
 Rationale: ~78 GB headroom minus the pip environment and a user LoRA or two. 20 GB is many
 generations and leaves the margin the 2.3 Space did not have when it filled its disk and went
@@ -499,7 +511,9 @@ I range-read the headers of three real public LTX LoRAs:
 1. **Not one of them carries `model_version`.** Stage 4 as originally written — "read
    `__metadata__.model_version`" — would be warn-only for **100% of real community uploads**,
    i.e. effectively dead code. The official Lightricks LoRA does carry it (`'2.5.0'`), so the
-   field is real; it is just not what users bring us.
+   field is real -- but **the official adapter is the exception, not the template.** A validator
+   written from it as the reference would have been written from the one file in the population
+   that is unrepresentative of the rest.
 
    **The absent case has two distinct shapes and the code must handle both:** no `__metadata__`
    key at all, *and* `__metadata__: {}` present but empty. Both mean "no version signal". Since
@@ -739,6 +753,25 @@ This is the fail-loudly principle applied to the resource budget. It turns an an
 `"Workload evicted, storage limit exceeded (150G)"` into a diagnosable message that names the
 fix. It also runs the §1.3 diffusers-version assertion. Test case.
 
+**The startup report** (`pipelines.startup_report`) prints, before anything expensive:
+
+```
+LTX-2.5 Studio starting
+  config          : transformer=bf16 text_encoder=bf16 zerogpu_size=auto duration=60s
+                    expected_weights=72.19GB outputs<=20GB
+  weights cached  : 36/37 files  MISSING 1
+  disk            : 412.5 GB free of 1995.2 GB
+  zerogpu size    : not yet known (reported after packing)
+  model revision  : 871165de037793df7d75c23a02dd7f45fd364c97
+  first missing   : vae/config.json
+```
+
+The **cache count is the load-bearing line**: `36/37`, with the first missing file named, makes
+"preload worked" and "preload silently did nothing" two different sentences. When a GPU run fails
+on a metered Space behind a 72 GB build, these lines are the difference between diagnosing it in
+one round trip and burning several -- and there is no opportunity to add a print statement
+afterwards.
+
 ### 5.7 API gotchas that cause silent wrongness
 
 Every row here is a **test case**, not a note. These are the ways this API is wrong-by-default.
@@ -917,7 +950,9 @@ ltx25_studio/
 ### 7.2 Layering rules
 
 - **Dependencies point inward.** `ui/` may import anything; `generate.py` must not import `ui/`.
-  `model_files.py`, `errors.py` and `constraints.py` import nothing from the package.
+  `errors.py` imports nothing from the package at all; `model_files.py` and `constraints.py`
+  may import **`errors` and nothing else**. An architecture test asserts it, because the value of
+  a bottom layer is entirely in what it refuses to depend on.
 - **`modes.py` is data, not branching.** Adding a mode is a registry entry, not an `if` in
   `generate.py`.
 - **`ui/handlers.py` contains no business logic.** Marshal inputs → call one function → marshal
