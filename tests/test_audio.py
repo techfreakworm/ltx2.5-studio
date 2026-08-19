@@ -131,6 +131,11 @@ def test_no_sample_rate_is_hardcoded():
     docstring_ids = set()
     for node in ast.walk(tree):
         body = getattr(node, "body", None)
+        # `isinstance(body, list)` because an IfExp's `.body` is a single
+        # expression, not a block -- a ternary anywhere in the module used to
+        # crash this scan with "'Call' object is not subscriptable".
+        if not isinstance(body, list):
+            continue
         if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant):
             docstring_ids.add(id(body[0].value))
     found = {

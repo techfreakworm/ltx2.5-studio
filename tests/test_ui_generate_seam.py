@@ -435,9 +435,51 @@ def test_a_mono_upload_is_reported_to_the_user_not_only_the_log(monkeypatch, tmp
 
     # -2 is the channel axis once the waveform is batched; reading axis 0 here
     # would read the batch and pass whatever the channel count actually was.
-    assert pipe.audio_vae.mels[-1].shape[-2] == 2, (
-        "the VAE was handed mono and would have raised"
-    )
+    assert pipe.audio_vae.mels[-1].shape[-2] == 2, "the VAE was handed mono and would have raised"
     assert any("mono" in note for note in result.warnings), (
         f"the upload was altered and the result says nothing about it: {result.warnings}"
+    )
+
+
+def test_the_seed_reaches_the_pipeline_not_only_the_sidecar(monkeypatch, tmp_path):
+    """The seed used to be recorded and never applied.
+
+    `_resolve_seed` ran, the number went into the encoder kwargs as metadata,
+    and there was no generator anywhere in the package -- so every run was
+    unconditionally random and every same-seed comparison was two independent
+    runs. H10b, the before/after pixel diffs, H12b and H4b all rested on it.
+    """
+    import sys
+    import types
+
+    seen = {}
+
+    class Generator:
+        def __init__(self, device=None):
+            seen["device"] = device
+
+        def manual_seed(self, value):
+            seen["seed"] = value
+            return self
+
+    torch = types.ModuleType("torch")
+    torch.Generator = Generator
+    monkeypatch.setitem(sys.modules, "torch", torch)
+
+    pipe = FakePipe()
+    generate_module.generate(
+        mode="text_to_video",
+        seed=1234,
+        pipeline_factory=factory_returning(pipe),
+        encoder=one_muxed_file_encoder,
+        output_root=tmp_path,
+        retention_bytes=10**9,
+    )
+
+    assert seen.get("seed") == 1234, (
+        f"the pipeline was never seeded: {seen}. The seed reaching only the sidecar is "
+        f"why 'same seed' comparisons compared two random runs."
+    )
+    assert "generator" in pipe.calls[-1], (
+        f"no generator reached the pipeline: {sorted(pipe.calls[-1])}"
     )

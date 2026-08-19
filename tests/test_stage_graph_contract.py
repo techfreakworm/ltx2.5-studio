@@ -1051,3 +1051,63 @@ def test_no_advertised_lever_sets_guidance_or_steps():
             f"{key!r} is still a UI field, but the distilled recipe fixes it -- a user "
             f"changing it fights the schedule and gets worse output with no way to know why"
         )
+
+
+# --------------------------------------------------------------------------
+# a partially-noised run needs a schedule that starts where its noise is
+#
+# `noise_scale` and `sigmas[0]` are the same quantity -- upstream infers one
+# from the other. Ours disagreed on the audio-input path: latents noised to
+# 0.5, scheduler told 1.0, so the model stripped a whole schedule's worth of
+# noise from a half-noised tensor. Measured: agree -10.4 dBFS, disagree -87.7.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("noise_scale", [0.05, 0.2, 0.5, 0.725, 0.9, 1.0])
+def test_the_schedule_starts_at_the_noise_scale(noise_scale):
+    """The invariant, across the whole band rather than at one value."""
+    sigmas = pipelines.schedule_from(noise_scale)
+
+    assert sigmas[0] == pytest.approx(noise_scale), (
+        f"schedule starts at {sigmas[0]} for noise_scale={noise_scale}. The model is told "
+        f"it is looking at {sigmas[0]} noise while the latents carry {noise_scale}."
+    )
+    assert sigmas == sorted(sigmas, reverse=True), f"not descending: {sigmas}"
+
+
+def test_a_full_strength_run_keeps_the_published_schedule():
+    """At 1.0 nothing is truncated -- the distilled curve is used as published."""
+    assert pipelines.schedule_from(1.0) == list(pipelines.DISTILLED_SIGMA_VALUES)
+    assert pipelines.schedule_from(None) == list(pipelines.DISTILLED_SIGMA_VALUES)
+
+
+def test_stage_2_keeps_its_schedule_by_construction():
+    """Not by two branches happening to agree, which is how they diverged."""
+    built = pipelines.stage_2_kwargs(object())
+
+    assert built["sigmas"] == list(pipelines.STAGE_2_DISTILLED_SIGMA_VALUES)
+    assert built["sigmas"][0] == built["noise_scale"], (
+        "stage 2's own schedule violates the invariant it taught us"
+    )
+
+
+def test_a_run_given_a_noise_scale_gets_a_matching_schedule():
+    """The seam: the runner must apply it, not just the helper offer it."""
+    runner, pipeline, _up, _dec = two_stage()
+
+    runner(prompt="a lighthouse", noise_scale=0.5)
+
+    sent = pipeline.kwargs
+    assert sent["sigmas"][0] == pytest.approx(0.5), (
+        f"the pipeline was told sigmas[0]={sent['sigmas'][0]} with noise_scale="
+        f"{sent['noise_scale']}. Disagreement here measured -87.7 dBFS on the card."
+    )
+
+
+def test_a_run_without_a_noise_scale_is_untouched():
+    """Only partially-noised runs truncate; the other ten modes must not."""
+    runner, pipeline, _up, _dec = two_stage()
+
+    runner(prompt="a lighthouse")
+
+    assert pipeline.kwargs["sigmas"] == list(pipelines.DISTILLED_SIGMA_VALUES)

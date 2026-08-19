@@ -277,6 +277,33 @@ def _prepared_conditions(kwargs: dict, request: GenerationRequest) -> None:
     )
 
 
+def _seeded_generator(pipe, seed: int):
+    """A generator on the pipeline's own device, seeded from the request.
+
+    **The seed used to reach only the sidecar.** ``_resolve_seed`` ran, the
+    number went into ``encoder_kwargs`` as metadata, and **nothing was ever
+    seeded** -- there was no generator anywhere in the package. So every run was
+    unconditionally random and every "same seed" comparison was two independent
+    runs: H10b, the before/after pixel diffs, H12b, H4b.
+
+    The device is read off the pipeline for the same reason the dtype is: a
+    CUDA generator is required for CUDA sampling, and ``"cuda"`` hardcoded is
+    wrong under offload or a second device.
+
+    Returns ``None`` when torch is absent, which is only true where there is no
+    model to seed -- the offline gate. It is not a fallback on a real path.
+    """
+    try:
+        import torch
+    except ImportError:
+        return None
+
+    target = getattr(getattr(pipe, "pipeline", pipe), "device", None)
+    generator = torch.Generator(device=target) if target is not None else torch.Generator()
+    generator.manual_seed(int(seed))
+    return generator
+
+
 def _prepared_audio(kwargs: dict, request: GenerationRequest, pipe) -> tuple[str, ...]:
     """Encode the user's audio file into the latents the pipeline actually takes.
 
@@ -312,6 +339,10 @@ def _prepared_audio(kwargs: dict, request: GenerationRequest, pipe) -> tuple[str
         )
 
     waveform, rate = audio_module.load_waveform(source)
+    # The same generator the pipeline gets: `audio_vae.encode` returns a
+    # distribution and `.sample()` draws from it, so an unseeded draw makes two
+    # runs differ regardless of any lever under test. That is the third reason
+    # H10b established less than it appeared to.
     # Anything the encode had to change about the user's file comes back here,
     # so it reaches `GenerationResult.warnings` rather than the Space log alone.
     notes: list[str] = []
@@ -321,6 +352,7 @@ def _prepared_audio(kwargs: dict, request: GenerationRequest, pipe) -> tuple[str
         sampling_rate=rate,
         notes=notes,
         vocoder=vocoder,
+        generator=kwargs.get("generator"),
     )
     return tuple(notes)
 
@@ -546,6 +578,12 @@ def generate(
     kwargs = _pipeline_kwargs(spec, request)
     _prepared_conditions(kwargs, request)
     _apply_loras(pipe, request)
+    # Before `_prepared_audio`, because the audio encode samples from a
+    # distribution and must draw from the same seeded stream as the pipeline.
+    generator = _seeded_generator(pipe, seed)
+    if generator is not None:
+        kwargs["generator"] = generator
+
     # After the pipeline exists, because encoding needs its `audio_vae`.
     audio_notes = _prepared_audio(kwargs, request, pipe)
     size_notes = ()

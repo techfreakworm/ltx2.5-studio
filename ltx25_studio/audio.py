@@ -512,11 +512,17 @@ def _resampled(waveform, *, from_rate: int, to_rate: int):
     return torchaudio.functional.resample(waveform, int(from_rate), int(to_rate))
 
 
-def _sampled(encoded):
-    """Unwrap whatever ``audio_vae.encode`` returned into a latent tensor."""
+def _sampled(encoded, generator=None):
+    """Unwrap whatever ``audio_vae.encode`` returned into a latent tensor.
+
+    ``.sample()`` **draws**, so it takes a generator like any other sampler.
+    Upstream's ``retrieve_latents`` threads one; we called it bare, which made
+    two runs draw different latents regardless of the lever being tested. The
+    sampling *mode* was always right -- upstream defaults to ``"sample"`` too.
+    """
     distribution = getattr(encoded, "latent_dist", None)
     if distribution is not None:
-        return distribution.sample()
+        return distribution.sample(generator) if generator is not None else distribution.sample()
     for attribute in ("latents", "sample"):
         found = getattr(encoded, attribute, None)
         if found is not None:
@@ -748,7 +754,14 @@ def _matched_to_module(tensor, component, *, name: str):
 
 
 def encode_waveform_to_latents(
-    waveform, *, audio_vae, sampling_rate: int, to_mel=None, notes=None, vocoder=None
+    waveform,
+    *,
+    audio_vae,
+    sampling_rate: int,
+    to_mel=None,
+    notes=None,
+    vocoder=None,
+    generator=None,
 ):
     """waveform -> mel -> ``audio_vae`` latents, ready to pass as ``audio_latents``.
 
@@ -792,7 +805,7 @@ def encode_waveform_to_latents(
     # explicitly-passed `to_mel=` from a caller who does not know the VAE dtype.
     mel = _matched_to_module(mel, audio_vae, name="audio_vae")
     _validate_mel_rank(mel)
-    latents = _sampled(audio_vae.encode(mel))
+    latents = _sampled(audio_vae.encode(mel), generator)
     validate_audio_latents_shape(getattr(latents, "shape", ()))
     return latents
 
