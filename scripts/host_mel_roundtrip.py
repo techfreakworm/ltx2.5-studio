@@ -27,6 +27,7 @@ the mel, in the VAE, or in the vocoder all look identical at the output.
 """
 
 import os
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -55,6 +56,34 @@ def structured_waveform(rate, channels=2, seconds=SECONDS):
     left = envelope * (0.7 * np.sin(2 * np.pi * 220.0 * t) + 0.3 * np.sin(2 * np.pi * 1320.0 * t))
     right = envelope * (0.7 * np.sin(2 * np.pi * 440.0 * t) + 0.3 * np.sin(2 * np.pi * 2640.0 * t))
     return torch.from_numpy(np.stack([left, right])[:channels])
+
+
+def write_wav(path, wave, rate):
+    """Persist the fixture so `load_waveform` can be the thing under test.
+
+    Reading the fixture back through the app's own loader means the round trip
+    starts where a user's upload starts -- including its device and dtype, which is
+    where this harness previously diverged from the application and hid a defect.
+    """
+    import av
+    import numpy as np
+
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    planes = wave.detach().cpu().numpy()
+    with av.open(str(path), mode="w") as container:
+        stream = container.add_stream("pcm_s16le", rate=rate)
+        stream.layout = "stereo" if planes.shape[0] == 2 else "mono"
+        # s16 is PACKED: one row of interleaved samples, not (channels, n) planar.
+        interleaved = np.clip(planes.T.reshape(1, -1), -1.0, 1.0)
+        frame = av.AudioFrame.from_ndarray(
+            (interleaved * 32767).astype("int16"), format="s16", layout=stream.layout.name
+        )
+        frame.sample_rate = rate
+        for packet in stream.encode(frame):
+            container.mux(packet)
+        for packet in stream.encode(None):
+            container.mux(packet)
+    return path
 
 
 def spectral_profile(x, rate, n_fft=1024):
@@ -108,7 +137,24 @@ def main() -> int:
         log(f"  ch{c}: rms {float(np.sqrt((src[c] ** 2).mean())):.6f}  "
             f"peaks at {peak_bins(prof, rate)} Hz")
 
-    dev_wave = wave.to(device=vae.device, dtype=vae.dtype)
+    # Write it out and read it back through `load_waveform`, so the input is
+    # LITERALLY what the app receives from a user upload -- same decoder, same
+    # dtype, same device (CPU).
+    #
+    # The previous version did `wave.to(device=vae.device, dtype=vae.dtype)` here,
+    # and that is how this harness concealed a real defect: the app does not move
+    # the waveform, so `encode_waveform_to_latents` hands a CPU mel to CUDA weights
+    # and raises -- while this test, having moved it, passed. A harness that
+    # performs a step the application omits is the same failure as a float32
+    # fixture over a bfloat16 bug, and it was mine.
+    fixture_path = os.environ.get(
+        "MEL_FIXTURE", "/home/wakeuser/ltx25-studio/mel-fixture.wav"
+    )
+    write_wav(fixture_path, wave, rate)
+    loaded, loaded_rate = audio_module.load_waveform(fixture_path)
+    log(f"\nread back via load_waveform: {tuple(loaded.shape)} @ {loaded_rate} Hz "
+        f"dtype={loaded.dtype} device={loaded.device}")
+    dev_wave = loaded
 
     log("\n=== stage 1: forward mel ===")
     # The app's own transform, unwrapped. `encode_waveform_to_latents` casts to the
