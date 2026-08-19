@@ -646,6 +646,27 @@ I range-read the headers of three real public LTX LoRAs:
 These three headers become **offline test fixtures** for stages 1–6.5 (§9.1): real-world data,
 zero GPU, zero weights, no network at test time.
 
+**The convention detector is now backed by real inputs in both conventions.**
+Until the H13 work it had only ever seen fixtures *we* wrote, shaped by our own
+reading of the format. `charlied98/ltxv_2b_lora_soft_draw_v1` ships the same
+adapter twice — `lora_weights_step_03000.safetensors` under `transformer.`
+(diffusers) and `comfy_lora_weights_step_03000.safetensors` under
+`diffusion_model.` (native) — and running the real validator against both gives:
+
+```
+transformer.       (diffusers)  ->  rejected at stage 6.5, LoRADimensionError
+diffusion_model.   (native)     ->  rejected at stage 6.5, LoRADimensionError
+```
+
+**Both converge on the correct stage.** The detector accepted two conventions
+neither of us invented and routed each to the dimension check — which retires the
+worry that the two paths might diverge, or that one might not reject at all.
+
+It also fixes what "rejected" means as a result: **a run reporting "rejected"
+without naming `LoRADimensionError` has not distinguished success from the
+convention detector breaking.** Two mechanisms could produce the same verdict, and
+only one of them is the validator working.
+
 ### 4.6 `lora/inspect.py` has ZERO heavy dependencies — and that buys a real feature
 
 The safetensors container is trivial:
@@ -1540,7 +1561,39 @@ Not *"is it imported"* but **"is it reached by the path that does the work"**. I
 module nobody remembered to think about, which is the whole point. `tests/test_module_reachability.py`
 pins it.
 
-### 9.1.2 Process finding: history that misdescribes itself
+### 9.1.2 Two rules for prose, since no test can fail on it
+
+**All four confidently-wrong artefacts on this build lived in the documentation
+layer** — `expected_weights=53.20GB`, `weights cached : 37/37`, *"blows the
+ceiling"*, and a §2.5/risk-#1 contradiction where the body stated a fact as known
+and the risk table stated the same fact as unverified. Both sentences were
+well-formed markdown and the gate has no opinion about prose.
+
+Two rules, both cheap, both applied rather than merely recorded:
+
+**1. A claim stated in two places is a claim that will diverge.** Where a number
+or a mechanism appears more than once, make **one place authoritative** and have
+the others point at it. §2.5 now carries that marker explicitly; §7.4, §8.3, the
+resource table and the risk register reference it instead of restating it.
+
+**2. Mark provenance on load-bearing claims** — *verified against `spaces` 0.51.1
+source*, *measured on hinode*, *inferred*. `53.20GB` and `37/37` were both numbers
+with **nothing visible behind them**, so no reader could tell there was nothing to
+check.
+
+And the rule that generalises furthest, from the contradiction above:
+
+> ### A claim moving from **known → unknown** is nearly always a regression.
+>
+> Documents accrete facts and rarely lose them. When an edit is about to record
+> something as uncertain, that is the moment to search the document for it being
+> **known** — because the likeliest explanation is that someone already
+> established it and the current author has not read it.
+
+That is what happened here: the answer was already in `PLAN.md`, and it was
+overwritten with "unverified" by an author who had the file open and searchable.
+
+### 9.1.3 Process finding: history that misdescribes itself
 
 `git log -- ltx25_studio/outputs.py` returns a commit whose message describes `conditioning.py`
 and `lora/apply.py`. An uncommitted change by another agent was swept into `3d53dd3` by a
