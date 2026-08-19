@@ -280,7 +280,7 @@ def total_size_gb(components: tuple[str, ...] | None = None) -> float:
 
 
 def download_allow_list(components: tuple[str, ...] | None = None) -> tuple[str, ...]:
-    """Every repo-relative path to fetch -- and only the live shards.
+    """Every repo-relative path to fetch, sorted -- and only the live shards.
 
     PLAN §5.2: the runtime download and the Space README ``preload_from_hub:``
     list are generated from this one function, never hand-maintained in two
@@ -298,7 +298,11 @@ def download_allow_list(components: tuple[str, ...] | None = None) -> tuple[str,
     paths: list[str] = list(ROOT_FILES)
     for name in names:
         paths.extend(get_component(name).paths)
-    return tuple(paths)
+    # Sorted, so the emitted string is canonical. A drift test comparing the
+    # README entry to this output compares STRINGS; an unstable order would make
+    # it fail for no reason, or worse, make someone "fix" it by loosening the
+    # comparison to a set and lose the revision check with it.
+    return tuple(sorted(paths))
 
 
 #: The config file each component needs in order to be constructed. Most use
