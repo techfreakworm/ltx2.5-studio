@@ -37,6 +37,7 @@ the whole package -- stays importable with no GPU, no weights and no diffusers.
 
 from __future__ import annotations
 
+import inspect
 from dataclasses import dataclass
 
 from . import model_files
@@ -56,9 +57,11 @@ __all__ = [
     "StageRunner",
     "WEIGHT_DTYPE",
     "WEIGHT_DTYPE_LABEL",
+    "BASE_KIND",
     "assert_compression_ratios",
     "assert_frame_rate_default",
     "clear_cache",
+    "derive_pipeline",
     "get_pipeline",
     "stage_1_kwargs",
     "stage_2_kwargs",
@@ -151,49 +154,96 @@ def _text_encoder_model_type(pipeline) -> str:
     return str(getattr(config, "model_type", "")) if config is not None else ""
 
 
-def get_pipeline(*, pipeline: str = "condition", dtype=None, device: str | None = None):
-    """Construct (or return the cached) pipeline for one upstream workflow.
+#: The workflow whose pipeline class accepts the SUPERSET of components, and so
+#: the one we always load. ``LTX2ConditionPipeline`` takes everything
+#: ``LTX2Pipeline`` takes plus ``audio_scheduler`` -- zero weights, ``None``
+#: default -- so deriving in this direction can never drop a component, while
+#: the reverse would silently lose the one the condition path actually uses.
+BASE_KIND = "condition"
 
-    Built on CPU. The ``.to("cuda")`` that triggers ZeroGPU's packing belongs at
-    module scope in the entrypoint, not here -- doing it lazily inside a
-    ``@spaces.GPU`` function defeats the packer entirely.
+#: Cache key for the raw base pipeline, distinct from the StageRunner entries.
+_BASE_CACHE_KEY = "__base__"
+
+
+def derive_pipeline(base, target_cls):
+    """Build ``target_cls`` from ``base``'s ALREADY-LOADED modules.
+
+    ``from_pretrained`` twice materialises two complete, independent copies of
+    the model -- ~67 GiB each. On ZeroGPU that is ~134 GiB packed to disk
+    against a 150 GB cap, and the packing runs after both builds; on a 96 GiB
+    card it is an outright OOM. The two pipeline classes take **identical**
+    weight-bearing components at our pinned revision, so there is no version of
+    this where two copies are wanted.
+
+    Prefers ``from_pipe``, which exists at the pinned SHA and handles exactly
+    this asymmetry -- it treats optional components carrying a default in the
+    signature as safe to omit, which is precisely ``audio_scheduler``. Falls back
+    to filtering ``base.components`` against the target's own signature, which is
+    the same rule written out.
     """
-    if pipeline in _CACHE:
-        return _CACHE[pipeline]
+    from_pipe = getattr(target_cls, "from_pipe", None)
+    if callable(from_pipe):
+        return from_pipe(base)
+    accepted = inspect.signature(target_cls.__init__).parameters
+    shared = {name: module for name, module in base.components.items() if name in accepted}
+    return target_cls(**shared)
+
+
+def _base_pipeline(*, dtype=None, device: str | None = None):
+    """Load the model ONCE. Every workflow is derived from this."""
+    if _BASE_CACHE_KEY in _CACHE:
+        return _CACHE[_BASE_CACHE_KEY]
 
     try:
         import torch
-        from diffusers import LTX2ConditionPipeline, LTX2Pipeline
+        from diffusers import LTX2ConditionPipeline
     except ImportError as exc:
         raise ModelLoadError(
-            component=pipeline,
+            component=BASE_KIND,
             reason=(
                 f"the model stack is not installed ({exc}). Install the pinned requirements; "
                 f"see docs/PLAN.md §1.3 for why the diffusers revision is exact."
             ),
         ) from exc
 
-    cls = LTX2Pipeline if pipeline == "text2video" else LTX2ConditionPipeline
     try:
-        built = cls.from_pretrained(
+        built = LTX2ConditionPipeline.from_pretrained(
             model_files.REPO_ID,
             revision=model_files.REVISION,
             torch_dtype=dtype or getattr(torch, WEIGHT_DTYPE),
         )
     except Exception as exc:
-        raise ModelLoadError(component=pipeline, reason=str(exc)) from exc
+        raise ModelLoadError(component=BASE_KIND, reason=str(exc)) from exc
 
     if device:
         # ZeroGPU intercepts this, rewrites it to .to("cpu") and packs every
         # tensor to disk -- which is why it must happen at module scope, not
         # lazily inside a @spaces.GPU function. Doing it there skips packing
-        # entirely and re-transfers from RAM on every cold worker.
+        # entirely and re-transfers from RAM on every cold worker. Only the base
+        # is moved: everything else shares these very modules.
         built.to(device)
 
     vae = getattr(built, "vae", None)
     if vae is not None:
         assert_compression_ratios(vae)
     assert_frame_rate_default(built)
+
+    _CACHE[_BASE_CACHE_KEY] = built
+    return built
+
+
+def get_pipeline(*, pipeline: str = BASE_KIND, dtype=None, device: str | None = None):
+    """The runner for one workflow, sharing one loaded copy of the model."""
+    if pipeline in _CACHE:
+        return _CACHE[pipeline]
+
+    base = _base_pipeline(dtype=dtype, device=device)
+    if pipeline == BASE_KIND:
+        built = base
+    else:
+        from diffusers import LTX2Pipeline
+
+        built = derive_pipeline(base, LTX2Pipeline)
 
     runner = StageRunner(built, kind=pipeline)
     _CACHE[pipeline] = runner

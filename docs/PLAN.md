@@ -1144,6 +1144,37 @@ decode A  audio_vae.decode(audio_latents) → mel → vocoder(...) → waveform
 latents (§5.7 #6). Passing the default `True` **double-denormalizes and silently corrupts the
 output**. This is a test case.
 
+#### The model is loaded ONCE and every workflow shares it
+
+`LTX2Pipeline` and `LTX2ConditionPipeline` take **identical weight-bearing
+components** at the pinned revision — `scheduler, vae, audio_vae, text_encoder,
+tokenizer, connectors, transformer, vocoder, processor, prompt_enhancer,
+duration_head`. The only difference is that the condition pipeline additionally
+accepts `audio_scheduler`: a scheduler, **zero weights**, defaulting to `None`.
+
+Calling `from_pretrained` per workflow therefore materialises **two complete
+independent copies of the model, ~67 GiB each**:
+
+| host | consequence |
+|---|---|
+| ZeroGPU | ~134 GiB packed to `~/.zerogpu/tensors` against a **150 GB cap** — and packing runs *after* both builds, so it blows the ceiling even when the download fits |
+| a 96 GiB card | outright OOM on the second build |
+
+So `pipelines._base_pipeline()` loads **once** and `derive_pipeline()` builds the
+other workflow from those same modules. There is no configuration in which two
+copies are wanted, which is why this was fixed before the measurement confirming
+its magnitude landed — the fix is correct in every branch.
+
+**The base is always the superset class**, `LTX2ConditionPipeline`. Deriving
+superset → subset can only drop `audio_scheduler`, which the subset does not
+take. The reverse would silently drop it from the pipeline that *does* use it,
+and a missing audio scheduler degrades the joint audio track in a way the video
+output never reveals — this build's recurring failure shape.
+
+The tests assert **module identity** (`is`), not equality. Two copies work
+perfectly, right up until the disk or the card runs out, so any check that only
+asks whether both pipelines function is blind to it.
+
 **Stage 2 is opt-in, and the registry overrides the request.** `GenerationRequest.enable_stage_2`
 defaults to **off**: it is a real quota cost on a metered Space and the user should own that
 trade. But a mode whose `skip_stage_2` is set generates video nobody sees (§3.2), so upscaling it

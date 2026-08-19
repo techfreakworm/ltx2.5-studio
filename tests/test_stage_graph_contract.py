@@ -370,3 +370,90 @@ def test_a_clean_startup_report_does_not_claim_files_are_missing(runtime_config)
     """The inverse: a report that always warns is a report nobody reads."""
     report = pipelines.startup_report(runtime_config, missing_files=())
     assert "00003" not in report
+
+
+# --------------------------------------------------------------------------
+# one loaded copy of the model, shared — PLAN §8, and the 150 GB ceiling
+# --------------------------------------------------------------------------
+#
+# `from_pretrained` twice materialises two complete independent copies, ~67 GiB
+# each. On ZeroGPU that is ~134 GiB packed to disk against a 150 GB cap, with the
+# packing running after both builds; on a 96 GiB card it is an outright OOM.
+#
+# At the pinned revision the two pipeline classes take IDENTICAL weight-bearing
+# components — the only difference is `audio_scheduler`, which carries no weights
+# and defaults to None. So there is no version of this where two copies are what
+# anyone wanted.
+#
+# These assert IDENTITY, not equality. The defect is invisible to any check that
+# only asks whether both pipelines work: two copies work fine, right up until the
+# disk or the card runs out.
+
+WEIGHT_BEARING = ("transformer", "vae", "audio_vae", "text_encoder", "connectors", "vocoder")
+
+
+class _Module:
+    """Stands in for a loaded component. Identity is the whole point."""
+
+
+class _FakeBase:
+    def __init__(self):
+        self._modules = {name: _Module() for name in WEIGHT_BEARING}
+        self._modules["audio_scheduler"] = _Module()
+
+    @property
+    def components(self):
+        return dict(self._modules)
+
+    def __getattr__(self, name):
+        try:
+            return self.__dict__["_modules"][name]
+        except KeyError:
+            raise AttributeError(name) from None
+
+
+class _FakeTarget:
+    """A pipeline class WITHOUT `audio_scheduler` — the real asymmetry."""
+
+    def __init__(self, transformer, vae, audio_vae, text_encoder, connectors, vocoder):
+        self.transformer = transformer
+        self.vae = vae
+        self.audio_vae = audio_vae
+        self.text_encoder = text_encoder
+        self.connectors = connectors
+        self.vocoder = vocoder
+
+
+@pytest.mark.parametrize("component", WEIGHT_BEARING)
+def test_the_derived_pipeline_shares_the_very_same_module(component):
+    """`is`, not `==`. Equality would pass with two copies loaded."""
+    base = _FakeBase()
+    derived = pipelines.derive_pipeline(base, _FakeTarget)
+
+    assert getattr(derived, component) is getattr(base, component), (
+        f"the derived pipeline has its own {component!r}. Two independent copies of "
+        f"the model are ~134 GiB together — over a 96 GiB card and over the 150 GB "
+        f"ZeroGPU disk cap, with packing running after both builds."
+    )
+
+
+def test_deriving_never_passes_a_component_the_target_cannot_accept():
+    """`audio_scheduler` is the one asymmetry, and it must not be forced across.
+
+    `LTX2ConditionPipeline` takes it; `LTX2Pipeline` does not. Passing it anyway
+    would TypeError at construction — loudly, at least — but the reverse is the
+    dangerous direction, which is why the base is always the superset class.
+    """
+    derived = pipelines.derive_pipeline(_FakeBase(), _FakeTarget)
+    assert not hasattr(derived, "audio_scheduler")
+
+
+def test_the_base_workflow_is_the_superset_class():
+    """Deriving must run superset -> subset, never the reverse.
+
+    Loading `LTX2Pipeline` first and deriving the condition pipeline from it
+    would silently drop `audio_scheduler` — and the condition path is the one
+    that uses it, so the joint audio track would degrade in a way the video
+    output never reveals. That is this build's recurring failure shape.
+    """
+    assert pipelines.BASE_KIND == "condition"
