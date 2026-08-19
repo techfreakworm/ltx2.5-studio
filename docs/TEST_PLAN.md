@@ -163,6 +163,9 @@ not run"* generalises. **Anywhere an input can be silently ignored and the run
 still succeeds, a passing run proves nothing.** Stage 2 was caught twice by
 noticing this; the same audit over every request field turns up four more:
 
+*The general rule is stated once, in `docs/PLAN.md` §9.1.4 (rule 3). **This section
+is authoritative for the fields and the runs** — add new ones here, not there.*
+
 | field | if silently ignored | the run still… | comparison that catches it |
 |---|---|---|---|
 | `enable_stage_2` | stage-1 render | succeeds, valid video | **H14** vs H1, same seed |

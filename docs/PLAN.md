@@ -1605,6 +1605,47 @@ reassures — just in the log instead of the source.** The root cause was struct
 reassigned mid-flight — so the mitigation is structural too: stage by explicit path, never by
 directory, whenever more than one agent can write.
 
+### 9.1.4 Two more rules, both of the §9.1.1 shape
+
+Neither is here because it sounds wise. Both are here because their *shape* does not
+depend on the author already suspecting the answer — the property §9.1.1 identifies as
+the only one that found anything.
+
+**3. Ask of every input: "if this were silently ignored, would the run still pass?"**
+
+Wherever the answer is *yes*, a green run is not evidence of anything. The mode still
+renders, the file still carries the right streams, every check passes — and the field
+under test was never read. Auditing the request fields on this build turned up **five**
+such inputs (`enable_stage_2`, `loras`, `auto_duration`, `noise_scale`, `strength`), and
+in every case the remedy is not a sharper assertion but **a second run differing in
+exactly that field**. `docs/TEST_PLAN.md` §A.4.1 is authoritative for the per-field
+table and the runs it implies.
+
+The rule earns its place by having **caught itself**. The six comparison runs it
+generated would every one of them have passed vacuously: `seed=-1` means *draw a fresh
+seed*, so both halves of each pair would have run at different seeds and differed for
+that reason alone. Established by running it rather than by reasoning about it — two
+runs at the default returned `777437012` and `3499445304`. **A rule about inputs that
+are silently ignored was nearly defeated by an input that is silently ignored**, which
+is the most compact argument available for checking a test can fail before trusting that
+it passed.
+
+**4. Record a fact once; derive every consumer of it.**
+
+Rule 1 says a claim stated in two places will diverge. That is not a property of prose —
+it is a property of *copies*, and code is not exempt. `model_files._SPECS` records the
+live shard sets **once**, read off the repo's own index files; both consumers are then
+derived from it, the runtime download and the Space `preload_from_hub:` list alike,
+through `download_allow_list()`. A drift test compares the committed README against that
+function's output, so the two cannot separate quietly.
+
+The payoff was not theoretical. The 37-file, 72.185 GB list was **correct on hinode — a
+machine nobody wrote it for** — including the duplicate-shard trap it exists to dodge:
+`transformer/` ships a 4-shard *and* an 8-shard copy of the same weights, `connectors/` a
+2-shard and a single-file copy, and a naive fetch of those folders pays **44.33 GB for
+nothing**. A hand-maintained second copy would have been accurate about the machine its
+author had in front of them — the only machine that never needed it to be right.
+
 ### 9.2 GPU-gated tests
 
 Anything needing real weights is marked `gpu` and deselected by default. CI and the default local
