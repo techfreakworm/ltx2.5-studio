@@ -226,17 +226,40 @@ def main() -> int:
     log(f"  missing cached files : {len(preflight.missing_cached_files())}")
     log(pipelines.startup_report(cfg, missing_files=preflight.missing_cached_files()))
 
+    bypass = os.environ.get("MATRIX_BYPASS_STAGE2") == "1"
     t0 = time.time()
-    cond = pipelines.get_pipeline(pipeline="condition", device="cuda")
-    load_seconds = time.time() - t0
-    base = cond.pipeline
+    if bypass:
+        # Harness accommodation, NOT a fix. get_pipeline builds the stage-2 parts
+        # unconditionally, and the diffusion decoder's NATTEN processor resolves
+        # its kernel version through the Hub -- which fails under
+        # HF_HUB_OFFLINE=1, the mode the model load itself requires to avoid
+        # refetching 44.33 GB of dead shards. The two are mutually exclusive
+        # today, so nothing loads.
+        #
+        # This routes around it using the app's OWN seam rather than editing it:
+        # `generate(pipeline_factory=...)` is a documented injection point, and
+        # the factory below builds the same StageRunner over the same
+        # derive_pipeline the real path uses. Only the stage-2 parts are absent,
+        # and no mode run under this flag uses them.
+        base = pipelines._base_pipeline(device="cuda")
+        load_seconds = time.time() - t0
+        log("  (MATRIX_BYPASS_STAGE2=1: base loaded directly; stage-2 parts absent)")
+    else:
+        cond = pipelines.get_pipeline(pipeline="condition", device="cuda")
+        load_seconds = time.time() - t0
+        base = cond.pipeline
     a1 = torch.cuda.memory_allocated()
     log(f"\n  LOAD condition       : {load_seconds:.1f}s")
     log(f"  cuda allocated       : {a1} bytes ({a1 / GiB:.3f} GiB)")
     log(f"  cuda reserved        : {torch.cuda.memory_reserved() / GiB:.3f} GiB")
     log(f"  base.dtype           : {base.dtype}")
 
-    t2v = pipelines.get_pipeline(pipeline="text2video", device="cuda").pipeline
+    if bypass:
+        from diffusers import LTX2Pipeline
+
+        t2v = pipelines.derive_pipeline(base, LTX2Pipeline)
+    else:
+        t2v = pipelines.get_pipeline(pipeline="text2video", device="cuda").pipeline
     a2 = torch.cuda.memory_allocated()
     log(f"  after text2video     : {a2} bytes ({a2 / GiB:.3f} GiB)  DELTA {a2 - a1} bytes")
 
@@ -315,6 +338,13 @@ def main() -> int:
                 req[need] = fixtures[need]
         if spec.min_resolution:
             log(f"  (registry forces min resolution {modes.MIN_RESOLUTION} for this mode)")
+
+        if bypass:
+            def _factory(*, pipeline, **_kw):
+                inner = base if pipeline == pipelines.BASE_KIND else t2v
+                return pipelines.StageRunner(inner, kind=pipeline)
+
+            req["pipeline_factory"] = _factory
 
         torch.cuda.reset_peak_memory_stats()
         started = time.time()
