@@ -293,3 +293,117 @@ The dropped-audio warning fired and reached the result, which is PLAN §5.3
 working rather than incidental: the model is jointly audio-visual with no video-off
 switch, so a video-only mode renders audio and pays for it either way, and the user
 is told instead of silently losing it.
+
+## Part A results — HOST-PROVEN
+
+Baseline **704 × 480 × 121**, seed pinned to **1234**, one model load per batch
+(13.8 s, ~68 GiB off disk). `verify_streams` exit 0 = MATCHES throughout; exit 2
+would be "could not probe" and is not a pass.
+
+| # | mode | generate | bytes | streams observed | verify |
+|---|---|---|---|---|---|
+| H1 | `text_to_video` | 25.7 s | 865,447 | h264 704x480@24, **no audio** | 0 |
+| H2 | `image_to_video` | 26.3 s | 577,051 | h264 704x480@24, **no audio** | 0 |
+| H3 | `image_text_to_video` | 26.6 s | 1,040,007 | h264 704x480@24, **no audio** | 0 |
+| H4 | `video_to_video` (strength 0.7) | 27.9 s | 726,998 | h264 704x480@24, **no audio** | 0 |
+| H5 | `text_to_audio_video` | 25.8 s | 1,017,916 | h264 + **aac 2ch 48000** | 0 |
+| H6 | `image_to_audio_video` | 26.5 s | 707,694 | h264 + **aac 2ch 48000** | 0 |
+| H7 | `image_text_to_audio_video` | 26.7 s | 926,923 | h264 + **aac 2ch 48000** | 0 |
+| H8 | `text_to_audio` | 5.5 s | 961,998 | **pcm_s16le 2ch 48000, no video** | 0 |
+| H9 | `video_to_audio` | 6.0 s | 961,998 | **pcm_s16le 2ch 48000, no video** | 0 |
+| H15 | duration_head | 20.2 s | 754,150 | h264, **97 frames / 4.042 s** | 0 |
+| H16 | `text_to_audio_video` 1216×704 | 68.9 s | 2,075,143 | h264 1216x704 + aac 2ch | 0 |
+
+**H1–H4 carry no audio stream and H8/H9 carry no video stream**, so `exports`
+decides container contents in *both* directions — the direction that has been weak
+here historically is the undeclared-stream-present one, and it holds.
+
+**H15 is checked on the property the stream verifier cannot see.** 97 frames /
+4.042 s against H1's 121 / 5.042 s from the same prompt and seed: inside the
+2–6 s bounds, and 97 = 12·8+1, a legal count. A stream check alone would have
+passed a mode that silently ignored `auto_duration`.
+
+Peak VRAM: 68.879 GiB (audio-only, 256²) → 70.5 GiB (baseline) → 71.008 GiB
+(video conditioning) → **76.653 GiB (1216×704)**. Against 94.97 GiB usable, the
+high-water mark leaves ~18 GiB.
+
+### The LoRA validator — both directions
+
+| # | adapter | outcome |
+|---|---|---|
+| H12 | `joyfox/LTX-2.3-Transition-LORA` | **ACCEPTED**, stage 7 attached **576 modules** |
+| H13a | `charlied98/…/lora_weights_step_03000` | **REJECTED at stage 6.5**, key `transformer.…` |
+| H13b | `charlied98/…/comfy_lora_weights_step_03000` | **REJECTED at stage 6.5**, key `diffusion_model.…` |
+| H12c | `AhsanHareem/reelbids-ltx25-camera-lora` | ACCEPTED, 384 modules (verdict unspecified) |
+
+```
+LoRADimensionError: 2048 at transformer_blocks.0.attn1.to_k, expected 4096
+```
+
+**H13a and H13b reach the same stage by the same mechanism**, differing only in key
+prefix. That is the check worth making: two conventions normalised into one
+dimension comparison, rather than one refused early at stage 5 for its convention
+and the other at 6.5 — two mechanisms producing one verdict reads exactly like a
+pass. H12 passing is the false-positive guard: its mixed dims (4096 attention,
+2048 `audio_ff`, 16384 `ff.net.2`) are legitimate and did not trip 6.5.
+
+`connectors: 0` on every accepted adapter. Stage 7 asserts *total* attached > 0, so
+it passes on the transformer alone — probably correct for these adapters, but the
+assertion cannot distinguish "connectors legitimately unused" from "connectors
+silently missed".
+
+### What is NOT proven
+
+* **`get_pipeline` as `app.py` calls it.** Every run above used
+  `MATRIX_BYPASS_STAGE2=1` — `_base_pipeline` plus a `StageRunner` injected through
+  `generate(pipeline_factory=...)`, the app's own seam. The real path cannot load
+  offline (below), so the whole set must be re-run once that is fixed.
+* **H10 / H11** — `audio.load_waveform` calls `torchaudio.load`, which at pinned
+  torchaudio 2.11.0 dispatches to TorchCodec and raises
+  `ImportError: TorchCodec is required for load_with_torchcodec`. Installing
+  `torchcodec` does not fix it: it loads system FFmpeg shared libraries
+  (`libavutil.so.56`) that are absent, with no sudo to add them. **`av` is already
+  a required pin and bundles its own FFmpeg**, and reads the file fine — note `s16`
+  is packed, so a frame is `(1, n*channels)` interleaved and needs de-interleaving
+  to the `(channels, samples)` layout `encode_waveform_to_latents` expects.
+* **H14 / stage 2** — blocked by the conflict below.
+* **"Output looks right?"** Nothing here establishes that the video looks good or
+  the audio sounds right. Streams, frame counts, rates and channel layouts are
+  verified; aesthetic correctness is not, and it is where every confidently-wrong
+  artifact on this build came from.
+
+## The offline/NATTEN deadlock
+
+Two requirements that cannot both be met as the code stands:
+
+* **The model load needs `HF_HUB_OFFLINE=1`.** Online, `from_pretrained` fetches
+  the full 48-file snapshot and pulls the 44.33 GB of dead shards PLAN §2.1 exists
+  to avoid.
+* **Stage 2 needs the Hub.** `get_kernel("shi-labs/natten", version=1)` resolves
+  version → ref through the Hub (`kernels/_versions.py:72`). Pre-downloading the
+  kernel is not enough — the *resolution* is not cached:
+
+```
+ValueError: Version 1 of 'shi-labs/natten' is not available in the local cache
+and Hugging Face Hub is in offline mode.
+```
+
+Because `_stage_2_parts` is called unconditionally from `get_pipeline`, **nothing
+loads at all**, including the eight modes that never touch stage 2.
+
+Also note the offline path works only while `trees/<revision>.json` is absent from
+the cache. Once written, the completeness check refuses:
+
+> *the cached snapshot … is incomplete: 14 file(s) are missing*
+
+The cached manifest lists **56 files, 164.19 GB** — the whole repo does not fit
+ZeroGPU's 150 GB cap with nothing else on disk, so a "complete snapshot" is
+unreachable for us by design and our 37-file subset is the right answer. That
+manifest is parked at
+`/home/wakeuser/ltx25-logs/saved-metadata/tree-871165de.json`.
+
+**Loading from the local snapshot directory** —
+`preflight.cache_repo_dir() / "snapshots" / REVISION` — bypasses hub resolution,
+the tree manifest, the completeness check and lazy fetching at once, and lets the
+network stay up so NATTEN resolves. `local_files_only=True` does the opposite: it
+is what *triggers* the strict check.
