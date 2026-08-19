@@ -219,8 +219,9 @@ Two consequences worth knowing as a user:
   token" — masquerading as the root cause and burning a second reservation to tell you
   something false. The app surfaces the original timeout instead.
 
-Stage-2 refinement is a real cost, not a free quality win, so it is an explicit opt-in
-rather than a default.
+Stage-2 upscale-and-refine is a real quota cost rather than a free quality win. It is not
+yet exposed as a control — `generate.py` does not run a stage-2 pass today, and a checkbox
+that changes nothing is the kind of dead toggle this project refuses to ship.
 
 ---
 

@@ -126,9 +126,23 @@ def _controls_resolution(mode: Any) -> bool:
     return not mode.min_resolution
 
 
-def _offers_stage_2(mode: Any) -> bool:
-    """False where the registry already forces stage 2 off (PLAN §3.2)."""
-    return not mode.skip_stage_2
+# NOTE — there is deliberately no `enable_stage_2` control here yet.
+#
+# Stage-2 upscale-and-refine (PLAN §7.4) is a real quality/quota trade a user
+# should own, and the registry already carries a per-mode `skip_stage_2`. But
+# `generate.GenerationRequest` has no `enable_stage_2` field and `generate.py`
+# does not run a stage-2 pass at all today, so a checkbox here would be a
+# control that changes nothing.
+#
+# PLAN §3.5 settled that case for the prompt enhancer and the reasoning is
+# identical: "Shipping a toggle that cannot work is exactly the silent lie §5
+# exists to prevent." Routing it through the request's `extras` bag would be
+# worse, not better — `extras` is declared but never read, so the toggle would
+# look wired while doing nothing.
+#
+# To restore it: add `enable_stage_2: bool = False` to `GenerationRequest`, have
+# the stage graph honour it, then add one `Field` below with
+# `visible_when=lambda m: not m.skip_stage_2`. Nothing else needs to change.
 
 
 # ---------------------------------------------------------------------------
@@ -312,15 +326,6 @@ FIELDS: tuple[Field, ...] = (
         group="sampling",
         default=8,
         options={"minimum": 1, "maximum": 50, "step": 1, "precision": 0},
-    ),
-    Field(
-        key="enable_stage_2",
-        kind="checkbox",
-        label="Stage 2 — upscale and refine",
-        info="Higher quality, more GPU-seconds. On a quota-metered Space that is a real cost.",
-        group="sampling",
-        default=False,
-        visible_when=_offers_stage_2,
     ),
     # -- carried state --------------------------------------------------------
     Field(

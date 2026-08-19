@@ -111,7 +111,6 @@ def build_ui() -> gr.Blocks:
                     with gr.Row():
                         components.render_fields(pool, "seed", "num_inference_steps")
                     components.render_fields(pool, "strength", "noise_scale", "guidance_scale")
-                    components.render_fields(pool, "enable_stage_2")
 
                 with gr.Accordion("LoRA", open=True):
                     lora = components.lora_panel()
