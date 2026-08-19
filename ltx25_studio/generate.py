@@ -124,6 +124,30 @@ def _default_encoder(output, **kwargs):
     return outputs.write_output(output, **kwargs)
 
 
+def _export_sampling_rate(pipe) -> int | None:
+    """The rate to write audio at, read off the vocoder.
+
+    ``outputs._write_audio`` refuses to guess -- correctly, since an assumed rate
+    would resample every export silently -- so the value has to be threaded from
+    the loaded model to the encoder. Without this, every audio-exporting mode
+    fails at the last step.
+
+    Returns ``None`` when there is no vocoder to ask (a stubbed pipeline in a
+    test, say); the caller decides whether that is fatal for the mode at hand.
+    """
+    from . import audio as audio_module
+    from .errors import LTXStudioError
+
+    inner = getattr(pipe, "pipeline", pipe)
+    vocoder = getattr(inner, "vocoder", None)
+    if vocoder is None:
+        return None
+    try:
+        return audio_module.export_sampling_rate_from(vocoder)
+    except LTXStudioError:
+        return None
+
+
 def _resolve_seed(seed: int) -> int:
     if seed is None or int(seed) == RANDOM_SEED:
         return secrets.randbelow(MAX_SEED)
@@ -215,20 +239,61 @@ def _sweep(root: Path, retention_bytes: int | None) -> tuple[str, ...]:
     return tuple(f"evicted old run {path}" for path in evicted)
 
 
-def _require_artifact(candidate, *, mode: str, run_dir: Path) -> Path:
+def _artifacts_for(written, *, spec, mode: str, run_dir: Path) -> dict:
+    """Map what the encoder wrote onto the tracks the mode promised.
+
+    **A mode's ``exports`` tuple is a contract, not a hint.** Declaring
+    ``exports=("audio", "video")`` and returning a path for only one of them is
+    the never-empty bug one level up: the artifact exists, so nothing downstream
+    can tell a real failure from a mapping accident -- and a UI that guards on a
+    missing track will correctly report a perfectly good run as broken.
+
+    So every declared export is resolved and checked here, and a missing one
+    raises rather than travelling onward as ``None``.
+
+    The encoder may return either a single path -- the common case, and for a
+    joint audio+video mode that single muxed file legitimately carries both
+    tracks -- or a mapping of track name to path when it writes them separately.
+    """
+    if isinstance(written, dict):
+        resolved = {
+            kind: _require_artifact(written.get(kind), mode=mode, run_dir=run_dir, track=kind)
+            for kind in spec.exports
+        }
+        primary = resolved.get("video") or next(iter(resolved.values()))
+    else:
+        artifact = _require_artifact(written, mode=mode, run_dir=run_dir)
+        resolved = dict.fromkeys(spec.exports, artifact)
+        primary = artifact
+
+    missing = [kind for kind in spec.exports if not resolved.get(kind)]
+    if missing:
+        raise EmptyOutputError(
+            mode=mode,
+            expected_path=(
+                f"{run_dir} (mode declares exports={list(spec.exports)} but produced nothing "
+                f"for {', '.join(missing)})"
+            ),
+        )
+    resolved["primary"] = primary
+    return resolved
+
+
+def _require_artifact(candidate, *, mode: str, run_dir: Path, track: str = "") -> Path:
     """The last gate. Everything falsy, absent or empty dies here.
 
     Note what this does NOT do: it does not fall back to anything. The only path
     it will accept is the one the encoder said it wrote.
     """
+    label = f" for the {track} track" if track else ""
     if not candidate:
         raise EmptyOutputError(
             mode=mode,
-            expected_path=f"{run_dir} (the encoder returned no path at all)",
+            expected_path=f"{run_dir} (the encoder returned no path at all{label})",
         )
     path = Path(candidate)
     if not path.exists():
-        raise EmptyOutputError(mode=mode, expected_path=str(path))
+        raise EmptyOutputError(mode=mode, expected_path=f"{path}{label}")
     if path.stat().st_size == 0:
         raise EmptyOutputError(mode=mode, expected_path=f"{path} (the file is 0 bytes)")
     return path
@@ -287,29 +352,41 @@ def generate(
     if progress is not None:
         progress(0.9, "encoding")
     try:
-        written = write(
-            output,
-            run_dir=run_dir,
-            mode=request.mode,
-            exports=spec.exports,
-            seed=seed,
-        )
+        encoder_kwargs = {
+            "run_dir": run_dir,
+            "mode": request.mode,
+            "exports": spec.exports,
+            "seed": seed,
+        }
+        sampling_rate = _export_sampling_rate(pipe)
+        if sampling_rate is not None:
+            encoder_kwargs["sampling_rate"] = sampling_rate
+        elif "audio" in spec.exports and encoder is None:
+            # Only fatal on the production path: an injected encoder in a test
+            # has no vocoder to read and does not need one.
+            raise EncodeError(
+                path=str(run_dir),
+                reason=(
+                    f"mode {request.mode!r} exports audio but the pipeline exposes no vocoder "
+                    f"to read output_sampling_rate from. Refusing to assume a rate, which would "
+                    f"silently resample every export."
+                ),
+            )
+        written = write(output, **encoder_kwargs)
     except Exception as exc:
         raise EncodeError(path=str(run_dir), reason=str(exc)) from exc
 
-    artifact = _require_artifact(written, mode=request.mode, run_dir=run_dir)
+    artifacts = _artifacts_for(written, spec=spec, mode=request.mode, run_dir=run_dir)
 
     warnings = _sweep(root, retention_bytes)
 
-    video_path = artifact if "video" in spec.exports else None
-    audio_path = artifact if "audio" in spec.exports and video_path is None else None
     return GenerationResult(
-        output_path=artifact,
+        output_path=artifacts["primary"],
         run_id=run_id,
         run_dir=run_dir,
         mode=request.mode,
         seed=seed,
-        video_path=video_path,
-        audio_path=audio_path,
+        video_path=artifacts.get("video"),
+        audio_path=artifacts.get("audio"),
         warnings=warnings,
     )
