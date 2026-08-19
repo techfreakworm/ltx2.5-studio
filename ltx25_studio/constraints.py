@@ -24,6 +24,7 @@ from __future__ import annotations
 from .errors import AudioVideoDesyncError, ConstraintError, DimensionError, FrameCountError
 
 __all__ = [
+    "DEFAULT_FRAME_RATE",
     "DEFAULT_IMAGE_CRF",
     "DEFAULT_LENGTH_TOLERANCE_SECONDS",
     "DEFAULT_SPATIAL_COMPRESSION_RATIO",
@@ -58,6 +59,21 @@ DEFAULT_SPATIAL_COMPRESSION_RATIO = 32
 #: (all generation pipelines and the latent-upsample pipeline raise on it).
 #: Pass ``multiple=vae.spatial_compression_ratio`` once a VAE is loaded.
 DIMENSION_MULTIPLE = DEFAULT_SPATIAL_COMPRESSION_RATIO
+
+#: Frames per second, used before any pipeline exists. Upstream's own
+#: ``__call__`` default -- verified at ``pipeline_ltx2_condition.py:1076``,
+#: ``frame_rate: float = 24.0``, and the same in the base pipeline. Same status
+#: as the two ratios above: a pre-load default, not a constant of the model.
+#:
+#: **This number has two consumers and they must never disagree.** It is passed
+#: to the pipeline, which generates at that rate, and to ``outputs.write_output``,
+#: which declares it in the container. If one of them takes this value and the
+#: other falls back to upstream's own default, the two agree only by coincidence
+#: -- and the day either changes, the video plays at the wrong speed while every
+#: layer reports success. That is why the encoder holds no default of its own and
+#: raises instead: there is one number, it lives here, and it flows outward
+#: (PLAN §5.4).
+DEFAULT_FRAME_RATE = 24.0
 
 #: Image-conditioning CRF for LTX-2.5, selected when
 #: ``text_encoder.config.model_type`` is a gemma4 variant.
