@@ -37,6 +37,15 @@ from ltx25_studio import pipelines
 
 GiB = 1024**3
 SECONDS = float(os.environ.get("MEL_SECONDS", "4.0"))
+SWAP = os.environ.get("MEL_SWAP") == "1"
+#: (fundamental, harmonic) per channel. The harmonic is the one at risk.
+TONES_L = (220.0, 1320.0)
+TONES_R = (440.0, 2640.0)
+#: Every expected tone must be recovered. The previous criterion was ">=1 tone per
+#: channel", under which 3 of 4 tones passed BY DESIGN -- a threshold that reports
+#: PASS while a quarter of the signal is missing is the kind of green result this
+#: build keeps producing.
+REQUIRE_ALL_TONES = os.environ.get("MEL_REQUIRE_ALL", "1") == "1"
 
 
 def log(*a):
@@ -53,9 +62,17 @@ def structured_waveform(rate, channels=2, seconds=SECONDS):
     n = int(seconds * rate)
     t = np.arange(n, dtype="float32") / rate
     envelope = 0.45 * (1.0 - np.exp(-4.0 * t)) * (0.65 + 0.35 * np.sin(2 * np.pi * 0.8 * t))
-    left = envelope * (0.7 * np.sin(2 * np.pi * 220.0 * t) + 0.3 * np.sin(2 * np.pi * 1320.0 * t))
-    right = envelope * (0.7 * np.sin(2 * np.pi * 440.0 * t) + 0.3 * np.sin(2 * np.pi * 2640.0 * t))
-    return torch.from_numpy(np.stack([left, right])[:channels])
+    lo, hi = TONES_L, TONES_R
+    if SWAP:
+        # The discriminator: put the HIGH tone on the other channel. If the high
+        # tone is lost whichever channel carries it, the loss is frequency-dependent
+        # and benign. If one channel always loses its high tone, it is
+        # channel-dependent and worth chasing. One run separates the two.
+        lo, hi = (TONES_L[0], TONES_R[1]), (TONES_R[0], TONES_L[1])
+    left = envelope * (0.7 * np.sin(2 * np.pi * lo[0] * t) + 0.3 * np.sin(2 * np.pi * lo[1] * t))
+    right = envelope * (0.7 * np.sin(2 * np.pi * hi[0] * t) + 0.3 * np.sin(2 * np.pi * hi[1] * t))
+    log(f"  tones: ch0 {lo} Hz   ch1 {hi} Hz" + ("   (SWAPPED)" if SWAP else ""))
+    return torch.from_numpy(np.stack([left, right])[:channels]), (lo, hi)
 
 
 def write_wav(path, wave, rate):
@@ -106,6 +123,26 @@ def spectral_profile(x, rate, n_fft=1024):
     return np.stack(cols, axis=1).mean(axis=1)
 
 
+def band_energy(x, rate, centre, n_fft=4096, width_hz=80.0):
+    """Energy in a narrow band around `centre`, as a fraction of total.
+
+    This replaces top-N peak picking, which was the wrong instrument: it reported
+    only the four largest peaks, so a real tone sitting fifth was indistinguishable
+    from a tone that was not there. Measuring the band directly answers "is there
+    energy at this frequency" without depending on what else is louder.
+
+    A larger n_fft than the display spectrogram, because resolving 80 Hz around
+    2640 Hz needs it.
+    """
+    prof = spectral_profile(x, rate, n_fft=n_fft)
+    if prof is None:
+        return 0.0
+    freqs = np.fft.rfftfreq(n_fft, 1.0 / rate)
+    mask = np.abs(freqs - centre) <= width_hz
+    total = float(prof.sum()) or 1.0
+    return float(prof[mask].sum()) / total
+
+
 def peak_bins(profile, rate, n_fft=1024, count=4):
     """Where the energy actually is, in Hz. A smeared window moves these."""
     freqs = np.fft.rfftfreq(n_fft, 1.0 / rate)
@@ -128,7 +165,7 @@ def main() -> int:
 
     rate = int(params["sample_rate"])
     channels = audio_module.audio_channels_from(vae)
-    wave = structured_waveform(rate, channels)
+    wave, tones = structured_waveform(rate, channels)
     log(f"\nfixture: {tuple(wave.shape)} @ {rate} Hz, {channels} ch, "
         f"two tones + envelope per channel")
     src = wave.numpy()
@@ -204,16 +241,28 @@ def main() -> int:
             f"({20 * np.log10((out_rms + 1e-12) / (in_rms + 1e-12)):+.1f} dB)")
         log(f"       input peaks  {in_peaks} Hz")
         log(f"       output peaks {out_peaks} Hz")
-        # The tones are at 220/1320 (L) and 440/2640 (R). A correct round trip
-        # should put energy near those; a smeared window spreads it elsewhere.
-        expect = [220.0, 1320.0] if c == 0 else [440.0, 2640.0]
-        near = [f for f in expect if any(abs(p - f) < max(60.0, 0.15 * f) for p in out_peaks)]
-        log(f"       tones recovered: {near} of {expect}")
-        if not near:
+        # Band energy at each expected tone, in and out, rather than top-N peaks.
+        expect = list(tones[0] if c == 0 else tones[1])
+        recovered = []
+        for f in expect:
+            e_in = band_energy(src[c], rate, f)
+            e_out = band_energy(rec[c], out_rate, f)
+            # Relative to the input's own concentration at that tone: a harmonic
+            # carried at 0.3 amplitude should not be held to the fundamental's bar.
+            ratio = e_out / e_in if e_in > 0 else 0.0
+            got = ratio > 0.10
+            recovered.append(f) if got else None
+            log(f"       {f:7.1f} Hz: band energy in {e_in:.5f} -> out {e_out:.5f} "
+                f"({ratio * 100:5.1f}% retained)  {'RECOVERED' if got else 'LOST'}")
+        log(f"       tones recovered: {recovered} of {expect}")
+        if REQUIRE_ALL_TONES and len(recovered) < len(expect):
+            ok = False
+        elif not recovered:
             ok = False
         if out_rms < in_rms * 0.02:
             log("       *** output is >34 dB below input -- reconstruction failed ***")
             ok = False
+    log(f"  criterion: {'ALL tones must be recovered' if REQUIRE_ALL_TONES else '>=1 tone per channel'}")
     log(f"\nH17 VERDICT: {'PASS -- the constructed mel reconstructs' if ok else 'FAIL -- see TEST_PLAN A.5.1 candidate order: log/floor -> mel_scale/norm -> power -> center'}")
     return 0 if ok else 1
 
