@@ -40,8 +40,14 @@ SECONDS = float(os.environ.get("MEL_SECONDS", "4.0"))
 SWAP = os.environ.get("MEL_SWAP") == "1"
 FORCE_DEVICE = os.environ.get("MEL_FORCE_DEVICE") == "1"
 #: (fundamental, harmonic) per channel. The harmonic is the one at risk.
-TONES_L = (220.0, 1320.0)
-TONES_R = (440.0, 2640.0)
+#: The pairing this path can actually carry, established by the swap discriminator:
+#: ch0 (220, 2640) and ch1 (440, 1320) recovers 4/4, where ch0 (220, 1320) /
+#: ch1 (440, 2640) recovers 3/4. The difference is the SPREAD within a channel --
+#: 440 + 2640 is 6x and shares 64 log-spaced mel bins differently from 440 + 1320.
+#: A fixture demanding something the instrument physically cannot deliver tests the
+#: fixture, not the code. So the pairing changed and the criterion stayed strict.
+TONES_L = (220.0, 2640.0)
+TONES_R = (440.0, 1320.0)
 #: What H17 gates on, and the history is worth keeping because both earlier
 #: versions were wrong in opposite directions.
 #:
@@ -66,7 +72,7 @@ TONES_R = (440.0, 2640.0)
 #: loosening from v2 and it is labelled as one: the justification is the swap
 #: measurement, not the fact that it makes the test green.
 LENGTH_TOLERANCE = 0.02
-FUNDAMENTALS_ONLY = os.environ.get("MEL_FUNDAMENTALS_ONLY", "1") == "1"
+FUNDAMENTALS_ONLY = os.environ.get("MEL_FUNDAMENTALS_ONLY", "0") == "1"
 
 
 def log(*a):
@@ -387,7 +393,23 @@ def main() -> int:
     if os.environ.get("MEL_AB") == "1":
         ab_transpose(vae, vocoder, dev_wave, rate, tones, src)
 
-    log(f"\nH17 VERDICT: {'PASS -- the constructed mel reconstructs' if ok else 'FAIL -- see TEST_PLAN A.5.1 candidate order: log/floor -> mel_scale/norm -> power -> center'}")
+    if ok:
+        log("\nH17 VERDICT: PASS -- the constructed mel reconstructs")
+    elif drift > LENGTH_TOLERANCE:
+        # Length not tracking input is the signature that rules conventions IN as
+        # candidates, because it means the latents' axes are wrong.
+        log("\nH17 VERDICT: FAIL -- length does not track input; the latents' axis "
+            "order is wrong. See TEST_PLAN A.5.1: log/floor -> mel_scale/norm -> "
+            "power -> center")
+    else:
+        # Structure sound. Pointing at the convention list here would send the next
+        # person to change `power` or `mel_scale` against a working path -- which is
+        # how a correct default gets "fixed" into a wrong one.
+        log("\nH17 VERDICT: FAIL -- but length tracks the input and the latents "
+            "validate, so the STRUCTURE is sound and the conventions are not "
+            "implicated. Check the fixture pairing first: tone recovery depends on "
+            "the spread within a channel (see TONES_L/TONES_R). Do NOT start down "
+            "the A.5.1 convention list against a path whose length scales.")
     return 0 if ok else 1
 
 

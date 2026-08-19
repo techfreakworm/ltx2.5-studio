@@ -215,6 +215,14 @@ RUNS = {
     # from each other; identical output means `strength` reaches nothing.
     "H4b_lo": dict(mode="video_to_video", needs=("video",), extra={"strength": 0.3}),
     "H4b_hi": dict(mode="video_to_video", needs=("video",), extra={"strength": 0.9}),
+    # CONTROL for H10b. `audio._sampled` calls `latent_dist.sample()` with no
+    # generator, while upstream's `retrieve_latents` threads one -- so the audio
+    # latents are sampled UNSEEDED. Two runs at the SAME noise_scale and the same
+    # seed must therefore be compared before H10b's differing halves can be read as
+    # evidence that noise_scale reaches the model. If these two also differ, that
+    # inference is unsupported.
+    "H10c_a": dict(mode="audio_to_audio", needs=("audio",), extra={"noise_scale": 0.5}),
+    "H10c_b": dict(mode="audio_to_audio", needs=("audio",), extra={"noise_scale": 0.5}),
     # A.4.1 H10b -- the acceptance test for the audio-input path. noise_scale 1.0
     # discards the input BY DESIGN, so a bug that drops it entirely is
     # indistinguishable from correct operation: the mode produces audio either
