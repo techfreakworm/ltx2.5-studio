@@ -19,6 +19,7 @@ visible, it just quietly makes those modes cost several times what they should.
 from __future__ import annotations
 
 import pytest
+from conftest import request_fields
 
 from ltx25_studio import modes
 from ltx25_studio.errors import UnknownModeError
@@ -260,9 +261,7 @@ def test_audio_only_modes_skip_stage_two(mode_id):
     assert modes.get_mode(mode_id).skip_stage_2 is True
 
 
-@pytest.mark.parametrize(
-    "mode_id", [m for m in EXPECTED_MODE_IDS if m not in AUDIO_ONLY_MODE_IDS]
-)
+@pytest.mark.parametrize("mode_id", [m for m in EXPECTED_MODE_IDS if m not in AUDIO_ONLY_MODE_IDS])
 def test_video_producing_modes_do_not_skip_stage_two(mode_id):
     """The mitigation is for modes whose video is thrown away. Applying it to a
     mode that returns video would silently halve its quality."""
@@ -328,7 +327,10 @@ def test_video_to_video_conditions_at_less_than_full_strength(make_request):
     )
     conditions = kwargs["conditions"]
     assert conditions
-    strengths = [getattr(c, "strength", c.get("strength") if isinstance(c, dict) else None) for c in conditions]
+    strengths = [
+        getattr(c, "strength", c.get("strength") if isinstance(c, dict) else None)
+        for c in conditions
+    ]
     assert all(s is not None and s < 1.0 for s in strengths), strengths
 
 
@@ -379,3 +381,68 @@ def test_builders_are_pure(mode_id, make_request):
         if isinstance(value, scalars):
             assert second[key] == value, f"{mode_id}: {key} differs between calls"
     assert vars(request) == before, f"{mode_id}'s builder mutated the request"
+
+
+# --------------------------------------------------------------------------
+# per-mode video condition strength
+#
+# `strength=0.8` -- the GenerationRequest default -- produced audio at -55.0
+# dBFS on `video_to_audio`, against -5.2 for text-only. Strength sets where in
+# the sigma schedule the run starts, so at 0.8 only the last ~20% of steps
+# execute. The video stream does not care, being anchored by the condition; the
+# audio stream has nothing anchoring it and never gets denoised.
+# --------------------------------------------------------------------------
+
+
+def _video_condition(mode_id, **overrides):
+    spec = modes.get_mode(mode_id)
+    request = request_fields(mode=mode_id, prompt="p", video=["a", "b"], **overrides)
+    conditions = spec.build_kwargs(request).get("conditions", ())
+    found = [c for c in conditions if c.kind == "video"]
+    assert found, f"{mode_id} built no video condition"
+    return found[0]
+
+
+def test_video_to_audio_uses_the_measured_strength():
+    """0.5 because it was measured at -5.1 dBFS, not because it is middling."""
+    assert (
+        _video_condition("video_to_audio").strength
+        == (modes.AUDIO_EXPORT_CONDITION_STRENGTH)
+        == 0.5
+    )
+
+
+def test_video_to_video_keeps_the_high_strength_it_needs():
+    """Fidelity to the input clip is the whole point of the mode.
+
+    It ran at 0.7 on the card and produced good video. One global default cannot
+    serve both this and `video_to_audio`, which is why the cap is per mode.
+    """
+    assert _video_condition("video_to_video").strength == 0.8
+
+
+def test_the_audio_cap_binds_even_when_the_user_asks_for_more():
+    """A user raising strength must not be able to silence the track."""
+    loud = _video_condition("video_to_audio", strength=0.99)
+
+    assert loud.strength == modes.AUDIO_EXPORT_CONDITION_STRENGTH, (
+        f"a request for 0.99 reached the audio branch as {loud.strength}; at 0.8 the "
+        f"measured level was -55.0 dBFS and at 0.99 it was -38.6"
+    )
+
+
+def test_a_lower_request_is_still_honoured():
+    """The cap is a ceiling, not an override -- 0.2 measured healthy at -11.5."""
+    assert _video_condition("video_to_audio", strength=0.2).strength == 0.2
+
+
+def test_the_global_ceiling_is_not_the_lever():
+    """MAX_VIDEO_CONDITION_STRENGTH never binds, so lowering it fixes nothing.
+
+    Pinned because it was proposed as the fix: `min(request.strength, 0.99)`
+    with a request default of 0.8 never reaches 0.99.
+    """
+    assert modes.MAX_VIDEO_CONDITION_STRENGTH > 0.8, (
+        "the global ceiling now binds at the request default; if that is intended the "
+        "comment saying it never binds needs to go"
+    )

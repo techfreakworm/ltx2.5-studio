@@ -38,6 +38,7 @@ from .errors import UnknownModeError
 __all__ = [
     "IMAGE_CONDITION_STRENGTH",
     "MAX_VIDEO_CONDITION_STRENGTH",
+    "AUDIO_EXPORT_CONDITION_STRENGTH",
     "MIN_RESOLUTION",
     "MODES",
     "PIPELINE_KINDS",
@@ -64,7 +65,38 @@ IMAGE_CONDITION_STRENGTH = 1.0
 
 #: Video conditioning must stay below 1.0: at full strength the input frames are
 #: pinned and nothing is generated.
+#:
+#: ⚠️ **This ceiling never binds in practice** and is not the lever anyone wants.
+#: ``_conditions`` takes ``min(request.strength, MAX_VIDEO_CONDITION_STRENGTH)``
+#: and ``GenerationRequest.strength`` defaults to **0.8**, so lowering this
+#: constant changes nothing. The value that matters is the per-mode cap below.
 MAX_VIDEO_CONDITION_STRENGTH = 0.99
+
+#: Condition strength for **modes that export audio**, which cannot use the
+#: video default. ✅ Measured on hinode, `video_to_audio`, seed 1234 throughout:
+#:
+#: ===========  ==========  ==========
+#: strength     audio       verdict
+#: ===========  ==========  ==========
+#: 0.99         -38.6 dBFS  near-silent
+#: **0.80**     **-55.0**   near-silent -- the old default
+#: **0.50**     **-5.1**    **healthy** -- matches text_to_audio's -5.2
+#: 0.20         -11.5 dBFS  healthy
+#: 0.05         -13.2 dBFS  healthy
+#: ===========  ==========  ==========
+#:
+#: ⚠️ **This is a cliff, not a curve. Do not interpolate.** 0.99 is *louder*
+#: than 0.80, and 0.50 is louder than 0.20 -- the ordering is not monotonic, so
+#: a value chosen between measured points ("0.6 seems safer") is a guess across
+#: a discontinuity. **0.5 is used because it was measured, not because it is
+#: middling.** Widening this range means running the sweep again.
+#:
+#: **The mechanism.** Strength sets where in the sigma schedule the run starts,
+#: so at 0.8 only the last ~20% of steps execute. The video stream does not
+#: care -- it is anchored by the condition. **The audio stream has nothing
+#: anchoring it and simply never gets denoised**, staying near its
+#: initialisation. That is what -55 dBFS is.
+AUDIO_EXPORT_CONDITION_STRENGTH = 0.5
 
 
 @dataclass(frozen=True)
@@ -158,8 +190,14 @@ def _with_audio(request, kwargs: dict) -> dict:
     return kwargs
 
 
-def _conditions(request) -> tuple[ConditionSpec, ...]:
-    """Build the condition list. Image and video share one mechanism (§3.1a)."""
+def _conditions(request, *, cap: float | None = None) -> tuple[ConditionSpec, ...]:
+    """Build the condition list. Image and video share one mechanism (§3.1a).
+
+    ``cap`` is the mode's own ceiling on video condition strength, applied on top
+    of :data:`MAX_VIDEO_CONDITION_STRENGTH`. See
+    :data:`AUDIO_EXPORT_CONDITION_STRENGTH` for why audio-exporting modes need
+    one and why its value must not be interpolated.
+    """
     specs: list[ConditionSpec] = []
     image = getattr(request, "image", None)
     if image is not None:
@@ -174,7 +212,10 @@ def _conditions(request) -> tuple[ConditionSpec, ...]:
                 source=video,
                 kind="video",
                 index=0,
-                strength=min(float(strength), MAX_VIDEO_CONDITION_STRENGTH),
+                strength=min(
+                    float(strength),
+                    MAX_VIDEO_CONDITION_STRENGTH if cap is None else float(cap),
+                ),
             )
         )
     specs.extend(getattr(request, "conditions", ()) or ())
@@ -190,14 +231,28 @@ def _text_builder(*, min_resolution: bool = False, audio: bool = False) -> Calla
 
 
 def _condition_builder(
-    *, keep_prompt: bool = True, min_resolution: bool = False, audio: bool = False
+    *,
+    keep_prompt: bool = True,
+    min_resolution: bool = False,
+    audio: bool = False,
+    condition_strength: float | None = None,
 ) -> Callable:
+    """Build the kwargs for a conditioned mode.
+
+    ``condition_strength`` caps the video condition for **this mode only**. A
+    single global default cannot serve every mode: `video_to_video` needs a high
+    strength for fidelity to its input, and that same value silences the audio
+    branch. **Where a mode both takes a video condition and exports audio, the
+    audio requirement is the binding one** -- a quiet video is a quality
+    complaint, a silent audio track is a broken mode.
+    """
+
     def build(request) -> dict:
         kwargs = _base_kwargs(request, min_resolution=min_resolution)
         if not keep_prompt:
             # PLAN §3.2 row 2 is explicit: one condition, empty prompt.
             kwargs["prompt"] = ""
-        conditions = _conditions(request)
+        conditions = _conditions(request, cap=condition_strength)
         if conditions:
             kwargs["conditions"] = conditions
         if audio:
@@ -286,7 +341,9 @@ _SPECS = (
         pipeline="condition",
         inputs=("video",),
         exports=("audio",),
-        build_kwargs=_condition_builder(min_resolution=True),
+        build_kwargs=_condition_builder(
+            min_resolution=True, condition_strength=AUDIO_EXPORT_CONDITION_STRENGTH
+        ),
         cost_note=_AUDIO_ONLY_NOTE,
         min_resolution=True,
         skip_stage_2=True,
