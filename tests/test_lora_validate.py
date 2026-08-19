@@ -23,7 +23,6 @@ the check that actually protects the user, and it cannot run here.
 from __future__ import annotations
 
 import pytest
-
 from conftest import (
     DIFFUSERS_PREFIX,
     NATIVE_CONNECTOR_PREFIX,
@@ -33,6 +32,7 @@ from conftest import (
     lora_pair,
     lora_tensors,
 )
+
 from ltx25_studio.errors import (
     LoRAConventionError,
     LoRAError,

@@ -506,6 +506,47 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 PACKAGE_ROOT = REPO_ROOT / "ltx25_studio"
 
 
+def code_string_constants(path):
+    """Yield ``(lineno, value)`` for every string literal that is not a docstring.
+
+    Comments are invisible to ``ast`` by construction, and module/class/function
+    docstrings are filtered explicitly — so this sees prose nowhere and code
+    everywhere, which is what the architecture rules want to police.
+    """
+    import ast
+
+    tree = ast.parse(Path(path).read_text())
+    docstrings = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+            body = getattr(node, "body", None)
+            if (
+                body
+                and isinstance(body[0], ast.Expr)
+                and isinstance(body[0].value, ast.Constant)
+                and isinstance(body[0].value.value, str)
+            ):
+                docstrings.add(id(body[0].value))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            if id(node) in docstrings:
+                continue
+            yield node.lineno, node.value
+
+
+def code_tokens(path):
+    """Every code token in a file, with comments and string literals dropped."""
+    import io as _io
+    import tokenize as _tokenize
+
+    source = Path(path).read_text()
+    for token in _tokenize.generate_tokens(_io.StringIO(source).readline):
+        if token.type in (_tokenize.COMMENT, _tokenize.STRING, _tokenize.NL, _tokenize.NEWLINE):
+            continue
+        if token.string.strip():
+            yield token.string
+
+
 def package_python_files(exclude=()):
     excluded = {str(PACKAGE_ROOT / name) for name in exclude}
     return sorted(

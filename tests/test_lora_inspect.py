@@ -24,7 +24,6 @@ import json
 import struct
 
 import pytest
-
 from conftest import (
     ALL_PREFIXES,
     DIFFUSERS_CONNECTOR_PREFIX,
@@ -36,6 +35,7 @@ from conftest import (
     build_safetensors_bytes,
     lora_tensors,
 )
+
 from ltx25_studio.errors import (
     LoRAError,
     LoRAFormatError,
@@ -43,7 +43,6 @@ from ltx25_studio.errors import (
     LoRATruncatedError,
 )
 from ltx25_studio.lora import inspect as lora_inspect
-
 
 # --------------------------------------------------------------------------
 # stage 2 — header only, payload never touched

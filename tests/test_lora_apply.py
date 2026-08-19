@@ -27,7 +27,6 @@ from __future__ import annotations
 import inspect as py_inspect
 
 import pytest
-
 from conftest import (
     CONNECTOR_MODULE_PATHS,
     NATIVE_CONNECTOR_PREFIX,
@@ -36,9 +35,9 @@ from conftest import (
     TRANSFORMER_MODULE_PATHS,
     lora_tensors,
 )
+
 from ltx25_studio.errors import LoRAError, LoRANotAttachedError
 from ltx25_studio.lora import apply as lora_apply
-
 
 # --------------------------------------------------------------------------
 # the happy path
@@ -118,10 +117,8 @@ def test_apply_lora_never_returns_a_report_when_nothing_attached(
 ):
     """Belt and braces: not "returns a report with attached=0", not "returns None"."""
     result = None
-    try:
+    with pytest.raises(LoRANotAttachedError):
         result = lora_apply.apply_lora(fake_pipeline, wrong_architecture_lora)
-    except LoRANotAttachedError:
-        pass
     assert result is None, f"a zero-attach load must raise, not return {result!r}"
 
 
