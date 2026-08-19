@@ -161,11 +161,17 @@ class Pipe:
 
 
 executed = set()
+functions = set()
 
 
 def tracer(frame, event, _arg):
     if event == "call" and frame.f_code.co_filename.startswith(PKG):
         executed.add(frame.f_code.co_filename)
+        # co_name was always right here and was always discarded. A module can
+        # be reached by one function while another in the same file is dead --
+        # which is exactly how `encode_waveform_to_latents` sat at importer
+        # count zero inside a module that ran on every audio export.
+        functions.add(frame.f_code.co_name)
     return None
 
 
@@ -185,10 +191,27 @@ with tempfile.TemporaryDirectory() as directory:
             pipeline_factory=lambda **_: Pipe(), encoder=None,
             output_root=directory, retention_bytes=10**9,
         )
+        # A second generation, because one mode cannot exercise eleven. The
+        # audio-input path is reachable from NO other mode, so a probe that
+        # drives only image_to_video is blind to it by construction.
+        from conftest import STUB_SAMPLING_RATE, STUB_WAVEFORM
+        from ltx25_studio import audio as audio_module
+
+        audio_module.load_waveform = lambda source: (STUB_WAVEFORM, STUB_SAMPLING_RATE)
+        generate_module.generate(
+            mode="audio_to_audio", seed=7, width=SIZE, height=SIZE,
+            audio="an-upload.wav",
+            pipeline_factory=lambda **_: Pipe(), encoder=None,
+            output_root=directory, retention_bytes=10**9,
+        )
     finally:
         sys.settrace(None)
 
-print("@@PROBE@@" + json.dumps({"after_import": after_import, "executed": sorted(executed)}))
+print("@@PROBE@@" + json.dumps({
+    "after_import": after_import,
+    "executed": sorted(executed),
+    "functions": sorted(functions),
+}))
 """
 
 
@@ -217,6 +240,7 @@ def _probe_a_clean_interpreter() -> dict:
     return {
         "after_import": frozenset(payload["after_import"]),
         "executed": {Path(f) for f in payload["executed"]},
+        "functions": set(payload["functions"]),
     }
 
 
@@ -687,4 +711,56 @@ def test_no_package_module_is_reached_by_nothing(clean_probe):
         f"exercises an image, a shot row and a staged LoRA: {orphans}. Either wire them in or "
         f"delete them; a module that exists and is called by nothing is the shape that shipped "
         f"four blockers on this build, every one of them with green tests."
+    )
+
+
+# --------------------------------------------------------------------------
+# a live module is not a live function
+# --------------------------------------------------------------------------
+
+#: Functions that ARE the path they belong to, in modules that other functions
+#: keep alive. A file-level sweep cannot see these: ``audio.py`` runs on every
+#: audio-exporting mode via ``export_sampling_rate_from``, so the module was
+#: always "reached" while ``encode_waveform_to_latents`` sat at importer count
+#: zero and the user's uploaded audio was silently discarded.
+CONTRACT_FUNCTIONS = (
+    (
+        "encode_waveform_to_latents",
+        "the user's uploaded audio is never encoded, so the "
+        "model generates a track they did not ask for and the run reports success",
+    ),
+    ("_prepared_audio", "nothing joins request.audio to audio_latents"),
+    ("build_conditions", "shot rows reach the pipeline unconverted"),
+    ("apply_lora", "an adapter validates and is never attached"),
+)
+
+
+@pytest.mark.parametrize(
+    "name,consequence", CONTRACT_FUNCTIONS, ids=[f[0] for f in CONTRACT_FUNCTIONS]
+)
+def test_a_function_that_is_the_whole_point_of_a_path_actually_runs(name, consequence, clean_probe):
+    """The escalation of the module sweep, and the reason it was needed.
+
+    Four blockers were dead *modules*; this one was a dead **function inside a
+    live module**, which the file-level check passes by construction. The tracer
+    always had ``co_name`` in hand and discarded it -- the resolution was thrown
+    away, not missing.
+    """
+    assert name in clean_probe["functions"], (
+        f"{name}() never ran during a real generation, so {consequence}. "
+        f"A module-level check cannot see this: its module was executed by other "
+        f"functions in the same file."
+    )
+
+
+def test_the_probe_drives_a_mode_that_takes_audio_input():
+    """One mode cannot exercise eleven.
+
+    The audio-input path is reachable from no other mode, so a probe that drives
+    only ``image_to_video`` is blind to it however fine its granularity. Both
+    halves were needed; either alone would still have missed this.
+    """
+    assert 'mode="audio_to_audio"' in _PROBE, (
+        "the reachability probe no longer drives an audio-input mode, so nothing "
+        "watches the path that was connected to nothing"
     )
