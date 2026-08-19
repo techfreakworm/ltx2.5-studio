@@ -57,10 +57,10 @@ export PYTHONPATH=/home/wakeuser/ltx25-studio
 default happens to be the same path here, and a setup that works by coincidence
 stops working the first time someone runs as another user.
 
-`PYTHONPATH` is needed because the runner scripts live in
-`/home/wakeuser/ltx25-runners/`, **outside** the repo, so that a re-sync cannot
-wipe them. `sys.path[0]` is then the runner's directory, not the repo, and
-`import ltx25_studio` fails without it.
+`PYTHONPATH` is set because `ltx25_studio` is not installed into the venv — the
+repo is synced, not `pip install -e`'d. Any script run from outside the repo root,
+or with `sys.path[0]` pointing at its own directory, fails to
+`import ltx25_studio` without it.
 
 ## Getting the code onto the box: `git archive`, not rsync
 
@@ -98,8 +98,14 @@ The repo is gated. The token is passed **via stdin into a launcher that exports 
 into the environment**, and never any other way:
 
 ```sh
-cat ~/.cache/huggingface/token | ssh wakeuser@hinode '/home/wakeuser/ltx25-runners/launch_download.sh'
+./scripts/hinode_run.sh host_download_weights.py
+SMOKE_MODE=image_text_to_video ./scripts/hinode_run.sh host_smoke.py
 ```
+
+`hinode_run.sh` reads the token from `~/.cache/huggingface/token`, pipes it into
+the remote launcher's **stdin**, and the launcher exports it into the environment
+of the `nohup`'d process. Detached, because an ssh drop must not kill a 72 GB
+download or a multi-minute generation.
 
 * Not in a file in the repo.
 * Not in `argv` — `ps` is world-readable on a shared box, so
