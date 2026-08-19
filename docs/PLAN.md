@@ -810,13 +810,55 @@ Three hazards to code around:
    comma-separated filenames. It fits in ~1.5 KB. (A naive one-file-per-entry list would not: 37 files.)
 3. **Ownership.** Preloaded files belong to the *build* user and are read-only to runtime uid
    1000, so a later lazy `hf_hub_download` into the same cache fails with
-   `Permission denied (os error 13)`. **Mitigation: point `HF_HOME` / `HF_HUB_CACHE` at a
-   writable location and handle the mirror case explicitly.** This is what makes "preload plus
-   runtime fallback" viable rather than the all-or-nothing choice it would otherwise be.
+   `Permission denied (os error 13)`.
+
+   **⚠️ DO NOT move `HF_HOME` to dodge this.** An earlier draft of this plan said to point
+   `HF_HOME` / `HF_HUB_CACHE` at a writable location. That advice was wrong and would have caused
+   the exact failure it was meant to prevent. The Spaces config reference warns, verbatim, on
+   `preload_from_hub`:
+
+   > *"Files are saved in the default `huggingface_hub` disk cache `~/.cache/huggingface/hub`. If
+   > your application expects them elsewhere or **you changed your `HF_HOME` variable, this
+   > preloading does not follow that at this time**."*
+
+   Moving `HF_HOME` means the 72 GB preload lands in the default cache, the app looks elsewhere,
+   finds nothing, and **re-downloads 72 GB at runtime** — on top of the preloaded copy, which on a
+   150 GB cap is a near-certain eviction.
+
+   **Correct approach: leave `HF_HOME` alone, read from the default cache, and avoid ever needing
+   a write.** See §6.2.1.
 
    Related and reassuring: ZeroGPU's packer deletes the HF cache blobs after packing anyway
    (§2.5). **Treat the HF cache as transient by design** — it is not a durable store, and any
    code that assumes a file stays there after startup is wrong.
+
+4. **Revision.** The entry format is `repo_id file1,file2,… commit_sha`. **The SHA is not
+   optional.** `model_files.py` pins `REVISION`; if the preload fetches `main` instead, those are
+   *different cache keys*, the preload is wasted, and the app re-downloads everything. The drift
+   test therefore compares the **whole entry string including the revision**, not just the file
+   set — and `download_allow_list()` returns sorted paths so that comparison is stable.
+
+5. **Startup timeout.** `startup_duration_timeout` defaults to **30 minutes**. Downloading and
+   packing 72 GB will plausibly exceed that; the Space frontmatter sets `1h`. If the first deploy
+   still times out, this is the first thing to raise — not the second.
+
+### 6.2.1 The completeness invariant — the real fix for the permission problem
+
+**If every file we ever load is in the preload set, nothing needs to be fetched lazily, and the
+read-only-cache problem cannot arise.** That is a stronger position than mirroring, so we make it
+an explicit, checked invariant rather than a hope:
+
+> At startup, verify every path in `download_allow_list()` is present in the cache. If any is
+> missing, **fail loudly with the specific filename AND its URL** rather than silently triggering
+> a runtime download.
+
+This converts the whole 2.3 permission-bug class into a diagnosable startup error. It lives in
+`preflight.py` (§5.6) and it is a test case.
+
+Mirroring stays documented as the fallback if a lazy write ever does prove necessary: hardlink
+blobs so it is zero-copy, byte-copy anything under `refs/` because the HF library rewrites those,
+and preserve snapshot symlinks as relative symlinks. But needing it at all should be treated as a
+bug in the allow-list, not as normal operation.
 
 ### 6.3 ✅ Main gate RESOLVED · ⚠️ one secondary gate still shut
 
