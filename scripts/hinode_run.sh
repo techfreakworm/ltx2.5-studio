@@ -39,6 +39,27 @@ done
 
 LOG_NAME="$(basename "$SCRIPT" .py)"
 
+# Refuse to run quietly against a stale tree. A measurement taken on a box that
+# lags local HEAD is a measurement of the wrong code, and it reads exactly like a
+# measurement of the right code -- that is how "seeding is incomplete" got reported
+# when the box simply did not have the seeding commit. The SHA was a thing assumed
+# constant and never checked, which is the same shape as a fixture never varied.
+BOX_SHA="$(ssh -o BatchMode=yes -o ConnectTimeout=15 "$HOST" \
+  "cat $(dirname "${LTX25_HINODE_DIR:-/home/wakeuser/ltx25-studio}")/$(basename "${LTX25_HINODE_DIR:-/home/wakeuser/ltx25-studio}")/.synced_sha 2>/dev/null" || true)"
+LOCAL_SHA="$(git rev-parse HEAD)"
+if [ -n "$BOX_SHA" ] && [ "$BOX_SHA" != "$LOCAL_SHA" ]; then
+  BEHIND="$(git rev-list --count "$BOX_SHA..$LOCAL_SHA" 2>/dev/null || echo "?")"
+  echo "=======================================================================" >&2
+  echo "WARNING: the box is NOT at local HEAD." >&2
+  echo "  box   $BOX_SHA" >&2
+  echo "  local $LOCAL_SHA  ($BEHIND commit(s) ahead)" >&2
+  git log --oneline "$BOX_SHA..$LOCAL_SHA" 2>/dev/null | sed 's/^/    /' >&2 || true
+  echo "  Run ./scripts/sync_to_hinode.sh first, or results attribute to the" >&2
+  echo "  wrong tree. Set LTX25_ALLOW_STALE=1 to proceed deliberately." >&2
+  echo "=======================================================================" >&2
+  [ "${LTX25_ALLOW_STALE:-}" = "1" ] || exit 3
+fi
+
 # shellcheck disable=SC2029  # deliberate: the remote script is composed here.
 cat "$TOKEN_FILE" | ssh -o BatchMode=yes -o ConnectTimeout=20 "$HOST" "
 set -euo pipefail
