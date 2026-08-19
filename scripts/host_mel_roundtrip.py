@@ -111,7 +111,22 @@ def main() -> int:
     dev_wave = wave.to(device=vae.device, dtype=vae.dtype)
 
     log("\n=== stage 1: forward mel ===")
-    to_mel = audio_module.build_mel_front_end(vae, vocoder)
+    built = audio_module.build_mel_front_end(vae, vocoder)
+
+    # `build_mel_front_end` computes in float32 -- correct, an STFT in bf16 loses
+    # precision exactly where the log floor matters -- but returns float32, and the
+    # VAE is bf16, so `audio_vae.encode` raises
+    #   "Input type (float) and bias type (c10::BFloat16) should be the same".
+    #
+    # Wrapping it here rather than editing audio.py does two things: it uses the
+    # documented `to_mel=` seam that the module's own error message points at, and
+    # it establishes the one-line cast is SUFFICIENT and not merely necessary --
+    # so the fix ships already verified instead of hopefully.
+    def to_mel(waveform):
+        return built(waveform).to(dtype=vae.dtype)
+
+    log(f"  wrapping build_mel_front_end with a cast to {vae.dtype} "
+        f"(the proposed one-line fix, applied via the to_mel= seam)")
     mel = to_mel(dev_wave)
     log(f"  mel {tuple(mel.shape)} dtype={mel.dtype} "
         f"min {float(mel.min()):.4f} max {float(mel.max()):.4f} "
