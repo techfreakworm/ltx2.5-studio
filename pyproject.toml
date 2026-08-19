@@ -1,0 +1,49 @@
+[project]
+name = "ltx25-studio"
+version = "0.1.0"
+description = "A Gradio studio for LTX-2.5 — every mode, with user-uploadable LoRA at inference time."
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+authors = [{ name = "Mayank Gupta", email = "techfreakworm@gmail.com" }]
+
+# Runtime dependencies are declared in requirements.txt, which is the file the
+# Hugging Face Space build reads. It is intentionally not written yet — see
+# docs/PLAN.md §5.1 (pin everything, with upper bounds) and §10 OQ-1, which must
+# be resolved before the diffusers pin can be chosen.
+
+[project.urls]
+Repository = "https://github.com/techfreakworm/ltx2.5-studio"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["ltx25_studio", "ltx25_studio.lora", "ltx25_studio.ui"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+addopts = "-ra"
+# No `testpaths` on purpose: `tests/` is owned by another teammate and does not
+# exist yet. Pinning testpaths to a missing directory turns `pytest -q` into a
+# usage error (exit 4) instead of an honest "no tests ran" (exit 5).
+norecursedirs = [".venv", ".git", "outputs", "models", "assets"]
+markers = [
+    "gpu: needs a GPU and real weights on disk (deselected by default)",
+    "network: reaches the Hugging Face Hub (deselected by default)",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+# Markdown is excluded: ruff would reformat the code samples embedded in
+# docs/PLAN.md, which are quoted verbatim from upstream source on purpose.
+exclude = [".venv/", "outputs/", "models/", "*.md"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM"]
+ignore = ["E501"]  # line length is the formatter's job, not the linter's
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["E402"]  # imports inside test functions are fine

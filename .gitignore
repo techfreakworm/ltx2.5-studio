@@ -1,11 +1,37 @@
+# Python
 __pycache__/
 *.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Environments
 .venv/
 venv/
 .env
-outputs/
-models/
-*.safetensors
-.DS_Store
+
+# Tooling caches
 .pytest_cache/
 .ruff_cache/
+
+# Gradio
+.gradio/
+gradio_cached_examples/
+
+# Model weights and Hub caches — never commit these (PLAN §2: the shipped
+# subset alone is ~72 GB)
+models/
+hf_cache/
+*.safetensors
+*.ckpt
+*.pth
+*.gguf
+
+# Generated artifacts (PLAN §2.5, §10 OQ-6: bounded retention, evicted not kept)
+outputs/
+
+# User-uploaded LoRAs land here at runtime
+loras/
+
+# OS
+.DS_Store
