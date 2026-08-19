@@ -45,6 +45,7 @@ __all__ = [
     "GenerationRequest",
     "GenerationResult",
     "generate",
+    "stage_2_enabled",
 ]
 
 #: ``seed = -1`` means "draw a fresh one". The drawn value comes back on the
@@ -80,6 +81,11 @@ class GenerationRequest:
     guidance_scale: float = 1.0
     num_inference_steps: int = 8
     loras: tuple = ()
+    #: Run the stage-2 refinement chain (PLAN §7.4): latent upsample, three more
+    #: denoise steps, then the diffusion decode. Off by default because it is a
+    #: real quota cost on a metered Space and the user should own that trade.
+    #: Forced off for modes whose video is discarded anyway.
+    enable_stage_2: bool = False
     #: Let ``duration_head`` choose the length: ``num_frames`` is omitted and
     #: ``min_seconds`` / ``max_seconds`` are passed instead.
     auto_duration: bool = False
@@ -139,8 +145,20 @@ def _validated(request: GenerationRequest) -> GenerationRequest:
     return request
 
 
+def stage_2_enabled(spec, request: GenerationRequest) -> bool:
+    """Whether to run the refinement chain for this request.
+
+    The registry wins over the request: ``skip_stage_2`` marks modes whose video
+    is generated and thrown away, and upscaling a frame nobody will see is pure
+    quota. Honouring the user's toggle there would be honouring a mistake.
+    """
+    return bool(request.enable_stage_2) and not spec.skip_stage_2
+
+
 def _pipeline_kwargs(spec, request: GenerationRequest) -> dict:
     kwargs = spec.build_kwargs(request)
+    if stage_2_enabled(spec, request):
+        kwargs["enable_stage_2"] = True
     if request.auto_duration:
         # duration_head picks the length, so num_frames must not be sent at all.
         kwargs.pop("num_frames", None)

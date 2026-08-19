@@ -52,10 +52,13 @@ from .errors import ModelLoadError
 __all__ = [
     "DIFFUSION_DECODE_DENORMALIZE",
     "PipelineBundle",
+    "StageRunner",
     "assert_compression_ratios",
     "clear_cache",
     "get_pipeline",
+    "stage_1_kwargs",
     "stage_2_kwargs",
+    "startup_report",
 ]
 
 #: Mandatory. See the module docstring -- the default silently corrupts output.
@@ -141,9 +144,19 @@ def get_pipeline(*, pipeline: str = "condition", dtype=None, device: str | None 
         raise ModelLoadError(component=pipeline, reason=str(exc)) from exc
 
     if device:
+        # ZeroGPU intercepts this, rewrites it to .to("cpu") and packs every
+        # tensor to disk -- which is why it must happen at module scope, not
+        # lazily inside a @spaces.GPU function. Doing it there skips packing
+        # entirely and re-transfers from RAM on every cold worker.
         built.to(device)
-    _CACHE[pipeline] = built
-    return built
+
+    vae = getattr(built, "vae", None)
+    if vae is not None:
+        assert_compression_ratios(vae)
+
+    runner = StageRunner(built, kind=pipeline)
+    _CACHE[pipeline] = runner
+    return runner
 
 
 def bundle_for(pipeline_object, kind: str) -> PipelineBundle:
@@ -188,6 +201,100 @@ def stage_2_kwargs(latents) -> dict:
 def decode_kwargs(latents) -> dict:
     """Diffusion decode. ``denormalize=False`` is not optional."""
     return {"latents": latents, "denormalize": DIFFUSION_DECODE_DENORMALIZE}
+
+
+class StageRunner:
+    """Callable that owns the stage graph, so ``generate.py`` owns no branches.
+
+    ``generate.py`` calls this exactly as it would call a bare pipeline. The
+    ``enable_stage_2`` kwarg is consumed here and never reaches diffusers.
+
+    **Single stage** (default): one denoise, decoded by the pipeline itself.
+
+    **Two stages**: stage 1 emits latents, the latent upsamplers enlarge them,
+    stage 2 refines with the three-step schedule, and the **diffusion decoder**
+    turns the result into frames -- not ``vae.decode``. Upstream's own
+    ``LTX25AutoBlocks`` says the diffusion decoder "is the native default from
+    LTX-2.5 on", so decoding with the convolutional VAE silently forfeits the
+    single biggest 2.5 quality feature. It would not error. It would just be
+    permanently worse.
+    """
+
+    def __init__(self, pipeline, *, kind, upsampler=None, decoder=None):
+        self.pipeline = pipeline
+        self.kind = kind
+        self.upsampler = upsampler
+        self.decoder = decoder
+
+    def __call__(self, *, enable_stage_2: bool = False, **kwargs):
+        if not enable_stage_2:
+            return self.pipeline(**kwargs)
+        if self.upsampler is None or self.decoder is None:
+            raise ModelLoadError(
+                component="latent_upsampler",
+                reason=(
+                    "stage 2 was requested but the latent upsampler or the diffusion decoder "
+                    "was not loaded. Refusing to silently fall back to a single-stage render, "
+                    "which would look like it worked and be visibly worse."
+                ),
+            )
+
+        stage_1 = self.pipeline(**kwargs, **stage_1_kwargs())
+        upsampled = self.upsampler(latents=_latents_of(stage_1))
+        stage_2 = self.pipeline(**kwargs, **stage_2_kwargs(_latents_of(upsampled)))
+        return self.decoder(**decode_kwargs(_latents_of(stage_2)))
+
+
+def _latents_of(output):
+    """``output_type="latent"`` returns the latents on the frames field."""
+    latents = getattr(output, "frames", None)
+    if latents is None:
+        latents = getattr(output, "latents", None)
+    if latents is None:
+        raise ModelLoadError(
+            component="stage graph",
+            reason="a staged call returned no latents; refusing to continue with nothing",
+        )
+    return latents
+
+
+def startup_report(runtime_config, *, cached_files=None, missing_files=(), gpu_size=None) -> str:
+    """The lines we will be reading at a distance when something goes wrong.
+
+    Deliberately verbose. When R1 fails on a metered Space behind a 72 GB build,
+    these lines are the difference between diagnosing it in one round trip and
+    burning several -- and there is no opportunity to add a print statement
+    afterwards.
+
+    Reports the resolved precision and expected footprint (so the running
+    configuration is never inferred), the measured RAM and disk (so an eviction
+    or an OOM has numbers attached), **how many of the expected files were found
+    in cache** (so "preload worked" is distinguishable from "preload silently did
+    nothing"), and the ZeroGPU size actually obtained after packing (so the 2x
+    quota cost is visible rather than assumed).
+    """
+    import shutil
+
+    expected_files = len(model_files.download_allow_list())
+    found = expected_files - len(missing_files) if cached_files is None else cached_files
+    try:
+        usage = shutil.disk_usage(".")
+        disk = f"{usage.free / 1e9:.1f} GB free of {usage.total / 1e9:.1f} GB"
+    except OSError:  # pragma: no cover - unusual filesystems
+        disk = "unavailable"
+
+    lines = [
+        "LTX-2.5 Studio starting",
+        f"  config          : {runtime_config.describe()}",
+        f"  weights cached  : {found}/{expected_files} files"
+        + (f"  MISSING {len(missing_files)}" if missing_files else ""),
+        f"  disk            : {disk}",
+        f"  zerogpu size    : {gpu_size or 'not yet known (reported after packing)'}",
+        f"  model revision  : {model_files.REVISION}",
+    ]
+    if missing_files:
+        lines.append(f"  first missing   : {missing_files[0]}")
+    return "\n".join(lines)
 
 
 def clear_cache() -> None:
