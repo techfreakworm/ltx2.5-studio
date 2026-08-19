@@ -669,3 +669,109 @@ and each launch appends the SHA, script and forwarded environment to an append-o
 `/home/wakeuser/ltx25-logs/RUNS.manifest`; a symlink keeps the stable name for
 polling. It records the **inputs** rather than the output, because that was the
 irrecoverable half — a result whose inputs are unknown is not a measurement.
+
+---
+
+# Corrected results — after the distilled-recipe fix (`d513de5`)
+
+**Everything above this line is the pre-fix baseline and is superseded.** Before
+`d513de5`, `DISTILLED_SIGMA_VALUES` reached the pipeline **only when
+`enable_stage_2` was set**, so H14 was the one run of twelve that used the distilled
+schedule; the rest got a generic linear fallback plus five guidance parameters left
+at upstream's **SFT** defaults (`audio_guidance_scale` 7.0 against 1.0,
+`modality_scale` 3.0 against 1.0, both STG scales 1.0 against 0.0).
+
+## The `video_to_audio` anomaly was never its own defect
+
+| | BEFORE | AFTER |
+|---|---|---|
+| **H9** `video_to_audio` | **−55.0 dBFS**, peak 0.0146, \|L-R\| 3.07% | **−17.8 dBFS**, peak 0.5078, \|L-R\| **19.22%** |
+| **H8** `text_to_audio` | −5.2 dBFS, **peak 1.0000** (railed) | −15.3 dBFS, peak 0.6953 |
+| gap | **~50 dB** | **2.5 dB** |
+
+One mode 50 dB down and another driven into the rail were **the same
+misconfiguration seen from opposite ends**. H8 was never a valid control: a peak of
+exactly 1.0000 is a signal against the rail, not a healthy reference.
+
+### ⚠️ The strength attribution recorded above is WRONG
+
+The earlier section concludes *"the culprit is `GenerationRequest.strength = 0.8`"*.
+**It is not.** The corrected H9 ran at the **unchanged default 0.8** and came out
+healthy. **No change to `strength` or `MAX_VIDEO_CONDITION_STRENGTH` is warranted.**
+
+The sweep measured something real — 0.8 → −55.0 and 0.5 → −5.1 at fixed seed, one
+lever — but that was an **interaction between condition strength and the broken SFT
+guidance**, not a root cause. The pipeline source says the conditioning mask is
+applied to `noise_pred_video` only and never touches `noise_pred_audio`, so the
+video condition *cannot* suppress audio directly; that citation was correct and this
+measurement did not contradict it.
+
+**The lesson is the transferable part: a single-lever same-seed sweep is strong
+evidence that something moves and no evidence about why.** Treating a clean
+correlation as a mechanism, against a source citation, is the error — and it is the
+same shape as reading a property off a finished file and inferring a cause.
+
+## BEFORE / AFTER pairs
+
+| # | mode | BEFORE | AFTER | pixel mean\|diff\| |
+|---|---|---|---|---|
+| H1 | `text_to_video` | `run-691abb4502d1` | `run-d6b415a8d334` | 53.54 |
+| H2 | `image_to_video` | `run-d761a8862653` | `run-f2a85282c802` | 15.36 |
+| H3 | `image_text_to_video` | `run-f8bc1f282edc` | `run-58a3e6db6812` | 55.27 |
+| H4 | `video_to_video` | `run-caf43b631aa2` | `run-10ac6e0ca315` | **3.71** |
+| H5 | `text_to_audio_video` | `run-7fceeaf2175d` | `run-8619ac8155f8` | 56.50 |
+| H6 | `image_to_audio_video` | `run-ea3906db261d` | `run-5e1867c7a94b` | 16.40 |
+| H7 | `image_text_to_audio_video` | `run-8bcbf7ff85ca` | `run-d41a0cee3225` | 58.11 |
+| H8 | `text_to_audio` | `run-b5f1517ba8f0` | `run-46eab07d0c7e` | audio only |
+| H9 | `video_to_audio` | `run-781803794dad` | `run-89bf420a98b1` | audio only |
+| H14 | stage 2 | `run-4a2412a9522c` | `run-8fa1e765bc47` | 58.81 |
+| H15 | duration_head | `run-bca114fb639d` | `run-2ede72c48af5` | 39.97 |
+| H16 | 1216×704 | `run-96e42dab977a` | `run-0dd906803af1` | 36.68 |
+
+**All twelve moved. Nothing silently survived the defect** — which is the finding, and
+it would have been lost by reporting only the differences.
+
+**The magnitudes order by conditioning strength**, which is why they are coherent
+rather than noise: text-only and image+text moved most (37–59), image-conditioned
+moderately (15–16), and **video-conditioned least at 3.71** — the strongest condition
+pins the output hardest and leaves the guidance least room to move it.
+
+**Quiet corroboration that the anchor conversion is right:** on every
+image-conditioned mode **frame 0 barely moved** — H2 0.65, H3 0.85, H6 0.73,
+H7 0.78 — while later frames moved 15–77. Frame 0 *is* the condition anchor at
+`index=0`. It stayed put while everything downstream changed.
+
+## Corrected audio, and the clipping was a symptom after all
+
+```
+peaks BEFORE : 1.7811  1.6452  1.4017  1.3557  1.1535  1.0054  1.0024  1.0000
+peaks AFTER  : 1.0050  0.9693  0.8778  0.7088  0.6953  0.5078
+levels AFTER : -9.5 to -17.8 dBFS   (was -5.2 to -55.0)
+```
+
+The earlier withdrawal of the clipping claim was **half right**. Our path never added
+gain — but material sitting at ±1.0 was itself the defect. With the correct recipe
+nothing reaches the rail, **so no limiter is needed** and `_write_audio`'s "what comes
+back is what the vocoder produced" principle stays intact.
+
+## ~3× faster, and the flagship is now 21 seconds
+
+| | before | after |
+|---|---|---|
+| H1 | 25.7 s | **8.4 s** |
+| H8 | 5.6 s | **1.8 s** |
+| H14 stage 2 | 84.3 s | **35.2 s** |
+| H16 **1216×704 + stereo** | 68.7 s | **21.0 s** |
+
+The distilled recipe runs unguided, dropping the extra forward passes SFT guidance
+required. VRAM essentially unchanged: H14 peak **83.899 GiB**, H16 **77.586 GiB**.
+
+## The H14 brightness falloff was the defect, not stage 2
+
+```
+BEFORE  frame 0 → 120 : mean 99.48 → 34.44   std 63.16 → 26.07   (collapsing)
+AFTER   frame 0 → 120 : mean 82.52 → 110.47  std 85.40 → 89.80   (stable)
+```
+
+Flagged earlier as needing a human eye; it no longer does. `std` now sits ~85–90 on
+every mode against 50–60 before — materially more contrast and detail.
