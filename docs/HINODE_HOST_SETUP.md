@@ -1070,3 +1070,90 @@ audio latents while receiving raw VAE output, `noise_scale * noise +
 `noise_scale`, which matches all three readings being silent. **Confirm against
 upstream's audio branch before changing any scale factor** — reasoning from
 correlation to cause has cost this build two changes today.
+
+---
+
+# ELEVEN OF ELEVEN — and a retraction
+
+## ⚠️ `audio_to_audio` is NOT broken. The fixture was.
+
+The section above reports it producing silence at −87.9 dBFS and calls it the one
+open defect. **That is wrong and is retracted.**
+
+| audio input | H10 output |
+|---|---|
+| synthetic two-tone fixture (−14.8 dBFS) | −87.9 dBFS |
+| **H8's own model-generated wav (−15.3 dBFS)** | **−10.4 dBFS, peak 0.9375 — healthy** |
+
+Same mode, same code, same `noise_scale`, same seed. **The only variable is input
+content.** Two pure sine tones plus an envelope is spectrally sparse and nothing
+like the model's training distribution; it handles real audio correctly and produces
+near-nothing from a tone pair. The scale hypothesis is withdrawn — and the pipeline
+applies `_normalize_audio_latents(latents, audio_vae.latents_mean,
+audio_vae.latents_std)` itself, so raw encode output was always correct to hand over.
+
+**A test fixture is an input, and an input that has never been varied is an
+assumption.** The two-tone fixture was right for H17, where sparse tones are exactly
+what makes a wrong analysis window measurable, and wrong for H10, where the model
+has to generate from it. One fixture serving two tests with opposite requirements.
+
+## H10b — the acceptance test, earned
+
+| run | `noise_scale` | rms | dBFS |
+|---|---|---|---|
+| H10b_lo | **0.1** | 0.319317 | **−9.9** |
+| H10b_hi | **0.9** | 0.104406 | **−19.6** |
+| H10c_a *(control)* | 0.5 | 0.292823 | −10.7 |
+| H10c_b *(control)* | 0.5 | 0.298060 | −10.5 |
+
+Halves differ **3.06× in rms (9.7 dB)**, both healthy. The control differs **1.8%**,
+so the `noise_scale` effect is **~170× the run-to-run variation**, in the right
+direction — 0.1 keeps the upload, 0.9 discards it by design.
+
+**The control exists because `_sampled` calls `latent_dist.sample()` with no
+generator**, while upstream's `retrieve_latents` threads one — so the audio latents
+are sampled unseeded and H10b's differing halves could have been sampling noise.
+At 1.8% it is a **reproducibility gap, not a confound**: `audio_to_audio` is not
+bit-reproducible under a pinned seed while every other mode is. Otherwise `_sampled`
+matches upstream's default `sample_mode="sample"` exactly.
+
+## H17 — PASS on the strict criterion, with no loosening
+
+The right fix was **change the fixture, keep the criterion strict** — not the
+placement-only loosening proposed here earlier.
+
+```
+tones: ch0 (220.0, 2640.0)   ch1 (440.0, 1320.0)
+duration: in 4.000s -> out 4.010s (0.25% drift, tolerance 2%)
+ch0  220 Hz  96.6% RECOVERED    2640 Hz 47.7% RECOVERED
+ch1  440 Hz 106.7% RECOVERED    1320 Hz 33.0% RECOVERED
+4/4 recovered, strict gate ACTIVE
+```
+
+A fixture demanding what a 64-bin log-spaced mel cannot carry in that pairing was
+testing the fixture. **The threshold never moved.** And a 2640.6 Hz input returning
+at **2625.0 Hz** — about one FFT bin — is *placement* evidence, which is what a wrong
+`mel_scale`, `f_min`/`f_max` or `norm` would actually break.
+
+**The verdict message was also a defect and is fixed.** It pointed at A.5.1's
+convention list on *any* failure, including one where length tracks the input and the
+latents validate — sending the next person to change `power` against a working path.
+The list is now offered **only when the length fails to track the input**, which is
+the signature that rules conventions in.
+
+## The pattern in three of my own errors
+
+Reported as product problems, each turning out to be an instrument:
+
+1. **clipping** — inferred a cause from a property of a finished file; the tensor
+   reversed it.
+2. **the latent transpose** — reported accurately, without the configuration the
+   measurement depended on; caused a double-correction.
+3. **`audio_to_audio` silence** — the fixture, not the mode.
+
+**Each time the measurement was accurate and the cause was not, and each time the
+missing step was a control varying the thing that had not been varied.** The fixture
+was the one input never treated as a variable. This sits alongside the harness
+failures already recorded, and it is the same lesson from the other side: **a
+harness that cannot fail the way production fails is one problem; a harness whose
+inputs are never varied is the other.**
