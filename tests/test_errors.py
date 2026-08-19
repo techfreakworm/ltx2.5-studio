@@ -92,6 +92,31 @@ ERROR_SPECS = {
         },
         ["adapter.safetensors", "transformer_blocks.0.attn1.to_q", "lora_A"],
     ),
+    "LoRAInContextError": (
+        {
+            "source": "/tmp/ic-lora.safetensors",
+            "marker": "reference_downscale_factor",
+            "value": "1",
+        },
+        ["ic-lora.safetensors", "reference_downscale_factor"],
+    ),
+    "LoRADimensionError": (
+        {
+            "source": "/tmp/ltxv-2b.safetensors",
+            "module": "transformer_blocks.0.attn1.to_k",
+            "expected": 4096,
+            "actual": 2048,
+        },
+        ["ltxv-2b.safetensors", "transformer_blocks.0.attn1.to_k", "4096", "2048"],
+    ),
+    "LoRAModuleNotFoundError": (
+        {
+            "source": "/tmp/sdxl.safetensors",
+            "missing_modules": ("down_blocks.0.resnets.0.conv1", "mid_block.attentions.0.to_out.0"),
+            "module_count": 2,
+        },
+        ["sdxl.safetensors", "down_blocks.0.resnets.0.conv1"],
+    ),
     "LoRANotAttachedError": (
         {
             "source": "/tmp/adapter.safetensors",
@@ -147,6 +172,9 @@ BASE_OF = {
     "LoRAVersionError": "LoRAError",
     "LoRAConventionError": "LoRAError",
     "LoRAPairingError": "LoRAError",
+    "LoRAInContextError": "LoRAError",
+    "LoRADimensionError": "LoRAError",
+    "LoRAModuleNotFoundError": "LoRAError",
     "LoRANotAttachedError": "LoRAError",
     "ModelLoadError": "GenerationError",
     "DecodeError": "GenerationError",

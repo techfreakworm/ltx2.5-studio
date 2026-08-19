@@ -243,13 +243,18 @@ FORBIDDEN_ANYWHERE = ("Lightricks/", "huggingface.co")
 def _is_a_hardcoded_filename(value):
     """True when the literal is a *filename*, not prose that mentions the extension.
 
-    The rule is about coordinates, not vocabulary. ``"transformer/diffusion_
-    pytorch_model-00001-of-00004.safetensors"`` and the f-string fragment
-    ``".safetensors"`` are coordinates and belong in ``model_files.py``; UI help
-    text reading "upload a `.safetensors` adapter" is a sentence, and the UI is
-    the layer whose whole job is sentences.
+    The rule is about coordinates, not vocabulary. A literal naming an actual
+    file — ``"transformer/diffusion_pytorch_model-00001-of-00004.safetensors"`` —
+    is a coordinate and belongs in ``model_files.py``. Two things are not:
+
+    * prose that mentions the extension ("upload a `.safetensors` adapter") — the
+      UI is the layer whose whole job is sentences;
+    * the bare extension used as an upload filter (``file_types=[".safetensors"]``)
+      — that describes what a *user* may upload, and no Lightricks rename touches it.
     """
     stripped = value.strip()
+    if stripped == ".safetensors":
+        return False
     return stripped.endswith(".safetensors") and not any(c.isspace() for c in stripped)
 
 
