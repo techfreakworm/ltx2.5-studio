@@ -312,12 +312,19 @@ def main() -> int:
                 log(f"MISSING {key} fixture: set {env} to a real file "
                     f"(produce one from an earlier run)")
                 continue
-            if key == "video":
-                fixtures["video"] = load_video_frames(src)
-                log(f"fixture video  : {len(fixtures['video'])} PIL frames from {src}")
-            else:
-                fixtures["audio"] = encode_audio_latents(base, src)
-                log(f"fixture audio  : latents from {src}")
+            # try/except, not just an existence check: a fixture that RAISES has
+            # to be as survivable as one that is absent, or an unrelated bug in
+            # fixture construction cancels every run in the batch.
+            try:
+                if key == "video":
+                    fixtures["video"] = load_video_frames(src)
+                    log(f"fixture video  : {len(fixtures['video'])} PIL frames from {src}")
+                else:
+                    fixtures["audio"] = encode_audio_latents(base, src)
+                    log(f"fixture audio  : latents from {src}")
+            except Exception as exc:
+                log(f"fixture {key} FAILED to build: {type(exc).__name__}: {exc}")
+                log(f"  runs needing {key!r} will be SKIPPED; the rest proceed")
     log("")
 
     # ---------------- the runs ----------------
