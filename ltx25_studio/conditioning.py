@@ -39,6 +39,7 @@ __all__ = [
     "ConditionSpec",
     "build_conditions",
     "image_crf_for",
+    "latent_group_for",
     "latent_index_for",
     "latent_to_pixel_index",
     "normalise_condition",
@@ -118,6 +119,38 @@ def latent_index_for(
     if pixel_frame <= 0:
         return 0
     return (pixel_frame - 1) // temporal_compression_ratio + 1
+
+
+def latent_group_for(
+    pixel_frame: int,
+    *,
+    temporal_compression_ratio: int = DEFAULT_TEMPORAL_COMPRESSION_RATIO,
+) -> dict:
+    """Which latent a frame lands on, and which frames share it.
+
+    The mapping is **lossy in this direction**: temporal compression is 8:1, so a
+    run of frames collapses onto one latent index. A user who types frame 30 is
+    anchored at the same place as one who types frame 25, and saying nothing
+    about that is the same quiet wrongness as snapping a dimension silently.
+
+    Returns the latent, the span of frames sharing it, and whether the frame the
+    user gave is the one that span begins at.
+
+    The arithmetic lives here rather than in the UI for the reason PLAN §5.7 #1
+    gives: a second copy would eventually disagree with the real one, and a
+    readout that disagrees with what runs is worse than no readout.
+    """
+    ratio = max(int(temporal_compression_ratio), 1)
+    latent = latent_index_for(pixel_frame, temporal_compression_ratio=ratio)
+    first = pixel_index_for(latent, temporal_compression_ratio=ratio)
+    last = 0 if latent == 0 else ratio * latent
+    return {
+        "latent": latent,
+        "first_frame": first,
+        "last_frame": last,
+        "exact": pixel_frame == first,
+        "shared": last > first,
+    }
 
 
 def validate_condition_index(pixel_frame: int, *, num_frames: int) -> int:

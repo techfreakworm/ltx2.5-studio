@@ -173,27 +173,47 @@ def dimension_hint(width: Any, height: Any, *, multiple: int, snapped: tuple[int
     )
 
 
-def shot_anchor_readout(rows: list[tuple[int, int]], *, out_of_range: list[int]) -> str:
-    """Show which pixel frame each latent anchor actually lands on.
+def shot_anchor_readout(anchors: list[dict], *, out_of_range: list[int]) -> str:
+    """Show which latent each frame anchor lands on, and which frames share it.
 
-    PLAN §5.7 #1: the anchor is a LATENT index and the conversion has a kink --
-    latent 0 and 1 map to pixel 0 and 1, and only then does the stride become the
-    compression ratio. Telling the user the rule is weaker than showing them the
-    number, because the rule is the part people misread.
+    The user types a frame; the model wants a latent index, and the conversion is
+    **8:1 lossy**. Frames 25 through 32 are the same anchor, so two shots the user
+    thinks are a third of a second apart can be identical. Telling them the rule
+    is weaker than showing them the span, because the rule is the part people
+    misread -- and finding out after a metered run is the expensive way.
 
-    The arithmetic is NOT done here: ``conditioning.pixel_index_for`` owns it and
+    The arithmetic is NOT done here: ``conditioning.latent_group_for`` owns it and
     this only words the answer. A copy of that formula living in the UI would
     eventually disagree with the real one, and a readout that disagrees with what
     runs is worse than no readout at all.
     """
-    if not rows:
+    if not anchors:
         return (
             "_No shots yet._ Add a row to compose a multishot prompt. The anchor column takes a "
-            "**latent** index — the readout here will show which pixel frame it lands on."
+            "**frame number** — the readout here will show which latent it lands on, and which "
+            "frames share it."
         )
-    lines = ["| shot | anchor (latent) | lands on pixel frame |", "|---|---|---|"]
-    lines += [f"| {n} | `{latent}` | **{pixel}** |" for n, (latent, pixel) in enumerate(rows, 1)]
+    lines = ["| shot | anchor (frame) | lands on latent | frames sharing it |", "|---|---|---|---|"]
+    inexact = []
+    for n, anchor in enumerate(anchors, 1):
+        span = (
+            f"{anchor['first_frame']}–{anchor['last_frame']}"
+            if anchor.get("shared")
+            else str(anchor["first_frame"])
+        )
+        mark = "" if anchor.get("exact") else " ⟵"
+        lines.append(f"| {n} | `{anchor['frame']}` | **{anchor['latent']}** | {span}{mark} |")
+        if not anchor.get("exact"):
+            inexact.append(anchor)
     body = "\n".join(lines)
+    if inexact:
+        first = inexact[0]
+        body += (
+            f"\n\n⟵ Temporal compression is 8:1, so these anchors snap. Frame "
+            f"`{first['frame']}` anchors at the same place as frame `{first['first_frame']}` — "
+            f"frames {first['first_frame']}–{first['last_frame']} all share latent "
+            f"**{first['latent']}**."
+        )
     if out_of_range:
         body += (
             f"\n\n⚠️ Anchor(s) {_join(out_of_range)} fall outside the clip. Upstream **skips an "

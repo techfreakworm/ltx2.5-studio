@@ -467,12 +467,19 @@ def generate(
     if progress is not None:
         progress(0.9, "encoding")
     try:
+        # The sink is additive: an encoder that ignores it behaves identically.
+        # Without it the dropped-audio note reaches the Space logs only, and the
+        # user gets a silent video with no on-screen explanation -- which is most
+        # of what the warning was for.
+        encoder_warnings: list[str] = []
         encoder_kwargs = {
             "run_dir": run_dir,
             "mode": request.mode,
             "exports": spec.exports,
             "seed": seed,
             "frame_rate": request.frame_rate,
+            "warnings": encoder_warnings,
+            "counterpart_label": modes.counterpart_label_for(request.mode),
         }
         sampling_rate = _export_sampling_rate(pipe)
         if sampling_rate is not None:
@@ -489,12 +496,17 @@ def generate(
                 ),
             )
         written = write(output, **encoder_kwargs)
+    except EncodeError:
+        # Already one of ours and already names its target; re-wrapping would
+        # read "failed to write output <run_dir>: failed to write output
+        # <target>: <reason>" and bury the reason a layer deeper.
+        raise
     except Exception as exc:
         raise EncodeError(path=str(run_dir), reason=str(exc)) from exc
 
     artifacts = _artifacts_for(written, spec=spec, mode=request.mode, run_dir=run_dir)
 
-    warnings = _sweep(root, retention_bytes)
+    warnings = _sweep(root, retention_bytes) + tuple(encoder_warnings)
 
     return GenerationResult(
         output_path=artifacts["primary"],

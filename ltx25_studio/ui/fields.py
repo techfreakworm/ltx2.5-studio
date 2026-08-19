@@ -184,14 +184,19 @@ MEDIA_KINDS = frozenset({"image", "video", "audio"})
 #: anchor readout reads both come from here, so reordering the table cannot leave
 #: the readout pointing at the wrong column -- it would otherwise read prompt text
 #: as a frame number and silently render nothing.
+#:
+#: The anchor is a **frame**, not a latent index. Users think in frames; a latent
+#: index is an artefact of the VAE's 8:1 temporal compression and means nothing
+#: to someone generating a video. ``conditioning.py`` converts frame -> latent,
+#: which is the single place PLAN §5.7 row 1 assigns that arithmetic to.
 SHOT_COLUMNS: tuple[tuple[str, str], ...] = (
     ("Prompt segment", "str"),
-    ("Anchor (LATENT index)", "number"),
+    ("Anchor (frame)", "number"),
     ("Strength", "number"),
 )
 SHOT_HEADERS: tuple[str, ...] = tuple(name for name, _ in SHOT_COLUMNS)
 SHOT_DATATYPES: tuple[str, ...] = tuple(kind for _, kind in SHOT_COLUMNS)
-SHOT_ANCHOR_COLUMN: int = SHOT_HEADERS.index("Anchor (LATENT index)")
+SHOT_ANCHOR_COLUMN: int = SHOT_HEADERS.index("Anchor (frame)")
 
 FIELDS: tuple[Field, ...] = (
     # -- what the model is told to make -------------------------------------

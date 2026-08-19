@@ -194,30 +194,34 @@ def on_auto_duration_toggle(auto: Any) -> tuple[bool, bool, bool]:
 
 
 def on_shots_change(rows: Any, num_frames: Any) -> str:
-    """Render which pixel frame each latent anchor lands on.
+    """Render which latent each frame anchor lands on, and what it shares.
 
-    ``conditioning.py`` does both the conversion and the range check -- this only
-    marshals the table in and the message out. PLAN §5.7 #2 is why the range
-    check is worth surfacing here: upstream **skips** an out-of-range condition
+    The user types a **frame**; ``conditioning.py`` converts frame -> latent.
+    That direction is lossy at 8:1, so a run of frames collapses onto one latent
+    and two different anchors can mean the same thing -- which the readout says
+    rather than leaving the user to discover after a metered run.
+
+    ``conditioning.py`` owns both the conversion and the range check; this only
+    marshals the table in and the message out. PLAN §5.7 #2 is why surfacing the
+    range check here is worth it: upstream **skips** an out-of-range condition
     with nothing but a log line and generates anyway, so the shot silently does
-    nothing. Catching it while the user is still typing is far cheaper than
-    catching it after a metered run.
+    nothing.
     """
     from .. import conditioning
 
     frames = _as_int(num_frames) or 0
-    pairs: list[tuple[int, int]] = []
+    anchors: list[dict] = []
     out_of_range: list[int] = []
     for row in rows or []:
         cells = row if isinstance(row, (list, tuple)) else ()
-        latent = _as_int(cells[SHOT_ANCHOR_COLUMN] if len(cells) > SHOT_ANCHOR_COLUMN else None)
-        if latent is None:
+        frame = _as_int(cells[SHOT_ANCHOR_COLUMN] if len(cells) > SHOT_ANCHOR_COLUMN else None)
+        if frame is None:
             continue
-        pixel = conditioning.pixel_index_for(latent)
-        pairs.append((latent, pixel))
-        if frames and not 0 <= pixel < frames:
-            out_of_range.append(latent)
-    return render.shot_anchor_readout(pairs, out_of_range=out_of_range)
+        group = conditioning.latent_group_for(frame)
+        anchors.append({"frame": frame, **group})
+        if frames and not 0 <= frame < frames:
+            out_of_range.append(frame)
+    return render.shot_anchor_readout(anchors, out_of_range=out_of_range)
 
 
 # ---------------------------------------------------------------------------

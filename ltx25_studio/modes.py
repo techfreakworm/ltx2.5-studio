@@ -43,6 +43,7 @@ __all__ = [
     "PIPELINE_KINDS",
     "ConditionSpec",
     "ModeSpec",
+    "counterpart_label_for",
     "get_mode",
     "modes_for_pipeline",
 ]
@@ -86,6 +87,12 @@ class ModeSpec:
     #: Skip the stage-2 spatial upscale. Only ever correct when the video is
     #: discarded; applying it to a mode that returns video halves its quality.
     skip_stage_2: bool = False
+    #: The sibling mode that keeps the audio this one discards, or None where
+    #: there is none. Carried as DATA so a message can name it without anyone
+    #: importing the registry into the writer or transforming mode ids as
+    #: strings -- the latter being the branch-on-identifiers pattern the
+    #: architecture spec forbids.
+    audio_counterpart: str | None = None
     aliases: tuple[str, ...] = field(default_factory=tuple)
 
 
@@ -206,6 +213,7 @@ _SPECS = (
         inputs=("text",),
         exports=("video",),
         build_kwargs=_text_builder(),
+        audio_counterpart="text_to_audio_video",
     ),
     ModeSpec(
         id="image_to_video",
@@ -214,6 +222,7 @@ _SPECS = (
         inputs=("image",),
         exports=("video",),
         build_kwargs=_condition_builder(keep_prompt=False),
+        audio_counterpart="image_to_audio_video",
     ),
     ModeSpec(
         id="image_text_to_video",
@@ -222,6 +231,7 @@ _SPECS = (
         inputs=("image", "text"),
         exports=("video",),
         build_kwargs=_condition_builder(),
+        audio_counterpart="image_text_to_audio_video",
     ),
     ModeSpec(
         id="video_to_video",
@@ -316,3 +326,15 @@ def get_mode(mode_id: str) -> ModeSpec:
 def modes_for_pipeline(pipeline: str) -> Sequence[ModeSpec]:
     """Every mode executed by one upstream workflow."""
     return tuple(spec for spec in MODES.values() if spec.pipeline == pipeline)
+
+
+def counterpart_label_for(mode_id: str) -> str | None:
+    """Human label of the mode that keeps this one's audio, if there is one.
+
+    Resolved here because the registry is the only thing that knows the
+    relationship. Callers hand the label onward and stay ignorant of the
+    registry, which is what keeps a message able to name a mode without the
+    writer importing modes or munging identifiers.
+    """
+    counterpart = get_mode(mode_id).audio_counterpart
+    return get_mode(counterpart).label if counterpart else None
