@@ -105,7 +105,7 @@ broken, nothing else matters and we want to know at 120 GPU-seconds spent, not 7
 | **R3** | R2 config **+ two adapters** (§5) | 60 | 120 | **Both directions in one call.** (a) the 2.5 adapter loads, attaches to **> 0 modules**, and generates — the headline feature works; (b) the 2B adapter is then attempted and **rejected loudly and specifically** — the anti-silent-garbage guard fires. | LoRA | _(pending)_ |
 | **R4** | same tiny config + a short input audio clip | 60 | 120 | audio-in: waveform → mel → `audio_vae` → **4D `audio_latents`** + `noise_scale` | 10, 11 | _(pending)_ |
 | **R5** | same tiny config + a short input video | 60 | 120 | **video** conditioning: a multi-frame condition — note multi-frame is **never** CRF-recompressed, unlike single-frame, so this is a genuinely different branch from R2 | 4, 9 | _(pending)_ |
-| **R6** | R1 config **+ stage 2** | 90 | 180 | The stage-2 chain: `LTX2LatentUpsamplePipeline` → `STAGE_2_DISTILLED_SIGMA_VALUES` → `noise_scale` → **`denormalize=False`** on the diffusion decode | quality path | _(pending)_ |
+| **R6** | R1 config **+ `enable_stage_2=True`** | 90 | 180 | The stage-2 chain: `LTX2LatentUpsamplePipeline` → `STAGE_2_DISTILLED_SIGMA_VALUES` → `noise_scale` → **`denormalize=False`** on the diffusion decode | quality path | _(pending)_ |
 | **R7** | R1 config, **no `num_frames`**, tight `min_seconds`/`max_seconds` | 75 | 150 | `duration_head` auto-duration | auto-duration | _(pending)_ |
 | | | | **930** | | | |
 
@@ -113,6 +113,10 @@ broken, nothing else matters and we want to know at 120 GPU-seconds spent, not 7
 
 **Deviation from the uniform-60 s estimate, stated plainly:** the lead's baseline was 7 × 120 =
 840 GPU-s. I raised two runs, costing 90 GPU-s more:
+
+**Setting up R6:** stage 2 is opt-in and defaults **off** (PLAN §7.4), so the run must pass
+`enable_stage_2=True`. Note the registry overrides the request — a mode with `skip_stage_2` set
+forces it off, so R6 must use a video-exporting mode. R1's `text_to_video` qualifies.
 
 - **R6 → 90 s.** The stage-2 chain does strictly more work than R1 (an upsample pass plus three
   further denoise steps on a larger latent). Requesting 60 s risks a timeout — and a timeout
