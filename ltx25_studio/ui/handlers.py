@@ -31,7 +31,7 @@ from typing import Any
 
 from .. import constraints, modes
 from . import render
-from .fields import FIELD_KEYS, TOGGLEABLE_FIELDS
+from .fields import FIELD_KEYS, SHOT_ANCHOR_COLUMN, TOGGLEABLE_FIELDS
 
 __all__ = [
     "FieldUpdate",
@@ -42,6 +42,7 @@ __all__ = [
     "on_generate_start",
     "on_mode_change",
     "on_shape_change",
+    "on_shots_change",
     "on_snap",
     "on_validate_lora",
 ]
@@ -190,6 +191,33 @@ def on_auto_duration_toggle(auto: Any) -> tuple[bool, bool, bool]:
     """
     chosen = bool(auto)
     return (not chosen, chosen, chosen)
+
+
+def on_shots_change(rows: Any, num_frames: Any) -> str:
+    """Render which pixel frame each latent anchor lands on.
+
+    ``conditioning.py`` does both the conversion and the range check -- this only
+    marshals the table in and the message out. PLAN §5.7 #2 is why the range
+    check is worth surfacing here: upstream **skips** an out-of-range condition
+    with nothing but a log line and generates anyway, so the shot silently does
+    nothing. Catching it while the user is still typing is far cheaper than
+    catching it after a metered run.
+    """
+    from .. import conditioning
+
+    frames = _as_int(num_frames) or 0
+    pairs: list[tuple[int, int]] = []
+    out_of_range: list[int] = []
+    for row in rows or []:
+        cells = row if isinstance(row, (list, tuple)) else ()
+        latent = _as_int(cells[SHOT_ANCHOR_COLUMN] if len(cells) > SHOT_ANCHOR_COLUMN else None)
+        if latent is None:
+            continue
+        pixel = conditioning.pixel_index_for(latent)
+        pairs.append((latent, pixel))
+        if frames and not 0 <= pixel < frames:
+            out_of_range.append(latent)
+    return render.shot_anchor_readout(pairs, out_of_range=out_of_range)
 
 
 # ---------------------------------------------------------------------------

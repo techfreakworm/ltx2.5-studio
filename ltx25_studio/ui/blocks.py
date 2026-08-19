@@ -95,6 +95,7 @@ def build_ui() -> gr.Blocks:
                 with gr.Accordion("Shot list / multishot", open=False):
                     gr.Markdown(_MULTISHOT_NOTE)
                     components.render_fields(pool, "conditions")
+                    shot_readout = gr.Markdown()
 
                 with gr.Accordion("Size and length", open=True):
                     with gr.Row():
@@ -172,6 +173,10 @@ def build_ui() -> gr.Blocks:
         for control in shape_inputs:
             control.change(fn=handlers.on_shape_change, inputs=shape_inputs, outputs=hint_outputs)
 
+        shot_inputs = [pool["conditions"], pool["num_frames"]]
+        for control in shot_inputs:
+            control.change(fn=handlers.on_shots_change, inputs=shot_inputs, outputs=[shot_readout])
+
         snap_button.click(
             fn=handlers.on_snap, inputs=shape_inputs, outputs=[*shape_inputs, *hint_outputs]
         )
@@ -213,6 +218,7 @@ def build_ui() -> gr.Blocks:
             outputs=[briefing, *toggleable, video_out, audio_out],
         )
         demo.load(fn=handlers.on_shape_change, inputs=shape_inputs, outputs=hint_outputs)
+        demo.load(fn=handlers.on_shots_change, inputs=shot_inputs, outputs=[shot_readout])
         demo.load(
             fn=lambda chosen: [
                 gr.update(visible=flag) for flag in handlers.on_auto_duration_toggle(chosen)

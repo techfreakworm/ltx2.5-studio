@@ -54,10 +54,16 @@ __all__ = [
     "lora_idle",
     "lora_rejected",
     "lora_stage_of",
+    "shot_anchor_readout",
     "mode_briefing",
     "running",
     "success",
 ]
+
+
+def _join(values) -> str:
+    """Render a sequence as a readable comma-separated list."""
+    return ", ".join(str(v) for v in values)
 
 
 # ---------------------------------------------------------------------------
@@ -165,6 +171,36 @@ def dimension_hint(width: Any, height: Any, *, multiple: int, snapped: tuple[int
         f"⚠️ Every spatial dimension must be a multiple of **{multiple}**; upstream raises "
         f"otherwise. {' · '.join(bad)}. Press *Snap to legal values*."
     )
+
+
+def shot_anchor_readout(rows: list[tuple[int, int]], *, out_of_range: list[int]) -> str:
+    """Show which pixel frame each latent anchor actually lands on.
+
+    PLAN §5.7 #1: the anchor is a LATENT index and the conversion has a kink --
+    latent 0 and 1 map to pixel 0 and 1, and only then does the stride become the
+    compression ratio. Telling the user the rule is weaker than showing them the
+    number, because the rule is the part people misread.
+
+    The arithmetic is NOT done here: ``conditioning.pixel_index_for`` owns it and
+    this only words the answer. A copy of that formula living in the UI would
+    eventually disagree with the real one, and a readout that disagrees with what
+    runs is worse than no readout at all.
+    """
+    if not rows:
+        return (
+            "_No shots yet._ Add a row to compose a multishot prompt. The anchor column takes a "
+            "**latent** index — the readout here will show which pixel frame it lands on."
+        )
+    lines = ["| shot | anchor (latent) | lands on pixel frame |", "|---|---|---|"]
+    lines += [f"| {n} | `{latent}` | **{pixel}** |" for n, (latent, pixel) in enumerate(rows, 1)]
+    body = "\n".join(lines)
+    if out_of_range:
+        body += (
+            f"\n\n⚠️ Anchor(s) {_join(out_of_range)} fall outside the clip. Upstream **skips an "
+            f"out-of-range condition with only a log line and generates anyway**, so that shot "
+            f"would silently have no effect. Fix the anchor or raise the frame count."
+        )
+    return body
 
 
 # ---------------------------------------------------------------------------

@@ -40,6 +40,8 @@ __all__ = [
     "FIELDS",
     "FIELD_KEYS",
     "MEDIA_KINDS",
+    "SHOT_ANCHOR_COLUMN",
+    "SHOT_COLUMNS",
     "TOGGLEABLE_FIELDS",
     "Field",
     "field_by_key",
@@ -178,6 +180,19 @@ def _forced_stage_2(mode: Any) -> Any:
 #: Field kinds that carry a user-supplied asset rather than a number or string.
 MEDIA_KINDS = frozenset({"image", "video", "audio"})
 
+#: The shot-list columns, declared once. The Dataframe headers AND the index the
+#: anchor readout reads both come from here, so reordering the table cannot leave
+#: the readout pointing at the wrong column -- it would otherwise read prompt text
+#: as a frame number and silently render nothing.
+SHOT_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("Prompt segment", "str"),
+    ("Anchor (LATENT index)", "number"),
+    ("Strength", "number"),
+)
+SHOT_HEADERS: tuple[str, ...] = tuple(name for name, _ in SHOT_COLUMNS)
+SHOT_DATATYPES: tuple[str, ...] = tuple(kind for _, kind in SHOT_COLUMNS)
+SHOT_ANCHOR_COLUMN: int = SHOT_HEADERS.index("Anchor (LATENT index)")
+
 FIELDS: tuple[Field, ...] = (
     # -- what the model is told to make -------------------------------------
     Field(
@@ -238,9 +253,9 @@ FIELDS: tuple[Field, ...] = (
         # moved to `row_limits`/`column_limits` -- which 6.24 accepts but does
         # not yet implement, so passing them only produces a warning. Omitted.
         options={
-            "headers": ["Prompt segment", "Anchor (LATENT index)", "Strength"],
-            "datatype": ["str", "number", "number"],
-            "column_count": 3,
+            "headers": list(SHOT_HEADERS),
+            "datatype": list(SHOT_DATATYPES),
+            "column_count": len(SHOT_COLUMNS),
             "row_count": 0,
             "type": "array",
         },
