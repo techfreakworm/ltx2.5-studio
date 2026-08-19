@@ -407,3 +407,134 @@ manifest is parked at
 the tree manifest, the completeness check and lazy fetching at once, and lets the
 network stay up so NATTEN resolves. `local_files_only=True` does the opposite: it
 is what *triggers* the strict check.
+
+## Final state — everything through the real `get_pipeline` path
+
+The whole matrix re-ran with **no `HF_HUB_OFFLINE`, no bypass, and
+`trees/<revision>.json` restored to the cache**. That last detail is the one worth
+keeping: the load previously worked only while that file was *absent*, and it now
+works with it present, so the accident is gone rather than avoided.
+
+```
+load 14.0s (one-off)
+H1  text_to_video             25.7s  verify=0     H9  video_to_audio      6.0s  verify=0
+H2  image_to_video            26.3s  verify=0     H14 stage 2            84.3s  verify=0
+H3  image_text_to_video       26.6s  verify=0     H15 duration_head      19.4s  verify=0
+H4  video_to_video            27.0s  verify=0     H16 1216x704           68.7s  verify=0
+H5  text_to_audio_video       25.0s  verify=0
+H6  image_to_audio_video      26.6s  verify=0
+H7  image_text_to_audio_video 26.7s  verify=0
+H8  text_to_audio              5.6s  verify=0
+```
+
+Peak VRAM by workload: 68.879 GiB (audio-only) → ~70.5 (baseline) → 71.008 (video
+conditioning) → 76.653 (1216×704) → **83.897 GiB (stage 2)**. Against 94.97 GiB
+usable, the high-water mark leaves ~11 GiB.
+
+### Stage 2 changes the output geometry
+
+A 704 × 480 request with `enable_stage_2=True` produces a **1408 × 960** artifact —
+the latent upsampler doubles both axes, which is what stage 2 is. Correct, but
+`verify_streams` passes because the expected layout for `text_to_video` does not
+assert resolution, so **the size the user asked for is not the size they get and
+nothing says so.**
+
+### NATTEN resolves once per process, not per generation
+
+Two stage-2 generations in one process (85.0 s, 83.4 s, different seeds) produced
+**exactly one** kernel fetch. `get_kernel("shi-labs/natten", version=1)` resolves
+version → ref over the network even with the kernel fully cached, and `version=1`
+is hardcoded inside diffusers so it is not ours to pin. Consequence: a worker needs
+outbound network at its **first** stage-2 use, not at every generation — and
+`_stage_2_parts` caches into `_CACHE`, so each cold worker pays it once.
+
+## Two open product defects the stream checks could not see
+
+### `video_to_audio` returns near-silence — and it is model-side
+
+`scripts/host_audio_levels.py` over every artifact:
+
+| artifact | mode | peak | rms | dBFS |
+|---|---|---|---|---|
+| `run-781803794dad/output.wav` | **video_to_audio** | 0.0146 | 0.001779 | **−55.0** |
+| `run-c1b06b0cf577/output.wav` | **video_to_audio** | 0.0128 | 0.001880 | **−54.5** |
+| `run-b5f1517ba8f0/output.wav` | text_to_audio | 1.0000 | 0.549740 | −5.2 |
+| `run-ffb3ae939601/output.wav` | text_to_audio | 1.0000 | 0.546838 | −5.2 |
+
+Localised by measuring the tensor **before** encode via `generate(encoder=...)`:
+
+```
+text_to_audio  : audio (1, 2, 240480) bf16  min -1.000000  max 1.000000  rms 0.541253
+video_to_audio : audio (1, 2, 240480) bf16  min -0.002319  max 0.002411  rms 0.000370
+```
+
+The tensor is already near-silent, so **`outputs.py` is faithful and exonerated**;
+the audio branch produces almost nothing when a video condition is present. Three
+reproducible runs. `verify_streams` passes all of them — correct codec, 2 channels,
+48000 Hz, no video stream — which is why this needed a level measurement rather
+than a structural one. A user picking *"Video to audio"* gets a perfect, inaudible
+file.
+
+### The audio-input modes cannot start: no mel front-end exists
+
+`load_waveform` works (via `av`). The next step does not:
+
+> *the loaded audio_vae carries no mel front-end (looked for `mel_spectrogram`,
+> `mel_transform`, `_mel_spectrogram`) … Pass `to_mel=` explicitly.*
+
+The real `AutoencoderKLLTX2Audio` exposes only `mel_compression_ratio` (an int),
+and **upstream ships no mel front-end anywhere** in `diffusers.pipelines.ltx2` —
+all 16 modules enumerated, `utils` has no mel members, and the audio-VAE module
+source has zero mel/stft/hann/n_fft references.
+
+**But the window size is declared — by the vocoder, not the audio VAE:**
+
+| `audio_vae/config.json` | `vocoder/config.json` |
+|---|---|
+| `mel_bins = 64` | **`window_length = 512`** |
+| `mel_hop_length = 160` | `hop_length = 80` |
+| `sample_rate = 16000` | `num_mel_channels = 64` |
+| `in_channels = 2` (stereo required) | `input_sampling_rate = 16000` |
+| `latent_channels = 8` | `output_sampling_rate = 48000` |
+
+`mel_front_end_for` looks only at the `audio_vae` and concludes the parameters do
+not exist. **One caution:** the hops disagree by 2× (160 vs 80), and the vocoder's
+`upsample_factors` multiply to exactly 160 — so reading `window_length` across is
+defensible, reading a hop across is not, and the VAE's own `mel_hop_length=160` is
+the value for the forward transform.
+
+Note the input path is **16 kHz** even though every artifact written is 48 kHz, and
+that `in_channels = 2` means **the audio VAE requires stereo** — a mono upload
+would otherwise reach `conv_in` and raise a raw tensor-shape `RuntimeError` from
+inside diffusers.
+
+**Why output works and input does not:** `decode_latents_to_waveform` goes latents →
+mel → vocoder and needs no STFT. Only the forward direction needs an analysis
+window. Not a symmetric gap.
+
+## One conclusion I got wrong, recorded because the method matters
+
+I reported that the audio export clipped, reasoning from PCM wavs peaking at
+exactly 1.0000 — "the signature of hard clipping at the int16 boundary". The tensor
+showed `min -1.000000 / max 1.000000` with **zero** samples exceeding |1.0|: the
+model's own output is already saturated at full scale and the write is faithful.
+The aac containers decoding to 1.78 are lossy-codec overshoot on full-scale input,
+not something our path introduces.
+
+I read a property off a finished file and attributed a cause. The tensor was one
+cheap run away and it reversed the conclusion. **Measure at the layer that owns the
+value, not at the artifact.**
+
+## Harness constructs that were wrong in the same way three times
+
+- `pkill -f host_matrix.py` matched the ssh command line **carrying the pattern**
+  and killed the session issuing it. Use `pgrep -af "host_matri[x]"` or a PID.
+- `until grep -q "SUMMARY"; do sleep; done` has no failure exit, so a crash becomes
+  an indefinite hang indistinguishable from slow progress. Every wait needs three:
+  success, **the process no longer existing**, and a timeout.
+- Fixture *absence* was non-fatal while a fixture that *raised* still cancelled the
+  batch, so a shape bug in the audio helper took down two modes that never wanted
+  audio.
+
+Each guarded against the failure that was imagined rather than the failures
+available. **A harness construct validated only against success is not validated.**
