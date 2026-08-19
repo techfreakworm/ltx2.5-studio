@@ -54,18 +54,27 @@ what `tests/verify_streams.py` observed in the container, not a human reading.
 | # | Mode | Result | Streams observed | Size | Time |
 |---|---|---|---|---|---|
 | H1 | `text_to_video` | ✅ | h264 704×480@24, f=121 | 886,265 B | 25.7 s |
-| H2 | `image_to_video` | ✅ | h264 704×480@24, f=121 | 432,486 B | ⏸️ |
-| H3 | `image_text_to_video` | ✅ | h264 704×480@24, f=121 | 1,130,178 B | ⏸️ |
-| H4 | `video_to_video` | ✅ | h264 704×480@24, f=121 | 727,490 B | ⏸️ |
-| H5 | `text_to_audio_video` | ✅ | h264 + **aac 48000 Hz 2 ch** | 1,091,468 B | ⏸️ |
-| H6 | `image_to_audio_video` | ✅ | h264 + aac 48000 Hz 2 ch | 620,537 B | ⏸️ |
-| H7 | `image_text_to_audio_video` | ✅ | h264 + aac 48000 Hz 2 ch | 784,282 B | ⏸️ |
-| H8 | `text_to_audio` | ✅ | **pcm_s16le 48000 Hz 2 ch**, no video | 961,998 B | ⏸️ |
-| H9 | `video_to_audio` | ⚠️ see §4.5 | pcm_s16le 48000 Hz 2 ch, no video | 961,998 B | ⏸️ |
+| H2 | `image_to_video` | ✅ | h264 704×480@24, f=121 | 432,486 B | 26.3 s |
+| H3 | `image_text_to_video` | ✅ | h264 704×480@24, f=121 | 1,130,178 B | 26.6 s |
+| H4 | `video_to_video` (strength 0.7) | ✅ | h264 704×480@24, f=121 | 727,490 B | 27.0 s |
+| H5 | `text_to_audio_video` | ✅ | h264 + **aac 48000 Hz 2 ch** | 1,091,468 B | 25.0 s |
+| H6 | `image_to_audio_video` | ✅ | h264 + aac 48000 Hz 2 ch | 620,537 B | 26.6 s |
+| H7 | `image_text_to_audio_video` | ✅ | h264 + aac 48000 Hz 2 ch | 784,282 B | 26.7 s |
+| H8 | `text_to_audio` | ✅ | **pcm_s16le 48000 Hz 2 ch**, no video | 961,998 B | 5.6 s |
+| H9 | `video_to_audio` | ⚠️ §4.5 | pcm_s16le 48000 Hz 2 ch, no video | 961,998 B | 6.0 s |
 | H10 | `audio_to_audio` | ⏸️ **not run** | — | — | — |
 | H11 | `audio_to_video` | ⏸️ **not run** | — | — | — |
 
-All ✅ measured. `verify_streams.py` returned 0 on every one.
+All ✅ measured on the real `get_pipeline` path, no bypass, `verify_streams` 0.
+
+> **Wall-clock excludes the model load**, which is **14.0 s once** for a whole
+> batch ✅. A reader comparing 5.6 s against 25.7 s is comparing generation, not
+> startup.
+>
+> ⏸️ **These predate the schedule-and-guidance fix.** Eleven of the twelve ran
+> with a linear sigma schedule and SFT guidance — see §4.7. **Expect every
+> figure here to move** when the corrected matrix runs; they are recorded so the
+> before/after pair can be judged, not as a target.
 
 > ### ⚠️ Structure is not content
 >
@@ -77,6 +86,14 @@ All ✅ measured. `verify_streams.py` returned 0 on every one.
 > H8 and H9 are byte-identical in size because uncompressed PCM of equal
 > duration always is. That is why size proves nothing about content, and why it
 > took an RMS measurement to notice.
+>
+> **On audio levels generally.** Measured levels sort by *condition type*, not
+> by mode ✅ — text-only −5.2 to −6.2 dBFS, image-conditioned −8.2 to −15.2,
+> video-conditioned at strength 0.8 −54.5 to −55.0. The text-only group peaks at
+> exactly **1.0000 with no samples exceeding**, so the export is faithful and
+> **the saturation is upstream, in the model, not in our writer**. Those files
+> are consistent with each other and sit at the rail; ⏸️ whether that is correct
+> for this model has not been established.
 
 > ### ⏸️ Sizes differ between the two code paths, and it is not known why
 >
@@ -182,7 +199,13 @@ caches per image or per cold worker is ⏸️ unknown and decides its severity.
    the input by design, so a bug that drops it entirely is indistinguishable
    from correct operation.
 
-2. **Stage 2 works; its NATTEN fetch is still uncharacterised.** ✅ H14 ran and
+2. **Stage 2 works; its NATTEN fetch is characterised.** ✅ **Resolved once per
+   process, not per generation** — two stage-2 generations in one process, one
+   kernel fetch. So a Space needs outbound network at a worker's **first**
+   stage-2 use rather than on every press of Generate. Still a real dependency,
+   because **each cold worker pays it once**. Retained below for the mechanism.
+
+   ✅ H14 ran and
    produced 1408 × 960. But the diffusion decoder resolves its NATTEN kernel
    through a **version → ref lookup that goes over the network even when the
    kernel files are cached** 📄, and **whether that fires once per process or
@@ -204,27 +227,54 @@ caches per image or per cold worker is ⏸️ unknown and decides its severity.
    and both documented recipes mention only the spatial one. We download it
    (0.2619 GB) and do **not** wire it in. Not a defect; an open question.
 
-5. ### ⚠️ `video_to_audio` produced near-silence, and this is unresolved
+5. ### ✅ `video_to_audio` near-silence — **found and fixed**
 
-   H9 produced audio at roughly **−55 dBFS** ✅ — **RMS 58.3 against H8's
-   18013.9 at the same settings, about 309× quieter** — on a 32767 int16
-   ceiling. It is not an echo of H8 (different md5), so it is *something*, but
-   effectively inaudible where H8 is a healthy signal.
+   H9 produced audio at **−55.0 dBFS** against `text_to_audio`'s −5.2 ✅. The
+   cause was the `strength=0.8` request default reaching the video condition.
+   Measured sweep at seed 1234:
 
-   ⏸️ **Not established** whether this is a defect, a property of the
-   conditioning clip, or correct behaviour for the mode. Under investigation,
-   including whether H5/H6/H7 are also quiet — **if they are, this is one defect
-   and every audio artifact counted above is silent.**
+   | strength | audio | |
+   |---:|---:|---|
+   | 0.99 | −38.6 dBFS | near-silent |
+   | **0.80** | **−55.0 dBFS** | near-silent — the default that shipped |
+   | **0.50** | **−5.1 dBFS** | **healthy**, matches text-only |
+   | 0.20 | −11.5 dBFS | healthy |
+   | 0.05 | −13.2 dBFS | healthy |
 
-   The sentence that matters most in this document:
+   **The mechanism is schedule truncation, not masking.** Strength sets where in
+   the sigma schedule the run *starts*, so at 0.8 only the last ~20% of steps
+   execute. The video stream does not care — the condition anchors it. **The
+   audio stream has nothing anchoring it and never gets denoised**, staying near
+   its initialisation.
 
-   > **All twelve artifacts passed every structural check. Content was
-   > inspected for two of them, and one looked wrong.**
+   ⚠️ **It is a cliff, not a curve. Do not interpolate a new value.** 0.99 is
+   *louder* than 0.80 and 0.50 is louder than 0.20. `video_to_audio` now caps at
+   **0.5 because that was measured**; `video_to_video` is unchanged, because
+   high condition strength is exactly what its fidelity needs.
 
-   Channels, sample rate, duration, non-emptiness and `verify_streams` exit 0
-   **all pass on H9**. Silence and a healthy signal have identical stream
-   layout. This is the *"output looks right?"* column of the run log failing
-   exactly where it was predicted to — the one column no instrument can fill.
+   **How it was found is the point.** Every structural check passed on H9 —
+   channels, rate, duration, non-empty, `verify_streams` 0. Silence and a
+   healthy signal have identical stream layout. It took someone measuring RMS on
+   an artifact that had already been signed off.
+
+7. ### ⏸️ Every artifact in §2 predates the schedule fix
+
+   Eleven of the twelve runs sent **no sigmas at all**. `DISTILLED_SIGMA_VALUES`
+   reached the pipeline only when stage 2 was enabled, so upstream built its own
+   schedule and five guidance parameters took their **SFT** defaults —
+   `audio_guidance_scale` at **7.0** against an intended 1.0.
+
+   ```
+   sent:      [1.0, 0.875, 0.75, 0.625, 0.5, 0.375, 0.25, 0.125]
+   intended:  [1.0, 0.99375, 0.9875, 0.98125, 0.975, 0.909375, 0.725, 0.421875]
+   ```
+
+   Five of eight steps above σ=0.97 with a floor of 0.42, against one and 0.125
+   — a different denoising trajectory, not a mistuning. **Fixed**, and `H14` is
+   the only recorded run that used the correct schedule. ⏸️ **The corrected
+   matrix has not yet run**, so every size, time and level in §2 is a
+   pre-fix measurement. It was **not** the cause of the H9 silence (§4.5);
+   levels sorted by condition type while every run shared these settings.
 
 6. **The audio input rate is 16000, the vocoder output is 48000.** 📄 They are
    not symmetric. Anything that assumes one rate for both directions will
@@ -335,6 +385,38 @@ point of recording it: it is not one person's blind spot, it is what happens
 whenever the person who imagines the failure is the person who writes the check
 for it.
 
+### We can prove a function ran. We cannot prove it ran with the right arguments.
+
+**The gap this build ends on**, and the one worth closing next.
+
+`DISTILLED_SIGMA_VALUES` was defined, documented as mandatory, quoted in its
+module's docstring, and **referenced** — so every check we own passed. It was
+referenced from `stage_1_kwargs()`, which `StageRunner` applies **only when
+stage 2 is enabled**. Eleven of twelve host runs were generated with upstream's
+linear fallback and its **SFT** guidance defaults instead:
+
+```
+sent:      [1.0, 0.875, 0.75, 0.625, 0.5, 0.375, 0.25, 0.125]
+intended:  [1.0, 0.99375, 0.9875, 0.98125, 0.975, 0.909375, 0.725, 0.421875]
+```
+
+A reference check passes. A reachability check at module level passes. Even the
+function-level sweep passes, unless someone thought to name that particular
+function. **What nothing checked was the arguments the pipeline was actually
+called with.**
+
+The pattern that does work, used three times here, is to **record the vendor's
+specification independently and assert against that** — `MODEL_CARD_DISTILLED`,
+`REAL_AUDIO_VAE_CONFIG_KEYS`, `REAL_VOCODER_CONFIG_KEYS`. Each is a fact copied
+from the source of truth rather than derived from our own constants, so changing
+ours cannot quietly redefine what correct means. Without that independence the
+test agrees with the code and with nothing else.
+
+> **The escalation ladder, in the order this build climbed it:** is the module
+> imported → is it *reached by the path that does the work* → did this specific
+> *function* run → **were the arguments the ones the vendor specifies.** Only
+> the last rung is still hand-built, one call site at a time.
+
 ### A module can be reached and still contain a dead function
 
 The reachability sweep that exists to catch importer-count-zero missed one, for
@@ -394,13 +476,21 @@ priority.
 
 **Two things, and they are the two claims this project has not earned.**
 
-### First: settle whether the audio is real
+### First: run H17, the mel round-trip
 
-`video_to_audio` came back at roughly **−55 dBFS** — see §4.5. Check whether
-H5/H6/H7 are also quiet. **If they are, every audio artifact in §2 is silent**
-and nine passing modes becomes four. Listen to them; no instrument here can
-answer it, which is the whole reason it went unnoticed through twelve green
-runs.
+**H10 and H11 passing does not establish that the audio-input path is correct**
+— only that it runs. The forward mel transform does not exist in the checkpoint
+and had to be built; **five of its parameters are read from config and the rest
+are conventions** (`power`, `f_min`/`f_max`, `mel_scale`/`norm`, `center`, the
+log and its floor). A wrong choice there produces **well-formed audio that is
+quietly degraded** — which is precisely the failure mode this document keeps
+returning to. `TEST_PLAN` A.5.1 specifies the round-trip and the
+failure-ordered candidate list.
+
+⚠️ Its fixture must have **structure a wrong window would damage** — two tones
+and an envelope. **Noise and silence both survive a wrong analysis window
+looking much the same**, so either would make the test pass while proving
+nothing.
 
 ### Second: run H10b
 
