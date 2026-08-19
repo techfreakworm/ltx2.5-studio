@@ -286,6 +286,14 @@ threshold is `xlarge_threshold = 42.00 GiB`: **exceed it and ZeroGPU silently au
 | fp8 transformer (~19) + bf16 TE (~24) + rest (~10) | ~53 GB (~49.3 GiB) | over | `xlarge` | 2× | comfortable RAM/disk, no quota win |
 | fp8 transformer + int8 TE | ~41 GB (~38.2 GiB) | **under** | `large` | **1×** | best quota economics, highest accuracy risk |
 
+**⚠️ The quantized checkpoints are not available to us at all — the blocker is FORMAT, not
+size.** The int8 / nvfp4 files exist only in `Lightricks/LTX-2.5`, the **native** repo; there are
+none in the Diffusers pack. And our single-file path cannot load them:
+`CHECKPOINT_KEY_NAMES["ltx2"]` → `ltx2-dev` → config repo `Lightricks/LTX-2` (that is **2.0**),
+with every converter named `LTX_2_0_*` and **nothing for 2.5's connectors, diffusion_decoder,
+vocoder, duration_head or latent_upsampler** (§1.4). So no plan should be written around the
+quantized files being reachable — they are a different repo in a format we have no converter for.
+
 **Why bf16 is the default and not the quantised config.** Shipping quantised by default would
 trade a *known* uncertainty for an *unverified* one:
 

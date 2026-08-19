@@ -70,8 +70,14 @@ from .errors import LTXStudioError
 
 __all__ = [
     "SPACE_HARDWARE",
+    "AUTOPRUNE_PATTERN",
     "assert_returnable",
     "check_duration_signature",
+    "unbacked_parameters",
+    "read_process_maps",
+    "parse_maps",
+    "check_mmap_backed",
+    "backing_file",
     "estimate_duration",
     "gpu_decorator_kwargs",
     "host_has_cuda",
@@ -125,6 +131,109 @@ def local_spaces_stub() -> _LocalSpacesStub:
 def is_zerogpu(spaces_module) -> bool:
     """True only when the real platform package is present."""
     return spaces_module is not None and not getattr(spaces_module, "is_stub", False)
+
+
+#: What ZeroGPU's post-pack cleanup unlinks, from `ZEROGPU_MMAP_AUTOPRUNE_PATTERN`.
+#: We assert on the SAME basis it prunes on, rather than on a proxy for it.
+AUTOPRUNE_PATTERN = "*/huggingface/hub/models--*/blobs/*"
+
+#: Where the kernel reports this process's mappings. Linux only.
+PROC_MAPS = "/proc/self/maps"
+
+
+def parse_maps(text: str) -> list[tuple[int, int, str]]:
+    """``(start, end, path)`` for every FILE-BACKED region in a maps dump.
+
+    Anonymous regions are dropped deliberately: a tensor living in one is
+    exactly the failure we are looking for, and it shows up as an address that
+    matches nothing here.
+    """
+    regions: list[tuple[int, int, str]] = []
+    for line in text.splitlines():
+        fields = line.split(maxsplit=5)
+        if len(fields) < 6:
+            continue
+        path = fields[5].strip()
+        if not path or path.startswith("["):
+            continue
+        bounds, _, _ = fields[0].partition(" ")
+        start, _, end = bounds.partition("-")
+        try:
+            regions.append((int(start, 16), int(end, 16), path))
+        except ValueError:
+            continue
+    return regions
+
+
+def backing_file(address: int, regions) -> str | None:
+    """The file an address is mapped from, or None if it is anonymous."""
+    for start, end, path in regions:
+        if start <= address < end:
+            return path
+    return None
+
+
+def unbacked_parameters(module, regions, *, pattern: str = AUTOPRUNE_PATTERN) -> list[str]:
+    """Named parameters whose storage is NOT backed by a prunable blob.
+
+    Each one is 72 GB of disk that ZeroGPU will never reclaim.
+    """
+    import fnmatch
+
+    offenders = []
+    for name, tensor in module.named_parameters():
+        try:
+            address = tensor.data_ptr()
+        except Exception:
+            continue
+        path = backing_file(address, regions)
+        if path is None or not fnmatch.fnmatch(path, pattern):
+            offenders.append(f"{name} ({'anonymous memory' if path is None else path})")
+    return offenders
+
+
+def read_process_maps(path: str = PROC_MAPS) -> str | None:
+    """The maps dump, or None where the kernel does not provide one (macOS)."""
+    try:
+        with open(path) as handle:
+            return handle.read()
+    except OSError:
+        return None
+
+
+def check_mmap_backed(module, *, name: str, maps_text: str | None = None) -> tuple[bool, str]:
+    """Are this module's tensors still mmap'd from prunable blobs?
+
+    ZeroGPU reclaims the 72 GB HF snapshot after packing by walking
+    ``/proc/self/maps``, mapping each tensor's ``data_ptr()`` back to the blob it
+    came from, and unlinking those. **Anything that materialises tensors into
+    anonymous memory** -- a dtype cast, a ``.clone()``, an eager
+    ``low_cpu_mem_usage=False``, a non-safetensors path -- leaves nothing to
+    capture. The prune then frees nothing, and the Space dies **at steady state**
+    with 72 GB it cannot account for and **no error explaining why**.
+
+    Returns ``(checked, message)``. ``checked`` is False where the kernel gives
+    us no maps to read -- reported rather than passed silently, because "could
+    not check" and "checked and fine" must never look the same.
+    """
+    text = maps_text if maps_text is not None else read_process_maps()
+    if text is None:
+        return False, (
+            f"mmap backing for {name} was NOT checked: {PROC_MAPS} is unavailable on this "
+            f"platform. The check is meaningful only where ZeroGPU packs."
+        )
+    offenders = unbacked_parameters(module, parse_maps(text))
+    if offenders:
+        shown = ", ".join(offenders[:3])
+        more = f" and {len(offenders) - 3} more" if len(offenders) > 3 else ""
+        return True, (
+            f"{len(offenders)} parameters of {name} are not mmap'd from prunable HF blobs: "
+            f"{shown}{more}. ZeroGPU's post-pack cleanup unlinks only file-backed tensors, so "
+            f"the {len(offenders)}-parameter shortfall means the HF snapshot is never freed -- "
+            f"72 GB stays on disk with nothing to attribute it to. Something cast, cloned or "
+            f"eagerly loaded these; the dtype must match the checkpoint's on-disk dtype."
+        )
+    return True, f"mmap backing for {name}: all parameters file-backed and prunable"
 
 
 def host_has_cuda() -> bool:

@@ -299,3 +299,95 @@ def test_the_cuda_probe_never_raises_without_torch(monkeypatch):
 
     monkeypatch.setattr(builtins, "__import__", no_torch)
     assert zerogpu.host_has_cuda() is False
+
+
+# --------------------------------------------------------------------------
+# the mmap precondition — 72 GB that never gets freed, with nothing to blame
+# --------------------------------------------------------------------------
+#
+# ZeroGPU reclaims the HF snapshot after packing by walking /proc/self/maps,
+# mapping each tensor's data_ptr() back to the blob it came from, and unlinking
+# those. A dtype cast, a .clone(), an eager load or a non-safetensors path
+# materialises tensors into anonymous memory — nothing left to capture, nothing
+# freed, and the Space dies at STEADY STATE with no error explaining why.
+#
+# We assert on the same basis the packer prunes on, rather than on a proxy.
+
+BLOB = "/home/u/.cache/huggingface/hub/models--Lightricks--LTX-2.5-Diffusers/blobs/abc123"
+
+MAPS = f"""\
+7f0000000000-7f0000010000 r--s 00000000 00:1b 111 {BLOB}
+7f0000020000-7f0000030000 rw-p 00000000 00:00 0 
+7f0000040000-7f0000050000 r--p 00000000 00:1b 222 /usr/lib/x86_64-linux-gnu/libc.so.6
+"""
+
+MAPPED = 0x7F0000000100      # inside the blob
+ANONYMOUS = 0x7F0000025000   # a cast or a clone lands here
+WRONG_FILE = 0x7F0000045000  # file-backed, but not a prunable blob
+
+
+class _Tensor:
+    def __init__(self, address):
+        self._address = address
+
+    def data_ptr(self):
+        return self._address
+
+
+class _Module:
+    def __init__(self, **params):
+        self._params = params
+
+    def named_parameters(self):
+        return iter(self._params.items())
+
+
+def test_a_fully_mmapped_module_passes():
+    module = _Module(**{f"blk.{n}.weight": _Tensor(MAPPED) for n in range(4)})
+    checked, message = zerogpu.check_mmap_backed(module, name="base", maps_text=MAPS)
+    assert checked
+    assert "all parameters file-backed" in message
+
+
+def test_a_cast_tensor_is_caught():
+    """The mutation the operator asked for: force one parameter into anonymous
+    memory, exactly as a dtype cast or a .clone() would."""
+    module = _Module(good=_Tensor(MAPPED), **{"blk.7.weight": _Tensor(ANONYMOUS)})
+    checked, message = zerogpu.check_mmap_backed(module, name="base", maps_text=MAPS)
+    assert checked
+    assert "not mmap'd" in message
+    assert "blk.7.weight" in message, f"the offending parameter must be named: {message}"
+    assert "anonymous memory" in message
+
+
+def test_a_tensor_backed_by_the_wrong_file_is_caught():
+    """File-backed is not sufficient — it must match the prune pattern.
+
+    A tensor mapped from somewhere the autoprune glob does not cover is just as
+    unfreeable as an anonymous one, and looks fine to any check that only asks
+    "is this file-backed".
+    """
+    module = _Module(**{"blk.0.weight": _Tensor(WRONG_FILE)})
+    checked, message = zerogpu.check_mmap_backed(module, name="base", maps_text=MAPS)
+    assert checked and "not mmap'd" in message
+    assert "libc" in message
+
+
+def test_being_unable_to_check_is_reported_not_passed():
+    """"could not check" and "checked and fine" must never look the same.
+
+    On macOS there is no /proc/self/maps. Returning a quiet pass there would be
+    the same defect as the startup report that defaulted to 37/37.
+    """
+    module = _Module(**{"blk.0.weight": _Tensor(MAPPED)})
+    checked, message = zerogpu.check_mmap_backed(
+        module, name="base", maps_text=zerogpu.read_process_maps("/nonexistent/maps")
+    )
+    assert checked is False
+    assert "NOT checked" in message
+
+
+def test_anonymous_regions_are_not_parsed_as_backing():
+    regions = zerogpu.parse_maps(MAPS)
+    assert zerogpu.backing_file(MAPPED, regions) == BLOB
+    assert zerogpu.backing_file(ANONYMOUS, regions) is None

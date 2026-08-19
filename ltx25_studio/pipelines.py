@@ -40,7 +40,7 @@ from __future__ import annotations
 import inspect
 from dataclasses import dataclass
 
-from . import model_files
+from . import model_files, zerogpu
 from .constraints import (
     DEFAULT_FRAME_RATE,
     DEFAULT_SPATIAL_COMPRESSION_RATIO,
@@ -80,6 +80,25 @@ WEIGHT_DTYPE = "bfloat16"
 WEIGHT_DTYPE_LABEL = "bf16"
 
 _CACHE: dict[str, object] = {}
+
+
+def _log():
+    import logging
+
+    return logging.getLogger("ltx25_studio")
+
+
+def _spaces_present() -> bool:
+    """True only on a Space, where packing -- and so the prune -- actually runs.
+
+    Checked via ``sys.modules`` rather than by importing: this module must never
+    import ``spaces`` itself (it is a deploy-environment package, and importing
+    it from library code makes the library unimportable off-Space).
+    """
+    import sys
+
+    module = sys.modules.get("spaces")
+    return module is not None and not getattr(module, "is_stub", False)
 
 
 @dataclass(frozen=True)
@@ -227,6 +246,21 @@ def _base_pipeline(*, dtype=None, device: str | None = None):
         )
     except Exception as exc:
         raise ModelLoadError(component=BASE_KIND, reason=str(exc)) from exc
+
+    # ⚠️ REQUIRED CHECK, before anything can move or copy the tensors.
+    #
+    # ZeroGPU frees the 72 GB snapshot only for tensors still mmap'd from HF
+    # blobs. If a cast or a clone materialised them into anonymous memory the
+    # prune frees NOTHING, and the Space dies at STEADY STATE with 72 GB it
+    # cannot account for and no error saying why. That is the failure this
+    # project exists to eliminate, so it fails loudly here instead.
+    #
+    # Only meaningful where packing happens. `spaces` real => on a Space.
+    if _spaces_present():
+        checked, message = zerogpu.check_mmap_backed(built, name="base pipeline")
+        _log().info("%s", message)
+        if checked and "not mmap'd" in message:
+            raise ModelLoadError(component=BASE_KIND, reason=message)
 
     if device:
         # ZeroGPU intercepts this, rewrites it to .to("cpu") and packs every
