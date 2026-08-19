@@ -202,7 +202,31 @@ def _as_array(value):
         if hasattr(value, "cpu"):
             value = value.cpu()
     if hasattr(value, "numpy") and not isinstance(value, np.ndarray):
-        value = value.numpy()
+        try:
+            value = value.numpy()
+        except TypeError:
+            # numpy has no bfloat16, so `.numpy()` raises "Got unsupported
+            # ScalarType BFloat16". WEIGHT_DTYPE **is** bfloat16 and is
+            # documented as not configurable, so this is the DEFAULT path for
+            # every audio-exporting mode rather than an edge case: six of eleven
+            # modes generated successfully and died here, at the last step.
+            #
+            # Handled in `_as_array` and not in `_as_audio_planes` because this
+            # helper promises "whatever we were given -> a numpy array". A dtype
+            # it cannot convert is its problem, and fixing it at one caller
+            # leaves the other latent -- which is how this survived: a shared
+            # helper with two callers where only one ever passed the bad input.
+            #
+            # float32, deliberately, NOT float16. A silent narrowing inside the
+            # module whose entire job is "never silently wrong" would be its own
+            # defect; `.float()` is float32 in torch whatever the source dtype.
+            #
+            # Selected by what numpy can REPRESENT rather than by dtype name, so
+            # any future dtype without a numpy equivalent takes the same route
+            # without anyone having to remember to add it here.
+            if not hasattr(value, "float"):
+                raise
+            value = value.float().numpy()
     return np.asarray(value)
 
 

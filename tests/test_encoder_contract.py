@@ -69,9 +69,7 @@ class VocoderPipe:
     """A pipeline that exposes the vocoder ``generate()`` must read the rate off."""
 
     def __init__(self, sampling_rate=VOCODER_SAMPLING_RATE):
-        self.vocoder = SimpleNamespace(
-            config=SimpleNamespace(output_sampling_rate=sampling_rate)
-        )
+        self.vocoder = SimpleNamespace(config=SimpleNamespace(output_sampling_rate=sampling_rate))
         self.calls: list[dict] = []
 
     def __call__(self, **kwargs):
@@ -127,9 +125,7 @@ def test_the_production_encoder_can_actually_write_this_modes_artifact(mode_id, 
         )
 
 
-@pytest.mark.parametrize(
-    "mode_id", [m for m in MODE_IDS if "audio" in modes.MODES[m].exports]
-)
+@pytest.mark.parametrize("mode_id", [m for m in MODE_IDS if "audio" in modes.MODES[m].exports])
 def test_an_audio_exporting_mode_is_handed_the_vocoders_sampling_rate(mode_id, tmp_path):
     """PLAN §5.4: the rate comes off the loaded vocoder, never from a default here.
 
@@ -159,9 +155,7 @@ def test_an_audio_exporting_mode_is_handed_the_vocoders_sampling_rate(mode_id, t
     )
 
 
-@pytest.mark.parametrize(
-    "mode_id", [m for m in MODE_IDS if "video" in modes.MODES[m].exports]
-)
+@pytest.mark.parametrize("mode_id", [m for m in MODE_IDS if "video" in modes.MODES[m].exports])
 def test_a_video_exporting_mode_is_handed_a_frame_rate(mode_id, tmp_path):
     """The same trap, the other number.
 
@@ -196,9 +190,7 @@ def test_a_video_exporting_mode_is_handed_a_frame_rate(mode_id, tmp_path):
 # muxing: an mp4 with no audio in it is not a success
 # --------------------------------------------------------------------------
 
-JOINT_MODES = tuple(
-    m for m in MODE_IDS if set(modes.MODES[m].exports) == {"audio", "video"}
-)
+JOINT_MODES = tuple(m for m in MODE_IDS if set(modes.MODES[m].exports) == {"audio", "video"})
 
 
 def _streams(path):
@@ -261,9 +253,7 @@ def test_the_muxed_audio_keeps_every_channel(mode_id, tmp_path):
     )
 
 
-@pytest.mark.parametrize(
-    "mode_id", [m for m in MODE_IDS if modes.MODES[m].exports == ("audio",)]
-)
+@pytest.mark.parametrize("mode_id", [m for m in MODE_IDS if modes.MODES[m].exports == ("audio",)])
 def test_an_audio_only_mode_writes_a_real_track_at_the_vocoders_rate(mode_id, tmp_path):
     """The audio-only export, demuxed: right rate, right channel count, real samples."""
     result = run_production(mode_id, tmp_path)
@@ -284,12 +274,8 @@ def test_an_audio_only_mode_writes_a_real_track_at_the_vocoders_rate(mode_id, tm
 # --------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    "mode_id", [m for m in MODE_IDS if "audio" in modes.MODES[m].exports]
-)
-def test_an_audio_mode_with_no_vocoder_to_read_refuses_rather_than_assuming(
-    mode_id, tmp_path
-):
+@pytest.mark.parametrize("mode_id", [m for m in MODE_IDS if "audio" in modes.MODES[m].exports])
+def test_an_audio_mode_with_no_vocoder_to_read_refuses_rather_than_assuming(mode_id, tmp_path):
     """PLAN §5.4: an assumed rate resamples every export, silently and forever.
 
     The failure must be typed and must say what was missing, so the next person
@@ -337,3 +323,132 @@ def test_the_writer_still_refuses_a_sampling_rate_it_was_not_given(tmp_path):
         )
 
     assert "sampling rate" in str(caught.value)
+
+
+# --------------------------------------------------------------------------
+# the dtype the model actually produces
+#
+# Every fixture above hands the writer `np.float32`. The pipeline hands it
+# `torch.bfloat16` -- WEIGHT_DTYPE, documented as not configurable -- and numpy
+# has no bfloat16, so `.numpy()` raised and SIX OF ELEVEN MODES generated
+# successfully and died at the last step. 1926 tests passed over it, because the
+# fixture that made the tests possible encoded the assumption that hid the bug.
+# --------------------------------------------------------------------------
+
+
+class BFloat16Tensor:
+    """A tensor whose dtype numpy cannot represent, behaving as torch does.
+
+    Reproduces the exact failure rather than approximating it: `.numpy()` raises
+    ``TypeError`` the way torch does for bfloat16, and `.float()` is the only way
+    through. `test_the_bfloat16_fake_is_faithful_to_torch` is what stops this
+    class quietly drifting into a shape that could not fail.
+    """
+
+    def __init__(self, array):
+        self._array = array
+        self.dtype = "torch.bfloat16"
+
+    def detach(self):
+        return self
+
+    def cpu(self):
+        return self
+
+    def numpy(self):
+        raise TypeError("Got unsupported ScalarType BFloat16")
+
+    def float(self):
+        # torch returns a TENSOR, not an ndarray -- `.float().numpy()` is two
+        # steps. Returning the array here made the fake unfaithful in exactly
+        # the direction that would have let a broken downcast pass.
+        return _Float32Tensor(self._array)
+
+
+class _Float32Tensor:
+    """What ``.float()`` gives back: still a tensor, now numpy-representable."""
+
+    def __init__(self, array):
+        self._array = array
+        self.dtype = "torch.float32"
+
+    def detach(self):
+        return self
+
+    def cpu(self):
+        return self
+
+    def numpy(self):
+        return self._array
+
+
+def bfloat16_output():
+    out = RealOutput()
+    out.audio = BFloat16Tensor(out.audio)
+    return out
+
+
+class BFloat16Pipe(VocoderPipe):
+    """The pipeline as it really behaves: audio comes back as bfloat16."""
+
+    def __call__(self, **kwargs):
+        self.calls.append(kwargs)
+        return bfloat16_output()
+
+
+@pytest.mark.parametrize("mode_id", [m for m in MODE_IDS if "audio" in m])
+def test_an_audio_mode_can_be_written_when_the_audio_is_bfloat16(mode_id, tmp_path):
+    """The default precision must reach the encoder, for every audio mode."""
+    result = run_production(mode_id, tmp_path, pipe=BFloat16Pipe())
+
+    written = result.audio_path or result.video_path
+    assert written is not None and written.exists(), (
+        f"{mode_id} produced no artifact from bfloat16 audio"
+    )
+    assert written.stat().st_size > 0, f"{mode_id} wrote an empty file from bfloat16 audio"
+
+
+def test_the_downcast_lands_on_float32_not_float16():
+    """A silent narrowing in the module whose job is 'never silently wrong'."""
+    source = np.zeros((AUDIO_CHANNELS, AUDIO_SAMPLES), dtype=np.float32)
+
+    converted = outputs._as_array(BFloat16Tensor(source))
+
+    assert converted.dtype == np.float32, (
+        f"bfloat16 audio was converted to {converted.dtype}, not float32"
+    )
+
+
+def test_a_dtype_numpy_cannot_take_is_the_helpers_problem_not_the_callers():
+    """`_as_array` promises 'whatever we were given -> a numpy array'.
+
+    Fixing this at one caller would leave the other latent, which is how a
+    shared helper with two callers hid it in the first place.
+    """
+    converted = outputs._as_array(BFloat16Tensor(np.zeros((2, 8), dtype=np.float32)))
+
+    assert isinstance(converted, np.ndarray), (
+        f"_as_array returned {type(converted).__name__}, so the promise it makes is not kept"
+    )
+
+
+def test_the_bfloat16_fake_is_faithful_to_torch():
+    """The fixture is itself untested by the tests it makes possible.
+
+    That is the gap this whole section exists to close, so it is closed rather
+    than described: against real torch, assert the two properties
+    :class:`BFloat16Tensor` claims -- that `.numpy()` raises on bfloat16, and
+    that `.float()` yields float32. If either stops holding, the fake above is
+    testing a failure mode that no longer exists.
+    """
+    torch = pytest.importorskip("torch", reason="fidelity check needs real torch")
+
+    real = torch.zeros((AUDIO_CHANNELS, 16), dtype=torch.bfloat16)
+
+    with pytest.raises(TypeError):
+        real.numpy()
+    assert real.float().numpy().dtype == np.float32
+
+    assert outputs._as_array(real).dtype == np.float32, (
+        "a real bfloat16 tensor did not survive _as_array"
+    )
