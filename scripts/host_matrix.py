@@ -159,6 +159,12 @@ RUNS = {
     # A.4 H14 -- stage 2. Same prompt and seed as H1, so the comparison is the
     # refinement chain and nothing else; the artifact must DIFFER from H1's.
     "H14": dict(mode="text_to_video", needs=(), extra={"enable_stage_2": True}),
+    # A second stage-2 run in the SAME process, to settle whether NATTEN's
+    # version->ref lookup fires once per process or once per generation. One
+    # stage-2 run cannot distinguish the two; two can. Different seed so it is a
+    # genuinely separate generation rather than a cache hit.
+    "H14b": dict(mode="text_to_video", needs=(), extra={"enable_stage_2": True},
+                 seed=99999),
     # A.4.1 H4b -- strength 0.3 vs 0.9 on the same seed. Two runs that must differ
     # from each other; identical output means `strength` reaches nothing.
     "H4b_lo": dict(mode="video_to_video", needs=("video",), extra={"strength": 0.3}),
@@ -369,7 +375,7 @@ def main() -> int:
             width=spec_row.get("width", BASE_W),
             height=spec_row.get("height", BASE_H),
             num_frames=spec_row.get("frames", BASE_FRAMES),
-            seed=SEED,
+            seed=spec_row.get("seed", SEED),
             output_root=OUTPUT_ROOT,
             **spec_row["extra"],
         )
