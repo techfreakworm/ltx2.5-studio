@@ -147,25 +147,26 @@ list here does not fail fast — it fails after tens of GB, and on a 150 GB cap 
 A further **37.975 GB**, the *dev* (non-distilled) transformer. We ship the distilled 8-step
 path, so we do not ship it. Documented as opt-in (§2.5), not deleted from our mental model.
 
-### 2.3 The bf16 subset we ship — **33 files, 72.186 GB (67.23 GiB)**
+### 2.3 The bf16 subset we ship — **37 files, 72.185 GB (67.23 GiB)**
 
-Measured against the resolved index files, not estimated.
+Measured from the Hub's own byte counts, not estimated. The `GB` column is decimal
+(bytes / 1e9), matching how the Hub reports sizes.
 
 | component | GB | loaded via | why |
 |---|---:|---|---|
-| `transformer/` | 37.977 | index | the model |
-| `text_encoder/` | 23.920 | index | `Gemma4UnifiedForConditionalGeneration` (§10 OQ-4) |
-| `connectors/` | 6.345 | index | text → transformer conditioning; also a LoRA target |
-| `vae/` | 1.452 | index | video VAE (conv-decoder fallback — §7.4) |
-| `latent_upsampler/` | 0.996 | **subfolder** | stage-2 spatial upscale |
-| `diffusion_decoder/` | 0.834 | index | **the native 2.5 decoder** — §7.4 |
-| `temporal_latent_upsampler/` | 0.262 | **subfolder** | stage-2 temporal upscale |
-| `vocoder/` | 0.258 | index | `LTX2VocoderWithBWE` — **not** plain `LTX2Vocoder` |
-| `audio_vae/` | 0.107 | index | audio VAE (mel ↔ latent) |
-| `tokenizer/` | 0.032 | index | `GemmaTokenizer` |
-| `duration_head/` | 0.004 | index | duration prediction |
+| `transformer/` | 37.9762 | index | the model (4 live shards + config + index) |
+| `text_encoder/` | 23.9195 | index | `Gemma4UnifiedForConditionalGeneration` (§10 OQ-4) |
+| `connectors/` | 6.3445 | index | text → transformer conditioning; also a LoRA target |
+| `vae/` | 1.4522 | index | video VAE (conv-decoder fallback — §7.4) |
+| `latent_upsampler/` | 0.9957 | **subfolder** | stage-2 spatial upscale |
+| `diffusion_decoder/` | 0.8343 | index | **the native 2.5 decoder** — §7.4 |
+| `temporal_latent_upsampler/` | 0.2619 | **subfolder** | stage-2 temporal upscale |
+| `vocoder/` | 0.2583 | index | `LTX2VocoderWithBWE` — **not** plain `LTX2Vocoder` |
+| `audio_vae/` | 0.1065 | index | audio VAE (mel ↔ latent) |
+| `tokenizer/` | 0.0322 | index | `GemmaTokenizer` |
+| `duration_head/` | 0.0038 | index | duration prediction |
 | `scheduler/`, `model_index.json` | ~0 | index | `FlowMatchEulerDiscreteScheduler` |
-| **TOTAL** | **72.186** | | **= 67.23 GiB, 44% of the repo — we skip 92.006 GB** |
+| **TOTAL** | **72.185** | | **= 67.23 GiB, 44% of the repo — we skip 92.005 GB** |
 
 **`model_index.json`, verbatim** — this is the authority for what the pipeline expects:
 
@@ -202,12 +203,18 @@ stage-2 quality path needs.
 
 | excluded | GB | reason |
 |---|---:|---|
-| `transformer_full/` | 37.976 | the DEV transformer; not needed for the distilled 8-step path |
+| `transformer_full/` | 37.977 | the DEV transformer; not needed for the distilled 8-step path |
 | duplicate shard sets (transformer 8-shard + connectors single-file) | 44.330 | Trap A — same weights, different sharding |
 | `ltx-2.5-22b-distilled-lora-450-bf16.safetensors` (repo root) | 9.699 | the distilled LoRA for **DEV** workflows; useless when we ship the distilled transformer |
 
-**Arithmetic check:** 72.186 + 37.976 + 44.330 + 9.699 = **164.191 GB**, closing against the
-repo's stated 164.19 GB across 56 files (33 shipped, 23 skipped). The accounting is complete; there is no
+**Arithmetic check:** 72.185 + 37.977 + 44.330 + 9.699 = **164.191 GB**, closing against the
+repo's stated 164.19 GB across 56 files (37 shipped, 19 skipped).
+
+**Precision note, because it has already bitten once.** Summing figures that were each
+truncated to three decimals gives 37.975 for the transformer; the exact byte count
+(37,976,221,088 B) gives **37.9762**. The difference is 220 KB and irrelevant to the disk budget,
+but it is larger than a ±0.001 assertion tolerance. `model_files.py` carries the byte-exact
+values, so any test asserting on sizes should use a tolerance of ±0.01, not ±0.001. The accounting is complete; there is no
 unexplained remainder.
 
 ### 2.5 The transient disk peak
