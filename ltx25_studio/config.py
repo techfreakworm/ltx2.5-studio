@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from types import MappingProxyType
 
 from . import model_files
 from .errors import ConfigError
@@ -29,40 +28,32 @@ __all__ = [
     "ENV_LORA_MAX_GB",
     "ENV_OUTPUT_DIR",
     "ENV_OUTPUT_RETENTION_GB",
-    "ENV_TEXT_ENCODER_PRECISION",
-    "ENV_TRANSFORMER_PRECISION",
     "ENV_ZEROGPU_SIZE",
-    "PRECISION_SIZE_FACTOR",
     "RuntimeConfig",
     "load_config",
 ]
 
 # --- variable names, in one place so the deploy request can quote them -------
-ENV_TRANSFORMER_PRECISION = "LTX25_TRANSFORMER_PRECISION"
-ENV_TEXT_ENCODER_PRECISION = "LTX25_TEXT_ENCODER_PRECISION"
 ENV_ZEROGPU_SIZE = "LTX25_ZEROGPU_SIZE"
 ENV_GPU_DURATION_SECONDS = "LTX25_GPU_DURATION_SECONDS"
 ENV_OUTPUT_RETENTION_GB = "LTX25_OUTPUT_RETENTION_GB"
 ENV_OUTPUT_DIR = "LTX25_OUTPUT_DIR"
 ENV_LORA_MAX_GB = "LTX25_LORA_MAX_GB"
 
-TRANSFORMER_PRECISIONS = ("bf16", "fp8")
-TEXT_ENCODER_PRECISIONS = ("bf16", "int8")
 #: ``auto`` means "do not pass ``size`` at all". ZeroGPU promotes us to xlarge
 #: by itself once packed weights exceed its 42.00 GiB threshold, and passing the
 #: kwarg to a platform ``spaces`` that predates it is an import-time TypeError.
 ZEROGPU_SIZES = ("auto", "large", "xlarge")
 
-#: Rough on-disk multiplier per precision, for the startup footprint estimate.
-#: Deliberately approximate: it drives a log line and a preflight comparison,
-#: not an allocation.
-PRECISION_SIZE_FACTOR = MappingProxyType({"bf16": 1.0, "fp8": 0.5, "int8": 0.5})
-
-#: Defaults match the plan of record. bf16 is the documented configuration;
-#: quantisation is a fallback whose interaction with ZeroGPU's tensor packer is
-#: unverified (PLAN §2.6, technical risk #1).
-DEFAULT_TRANSFORMER_PRECISION = "bf16"
-DEFAULT_TEXT_ENCODER_PRECISION = "bf16"
+#: NOTE: there is deliberately NO precision/quantisation variable here.
+#: One existed and was wired to nothing -- `pipelines.get_pipeline` never read
+#: the config, so setting it changed no behaviour while `expected_weights_gb`
+#: confidently reported 53.20 GB for a load that was still 72.19 GB. An
+#: advertised lever attached to nothing is worse than no lever: it does not fail
+#: silently, it *speaks*, and it misdirects the next decision. Wiring it properly
+#: needs bitsandbytes or torchao -- neither pinned, neither verifiable without a
+#: GPU, and both using custom tensor subclasses whose interaction with ZeroGPU's
+#: packer is unknown (PLAN §2.6). So it is gone rather than half-present.
 DEFAULT_ZEROGPU_SIZE = "auto"
 DEFAULT_GPU_DURATION_SECONDS = 60
 DEFAULT_OUTPUT_RETENTION_GB = 20.0
@@ -101,8 +92,6 @@ def _number(name: str, default: float, *, minimum: float, integer: bool = False)
 class RuntimeConfig:
     """Everything tunable without a code change."""
 
-    transformer_precision: str
-    text_encoder_precision: str
     zerogpu_size: str
     gpu_duration_seconds: int
     output_retention_gb: float
@@ -115,36 +104,17 @@ class RuntimeConfig:
 
     @property
     def expected_weights_gb(self) -> float:
-        """Approximate on-disk weight footprint for the resolved precisions.
+        """On-disk weight footprint. Always the full bf16 subset.
 
-        Logged next to the preflight's measured free RAM and disk so that, when
-        a Space misbehaves, the first log lines say which configuration was
-        actually running.
+        There is no precision switch, so this is simply what
+        ``model_files`` declares -- and being a single honest number beats being
+        a configurable one that reported a footprint nobody was loading.
         """
-        total = 0.0
-        for name in model_files.DEFAULT_COMPONENTS:
-            spec = model_files.get_component(name)
-            if name == "transformer":
-                factor = PRECISION_SIZE_FACTOR[self.transformer_precision]
-            elif name == "text_encoder":
-                factor = PRECISION_SIZE_FACTOR[self.text_encoder_precision]
-            else:
-                factor = 1.0
-            total += spec.size_gb * factor
-        return total
-
-    @property
-    def is_quantised(self) -> bool:
-        return (
-            self.transformer_precision != DEFAULT_TRANSFORMER_PRECISION
-            or self.text_encoder_precision != DEFAULT_TEXT_ENCODER_PRECISION
-        )
+        return model_files.total_size_gb()
 
     def describe(self) -> str:
         """One-line startup summary."""
         return (
-            f"transformer={self.transformer_precision} "
-            f"text_encoder={self.text_encoder_precision} "
             f"zerogpu_size={self.zerogpu_size} "
             f"duration={self.gpu_duration_seconds}s "
             f"expected_weights={self.expected_weights_gb:.2f}GB "
@@ -155,12 +125,6 @@ class RuntimeConfig:
 def load_config() -> RuntimeConfig:
     """Resolve the runtime configuration, raising on anything unrecognised."""
     return RuntimeConfig(
-        transformer_precision=_choice(
-            ENV_TRANSFORMER_PRECISION, DEFAULT_TRANSFORMER_PRECISION, TRANSFORMER_PRECISIONS
-        ),
-        text_encoder_precision=_choice(
-            ENV_TEXT_ENCODER_PRECISION, DEFAULT_TEXT_ENCODER_PRECISION, TEXT_ENCODER_PRECISIONS
-        ),
         zerogpu_size=_choice(ENV_ZEROGPU_SIZE, DEFAULT_ZEROGPU_SIZE, ZEROGPU_SIZES),
         gpu_duration_seconds=_number(
             ENV_GPU_DURATION_SECONDS, DEFAULT_GPU_DURATION_SECONDS, minimum=1, integer=True

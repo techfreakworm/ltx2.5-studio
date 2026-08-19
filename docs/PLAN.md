@@ -272,9 +272,25 @@ trade a *known* uncertainty for an *unverified* one:
   tensors correctly is **unverified**. A packer that mishandles them fails in exactly the way
   we cannot tolerate: quietly, as a quality regression.
 
-So bf16 ships, `size="xlarge"` is **declared explicitly** rather than being silently promoted
-(§8.5), and dtype/quantization is **one switch** -- the `LTX25_TRANSFORMER_PRECISION` /
-`LTX25_TEXT_ENCODER_PRECISION` variables resolved in `config.py` (§5.1).
+So bf16 ships and `size="xlarge"` is **declared explicitly** rather than being silently promoted
+(§8.5).
+
+**⚠️ There is no precision switch, and the reason is a correction rather than a decision.**
+`LTX25_TRANSFORMER_PRECISION` and `LTX25_TEXT_ENCODER_PRECISION` existed, resolved cleanly, and
+were **wired to nothing** — `pipelines.get_pipeline` never read the config, so the load was
+always bf16. Worse, `expected_weights_gb` applied the precision factor anyway, so the startup
+report stated **53.20 GB for a load that was still 72.19 GB**. It did not fail silently: it
+*spoke*, and the number was wrong in the direction that misdirects the next decision. It was one
+approval away from being reached for to fix a disk eviction, twice.
+
+**An advertised lever attached to nothing is worse than no lever at all**, so it was removed
+rather than half-wired. Wiring it properly needs `bitsandbytes` or `torchao` — neither pinned,
+neither verifiable without a GPU, and both using custom tensor subclasses whose interaction with
+ZeroGPU's packer is unknown (technical risk #2). Quantization remains a *documented option*; it
+is not a *configured* one, and the difference is now visible in the code rather than implied.
+
+The routes actually available under disk pressure are persistent storage, a public Space, or
+smaller checkpoints — see §6.2.1.
 
 **⚠️ Flipping precision is a REBUILD, not a runtime switch.** Preloading is all-or-nothing
 (§6.2): preloaded files are owned by the build user and read-only to the runtime, so a quantised

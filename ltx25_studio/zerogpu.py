@@ -138,9 +138,17 @@ def estimate_duration(**params) -> int:
     **effective** duration times the size multiplier. So an over-generous
     request costs nothing in billing and everything in schedulability.
     """
-    from .config import DEFAULT_GPU_DURATION_SECONDS
+    from .config import DEFAULT_GPU_DURATION_SECONDS, load_config
 
-    seconds = params.get("gpu_duration_seconds") or DEFAULT_GPU_DURATION_SECONDS
+    seconds = params.get("gpu_duration_seconds")
+    if seconds is None:
+        # Read the CONFIG, not the constant. Reading the constant is what made
+        # LTX25_GPU_DURATION_SECONDS an advertised lever attached to nothing --
+        # it resolved fine and changed no behaviour.
+        try:
+            seconds = load_config().gpu_duration_seconds
+        except Exception:
+            seconds = DEFAULT_GPU_DURATION_SECONDS
     if params.get("enable_stage_2"):
         # Stage 2 adds an upsample pass plus three more denoise steps; a timeout
         # costs the whole reservation and proves nothing.

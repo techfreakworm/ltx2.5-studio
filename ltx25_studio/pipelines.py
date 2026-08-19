@@ -54,6 +54,8 @@ __all__ = [
     "DIFFUSION_DECODE_DENORMALIZE",
     "PipelineBundle",
     "StageRunner",
+    "WEIGHT_DTYPE",
+    "WEIGHT_DTYPE_LABEL",
     "assert_compression_ratios",
     "assert_frame_rate_default",
     "clear_cache",
@@ -65,6 +67,14 @@ __all__ = [
 
 #: Mandatory. See the module docstring -- the default silently corrupts output.
 DIFFUSION_DECODE_DENORMALIZE = False
+
+#: The dtype every component loads at, and its short label for the log.
+#: **Not configurable.** A precision variable existed, was wired to nothing, and
+#: reported a footprint nobody was loading (PLAN §2.6). Fixed here so the value
+#: the loader uses and the value the startup report prints cannot disagree --
+#: which is the whole reason the report states it at all.
+WEIGHT_DTYPE = "bfloat16"
+WEIGHT_DTYPE_LABEL = "bf16"
 
 _CACHE: dict[str, object] = {}
 
@@ -168,7 +178,7 @@ def get_pipeline(*, pipeline: str = "condition", dtype=None, device: str | None 
         built = cls.from_pretrained(
             model_files.REPO_ID,
             revision=model_files.REVISION,
-            torch_dtype=dtype or torch.bfloat16,
+            torch_dtype=dtype or getattr(torch, WEIGHT_DTYPE),
         )
     except Exception as exc:
         raise ModelLoadError(component=pipeline, reason=str(exc)) from exc
@@ -333,7 +343,7 @@ def _latents_of(output):
     return latents
 
 
-def startup_report(runtime_config, *, cached_files=None, missing_files=(), gpu_size=None) -> str:
+def startup_report(runtime_config, *, cached_files=None, missing_files=None, gpu_size=None) -> str:
     """The lines we will be reading at a distance when something goes wrong.
 
     Deliberately verbose. When R1 fails on a metered Space behind a 72 GB build,
@@ -350,6 +360,17 @@ def startup_report(runtime_config, *, cached_files=None, missing_files=(), gpu_s
     """
     import shutil
 
+    # `missing_files=None` means "go and look", NOT "nothing is missing". The
+    # default used to be `()`, so any caller that omitted the argument got a
+    # confident `37/37` without anything having been checked -- the cache count
+    # is the line that distinguishes preload-worked from preload-did-nothing, and
+    # a line that cannot report failure is not a check. Pass `()` explicitly to
+    # assert completeness you have established yourself.
+    if missing_files is None:
+        from . import preflight
+
+        missing_files = preflight.missing_cached_files()
+
     expected_files = len(model_files.download_allow_list())
     found = expected_files - len(missing_files) if cached_files is None else cached_files
     try:
@@ -361,6 +382,7 @@ def startup_report(runtime_config, *, cached_files=None, missing_files=(), gpu_s
     lines = [
         "LTX-2.5 Studio starting",
         f"  config          : {runtime_config.describe()}",
+        f"  dtype           : {WEIGHT_DTYPE_LABEL} (fixed; no precision switch)",
         f"  weights cached  : {found}/{expected_files} files"
         + (f"  MISSING {len(missing_files)}" if missing_files else ""),
         f"  disk            : {disk}",

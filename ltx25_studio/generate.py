@@ -295,11 +295,22 @@ def _apply_loras(pipe, request: GenerationRequest):
             weight = 1.0
             validated = False
         if not validated:
+            max_bytes = None
+            try:
+                from .config import load_config
+
+                max_bytes = load_config().lora_max_bytes
+            except Exception:
+                max_bytes = None  # fall back to the validator's own default
             # Stages 1-6.5 run here for anything the UI did not already screen.
             # The UI validates what it stages, but a programmatic caller -- or a
             # future UI that forgets -- would otherwise reach stage 7 with no
             # header check, no version check and no dimension check at all.
-            validate_lora(source, transformer=getattr(target, "transformer", None))
+            validate_lora(
+                source,
+                max_bytes=max_bytes,
+                transformer=getattr(target, "transformer", None),
+            )
         reports.append(
             lora_apply.apply_lora(
                 target, source, adapter_name=f"user_lora_{position}", weight=weight

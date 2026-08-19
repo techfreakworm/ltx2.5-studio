@@ -363,3 +363,85 @@ def test_the_preload_block_stays_within_the_ten_entry_cap():
     """
     entries = frontmatter_list("preload_from_hub")
     assert len(entries) <= 10, f"preload_from_hub has {len(entries)} entries; the cap is 10"
+
+
+# --------------------------------------------------------------------------
+# every advertised env var must reach the path that does the work
+# --------------------------------------------------------------------------
+#
+# `LTX25_TRANSFORMER_PRECISION` resolved cleanly, logged cleanly, and changed no
+# behaviour: `pipelines.get_pipeline` never read the config. Worse, the startup
+# report then stated a footprint of 53.20 GB for a load that was still 72.19 GB —
+# so it did not fail silently, it SPOKE, and it would have misdirected the next
+# decision. Two of these were about to be reached for under disk pressure.
+#
+# This is "is it reached by the path that does the work" (test_module_reachability)
+# applied to a config value rather than a module: setting it must observably change
+# something. Discovered by iterating load_config's own fields, so a lever added
+# tomorrow and wired to nothing fails here without anyone updating a list.
+
+
+def _config_fields():
+    from dataclasses import fields
+
+    from ltx25_studio.config import RuntimeConfig
+
+    return {f.name for f in fields(RuntimeConfig)}
+
+
+def test_every_config_field_is_consumed_somewhere_outside_config():
+    """A resolved value nothing reads is a lever attached to nothing."""
+
+    package = REPO_ROOT / "ltx25_studio"
+    sources = {
+        path: path.read_text()
+        for path in list(package.rglob("*.py")) + [REPO_ROOT / "app.py"]
+        if path.name != "config.py"
+    }
+    # A field consumed through a derived property is consumed: `lora_max_gb` is
+    # read by nothing directly, but `lora_max_bytes` is `int(lora_max_gb * 1e9)`
+    # and callers use that. Resolving properties keeps the guard accurate rather
+    # than merely strict -- a guard that fails on correct code gets disabled by
+    # whoever it blocks, which is the same defect pointed the other way.
+    import inspect
+
+    from ltx25_studio.config import RuntimeConfig
+
+    aliases: dict[str, set[str]] = {}
+    for name, attr in vars(RuntimeConfig).items():
+        if isinstance(attr, property):
+            body = inspect.getsource(attr.fget)
+            for field in _config_fields():
+                if f"self.{field}" in body:
+                    aliases.setdefault(field, set()).add(name)
+
+    unread = []
+    for field in sorted(_config_fields()):
+        names = {field} | aliases.get(field, set())
+        if not any(any(n in text for n in names) for text in sources.values()):
+            unread.append(field)
+    assert not unread, (
+        f"these RuntimeConfig fields are read by nothing outside config.py: {unread}. "
+        f"Each is an advertised environment variable that resolves cleanly and changes "
+        f"no behaviour — the shape that made LTX25_TRANSFORMER_PRECISION worse than "
+        f"having no lever at all, because it reported a footprint nobody was loading."
+    )
+
+
+def test_the_startup_report_cache_count_cannot_default_to_complete():
+    """The line that distinguishes preload-worked from preload-did-nothing.
+
+    Its default must be "go and look", not "nothing is missing" — a count that
+    can only ever say 37/37 is not a check, and this is the single line we will
+    be reading from the Space when a build goes wrong.
+    """
+    import inspect
+
+    from ltx25_studio import pipelines
+
+    signature = inspect.signature(pipelines.startup_report)
+    default = signature.parameters["missing_files"].default
+    assert default is None, (
+        f"startup_report(missing_files=) defaults to {default!r}. With an empty default "
+        f"every caller that omits it gets a confident 37/37 with nothing checked."
+    )
