@@ -1225,3 +1225,72 @@ is established; the pixel diffs cannot carry it.
 
 Eleven of eleven modes still produce correct, verified artifacts. What is outstanding
 is the **evidence quality of three comparisons**, not the function of any mode.
+
+## Reproducibility is still incomplete after the seeding fix
+
+Same mode, same `noise_scale=0.5`, same seed 1234, same fixture, back to back:
+
+```
+run-b25646d02dd2   md5 299526b4be5e594af51263db899dbae2   rms 0.283010  -11.0 dBFS
+run-68a83ce50ffd   md5 0ec4cb17f6e0f36429b1dad78a7e9634   rms 0.307674  -10.2 dBFS
+```
+
+**Different md5, 8.7% apart.** The generator reaches `kwargs["generator"]`
+(`generate.py:585`) and `audio_vae.encode`'s `.sample()` (`:355`) — both verified —
+so something else still draws unseeded. Untested candidates: the pipeline's own
+noise for the video stream, `_create_noised_state` inside `prepare_audio_latents`,
+or the diffusion decoder.
+
+**This may not be audio-specific.** If the unseeded draw is the pipeline's *main*
+noise, **every mode is irreproducible** and the twelve-mode pixel-diff table stays
+confounded regardless of the audio work. `seed` is a user-facing control that
+currently **records rather than determines**, which is a property worth a decision
+rather than a footnote.
+
+## H10b — large separation, deliberately not called controlled
+
+| | `noise_scale` | rms | dBFS |
+|---|---|---|---|
+| H10b_lo | 0.1 | 0.319835 | **−9.9** |
+| H10b_hi | 0.9 | 0.091639 | **−20.8** |
+| control ×2 | 0.5 | 0.283010 / 0.307674 | −11.0 / −10.2 |
+
+Halves differ **249%**, residual **8.7%**, direction correct — 0.1 keeps the upload,
+0.9 discards it by design.
+
+**Still not controlled, for the same reason a previous version of this claim had to
+be retracted: one control pair is not a variance bound.** 8.7% on a single
+comparison does not establish that 249% could not arise from a distribution nobody
+has sampled. When reproducibility genuinely holds the control collapses to zero and
+there is no statistical argument left to have — that is the version worth banking,
+rather than an argument about two samples.
+
+## The schedule truncation was withdrawn, so the sweep has no hypothesis
+
+`a8a5a86` withdrew it on the 2×2 above. The pre-registered prediction — *"if
+truncation is right the level recovers across the whole band, not only near 1.0"* —
+was about truncation's effect, and there is no truncation.
+
+So `0.2 / 0.42 / 0.6 / 0.8 / 0.95` was **deliberately not run**: five points on an
+unseeded path would be five numbers unattributable to `noise_scale` rather than to
+the residual. Characterising against a baseline that is not sound is the error that
+cost this build the strength sweep and nearly cost it a wrong `mel_scale`.
+
+## `audio_to_audio` works — the solid part
+
+Four independent runs, realistic input: **−9.9, −10.2, −11.0, −20.8 dBFS**, peaks
+0.44–0.96, correct streams, `verify_streams` exit 0 every time. **Levels, not
+comparisons** — which has been the robust half of every measurement here.
+
+## Final open items — none of them is a mode failing
+
+1. **Reproducibility**, possibly build-wide rather than audio-specific.
+2. **H10b's evidence quality**, dependent on (1).
+3. The **`noise_scale` / `sigmas[0]` disagreement** as a separate quality item:
+   upstream infers `noise_scale = sigmas[0]` when sigmas are given, our stage-2 path
+   honours it and the audio-input path does not. It could cost fidelity invisibly
+   without costing audibility, which is exactly why it needs a decision rather than
+   a measurement.
+
+All three are about how well things can be **evidenced**, which is a different class
+from the defects this host started with.
