@@ -678,3 +678,37 @@ def test_the_diffusion_decode_is_seeded_with_the_run_generator():
     assert decoder.kwargs.get("generator") == "gen-42", (
         f"the diffusion decode was left unseeded: {sorted(decoder.kwargs)}"
     )
+
+
+def test_a_two_stage_audio_run_does_not_return_a_silent_video():
+    """The decoder returns video only, and ``outputs`` reads audio with getattr.
+
+    ``LTX2VideoDecodeOutput`` has no ``audio`` field, so returning it directly
+    exports a silent file on every audio mode with nothing raised or logged.
+    """
+    runner, pipeline, _upsampler, _decoder = two_stage()
+
+    result = runner(prompt="a lighthouse", enable_stage_2=True)
+
+    audio = getattr(result, "audio", None)
+    assert audio is not None, (
+        "the two-stage result carries no audio, so every audio mode would export "
+        "a silent file and report success"
+    )
+    assert pipeline.audio_vae.decoded, "the audio latents were never decoded to a mel"
+    assert pipeline.vocoder.mels, "the mel never reached the vocoder"
+    assert audio == FakeTensor("waveform<-mel<-audio-latents@bfloat16"), (
+        f"the audio did not come from stage 2's latents via audio_vae + vocoder: {audio}"
+    )
+    assert getattr(result, "frames", None) == FakeTensor("decoded"), (
+        "the frames are not the diffusion decoder's output"
+    )
+
+
+def test_a_video_only_two_stage_run_returns_the_decoder_output_unchanged():
+    """No audio to reunite means nothing to wrap."""
+    runner, _pipeline, _upsampler, decoder = two_stage(audio=False)
+
+    result = runner(prompt="a lighthouse", enable_stage_2=True)
+
+    assert result is decoder._output, "a video-only run was given an audio field it never had"

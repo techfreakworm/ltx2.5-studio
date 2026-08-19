@@ -55,6 +55,7 @@ __all__ = [
     "DIFFUSION_DECODE_DENORMALIZE",
     "PipelineBundle",
     "StageRunner",
+    "StagedOutput",
     "WEIGHT_DTYPE",
     "WEIGHT_DTYPE_LABEL",
     "BASE_KIND",
@@ -465,6 +466,26 @@ def decode_kwargs(latents, *, generator=None) -> dict:
     return kwargs
 
 
+@dataclass(frozen=True)
+class StagedOutput:
+    """What the two-stage graph returns: the two fields the export path reads.
+
+    ``outputs.write_artifacts`` takes ``frames`` and ``audio`` off the pipeline
+    output with ``getattr`` and touches nothing else, so these two fields are the
+    entire contract and a single-stage output satisfies it already.
+
+    Deliberately ours rather than upstream's ``LTX2PipelineOutput``. Constructing
+    that would put an ``import diffusers`` on the stage-2 finish, making the one
+    branch that reunites video with audio unreachable in any environment without
+    the weights -- and PLAN §9.2 requires the default local run to be green with
+    zero weights on disk. A branch that cannot be exercised offline is how the
+    audio came to be dropped in the first place.
+    """
+
+    frames: object
+    audio: object
+
+
 class StageRunner:
     """Callable that owns the stage graph, so ``generate.py`` owns no branches.
 
@@ -524,7 +545,44 @@ class StageRunner:
         decoded = self.decoder(
             **decode_kwargs(_latents_of(stage_2), generator=kwargs.get("generator"))
         )
-        return decoded
+        return self._with_audio(decoded, stage_2)
+
+    def _with_audio(self, decoded, stage_2):
+        """Reunite the diffusion-decoded frames with the audio stage 2 produced.
+
+        **The diffusion decoder returns video only.** ``LTX2VideoDecodeOutput``
+        has a ``frames`` field and no ``audio`` field at all, and
+        ``output_type="latent"`` skipped the vocoder on the way in, so stage 2's
+        audio is still latents. Returning the decoder's output as-is therefore
+        exports a **silent file** on all six audio-bearing modes -- and
+        ``outputs.py`` reads the track with ``getattr(output, "audio", None)``,
+        so nothing raises, nothing logs, and the run reports success.
+
+        Video-only modes have no audio to reunite, so they get the decoder's
+        output unchanged rather than an ``audio=None`` field they never had.
+        """
+        audio_latents = _audio_of(stage_2)
+        if audio_latents is None:
+            return decoded
+
+        audio_vae = getattr(self.pipeline, "audio_vae", None)
+        vocoder = getattr(self.pipeline, "vocoder", None)
+        if audio_vae is None or vocoder is None:
+            raise ModelLoadError(
+                component="vocoder",
+                reason=(
+                    "stage 2 produced audio latents but the pipeline exposes no audio_vae or "
+                    "vocoder to finish them. Refusing to return a silent video for a mode that "
+                    "exports audio."
+                ),
+            )
+
+        # Upstream's own finish for this path. These latents are already
+        # denormalized, which is what `audio_vae.decode` expects.
+        mel = audio_vae.decode(audio_latents.to(audio_vae.dtype), return_dict=False)[0]
+        audio = vocoder(mel)
+
+        return StagedOutput(frames=_latents_of(decoded), audio=audio)
 
 
 def _with_real_conditions(kwargs: dict) -> dict:
