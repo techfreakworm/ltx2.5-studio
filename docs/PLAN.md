@@ -1283,6 +1283,25 @@ HF's guidance, quoted: **models must be placed on cuda at the root module level.
 **Corollary: do NOT lazy-load models inside the decorated function.** HF documents that
 placements are optimised for startup; lazy loading defeats the packer entirely.
 
+##### Considered and rejected: deferring the second workflow
+
+Building only one pipeline at startup and the other on demand would halve the
+packed footprint, and the disk arithmetic in §7.4 makes that look attractive.
+
+**It is a worse fix, and worse in a way visible only on ZeroGPU.** A pipeline
+built lazily inside the decorated function is never packed, so it is re-transferred
+from RAM on **every cold worker** — trading a one-off disk cost for a per-request
+cost, on the platform where cold starts are the normal case. It would show up as a
+win in the disk numbers and a loss in every generation.
+
+`from_pipe` gets both properties at once: both pipelines exist at module scope so
+both are packed, and they share module objects so there is only one set of tensors
+*to* pack. Strictly better on both axes.
+
+Recorded rather than dropped because the arithmetic makes it an obvious idea, and
+the next person to have it deserves the reason it does not work rather than
+silence.
+
 ### 8.4 `enable_model_cpu_offload()` must NOT be used
 
 This supersedes an earlier draft of this plan, which called it mandatory. It is the opposite.

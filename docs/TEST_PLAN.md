@@ -1,16 +1,128 @@
-# LTX-2.5 Studio — GPU Test Plan
+# LTX-2.5 Studio — Test Plan
 
-**This document must exist and be reported before the first GPU call.**
+Two matrices, for two different questions. **They are not interchangeable and a
+result from one does not answer the other.**
 
-Companion to [`docs/PLAN.md`](PLAN.md). PLAN says what we build; this says **what we are allowed
-to spend proving it works**, and it is a budget document as much as a test document.
+| | **Part A — hinode** | **Part B — ZeroGPU** |
+|---|---|---|
+| answers | **is the application correct?** | **does it fit the platform?** |
+| hardware | RTX PRO 6000 Blackwell, **unpartitioned**, 97887 MiB | same silicon, MIG-partitioned |
+| RAM | 124 GB | ~68 GB (community observation) |
+| disk | 136 GB free, persistent | 150 GB cap, **wiped on cold start** |
+| tensor packing | none | O_DIRECT to `~/.zerogpu/tensors` |
+| budget | time only | **2400 GPU-s/day**, 2× on `xlarge` |
+| status | **critical path** | **parked** |
 
-**Governing principle: cover code paths, not tabs.** Eleven UI modes do not need eleven GPU
-runs. Seven runs cover every distinct code path we have. Everything else is a unit test.
+**Label every claim.** A mode that works on hinode is **HOST-PROVEN**; whether it
+fits ZeroGPU is **ZEROGPU-PENDING** and hinode cannot speak to it. The reverse is
+also true: a ZeroGPU disk failure says nothing about whether the mode is correct.
 
 ---
 
-## 1. The economics
+# Part A — hinode: is the application correct?
+
+No quota, so the constraint is wall-clock rather than seconds-of-GPU. That
+changes the design of the matrix, not just its size: on ZeroGPU we deliberately
+proved **code paths** and skipped modes whose paths were already covered. Here we
+can afford to run every mode at a resolution someone would actually use, and the
+right thing to buy with that budget is **output we can look at**, not more green
+ticks.
+
+## A.0 Before any run
+
+| check | why |
+|---|---|
+| `HF_TOKEN` exported **in the launching environment** | `ensure_weights` runs here now (capability gating). Not merely present in an interactive shell — it must survive `nohup`/`tmux` |
+| startup log shows `will_use_gpu=True` | if False, the app silently does no GPU work at all — the defect this gating fixed |
+| `weights cached : 37/37` | 26/37 means the download is incomplete; the run would fail later and more confusingly |
+| `dtype : bf16 (fixed; no precision switch)` | there is no precision lever; if you are reaching for one, read PLAN §2.6 |
+| **module identity** across the two pipelines | `pipe_a.transformer is pipe_b.transformer`. Equality passes with two copies loaded — 134 GiB against a 96 GiB card |
+| `audio_scheduler` present on the condition pipeline | the one component the two classes do not share. If sharing dropped it, the joint audio degrades in a way the **video output never reveals** |
+
+## A.1 The matrix — all eleven modes, real resolutions
+
+Baseline **704×480, 121 frames** unless stated. Ordered by risk: the earliest
+failure should be the cheapest to diagnose.
+
+| # | Run | Mode(s) | Config | Proves |
+|---|---|---|---|---|
+| H1 | first light | `text_to_video` | baseline | the entire stack: load → single denoise → **diffusion decode** → muxed mp4 |
+| H2 | joint audio-visual | `text_to_audio_video` | baseline | the flagship. Audio and video in one container, **stereo, 24 kHz** |
+| H3 | image conditioning | `image_to_video` | baseline + 1 image | `LTX2VideoCondition`, VAE encode, **CRF-18** branch, **pixel→latent** index |
+| H4 | image + prompt | `image_text_to_video` | baseline + image + prompt | prompt survives alongside a condition |
+| H5 | video conditioning | `video_to_video` | baseline + clip, strength 0.7 | multi-frame condition — **never CRF-recompressed**, a different branch from H3 |
+| H6 | joint from image | `image_to_audio_video` | baseline + image | H2 ∩ H3 |
+| H7 | joint from image+text | `image_text_to_audio_video` | baseline + image + prompt | the fullest first-class path |
+| H8 | audio-only export | `text_to_audio` | min resolution | audio track extracted; **video still rendered internally** |
+| H9 | audio from video | `video_to_audio` | min resolution + clip | as H8 from a conditioned source |
+| H10 | audio→audio | `audio_to_audio` | min resolution + clip | waveform → mel → `audio_vae` → **4D latents** + `noise_scale` |
+| H11 | audio→video | `audio_to_video` | baseline + clip | audio-latent input, video out — pays audio encode **on top** |
+| H12 | **LoRA, positive** | `image_to_video` + adapter | baseline | stage 7 attaches to **> 0 modules** on real weights |
+| H13 | **LoRA, negative** | same + 2B adapter | baseline | **rejected** naming module/expected/actual |
+| H14 | stage 2 | `text_to_video`, `enable_stage_2=True` | baseline | upsample → STAGE_2 sigmas → **`denormalize=False`** |
+| H15 | duration head | `text_to_video`, no `num_frames` | tight min/max | auto-duration |
+| H16 | high resolution | `text_to_audio_video` | **1216×704** | the resolution a user would actually pick |
+
+**H14 must pass `enable_stage_2=True` explicitly.** It defaults off, so a run that
+omits it silently exercises the stage-1 path and reports a pass — spending the run
+to prove the thing it was designed to test did not happen.
+
+**H13's fixture and the both-directions check** are unchanged from §B.5 — the
+positive adapter is `AhsanHareem/reelbids-ltx25-camera-lora` (4096 dims, empty
+metadata), the negative is `charlied98/ltxv_2b_lora_soft_draw_v1` (2048 at
+`attn1.to_k`).
+
+## A.2 What hinode CANNOT tell us
+
+Recorded so a green Part A is not mistaken for a shippable Space:
+
+- **tensor packing** — does not run here at all
+- **the 150 GB ceiling** — §7.4 arithmetic says even one pipeline may not fit
+- **~68 GB RAM** — hinode has 124 GB, so a run that fits here may OOM there
+- **the `size` kwarg against the platform's own `spaces`** — still first-contact
+- **`preflight` strict on a Space** — different filesystem, different cache
+
+A mode passing H1–H16 is **HOST-PROVEN**. Every one of them remains
+**ZEROGPU-PENDING**.
+
+## A.3 Run log
+
+Filled in as runs complete. Wall-clock rather than GPU-seconds, because the
+constraint here is time, not quota.
+
+| Run | Mode | Result | Wall clock | Output looks right? | Notes |
+|---|---|---|---|---|---|
+| H1 | text_to_video | — | — | — | not run |
+| H2 | text_to_audio_video | — | — | — | not run |
+| H3 | image_to_video | — | — | — | not run |
+| H4 | image_text_to_video | — | — | — | not run |
+| H5 | video_to_video | — | — | — | not run |
+| H6 | image_to_audio_video | — | — | — | not run |
+| H7 | image_text_to_audio_video | — | — | — | not run |
+| H8 | text_to_audio | — | — | — | not run |
+| H9 | video_to_audio | — | — | — | not run |
+| H10 | audio_to_audio | — | — | — | not run |
+| H11 | audio_to_video | — | — | — | not run |
+| H12 | LoRA positive | — | — | — | not run |
+| H13 | LoRA negative | — | — | n/a | not run |
+| H14 | stage 2 | — | — | — | not run |
+| H15 | duration head | — | — | — | not run |
+| H16 | high resolution | — | — | — | not run |
+
+**"Output looks right?" is a required column, not decoration.** Every failure this
+build has produced was something that *ran* and was wrong — a silent video, a
+double-denormalized decode, an adapter that attached to nothing. A green exit code
+is the weakest evidence available here, and hinode is the first place we can
+afford to actually look at the artifact.
+
+---
+
+# Part B — ZeroGPU: does it fit the platform?
+
+**Parked.** Retained unchanged because it is the matrix we return to, and because
+its economics do not apply to hinode and must not leak into Part A.
+
+## B.1 The economics
 
 | | |
 |---|---|
@@ -24,7 +136,7 @@ runs. Seven runs cover every distinct code path we have. Everything else is a un
 be fixed and retested on the same day. A test budget with no reserve is a test budget that
 guarantees the last bug found is the one you cannot verify fixed.
 
-### 1.1 Two metering paths — they are not the same number
+### B.1.1 Two metering paths — they are not the same number
 
 This distinction decides how we set `duration=`:
 
@@ -44,7 +156,7 @@ discover it, never hardcode it.
 
 ---
 
-## 2. What does NOT need a GPU
+## B.2 What does NOT need a GPU
 
 This is the largest cost saving in the document, so it comes before the matrix.
 
@@ -59,7 +171,7 @@ This is the largest cost saving in the document, so it comes before the matrix.
 | Preflight RAM/disk checks | inject fake numbers |
 | **Audio-only export (modes 8, 9, 10, 11)** | see §2.1 |
 
-### 2.1 Modes 8–11 need NO dedicated GPU run
+### B.2.1 Modes 8–11 need NO dedicated GPU run
 
 This is the clearest illustration of "code paths, not tabs".
 
@@ -70,7 +182,7 @@ fixture.
 
 Spending four GPU runs on them would buy nothing but four tabs turning green.
 
-### 2.2 LoRA stage 7 needs a load, not a generation
+### B.2.2 LoRA stage 7 needs a load, not a generation
 
 Stage 7 — "assert the adapter attached to > 0 modules" — needs **real weights in memory**, but it
 does **not** need a completed denoise. It is folded into **R3** rather than given its own run, so
@@ -79,7 +191,7 @@ adapter applied.
 
 ---
 
-## 3. The minimal legal configuration
+## B.3 The minimal legal configuration
 
 Verified against `check_inputs`: **the only dimension rule is `height % 32 == 0` and
 `width % 32 == 0`.** There is **no minimum resolution**, and `num_frames % 8 == 1` is not checked
@@ -88,11 +200,11 @@ upstream at all (PLAN §5.5 — which is exactly why *we* check it).
 **Therefore the cheapest legal proving run is `256 × 256`, `num_frames = 9`.**
 
 Quality will be bad. That is correct and intended: these runs prove **code paths**, not output
-quality. A showcase run happens at the end, only if quota remains (§6).
+quality. A showcase run happens at the end, only if quota remains (§B.6).
 
 ---
 
-## 4. The matrix — 7 runs, 11 modes, ordered by risk
+## B.4 The matrix — 7 runs, 11 modes, ordered by risk
 
 Ordered so that **the most likely failure surfaces while the most quota remains**. R1 is first
 because it is the riskiest thing we have: if the packer, the worker, or the diffusion decode is
@@ -126,30 +238,30 @@ forces it off, so R6 must use a video-exporting mode. R1's `text_to_video` quali
   config the way the others are. **Pass the tightest legal `min_seconds`/`max_seconds`** to keep
   this from being the expensive one.
 
-Both are still tight enough to reserve comfortably (§1.1).
+Both are still tight enough to reserve comfortably (§B.1.1).
 
 ---
 
-## 5. The R3 fixtures — one positive, one negative
+## B.5 The R3 fixtures — one positive, one negative
 
 R3 proves **both directions in a single GPU call**: that a good adapter works, and that a bad one
 is refused. All candidates were assessed by HTTP **range-reading their safetensors headers** — no
 full downloads.
 
-### 5.1 Rejected: the official distilled LoRA
+### B.5.1 Rejected: the official distilled LoRA
 
 `ltx-2.5-22b-distilled-lora-450-bf16.safetensors` (9.699 GB) is documented for **DEV-transformer**
 workflows. **We ship the distilled transformer**, so this is the wrong adapter for our
 configuration and a passing result would be misleading. Already excluded from the disk budget
 (PLAN §2.4) for the same reason.
 
-### 5.2 Rejected: the official IC-LoRAs
+### B.5.2 Rejected: the official IC-LoRAs
 
 `Lightricks/LTX-2.5-22b-IC-LoRA-Pixel-Spatial-Upscaler` (0.327 GB) and the 2.3 IC-LoRA family are
 **separately gated** and the operator's token does not have them — verified, they 403. Not worth
 a second gate request, because §5.3 is a better fixture anyway.
 
-### 5.3 **Positive fixture: `AhsanHareem/reelbids-ltx25-camera-lora`**
+### B.5.3 **Positive fixture: `AhsanHareem/reelbids-ltx25-camera-lora`**
 
 File `lora_weights_step_01250.safetensors`.
 
@@ -172,7 +284,7 @@ absent-is-not-fatal branch against a real file. Note the distinction the code mu
 metadata **present but empty** is a different shape from metadata **absent**, and both mean "no
 version signal" (PLAN §4.5).
 
-### 5.4 **Negative fixture: `charlied98/ltxv_2b_lora_soft_draw_v1`**
+### B.5.4 **Negative fixture: `charlied98/ltxv_2b_lora_soft_draw_v1`**
 
 An LTX-**Video-2B** adapter — flatly the wrong architecture, and the reason PLAN §4.3 has a stage
 6.5 at all. It passes stages 4, 5 and 6, passes diffusers' only built-in check, and may even pass
@@ -182,7 +294,7 @@ An LTX-**Video-2B** adapter — flatly the wrong architecture, and the reason PL
 R3 attempts it **after** the positive case and asserts a loud, specific rejection naming module,
 expected and actual dims. One run, both directions.
 
-### 5.5 Rejected candidates
+### B.5.5 Rejected candidates
 
 | candidate | why not |
 |---|---|
@@ -211,14 +323,14 @@ and they are what makes stages 1-3 testable at all.
 
 ---
 
-## 6. Showcase runs
+## B.6 Showcase runs
 
 **Only if quota remains after the matrix is green**, and only with the stop line respected. A
 showcase run at full resolution is a *demo*, not a test — it must never displace a retest.
 
 ---
 
-## 7. Rules of engagement
+## B.7 Rules of engagement
 
 1. **Log actual cost after every run** — requested `duration=`, `size`, and **real** GPU-seconds
    — into §8. A budget nobody reconciles is a budget nobody has.
@@ -234,7 +346,7 @@ showcase run at full resolution is a *demo*, not a test — it must never displa
 
 ---
 
-## 8. Run log
+## B.8 Run log
 
 Filled in after each run. Running total maintained here.
 
