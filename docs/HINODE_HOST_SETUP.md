@@ -900,3 +900,74 @@ list was an invitation to do it again.
 **So the conventions remain UNVALIDATED.** H17 cannot answer that question yet, and
 H10/H11 passing would establish even less than before — not that the mel is right,
 and now not even that the plumbing is.
+
+### H17 — PASS, and what that does and does not establish
+
+`23f7e8b` ("the mel must reach the encoder batched AND time-major") and `5aa5d7b`
+(the dtype cast) together fixed every structural finding above. On the natural
+unbatched `(2, 64000)` that `load_waveform` returns:
+
+```
+mel      (1, 2, 401, 64) float32   min -11.5129  max -0.0854   <- batched AND time-major
+latents  (1, 8, 101, 16) bfloat16  absmax 8.2500  rms 2.7778    <- frames on axis 2, as declared
+recon    4.01 s out from 4.00 s in                             <- length TRACKS the input
+ch0  -16.6 dB   tones recovered: [220, 1320] of [220, 1320]
+ch1  -11.1 dB   tones recovered: [440] of [440, 2640]
+```
+
+**So the five conventions nobody declared — `power=1.0`, `f_min=0.0`,
+`mel_scale`/`norm=slaney`, `center=True`, log floor `1e-05` — reconstruct a known
+signal.** That claim is earned by measurement. Moving a tensor between devices does
+not change the arithmetic, so this conclusion survives the caveat below.
+
+All three structural findings confirmed fixed against the tree: frames on axis 2,
+and the reconstruction length tracking the input where it had been pinned at 0.61 s
+for *any* input. `encoder_layout` states the trap better than the original report
+did — *"correcting only the batch axis yields a 4D tensor that satisfies the rank
+check and is a transposed spectrogram — audio out, silently wrong."*
+
+**Caveat on the instrument, not the result.** `peak_bins` reports only the **top 4**
+peaks, and ch1's energy is dominated by the 440 Hz region — so 2640 Hz being absent
+from the recovered list is **not** evidence of absent energy. Recorded as unresolved
+rather than as high-frequency loss; inferring a defect from a limitation of one's own
+tool is the error this file keeps returning to.
+
+### ⛔ The device half of the same hand-off
+
+```
+RuntimeError: Input type (CPUBFloat16Type) and weight type (CUDABFloat16Type) should be the same
+  generate.py:318   _prepared_audio
+  audio.py:706      encode_waveform_to_latents
+```
+
+`load_waveform` returns a **CPU** tensor, the mel is computed on CPU, and
+`_matched_dtype` does `return cast(dtype=dtype)` — **dtype only** — while the VAE's
+weights are on CUDA. It matches one of the two things that must match. One line:
+read `device` off the component alongside `dtype`, and rename, because a function
+called `_matched_dtype` that also moves devices will have the device half tidied out
+by someone matching it to its name.
+
+### The harness hid it, and that is the same failure it exists to catch
+
+H17 originally did `wave.to(device=vae.device, dtype=vae.dtype)` before encoding, so
+it **performed a step the application omits** and passed while the app raised. That
+is a float32-fixture-over-a-bfloat16-defect in a new costume, authored here.
+
+Fixed by writing the fixture to a wav and reading it back through
+`load_waveform`, so the round trip now begins exactly where a user's upload begins —
+same decoder, same dtype, same device. H17 now reproduces the device defect instead
+of stepping over it, and `load_waveform` is inside what it covers rather than
+alongside it.
+
+### Four boundary defects, one hand-off, all four attributes
+
+1. `from_pipe` recasting shared bf16 modules to fp32 — **dtype**, silently.
+2. `_as_array` calling `.numpy()` on bf16 — dtype, the way **out**.
+3. float32 mel into a bf16 `conv_in` — dtype, the way **in**.
+4. CPU mel into CUDA weights — **device**, same hand-off.
+
+Plus rank and axis order, both found in the same function within the hour. **At a
+hand-off between our code and a model, every attribute that can disagree eventually
+does — dtype, device, rank, axis order — and fixing them one at a time as they
+surface is not the same as enumerating them.** All four attributes of a single
+tensor hand-off failed today, in sequence, and each was found only by running it.
