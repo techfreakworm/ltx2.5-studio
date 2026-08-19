@@ -38,6 +38,7 @@ from ltx25_studio import pipelines
 GiB = 1024**3
 SECONDS = float(os.environ.get("MEL_SECONDS", "4.0"))
 SWAP = os.environ.get("MEL_SWAP") == "1"
+FORCE_DEVICE = os.environ.get("MEL_FORCE_DEVICE") == "1"
 #: (fundamental, harmonic) per channel. The harmonic is the one at risk.
 TONES_L = (220.0, 1320.0)
 TONES_R = (440.0, 2640.0)
@@ -192,6 +193,20 @@ def main() -> int:
     log(f"\nread back via load_waveform: {tuple(loaded.shape)} @ {loaded_rate} Hz "
         f"dtype={loaded.dtype} device={loaded.device}")
     dev_wave = loaded
+    if FORCE_DEVICE:
+        # Moves the waveform to the VAE's device, which the APP DOES NOT DO -- see
+        # the CPU/CUDA defect at `encode_waveform_to_latents`. Off by default for
+        # exactly that reason.
+        #
+        # It is offered because device placement does not change arithmetic: the
+        # mel, the VAE and the vocoder compute the same values wherever the tensor
+        # lives. So this variant can answer a question about FREQUENCY CONTENT --
+        # which tones survive the round trip -- while the app path is blocked. It
+        # answers nothing about whether a user's upload works, and a run using it
+        # must not be reported as an app-path pass.
+        dev_wave = loaded.to(device=vae.device)
+        log(f"  MEL_FORCE_DEVICE=1: moved to {dev_wave.device} "
+            f"(answers frequency content only, NOT the app path)")
 
     log("\n=== stage 1: forward mel ===")
     # The app's own transform, unwrapped. `encode_waveform_to_latents` casts to the
