@@ -775,3 +775,69 @@ AFTER   frame 0 → 120 : mean 82.52 → 110.47  std 85.40 → 89.80   (stable)
 
 Flagged earlier as needing a human eye; it no longer does. `std` now sits ~85–90 on
 every mode against 50–60 before — materially more contrast and detail.
+
+## H17 — the mel round-trip, and why H10/H11 passing would not have been enough
+
+The forward mel does not exist in the checkpoint, so `build_mel_front_end`
+constructs it. **Five parameters are read; the rest are chosen:**
+
+| read from the checkpoint | | convention, declared nowhere |
+|---|---|---|
+| `n_fft` 512 | `vocoder.filter_length` | `power` 1.0 |
+| `win_length` 512 | `vocoder.window_length` | `f_min` 0.0 / `f_max` None |
+| `hop_length` 160 | `audio_vae.mel_hop_length` | `mel_scale` / `norm` slaney |
+| `n_mels` 64 | `audio_vae.mel_bins` | `center` True |
+| `sample_rate` 16000 | `audio_vae.sample_rate` | log floor 1e-05 |
+
+Nothing offline can validate the right column, and a wrong choice there is
+*"audible as degraded audio, reported as nothing"*. **H10/H11 will produce
+well-formed audio through a wrong analysis window** — so they are not evidence the
+mel is right, and the round trip is what is.
+
+**Stage 1 passes.** `mel (2, 64, 401) float32, min −11.5129, max −0.0854,
+mean −8.3448` — real dynamic range rather than a constant, and `min` is exactly
+`log(1e-05)`, so the floor engages at the quiet end as intended.
+
+### The fixture, and why it is tones
+
+Two tones an octave apart per channel plus an amplitude envelope — **not noise and
+not silence.** A wrong analysis window smears narrow spectral peaks, so tones are
+what make the damage measurable; broadband noise has no peaks to smear and silence
+has no content, and both reconstruct to something that looks fine. Same trap as a
+`float32` fixture over a `bfloat16` defect.
+
+Confirmed working from stage 1: energy lands at 203 / 219 / 234 / 1312 Hz on ch0
+(tones at 220 and 1320) and 422 / 438 / 453 / 2641 Hz on ch1 (tones at 440 and
+2640). The spread across adjacent bins is the analysis resolution, not the signal.
+
+Comparison is **spectral, not sample-wise**: the vocoder does not preserve phase and
+the round trip is lossy by design, so a sample-wise difference would fail on a
+correct implementation. Each side is measured at **its own rate** — 16000 in, 48000
+out — so the resampler does not end up inside the result. Reporting is per stage,
+because a fault in the mel, the VAE or the vocoder all look identical at the output.
+
+### ⛔ Blocked at stage 2 by a dtype boundary
+
+```
+RuntimeError: Input type (float) and bias type (c10::BFloat16) should be the same
+  autoencoder_kl_ltx2_audio.py:446  forward -> self.conv_in(hidden_states)
+```
+
+`to_mel` computes in float32 — **correct**, an STFT in bf16 would lose precision
+exactly where the log floor matters — and returns float32, while the VAE is bf16 and
+`encode_waveform_to_latents` casts nothing before `audio_vae.encode`. One cast fixes
+it; the better home is arguably that call site rather than inside `to_mel`, since it
+already owns the handoff and would also protect an explicitly-passed `to_mel=` from
+a caller who does not know the VAE's dtype.
+
+## Three dtype-boundary defects, one shape
+
+1. `from_pipe` defaulting to fp32 and silently recasting the shared bf16 modules.
+2. `_as_array` calling `.numpy()` on a bf16 tensor.
+3. A float32 mel handed to a bf16 conv.
+
+Each sits where a value crosses between our code and something with its own opinion
+about precision, and **each was invisible to the offline gate because the fixtures
+are float32 and float32 is the dtype that works.** Not a criticism of the gate: a
+bf16 build needs at least one genuinely bf16 fixture, or this family recurs one
+boundary at a time.
