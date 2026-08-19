@@ -111,7 +111,7 @@ smallest absorbed most of the diagnostic effort. What remains is structural.
 
 ## 3. The four options
 
-### Option A — mount the model repo as a read-only volume · **recommended, if the assumption holds**
+### Option A — mount the model repo as a read-only volume · ⚠️ **mechanism real, target filesystem almost certainly incompatible**
 
 Hugging Face supports mounting a model repo into a Space rather than downloading
 it:
@@ -242,6 +242,55 @@ diffusion_decoder, vocoder, duration_head or latent_upsampler**.
 **The blocker is FORMAT, not size.** This is a different thing from Option B and
 must not be conflated with it — runtime quantization is the live lever;
 pre-quantized files are unreachable.
+
+---
+
+## 4.1 ⚠️ Option A is almost certainly blocked at the filesystem
+
+The lever is real — `ZEROGPU_OFFLOAD_DIR` is read at import (`config.py:27`) and
+is settable as a Space Variable. **What it points at is the problem.**
+
+The packer uses `O_DIRECT`, **plus `posix_fallocate` of the whole ~72 GB file**,
+plus hand-aligned page buffers. That is raw-NVMe idiom. The only writable volume
+HF offers is an NFS/FUSE lazily-fetched object store, where `posix_fallocate` is
+commonly unsupported — and it is **the first call after open**, so it fails
+before a single tensor is written.
+
+✅ *Answered from `spaces` source.* Cheap to confirm if anyone wants certainty:
+it fails immediately or not at all.
+
+---
+
+## 4.2 ✅ RULED: int8 via bitsandbytes
+
+**The chosen route.** Not for its headline number but for a property none of the
+others have:
+
+| | peak |
+|---|---:|
+| int8, **if** the mmap prune works | ~120 GB |
+| int8, **if the prune never fires** | ~110 GB steady |
+
+**It survives both branches.** Every other option requires the prune to work,
+and the prune is the thing we cannot exercise off-platform.
+
+⚠️ **The interaction that would otherwise be rediscovered as a defect:** a
+quantised load **materialises new tensors**, so the autoprune may free nothing.
+That is *already priced into the ~110 GB figure* — it is a known cost, not a
+surprise waiting.
+
+📄 **bitsandbytes ≥ 0.46.0 needs no ZeroGPU handling at all**:
+`spaces/zero/torch/bitsandbytes.py` no-ops `_patch`/`_unpatch`/`_move` above that
+version, wired at `patching.py:328/355/445`. **There is no torchao equivalent** —
+which is what makes bnb the supported path rather than a preference. Pin it with
+a floor **and** a ceiling.
+
+> ⏸️ **Prepared and gated, deliberately not landed.** It must not ride along with
+> the schedule-and-guidance correction: quantisation changes output quality too,
+> and landing both at once means **neither can be attributed**. Sequence is the
+> corrected bf16 matrix first, signed off; **then** int8 against that baseline —
+> which turns "what does int8 cost us in quality?" from a guess into a
+> same-seed pair anyone can look at once and answer.
 
 ---
 
