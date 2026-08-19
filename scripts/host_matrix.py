@@ -223,6 +223,14 @@ RUNS = {
     # inference is unsupported.
     "H10c_a": dict(mode="audio_to_audio", needs=("audio",), extra={"noise_scale": 0.5}),
     "H10c_b": dict(mode="audio_to_audio", needs=("audio",), extra={"noise_scale": 0.5}),
+    # MECHANISM CHECK, not an audio_to_audio pass. At noise_scale=1.0 the input is
+    # discarded entirely -- `noised = 1.0*noise + 0.0*latents` -- so this asks only
+    # "does the audio branch produce anything when audio_latents is supplied at
+    # all". It is also the one setting where our noise_scale already equals the
+    # recipe's sigmas[0]=1.0, so it removes the suspected mismatch rather than
+    # holding it fixed. A healthy result here is NOT evidence that a user's upload
+    # works, because at 1.0 no upload survives.
+    "H10d": dict(mode="audio_to_audio", needs=("audio",), extra={"noise_scale": 1.0}),
     # A.4.1 H10b -- the acceptance test for the audio-input path. noise_scale 1.0
     # discards the input BY DESIGN, so a bug that drops it entirely is
     # indistinguishable from correct operation: the mode produces audio either
