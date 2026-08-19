@@ -41,6 +41,19 @@ the output catches.
 | `pipe_a.transformer is pipe_b.transformer` | **identity, not equality.** Two copies is 134 GiB against a 96 GiB card — an OOM on the second build |
 | `audio_scheduler` present on the condition pipeline | the one component the two classes do not share. If sharing dropped it, the joint audio degrades in a way **the video never reveals** |
 
+## A.0.1 ⛔ GATE — smoke test before anything else
+
+**Run `smoke_t2v.py` and get a file out of it before starting H1.** Do not skip
+this because the quota constraint is gone.
+
+Part B's *smallest thing that can fail first* principle still holds — what changed
+is the currency, not the logic. A broken stack should announce itself in **two
+minutes**, not twenty, and H1 at 704×480×121 is a twenty-minute way to discover
+that the model did not load. Losing cheap-first-failure was a side effect of
+dropping the quota, not a decision.
+
+**If the smoke test fails, nothing below it means anything.** Stop and diagnose.
+
 ## A.1 Resolution and length
 
 **Baseline: 704 × 480, 121 frames** (16 latents). Part B's 256×256×9 existed only
@@ -86,7 +99,8 @@ Stage 7 needs a real load, so it belongs here rather than in the offline suite.
 | # | Adapter | Expected |
 |---|---|---|
 | H12 | `joyfox/LTX-2.3-Transition-LORA` (0.39 GB, ungated) | **ACCEPTED.** Mixed dims — 4096 at attention, 2048 at `audio_ff`, 16384 at `ff.net.2` — and none of that is a mismatch. Stage 7 reports **> 0 modules attached** |
-| H13 | `charlied98/ltxv_2b_lora_soft_draw_v1` (LTX-Video-**2B**) | **REJECTED**, naming module / expected / actual: `2048 at transformer_blocks.0.attn1.to_k, expected 4096` |
+| H13a | `charlied98/ltxv_2b_lora_soft_draw_v1` → **`lora_weights_step_03000.safetensors`** | **REJECTED at stage 6.5**, `LoRADimensionError`: `2048 at transformer_blocks.0.attn1.to_k, expected 4096` |
+| H13b | same repo → **`comfy_lora_weights_step_03000.safetensors`** | **REJECTED at stage 6.5**, same error |
 
 **H12 is the false-positive guard.** It contains 2048-wide tensors *at the audio
 modules, where 2048 is correct*. A validator that rejects it has learned "contains
@@ -96,6 +110,39 @@ LTX LoRA on the Hub.
 **H13 is the whole point of the validator.** It passes stages 4, 5 and 6, passes
 diffusers' only built-in check, and **would pass stage 7 too** — its module names
 match. Only stage 6.5 catches it.
+
+### Why H13 is two runs, and why the stage matters more than the verdict
+
+The repo ships **two files of identical size and different key conventions**:
+
+| file | prefix | convention | metadata |
+|---|---|---|---|
+| `lora_weights_step_03000.safetensors` | `transformer.` | **diffusers** | `{'format': 'pt'}` |
+| `comfy_lora_weights_step_03000.safetensors` | `diffusion_model.` | **native / ComfyUI** | *absent* |
+
+Both carry 448 tensors, clean `lora_A`/`lora_B` pairing, and **2048 in-dims**.
+
+**"Rejected" is not a result when two mechanisms could produce it.** A file
+rejected at stage 5 for an unrecognised convention would look identical in a pass
+column to one rejected at 6.5 for a dimension mismatch — and the first would mean
+the convention detector had *failed*, not succeeded.
+
+**Predicted and then verified** by running the real validator against both
+headers with a 48-layer 4096-dim transformer:
+
+```
+lora_weights_step_03000.safetensors        REJECTED at stage 6.5  LoRADimensionError
+comfy_lora_weights_step_03000.safetensors  REJECTED at stage 6.5  LoRADimensionError
+```
+
+**Both converge on 6.5, which is the right answer**: the convention detector
+accepted *both real conventions* and handed each to the dimension check. Until
+now it had only ever been exercised by synthetic fixtures — this is the first
+evidence it works on files somebody else wrote.
+
+**Record the stage, not just the verdict.** A run of H13 that reports "rejected"
+without naming `LoRADimensionError` has not distinguished success from the
+convention detector breaking.
 
 ## A.4 The two features that need their own run
 
@@ -109,6 +156,28 @@ match. Only stage 6.5 catches it.
 > spending the run to prove the thing it was designed to test never happened.
 > Compare against H1 at the same seed; if they are identical, stage 2 did not run.
 
+## A.4.1 The undeclared-export direction — covered offline, no run needed
+
+The exports contract is enforced **both ways**: declared-but-missing raises
+`EmptyOutputError`; written-but-undeclared is dropped and noted on
+`GenerationResult.warnings`.
+
+**Every run in A.2 proves the first direction. None proves the second**, and it is
+the direction that silently discards a real artifact.
+
+**It does not need a GPU run** — it needs an encoder that returns more than the
+mode declares, which is a fake, not a model. Already covered:
+
+```
+tests/test_exports_contract.py::test_a_track_the_mode_never_declared_does_not_reach_the_result
+    11 passed — parametrised across every mode
+tests/test_ui_generate_seam.py — the same contract from the handler's side
+```
+
+**Recorded here so the gap is visibly closed rather than merely absent.** If those
+tests are ever removed, this line becomes false and nothing else in Part A would
+notice.
+
 ## A.5 One high-resolution run
 
 | # | Mode | Config | Purpose |
@@ -119,6 +188,7 @@ match. Only stage 6.5 catches it.
 
 | Run | Mode | Result | Wall clock | **Streams observed** | **Output looks right?** | Notes |
 |---|---|---|---|---|---|---|
+| **S0** | **smoke_t2v.py — GATE** | — | — | — | — | **run this first** |
 | H1 | text_to_video | — | — | — | — | not run |
 | H2 | image_to_video | — | — | — | — | not run |
 | H3 | image_text_to_video | — | — | — | — | not run |
@@ -131,7 +201,8 @@ match. Only stage 6.5 catches it.
 | H10 | audio_to_audio | — | — | — | — | not run |
 | H11 | audio_to_video | — | — | — | — | not run |
 | H12 | LoRA accepted | — | — | n/a | — | not run |
-| H13 | LoRA rejected | — | — | n/a | n/a | not run |
+| H13a | LoRA rejected (diffusers conv.) | — | — | n/a | n/a | not run — must name the stage |
+| H13b | LoRA rejected (native conv.) | — | — | n/a | n/a | not run — must name the stage |
 | H14 | stage 2 | — | — | — | — | not run |
 | H15 | duration_head | — | — | — | — | not run |
 | H16 | high resolution | — | — | — | — | not run |

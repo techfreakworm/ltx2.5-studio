@@ -217,11 +217,15 @@ separately?" decides this document.
 
 ---
 
-## 6. The guard to build on return
+## 6. The mmap guard — BUILT and PARKED
 
-`zerogpu.check_mmap_backed()` and its helpers **exist, are tested and are
-mutation-checked**, but are deliberately **not wired into any live path** — they
-are ZeroGPU-only and cannot fire elsewhere.
+**Status: built, tested, mutation-checked, and deliberately not wired in.** It was
+written after ZeroGPU was parked — crossed messages — and kept rather than
+reverted because it is provably inert off-Space and re-enabling costs one line.
+**Do not extend or maintain it until ZeroGPU is unparked.**
+
+`zerogpu.check_mmap_backed()` and its helpers are ZeroGPU-only and cannot fire
+elsewhere.
 
 **What they do:** walk `/proc/self/maps`, resolve each model parameter's
 `data_ptr()` back to its backing file, and require a match against the autoprune
