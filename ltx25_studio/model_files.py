@@ -69,7 +69,7 @@ HUB_BASE_URL = "https://huggingface.co"
 #: Weight precision. Default is bf16: it is what the model card documents and
 #: what the official Space pattern uses. Quantised variants are a documented
 #: fallback rather than the default, because ZeroGPU's tensor packer is
-#: unverified against bitsandbytes/torchao custom tensor subclasses (PLAN §2.6,
+#: a decision deferred rather than a capability we lack (PLAN §2.6,
 #: technical risk #1). Switching lives here so it stays a one-line change.
 DEFAULT_DTYPE = "bfloat16"
 

@@ -52,8 +52,13 @@ ZEROGPU_SIZES = ("auto", "large", "xlarge")
 #: advertised lever attached to nothing is worse than no lever: it does not fail
 #: silently, it *speaks*, and it misdirects the next decision. Wiring it properly
 #: needs bitsandbytes or torchao -- neither pinned, neither verifiable without a
-#: GPU, and both using custom tensor subclasses whose interaction with ZeroGPU's
-#: packer is unknown (PLAN §2.6). So it is gone rather than half-present.
+#: GPU. Note the ORIGINAL reason given here was wrong: the packer's handling of
+#: quantised tensors is NOT unknown. `spaces/zero/torch/bitsandbytes.py` is a
+#: version check that no-ops for bnb >= 0.46.0, so modern bitsandbytes needs no
+#: special handling at all; there is no equivalent module for torchao, which is
+#: what actually makes bnb the supported path and torchao not (PLAN §2.6,
+#: docs/ZEROGPU_DISK.md). The lever is gone because it was WIRED TO NOTHING,
+#: which remains true and is reason enough.
 DEFAULT_ZEROGPU_SIZE = "auto"
 DEFAULT_GPU_DURATION_SECONDS = 60
 DEFAULT_OUTPUT_RETENTION_GB = 20.0

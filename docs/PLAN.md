@@ -300,11 +300,13 @@ trade a *known* uncertainty for an *unverified* one:
 - The RAM ceiling (~68 GB) is a community cgroup observation, not an official number. It is
   uncertain, but it is uncertainty about a configuration that upstream documents and that a
   production Space already runs.
-- Quantization carries its own **unquantified** risk on this specific platform. bitsandbytes
-  `Int8Params` / `Params4bit` and torchao both use **custom tensor subclasses**, and ZeroGPU's
-  packer tracks aliased tensors in a `WeakTensorKeyDictionary`. Whether it packs subclassed
-  tensors correctly is **unverified**. A packer that mishandles them fails in exactly the way
-  we cannot tolerate: quietly, as a quality regression.
+- ~~Quantization carries its own unquantified risk: bitsandbytes and torchao use custom tensor
+  subclasses and the packer's handling of them is unverified.~~ **This was wrong.**
+  `spaces/zero/torch/bitsandbytes.py` is a 43-line version check that **no-ops for
+  bnb ≥ 0.46.0**, wired into the packing path at `patching.py:328/355/445` — so modern
+  bitsandbytes needs **no special handling at all**. There is **no equivalent module for
+  torchao**, and that asymmetry is what actually selects the library. *Verified against
+  `spaces` 0.51.1.* See `docs/ZEROGPU_DISK.md`.
 
 So bf16 ships and `size="xlarge"` is **declared explicitly** rather than being silently promoted
 (§8.5).
@@ -319,8 +321,10 @@ approval away from being reached for to fix a disk eviction, twice.
 
 **An advertised lever attached to nothing is worse than no lever at all**, so it was removed
 rather than half-wired. Wiring it properly needs `bitsandbytes` or `torchao` — neither pinned,
-neither verifiable without a GPU, and both using custom tensor subclasses whose interaction with
-ZeroGPU's packer is unknown (technical risk #2). Quantization remains a *documented option*; it
+neither verifiable without a GPU. **The reason originally given here — that the packer's handling
+of quantised tensors was unknown — was false; see above.** The lever is gone because it was
+**wired to nothing**, which is reason enough on its own. Quantization remains a *documented
+option*; it
 is not a *configured* one, and the difference is now visible in the code rather than implied.
 
 The routes actually available under disk pressure are persistent storage, a public Space, or
@@ -1593,7 +1597,7 @@ register.
 | # | Risk | Why it is uncertain | How it gets settled |
 |---|---|---|---|
 | **1** | ~~bf16 fits ZeroGPU's transient disk~~ — **SETTLED: it does not.** | **Not a risk any more, a finding.** The snapshot **IS** freed after packing (verified, `spaces` 0.51.1) — and the unlink runs *strictly after* `_pack()`, so the 144.37 GB peak precedes it, and with an 8–12 GB image the total is **152–156 GB against a 150 GB cap**. See §2.5 for the authoritative arithmetic. The ~68 GB RAM ceiling remains a community cgroup observation, separate and still open. | **No longer settled by measurement — it is settled.** The routes are persistent storage, a public Space with `preload_from_hub` (§6.2), or smaller checkpoints. All three are operator decisions, none is a knob we can turn. **ZeroGPU is parked; hinode is the critical path.** |
-| 2 | ZeroGPU's packer handles the pipeline's tensor graph correctly | Verified for ordinary tensors; **unverified for quantised custom tensor subclasses** (bitsandbytes `Int8Params`/`Params4bit`, torchao) against the packer's `WeakTensorKeyDictionary` | only becomes live if risk #1 forces quantization — measure then |
+| 2 | ~~the packer handles quantised tensor subclasses~~ — **RESOLVED: it does, for bitsandbytes** | `spaces/zero/torch/bitsandbytes.py` no-ops for bnb ≥ 0.46.0, wired in at `patching.py:328/355/445`. **No equivalent module exists for torchao** — bnb is supported, torchao is not, and that decides the library. *Verified, `spaces` 0.51.1.* | Not a risk. Recorded because the asymmetry is invisible from outside. See `docs/ZEROGPU_DISK.md`. |
 | 3 | ~~`preload_from_hub` 10-entry cap~~ | **RETIRED.** We are one repo → one entry with comma-separated filenames. Fits comfortably (§6.2). | — |
 | 4 | Max `@spaces.GPU` duration on our tier | server-side, tier-dependent, **unpublished** | discover empirically; never hardcode (§5.8 #4) |
 | 5 | Multishot via prompt structure produces usable results | no API support, and the enhancer system prompts actively discourage scene cuts (§3.4) | presented to users as unverified technique, not a feature |
