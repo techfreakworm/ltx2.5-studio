@@ -55,7 +55,6 @@ __all__ = [
     "DIFFUSION_DECODE_DENORMALIZE",
     "PipelineBundle",
     "StageRunner",
-    "StagedOutput",
     "WEIGHT_DTYPE",
     "WEIGHT_DTYPE_LABEL",
     "BASE_KIND",
@@ -487,26 +486,6 @@ def decode_kwargs(latents, *, generator=None) -> dict:
     return kwargs
 
 
-@dataclass(frozen=True)
-class StagedOutput:
-    """What the two-stage graph returns: the two fields the export path reads.
-
-    ``outputs.write_artifacts`` takes ``frames`` and ``audio`` off the pipeline
-    output with ``getattr`` and touches nothing else, so these two fields are the
-    entire contract and a single-stage output satisfies it already.
-
-    Deliberately ours rather than upstream's ``LTX2PipelineOutput``. Constructing
-    that would put an ``import diffusers`` on the stage-2 finish, making the one
-    branch that reunites video with audio unreachable in any environment without
-    the weights -- and PLAN §9.2 requires the default local run to be green with
-    zero weights on disk. A branch that cannot be exercised offline is how the
-    audio came to be dropped in the first place.
-    """
-
-    frames: object
-    audio: object
-
-
 class StageRunner:
     """Callable that owns the stage graph, so ``generate.py`` owns no branches.
 
@@ -603,7 +582,14 @@ class StageRunner:
         mel = audio_vae.decode(audio_latents.to(audio_vae.dtype), return_dict=False)[0]
         audio = vocoder(mel)
 
-        return StagedOutput(frames=_latents_of(decoded), audio=audio)
+        # Upstream's own class, taken off the object we already hold rather than
+        # imported. Same type `LTX2PipelineOutput` that the single-stage path
+        # returns, so `outputs.py` never branches on which path produced it --
+        # and no `import diffusers` on this branch, which would make the one
+        # piece of logic that reunites video with audio unrunnable in the
+        # default local gate. A branch that cannot be exercised offline is how
+        # the audio came to be dropped in the first place.
+        return type(stage_2)(frames=_latents_of(decoded), audio=audio)
 
 
 def _with_real_conditions(kwargs: dict) -> dict:

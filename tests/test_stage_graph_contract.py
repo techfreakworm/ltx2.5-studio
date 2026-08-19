@@ -569,10 +569,14 @@ class FakeTensor:
 
 
 class Staged:
-    """A stage output carrying video latents and, optionally, audio latents."""
+    """A stage output carrying video latents and, optionally, audio latents.
 
-    def __init__(self, tag, audio=None):
-        self.frames = FakeTensor(tag)
+    Field names mirror upstream's ``LTX2PipelineOutput`` because the stage-2
+    finish rebuilds the output as ``type(stage_2)(frames=..., audio=...)``.
+    """
+
+    def __init__(self, frames, audio=None):
+        self.frames = frames if isinstance(frames, FakeTensor) else FakeTensor(frames)
         self.audio = audio
 
 
