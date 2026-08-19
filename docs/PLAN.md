@@ -1740,6 +1740,35 @@ intervention could — and when it ran, all twelve moved. That is the same shape
 as one artifact being rejected as a control because it was pinned to the rail:
 **a baseline has to be established, not assumed from internal consistency.**
 
+**10. At a hand-off between our code and a model, every attribute that can
+disagree eventually will — and fixing them as they surface is not the same as
+enumerating them.**
+
+`host-runner`'s words, after the fourth one. **One call site**, `mel ->
+audio_vae.encode`, and every attribute of that tensor was wrong in turn:
+
+| | attribute | how it failed |
+|---|---|---|
+| 1 | **dtype**, outward | `_as_array` calling `.numpy()` on bf16 — numpy has no such dtype |
+| 2 | **dtype**, inward | float32 mel into a bf16 `conv_in` |
+| 3 | **rank + axis order** | unbatched, mel-major, where the encoder wants batched and time-major |
+| 4 | **device** | CPU mel into CUDA weights, *at the same line as (2)* |
+
+Each was found by running it, none by the offline gate, and each fix was
+correct and incomplete because it addressed the attribute that had crashed.
+
+> **The crashing end announces itself and the quiet end does not.** Every one of
+> these raised a clear exception naming the thing that was wrong, which is
+> exactly why the fix kept being scoped to it. `_as_array` raised a `TypeError`
+> naming bfloat16; nobody asked what happened on the way *in*.
+
+**The mitigation is a written list, not more care.** The helper that owns the
+hand-off now names all four attributes and which function owns each — so the
+fifth is *looked for* rather than waited for. And the helper is named for the
+**module** it matches against, not for one attribute, because
+`_matched_dtype` is a name that invites the device half to be deleted by
+someone tidying it.
+
 ### 9.1.6 The ladder, and the rung that is still hand-built
 
 Each rung was added because the one below it passed while something was broken:
