@@ -1256,10 +1256,27 @@ The corollary is the part that took five separate blockers to learn, every one o
 | 4 | `conditioning` reached only from a UI readout | raw dataframe rows went to the pipeline; the pixel→latent conversion never ran |
 | 5 | `lora/apply` — **importer count zero**, 19 passing specs | the entire LoRA validator was itself never applied |
 
-**#5 is the one to remember.** Nine validation stages, a header-only parser, a per-module
-dimension check — a machine built specifically to stop silent garbage — and it was silently doing
-nothing. A user would upload an adapter, watch it validate, generate, receive base-model output,
-and be told it worked.
+**#5 is the one to remember:** the machine built to prevent silent wrongness was itself silently
+doing nothing, and **19 green specs said otherwise**. Nine validation stages, a header-only
+parser, a per-module dimension check — a user would upload an adapter, watch it validate,
+generate, receive base-model output, and be told it worked.
+
+**They were not five unrelated mistakes. They were one mistake with five faces**, and the reason
+it recurred matters more than the instances: *everyone verified the thing they had just built,
+using a check they designed, against the mental model they already held.* Unit specs passed.
+Hand-written probes passed. AST scans and `sys.modules` checks passed. Every one of them tested a
+**belief** rather than the system.
+
+The only checks that found anything were the ones whose *shape* did not depend on the checker
+being right — seam tests driving real layer A into real layer B, and the evict-and-diff sweep
+that asks the program what it actually reached. Stated as the person who kept missing them:
+
+> **I probed the path I had in mind rather than the paths other code takes.**
+
+**The numbers make it concrete.** The gate went green at **1102 tests with all five blockers
+still in the tree**. It stands at ~1800 now, and the difference is almost entirely **seam and
+reachability tests — not more unit coverage**. More tests of the same shape would have found none
+of them.
 
 **Why the usual checks miss this class.** Unit tests prove a module correct *in isolation*, which
 is exactly what a disconnected module is. A probe you design tests the mental model you already
@@ -1288,8 +1305,8 @@ and `lora/apply.py`. An uncommitted change by another agent was swept into `3d53
 `git add ltx25_studio/` that was not path-scoped.
 
 Recorded because the next reader deserves the warning: **history that misdescribes its own
-contents is a slow-acting trap**, the same failure as documentation that reassures, relocated
-into the log. The root cause was structural — three agents sharing one worktree with files
+contents is a trap for whoever reads it next, and it is the same failure as documentation that
+reassures — just in the log instead of the source.** The root cause was structural — three agents sharing one worktree with files
 reassigned mid-flight — so the mitigation is structural too: stage by explicit path, never by
 directory, whenever more than one agent can write.
 
