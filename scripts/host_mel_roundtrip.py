@@ -135,8 +135,17 @@ def main() -> int:
         log("  *** mel is nearly constant -- the transform is not producing structure ***")
 
     log("\n=== stage 2: audio_vae.encode ===")
+    # BATCHED. An unbatched (channels, samples) waveform yields an unbatched
+    # (channels, mel, frames) mel, conv2d accepts that as a single sample, and the
+    # latents come back 3D -- which validate_audio_latents_shape correctly refuses,
+    # since AUDIO_LATENT_DIMS is 4D [batch, channels, frames, mel]. Batching the
+    # waveform is what makes the rank right, and it is the layout the pipeline's own
+    # audio_latents kwarg expects.
+    batched = dev_wave.unsqueeze(0) if dev_wave.dim() == 2 else dev_wave
+    log(f"  waveform batched: {tuple(dev_wave.shape)} -> {tuple(batched.shape)}")
+    log(f"  mel of batched  : {tuple(to_mel(batched).shape)}")
     latents = audio_module.encode_waveform_to_latents(
-        dev_wave, audio_vae=vae, sampling_rate=rate, to_mel=to_mel
+        batched, audio_vae=vae, sampling_rate=rate, to_mel=to_mel
     )
     log(f"  latents {tuple(latents.shape)} dtype={latents.dtype} "
         f"absmax {float(latents.float().abs().max()):.4f} "
