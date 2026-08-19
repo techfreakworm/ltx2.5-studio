@@ -11,6 +11,21 @@ error, no warning, a plausible-looking artifact. That is the same silent-failure
 class as §5.3's empty output, one layer further out, and it is why every write
 that has audio in hand muxes it or raises.
 
+**``exports`` describes reality, in both directions.** A mode that declares
+``exports=("video",)`` gets a container with *no* audio stream, even though the
+model produced one. The tuple is a checked contract elsewhere -- ``generate.py``
+raises when a declared track is missing -- and a contract enforced in only one
+direction drifts silently in the other: video-only modes would ship files
+indistinguishable from the joint modes, and four of the eleven modes PLAN §3.2
+argues for would be cosmetic duplicates of three others.
+
+Dropping it is not free and is never silent. PLAN §3.2 already records that the
+audio-only modes "still pay full video compute"; the reverse is equally true and
+deserves the same candour -- **the video-only modes pay full audio compute**,
+because the model is jointly audio-visual and has no video-off switch. So the
+audio is rendered either way, and when we discard it we say so: see
+:func:`dropped_audio_warning`.
+
 **Audio is stereo and stays stereo.** The vocoder reports two output channels.
 Nothing here may mono-downmix: the channel count is read off the array that
 arrives and the container layout is *derived* from it (FFmpeg's ``"{n}c"``
@@ -54,10 +69,13 @@ stops the predecessor's "newest video in the output dir" fallback growing back
 
 from __future__ import annotations
 
+import logging
 from fractions import Fraction
 from pathlib import Path
 
 from .errors import EncodeError, LTXStudioError
+
+_log = logging.getLogger(__name__)
 
 __all__ = [
     "AUDIO_FILENAME",
@@ -68,6 +86,7 @@ __all__ = [
     "VIDEO_FILENAME",
     "VIDEO_PIXEL_FORMAT",
     "directory_size",
+    "dropped_audio_warning",
     "enforce_retention",
     "run_age",
     "write_output",
@@ -342,12 +361,32 @@ def _encode_audio(container, stream, planes, *, sampling_rate: int) -> None:
         container.mux(packet)
 
 
-def _write_video(frames, audio, target: Path, *, frame_rate, sampling_rate) -> None:
-    """Encode the frames and **mux the audio track into the same file**.
+def dropped_audio_warning(mode: str) -> str:
+    """Why a video-only mode's file has no sound.
 
-    Audio present with no sample rate raises rather than falling back to a
-    video-only write: silently dropping the audio track from a joint
-    audio-visual generation is the exact defect this module is written against.
+    The audio existed: the model is jointly audio-visual and renders it whether
+    or not the mode exports it. Discarding it without saying so would leave a
+    user who expected sound with silence and no explanation -- which is the
+    silent-wrongness shape, just quieter.
+    """
+    return (
+        f"mode {mode!r} exports video only, so the audio track this generation produced was "
+        f"dropped rather than muxed. The model is jointly audio-visual and has no video-off "
+        f"switch, so that audio was rendered and paid for either way -- use the matching "
+        f"audio+video mode to keep it."
+    )
+
+
+def _write_video(
+    frames, audio, target: Path, *, frame_rate, sampling_rate, include_audio: bool, mode: str = ""
+) -> tuple[str, ...]:
+    """Encode the frames, muxing the audio track only if the mode exports it.
+
+    Returns any warnings the caller should surface. Audio present with no sample
+    rate raises rather than falling back to a video-only write: silently
+    dropping the audio track from a *joint* generation is the exact defect this
+    module is written against. Dropping it from a **video-only** mode is the
+    opposite case -- declared, intended, and reported rather than silent.
     """
     import av
 
@@ -359,7 +398,22 @@ def _write_video(frames, audio, target: Path, *, frame_rate, sampling_rate) -> N
         "reports no error",
         target=target,
     )
+    notes: list[str] = []
     planes = None
+    if include_audio and audio is None:
+        raise EncodeError(
+            path=str(target),
+            reason=(
+                f"mode {mode!r} declares that it exports audio, but this generation produced "
+                f"none. exports is a contract: emitting the video alone would hand back a file "
+                f"that satisfies the shape of the promise and not its content"
+            ),
+        )
+    if audio is not None and not include_audio:
+        # Declared, intended, and reported -- never silent. See the module docstring.
+        notes.append(dropped_audio_warning(mode))
+        _log.warning("%s", notes[-1])
+        audio = None
     if audio is not None:
         sampling_rate = _required(
             sampling_rate,
@@ -404,6 +458,7 @@ def _write_video(frames, audio, target: Path, *, frame_rate, sampling_rate) -> N
             _encode_audio(container, audio_stream, planes, sampling_rate=sampling_rate)
     finally:
         container.close()
+    return tuple(notes)
 
 
 def _write_audio(audio, target: Path, *, sampling_rate) -> None:
@@ -450,6 +505,7 @@ def write_output(
     seed: int = 0,
     frame_rate=None,
     sampling_rate=None,
+    warnings=None,
     **extra,
 ) -> Path:
     """Encode the pipeline output into ``run_dir`` and return the artifact path.
@@ -461,6 +517,12 @@ def write_output(
     is ``vocoder.config.output_sampling_rate``. Neither is defaulted: see the
     module docstring for why a second independent assumption about either is a
     silent-wrongness bug rather than a convenience.
+
+    ``exports`` decides the container's contents, not just its name: a mode that
+    does not export ``audio`` gets a file with no audio stream. ``warnings`` is
+    an optional list the caller may pass to collect anything worth telling the
+    user -- currently the dropped-audio note. It is also logged unconditionally,
+    so the information survives a caller that does not pass a sink.
     """
     run_dir = Path(run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -472,7 +534,17 @@ def write_output(
 
     try:
         if wants_video:
-            _write_video(frames, audio, target, frame_rate=frame_rate, sampling_rate=sampling_rate)
+            notes = _write_video(
+                frames,
+                audio,
+                target,
+                frame_rate=frame_rate,
+                sampling_rate=sampling_rate,
+                include_audio="audio" in exports,
+                mode=mode,
+            )
+            if warnings is not None:
+                warnings.extend(notes)
         else:
             _write_audio(audio, target, sampling_rate=sampling_rate)
     except LTXStudioError:
