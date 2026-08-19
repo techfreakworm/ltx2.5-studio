@@ -237,9 +237,11 @@ Two consequences worth knowing as a user:
   token" — masquerading as the root cause and burning a second reservation to tell you
   something false. The app surfaces the original timeout instead.
 
-Stage-2 upscale-and-refine is a real quota cost rather than a free quality win. It is not
-yet exposed as a control — `generate.py` does not run a stage-2 pass today, and a checkbox
-that changes nothing is the kind of dead toggle this project refuses to ship.
+Stage-2 upscale-and-refine — the 2.5 quality path: a latent upsample plus three more
+denoise steps — is opt-in rather than default, because it is a real quota cost and not a
+free quality win. On the three audio-only modes the registry overrides it regardless, so
+the checkbox is shown pinned off and disabled rather than hidden: you can always see what
+will actually run.
 
 ---
 
