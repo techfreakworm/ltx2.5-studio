@@ -146,11 +146,16 @@ def spectrogram(path, label):
         log(f"    ch{c}: peak {peak:.4f} rms {rms:.6f}"
             + ("   *** SILENT ***" if peak < 1e-4 else ""))
     if raw.shape[0] >= 2:
-        # A channel count of 2 does not mean two different channels.
+        # A channel count of 2 does not mean two different channels. Judge the
+        # difference RELATIVE to the signal: an absolute threshold calls a quiet
+        # track "real stereo" on a difference that is a rounding error next to its
+        # own amplitude, which is how a near-mono quiet track would slip past.
         delta = float(np.abs(raw[0] - raw[1]).mean())
-        log(f"    |L-R| mean = {delta:.6f}  -> "
-            + ("channels DIFFER (real stereo)" if delta > 1e-5
-               else "*** channels IDENTICAL -- effectively mono ***"))
+        level = float(np.abs(raw).mean())
+        ratio = delta / level if level > 0 else 0.0
+        log(f"    |L-R| mean = {delta:.6f}  ({ratio * 100:.2f}% of mean level) -> "
+            + ("channels DIFFER (real stereo)" if ratio > 0.01
+               else "*** channels EFFECTIVELY IDENTICAL -- near-mono ***"))
 
     # STFT by hand: no scipy in the pinned set, and numpy is enough.
     win = 1024
