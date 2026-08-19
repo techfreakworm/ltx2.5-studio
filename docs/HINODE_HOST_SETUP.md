@@ -841,3 +841,62 @@ about precision, and **each was invisible to the offline gate because the fixtur
 are float32 and float32 is the dtype that works.** Not a criticism of the gate: a
 bf16 build needs at least one genuinely bf16 fixture, or this family recurs one
 boundary at a time.
+
+### H17 result — FAIL, and not on the conventions
+
+Four structural defects sit in front of the conventions and mask them completely.
+
+**1. The dtype cast is necessary AND sufficient.** Wrapping `build_mel_front_end`
+with `.to(dtype=vae.dtype)` through the documented `to_mel=` seam gets
+`audio_vae.encode` running. Verified rather than assumed, so the fix ships already
+tested.
+
+**2. `AUDIO_LATENT_DIMS` is transposed.** Proven by halving the input duration and
+watching which axis moved:
+
+| input | mel | latents |
+|---|---|---|
+| 4.0 s | `(1, 2, 64, 401)` | `(2, 8, 16, **100**)` |
+| 2.0 s | `(1, 2, 64, 201)` | `(2, 8, 16, **50**)` |
+
+Axis 3 tracks duration; axis 2 stays at 16 = `mel_bins / mel_compression_ratio`.
+So the VAE produces **`(batch, channels, mel, frames)`** while `AUDIO_LATENT_DIMS`
+declares `(batch, channels, frames, mel)`. `audio_frames_from_latents` therefore
+reads **16** where the true frame count is **100**, and upstream's own
+`_, _, audio_num_frames, _ = audio_latents.shape` reads the same wrong axis. PLAN
+§5.7 row 5 is precisely this axis, and its whole point is that getting it wrong is
+silent.
+
+**3. The reconstruction length is fixed regardless of input.** 4.0 s and 2.0 s
+inputs both produce exactly **29,280 samples (0.61 s)**. The decode path is not
+tracking the latent frame count — the same defect as #2 from the other end.
+
+**4. `match_channel_count` misreads a batched waveform as mono.** Given
+`(1, 2, 64000)` it duplicated "the single channel" and produced batch = 2, having
+read the batch dim as the channel count.
+
+**5. The rank contract is self-contradictory.** 4D latents require a batched
+waveform; `match_channel_count` requires an unbatched one and corrupts a batched
+one. **No input shape currently satisfies both.** The shape guard did its job — its
+docstring warns that a wrongly-ranked tensor "can be silently misinterpreted", and
+it caught a rank error the VAE itself accepted without complaint.
+
+### Why the A.5.1 candidate list was NOT followed
+
+The comparison looks catastrophic — tones at 220/1320 Hz returning at
+2297/2344 Hz, 22 dB down, no tone recovered — and A.5.1 offers an ordered list of
+conventions to start changing (log/floor → `mel_scale`/`norm` → `power` → `center`).
+
+**None was touched.** With the batch axis duplicated into channels, the frames axis
+transposed and decode emitting a fixed 0.61 s, the reconstruction could not have
+resembled the input whatever those values are. Changing a convention against a
+structurally broken round trip is how a correct default gets "fixed" into a wrong
+one, and the failure would persist looking like the next candidate's fault.
+
+**This is the strength-sweep trap one layer along: characterising against a broken
+baseline points at the wrong mechanism.** Having walked into it once, the ordered
+list was an invitation to do it again.
+
+**So the conventions remain UNVALIDATED.** H17 cannot answer that question yet, and
+H10/H11 passing would establish even less than before — not that the mel is right,
+and now not even that the plumbing is.
