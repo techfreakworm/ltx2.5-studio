@@ -1769,6 +1769,55 @@ fifth is *looked for* rather than waited for. And the helper is named for the
 `_matched_dtype` is a name that invites the device half to be deleted by
 someone tidying it.
 
+**11. A number is not evidence for a hypothesis until you check which variable
+produced it.**
+
+A run came back at −10.4 dBFS and was read as confirming that `noise_scale`
+must equal `sigmas[0]`. **The manifest showed the variable that had actually
+moved was `MATRIX_AUDIO_FIXTURE`** — a different audio file, not a different
+`noise_scale`. One run, read as evidence for a hypothesis it never tested, and
+a schedule change shipped on it.
+
+The 2×2 that settled it is the shape to copy:
+
+| content | `noise_scale` | mismatch present? | result |
+|---|---|---|---|
+| realistic | 0.5 | **yes** | **healthy, −10.4 dBFS** |
+| synthetic tones | 0.5 | yes | silent, −87.9 |
+| synthetic tones | 1.0 | no | healthy, −7.6 |
+
+**Row 1 is the whole answer**: the mismatch is present and the output is fine,
+so content is sufficient to explain the silence and the mismatch is not
+necessary. The single-variable test that had been pre-registered — *healthy at
+1.0 confirms it* — was consistent with **both** hypotheses and discriminated
+neither.
+
+> **An experiment that holds the suspected cause constant cannot distinguish it
+> from anything else** — and one that varies two things at once cannot either.
+> The manifest is what makes the second recoverable after the fact, which is why
+> recording a result's inputs is worth more than recording the result.
+
+**12. An advertised lever attached to nothing is not written by careless people.
+It is written by careful people who do not revisit.**
+
+`decode_kwargs(generator=...)` was added *with a docstring explaining why the
+diffusion decoder draws its own noise and must be seeded.* The reasoning was
+right, the parameter was right, and **it read a key nothing ever set** — there
+was no generator anywhere in the package, and `_resolve_seed`'s result went only
+to sidecar metadata. Every "same seed" comparison on this build was two
+independent runs.
+
+It was written by the person who spent the same day removing other people's
+inert levers, and it surfaced only because an unrelated question about
+`sample` vs `argmax` sent them past the line.
+
+> **The care that writes the docstring is spent at the moment of writing. What
+> catches the lever is a check that runs later** — which is §9.1.5 rule 7
+> arriving from the other side: not "prefer a check to a comment" because
+> comments rot, but because **a comment is written by someone who has just
+> understood the problem, and that is exactly the person least able to notice
+> they have not finished solving it.**
+
 ### 9.1.6 The ladder, and the rung that is still hand-built
 
 Each rung was added because the one below it passed while something was broken:
