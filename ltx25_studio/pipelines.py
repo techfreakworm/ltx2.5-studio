@@ -207,6 +207,19 @@ def _base_pipeline(*, dtype=None, device: str | None = None):
         ) from exc
 
     try:
+        # ⚠️ `torch_dtype` MUST match the checkpoint's on-disk dtype. It is not a
+        # free parameter, and the reason is invisible from here.
+        #
+        # ZeroGPU frees the 72 GB HF snapshot after packing, but only by reading
+        # /proc/self/maps, mapping each tensor's data_ptr() back to the blob it is
+        # mmap'd from, and unlinking those. Anything that materialises tensors
+        # into anonymous memory -- a dtype CAST, a .clone(), an eager
+        # low_cpu_mem_usage=False, a non-safetensors path -- leaves nothing in the
+        # map to capture. Then nothing is freed, 72 GB stays on disk forever, and
+        # there is no error and no log line saying so.
+        #
+        # The checkpoint is bf16 and WEIGHT_DTYPE is bfloat16, so this is a
+        # no-op load rather than a conversion. Do not "helpfully" add a cast.
         built = LTX2ConditionPipeline.from_pretrained(
             model_files.REPO_ID,
             revision=model_files.REVISION,

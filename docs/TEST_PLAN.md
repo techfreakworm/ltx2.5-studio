@@ -10,7 +10,7 @@ result from one does not answer the other.**
 | RAM | 124 GB | ~68 GB (community observation) |
 | disk | 136 GB free, persistent | 150 GB cap, **wiped on cold start** |
 | tensor packing | none | O_DIRECT to `~/.zerogpu/tensors` |
-| budget | time only | **2400 GPU-s/day**, 2× on `xlarge` |
+| budget | time only | **2400 GPU-s/day**; an xlarge multiplier is *assumed*, see §B.1 |
 | status | **critical path** | **parked** |
 
 **Label every claim.** A mode that works on hinode is **HOST-PROVEN**; whether it
@@ -127,14 +127,27 @@ its economics do not apply to hinode and must not leak into Part A.
 | | |
 |---|---|
 | PRO quota | **2400 GPU-seconds/day**, fixed 24 h window starting at first use |
-| Our tier | **`xlarge`** — forced, because packed weights are 67.23 GiB and `xlarge_threshold` is 42.00 GiB (PLAN §8.6) |
-| Multiplier | **2×**. A 75 s run costs **150 GPU-seconds** |
+| Our tier | **`xlarge`** — forced, because packed weights are 67.23 GiB and `xlarge_threshold` is **42.00 GiB exactly** (`45097156608` bytes, **verified in the platform's own `spaces/zero/configs.json`**) |
+| Multiplier | **assumed 2×** — ⚠️ **UNVERIFIED.** A 75 s run is budgeted at 150 GPU-seconds |
 | Practical ceiling | **~16 runs/day** |
 | **HARD STOP** | **1920 GPU-seconds (80%)** |
 
 **Never run the tank dry.** The stop line exists so that a failure discovered on run 5 can still
 be fixed and retested on the same day. A test budget with no reserve is a test budget that
 guarantees the last bug found is the one you cannot verify fixed.
+
+> ⚠️ **The 2× multiplier is unverified, and it sized this entire matrix.**
+> Reading the `spaces` 0.51.1 client turned up `duration_factor = 1.5` applied at
+> `client.py:112` as `if gpu_size != 'xlarge': duration_seconds *= duration_factor` — so the
+> **1.5× inflation applies to `large` and NOT to `xlarge`, which is what we get** — but **no 2×
+> xlarge billing multiplier appears anywhere in the client.** It may well be server-side, which
+> is why this is downgraded rather than deleted.
+>
+> Consequence if it does not exist: the 7-run budget of 930 GPU-seconds is really ~465, and the
+> matrix is half as expensive as planned. **Budgeting the pessimistic number is correct** — being
+> wrong about it costs unused quota, while being wrong the other way costs a reservation failure
+> mid-matrix. Do not re-plan around the cheaper figure until a real run's *billed* seconds
+> confirm it. **The first run is the measurement**: compare billed against requested.
 
 ### B.1.1 Two metering paths — they are not the same number
 
@@ -149,9 +162,10 @@ So: **keep `duration=` tight.** An over-generous request costs nothing in billin
 in schedulability — late in the day, a `duration=300` reservation fails against 200 s remaining
 while the actual 40 s run would have fit fine.
 
-Two related traps from PLAN §5.8: `large` applies a hidden **1.5× `duration_factor`** (so
-`duration=60` schedules as 90 s), while `xlarge` skips that factor but **doubles the request**
-instead. And the maximum duration is a **server-side, tier-dependent, unpublished cap** —
+One trap from PLAN §5.8, now **confirmed at source**: `large` applies a hidden
+**1.5× `duration_factor`** (so `duration=60` schedules as 90 s). `spaces/zero/client.py:112`
+gates it on `gpu_size != 'xlarge'`, so it does **not** apply to us. The claim that `xlarge`
+"doubles the request instead" is the unverified half — see the warning above. And the maximum duration is a **server-side, tier-dependent, unpublished cap** —
 discover it, never hardcode it.
 
 ---

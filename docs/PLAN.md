@@ -1280,6 +1280,41 @@ normal GPU-box practice:
 
 HF's guidance, quoted: **models must be placed on cuda at the root module level.**
 
+##### ⚠️ The snapshot is freed after packing — but only if the mmap survives
+
+Read from `spaces` 0.51.1 (`zero/torch/patching.py:395`) rather than inferred:
+
+```python
+with unmap_capture(mmap_addrs) as unmapped_paths:
+    total_size = _pack(Config.zerogpu_offload_dir)
+for path in unmapped_paths:
+    path.unlink(missing_ok=True)
+```
+
+`unmap_capture` reads `/proc/self/maps`, maps each tensor's `data_ptr()` back to
+**the blob file it is mmap'd from**, and unlinks those matching
+`~/.cache/huggingface/hub/models--*/blobs/*`.
+
+**So the 72 GB snapshot IS reclaimed — conditionally.** Two preconditions, both
+easy to break and both silent when broken:
+
+1. **Tensors must still be mmap'd from the blobs when packing runs.** A dtype
+   **cast**, a `.clone()`, an eager `low_cpu_mem_usage=False`, or a
+   non-safetensors path materialises them into anonymous memory, leaving nothing
+   in the map to capture. Nothing is freed, 72 GB stays forever, **no error and
+   no log line**. This is why `torch_dtype` must equal the checkpoint's on-disk
+   dtype rather than being a free parameter — recorded at the risk site in
+   `pipelines.get_pipeline`.
+2. **The cache must live under `~/.cache/huggingface/hub`**, or the autoprune
+   pattern stops matching. **This is the sharper reason not to move `HF_HOME`** —
+   §6.2 gives the preload reason, and this one is worse because it fails
+   silently rather than loudly.
+
+**And the unlink runs strictly AFTER `_pack()` completes**, so both copies
+coexist for the whole packing window — which is the 144.37 GB peak in §7.4.
+Steady state afterwards is fine at ~72 GB. **It is the peak that evicts us, not
+the residency.**
+
 **Corollary: do NOT lazy-load models inside the decorated function.** HF documents that
 placements are optimised for startup; lazy loading defeats the packer entirely.
 

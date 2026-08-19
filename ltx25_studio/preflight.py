@@ -15,10 +15,13 @@ byte is touched:
    that failure cannot happen -- so we check the invariant instead of hoping for
    it, and a miss names the file AND its URL.
 
-   Note we deliberately do NOT move ``HF_HOME`` to dodge the permission problem.
-   ``preload_from_hub`` writes to the default cache and does not follow a moved
-   ``HF_HOME``, so relocating it makes the app look somewhere empty and
-   re-download 72 GB (PLAN §6.2).
+   Note we deliberately do NOT move ``HF_HOME``, and there are two reasons --
+   the second sharper than the first. ``preload_from_hub`` writes to the default
+   cache and does not follow a moved ``HF_HOME``, so relocating it makes the app
+   look somewhere empty and re-download 72 GB. **And ZeroGPU's post-pack cleanup
+   unlinks blobs matching** ``~/.cache/huggingface/hub/models--*/blobs/*``
+   **specifically** -- move the cache out from under that pattern and the 72 GB
+   snapshot is never freed, silently (PLAN §6.2, §8.3).
 
 3. **Resource preflight.** Measure free RAM and free disk against the
    requirement computed from the resolved config, and raise an error that NAMES
@@ -87,8 +90,9 @@ def ensure_weights(
     log = logging.getLogger("ltx25_studio")
     paths = model_files.download_allow_list(components)
     total_gb = model_files.total_size_gb(components)
-    log.info("fetching %d files (%.2f GB) at revision %s", len(paths), total_gb,
-             model_files.REVISION)
+    log.info(
+        "fetching %d files (%.2f GB) at revision %s", len(paths), total_gb, model_files.REVISION
+    )
     fetched: list[Path] = []
     for index, path in enumerate(paths, 1):
         # Progress is not decoration. This is a 72 GB cold start on every restart,
