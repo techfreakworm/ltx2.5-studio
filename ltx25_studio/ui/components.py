@@ -48,7 +48,7 @@ __all__ = [
 #: ``gr.Video``, ``gr.Audio`` and ``gr.Dataframe`` have no ``info=`` in Gradio 6,
 #: so their guidance is rendered as a caption underneath instead of being
 #: dropped on the floor.
-_ACCEPTS_INFO = frozenset({"text", "textarea", "number", "slider", "checkbox"})
+_ACCEPTS_INFO = frozenset({"text", "number", "slider", "checkbox"})
 
 
 def _build(spec: Field) -> gr.components.Component:
@@ -58,8 +58,6 @@ def _build(spec: Field) -> gr.components.Component:
     if spec.kind in _ACCEPTS_INFO and spec.info:
         common["info"] = spec.info
 
-    if spec.kind == "textarea":
-        return gr.Textbox(value=spec.default, **common, **options)
     if spec.kind == "text":
         return gr.Textbox(value=spec.default, **common, **options)
     if spec.kind == "number":

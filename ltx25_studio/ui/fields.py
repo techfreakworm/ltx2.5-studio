@@ -6,10 +6,10 @@ This module is how the UI honours both: a single ordered tuple of :class:`Field`
 descriptions, from which four separate things are generated **by construction**
 rather than maintained in parallel:
 
-1. the component pool          (``components.build_pool`` iterates ``FIELDS``)
-2. the ``inputs=`` list        (``[pool[k] for k in FIELD_KEYS]``)
+1. the component pool          (``components.render_fields`` builds one per ``Field``)
+2. the ``inputs=`` list        (``[pool[k] for k in FIELD_KEYS]``, in ``blocks.py``)
 3. the handler's unpacking     (``dict(zip(FIELD_KEYS, values, strict=True))``)
-4. per-mode visibility         (``handlers.visibility_flags`` iterates ``TOGGLEABLE_FIELDS``)
+4. per-mode visibility         (``handlers.on_mode_change`` walks ``TOGGLEABLE_FIELDS``)
 
 **Why this shape, specifically.** The predecessor kept three hand-maintained
 ``if``/``elif`` chains -- one listing a mode's input keys, one collecting its
@@ -145,7 +145,7 @@ FIELDS: tuple[Field, ...] = (
     # -- what the model is told to make -------------------------------------
     Field(
         key="prompt",
-        kind="textarea",
+        kind="text",
         label="Prompt",
         info="What to generate. LTX-2.5 responds to camera, lighting and motion language.",
         group="prompt",
@@ -353,8 +353,7 @@ def field_by_key(key: str) -> Field:
 def _assert_unique(keys: Sequence[str]) -> None:
     """A duplicated key would make the pool smaller than the key list and
     quietly desynchronise the marshalling. Catch it at import, not at runtime."""
-    seen: set[str] = set()
-    duplicates = sorted({k for k in keys if k in seen or seen.add(k)})  # type: ignore[func-returns-value]
+    duplicates = sorted({key for key in keys if keys.count(key) > 1})
     if duplicates:
         raise RuntimeError(f"duplicate UI field keys: {', '.join(duplicates)}")
 
