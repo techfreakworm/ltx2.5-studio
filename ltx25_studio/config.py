@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from types import MappingProxyType
 
 from . import model_files
-from .errors import LTXStudioError
+from .errors import ConfigError
 
 __all__ = [
     "ENV_GPU_DURATION_SECONDS",
@@ -76,10 +76,7 @@ def _choice(name: str, default: str, allowed: tuple[str, ...]) -> str:
         return default
     value = raw.strip().lower()
     if value not in allowed:
-        raise LTXStudioError(
-            f"{name}={raw!r} is not a recognised value. Legal values are: "
-            f"{', '.join(allowed)} (default {default!r}). Refusing to fall back silently."
-        )
+        raise ConfigError(variable=name, value=raw, legal=allowed)
     return value
 
 
@@ -90,14 +87,13 @@ def _number(name: str, default: float, *, minimum: float, integer: bool = False)
     try:
         value = int(raw) if integer else float(raw)
     except ValueError:
-        raise LTXStudioError(
-            f"{name}={raw!r} is not a number. Expected "
-            f"{'an integer' if integer else 'a number'} >= {minimum} (default {default})."
+        raise ConfigError(
+            variable=name,
+            value=raw,
+            legal=(f"{'an integer' if integer else 'a number'} >= {minimum}", f"default {default}"),
         ) from None
     if value < minimum:
-        raise LTXStudioError(
-            f"{name}={raw!r} is below the minimum of {minimum} (default {default})."
-        )
+        raise ConfigError(variable=name, value=raw, legal=(f">= {minimum}", f"default {default}"))
     return value
 
 

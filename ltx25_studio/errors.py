@@ -26,6 +26,7 @@ from __future__ import annotations
 
 __all__ = [
     "AudioVideoDesyncError",
+    "ConfigError",
     "ConstraintError",
     "DecodeError",
     "DimensionError",
@@ -92,6 +93,33 @@ class LoRAError(LTXStudioError):
 
 class GenerationError(LTXStudioError):
     """Generation started and did not produce a usable artifact (PLAN §5.3)."""
+
+
+# ---------------------------------------------------------------------------
+# configuration -- PLAN §5.1
+# ---------------------------------------------------------------------------
+
+
+class ConfigError(LTXStudioError):
+    """An environment variable holds a value we do not recognise.
+
+    Deliberately outside :class:`GenerationError` and :class:`ConstraintError`:
+    ``ui/`` has to tell an operator who set a Space variable wrong from a user
+    whose run failed, and those are different messages to different people.
+
+    Raised rather than defaulted, because a silent fallback is how a Space runs
+    for a week in a configuration nobody chose.
+    """
+
+    def __init__(self, *, variable, value, legal):
+        self.variable = variable
+        self.value = value
+        self.legal = tuple(legal)
+        super().__init__(
+            f"{variable}={value!r} is not a recognised value. Legal values are: "
+            f"{_join(self.legal)}. Refusing to fall back to a default silently -- set the "
+            f"variable correctly or unset it."
+        )
 
 
 # ---------------------------------------------------------------------------
