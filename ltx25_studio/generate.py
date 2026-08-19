@@ -281,6 +281,7 @@ def _apply_loras(pipe, request: GenerationRequest):
     if not staged:
         return ()
     from .lora import apply as lora_apply
+    from .lora import validate_lora
 
     target = getattr(pipe, "pipeline", pipe)
     reports = []
@@ -288,9 +289,17 @@ def _apply_loras(pipe, request: GenerationRequest):
         if isinstance(entry, dict):
             source = entry.get("source")
             weight = float(entry.get("weight", 1.0))
+            validated = entry.get("report") is not None
         else:
             source = entry
             weight = 1.0
+            validated = False
+        if not validated:
+            # Stages 1-6.5 run here for anything the UI did not already screen.
+            # The UI validates what it stages, but a programmatic caller -- or a
+            # future UI that forgets -- would otherwise reach stage 7 with no
+            # header check, no version check and no dimension check at all.
+            validate_lora(source, transformer=getattr(target, "transformer", None))
         reports.append(
             lora_apply.apply_lora(
                 target, source, adapter_name=f"user_lora_{position}", weight=weight
