@@ -266,9 +266,7 @@ def test_generate_refuses_a_result_missing_a_declared_track(mode_id, dropped, tm
 
     def encoder(output, *, run_dir, exports, **kwargs):
         return {
-            track: _write(run_dir, FILENAME_FOR[track])
-            for track in exports
-            if track != dropped
+            track: _write(run_dir, FILENAME_FOR[track]) for track in exports if track != dropped
         }
 
     with pytest.raises(EmptyOutputError) as caught:
@@ -298,9 +296,7 @@ def test_generate_refuses_a_declared_track_returned_as_none(mode_id, dropped, tm
 @pytest.mark.parametrize(
     ("mode_id", "phantom"), MODE_TRACK_PAIRS, ids=_pair_ids(MODE_TRACK_PAIRS, "unwritten")
 )
-def test_generate_refuses_a_declared_track_whose_file_was_never_written(
-    mode_id, phantom, tmp_path
-):
+def test_generate_refuses_a_declared_track_whose_file_was_never_written(mode_id, phantom, tmp_path):
     """A path is not an artifact. PLAN §5.3 forbids trusting one we did not see."""
 
     def encoder(output, *, run_dir, exports, **kwargs):
@@ -422,3 +418,44 @@ def test_every_declared_export_has_somewhere_to_live_on_the_result(mode_id):
         f"{list(TRACKS)}. Such a track would be silently dropped."
     )
     assert spec.exports, f"mode {mode_id!r} declares no exports at all"
+
+
+# --------------------------------------------------------------------------
+# stage 2 returns a different size than was asked for
+#
+# Requesting 704x480 with stage 2 gives a 1408x960 file. That is correct --
+# doubling both axes is what stage 2 IS -- but nothing said so, and
+# verify_streams does not assert resolution, so the size a user asked for was
+# not the size they got and no part of the system mentioned it.
+# --------------------------------------------------------------------------
+
+
+def test_a_stage_2_run_says_the_output_is_twice_the_requested_size(tmp_path):
+    result = run("text_to_video", tmp_path, enable_stage_2=True, width=704, height=480)
+
+    notes = " ".join(result.warnings)
+    assert "1408" in notes and "960" in notes, (
+        f"a stage-2 run did not tell the user its output is 1408x960 rather than the "
+        f"704x480 requested: {result.warnings}"
+    )
+    assert "704" in notes and "480" in notes, (
+        f"the note does not name the size that was actually asked for: {result.warnings}"
+    )
+
+
+def test_a_single_stage_run_says_nothing_about_size(tmp_path):
+    """A note on every run is a note nobody reads."""
+    result = run("text_to_video", tmp_path, width=704, height=480)
+
+    assert not any("upsamples" in note for note in result.warnings), (
+        f"a single-stage run warned about a doubling that did not happen: {result.warnings}"
+    )
+
+
+def test_a_mode_that_skips_stage_2_does_not_warn(tmp_path):
+    """`text_to_audio` discards its video, so the registry overrides the toggle."""
+    result = run("text_to_audio", tmp_path, enable_stage_2=True, width=704, height=480)
+
+    assert not any("upsamples" in note for note in result.warnings), (
+        f"a mode with skip_stage_2 warned about an upsample it never runs: {result.warnings}"
+    )

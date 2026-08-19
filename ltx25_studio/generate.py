@@ -548,6 +548,11 @@ def generate(
     _apply_loras(pipe, request)
     # After the pipeline exists, because encoding needs its `audio_vae`.
     audio_notes = _prepared_audio(kwargs, request, pipe)
+    size_notes = ()
+    if stage_2_enabled(spec, request):
+        from . import pipelines
+
+        size_notes = (pipelines.stage_2_size_note(request.width, request.height),)
     try:
         output = pipe(**kwargs)
     except Exception as exc:
@@ -599,7 +604,7 @@ def generate(
         written, spec=spec, mode=request.mode, run_dir=run_dir, notes=encoder_warnings
     )
 
-    warnings = _sweep(root, retention_bytes) + tuple(encoder_warnings) + audio_notes
+    warnings = _sweep(root, retention_bytes) + tuple(encoder_warnings) + audio_notes + size_notes
 
     return GenerationResult(
         output_path=artifacts["primary"],
