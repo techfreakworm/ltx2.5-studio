@@ -1711,6 +1711,35 @@ denoised at all. The refutation was of the *denoise loop*; the effect was in the
 > eliminated the wrong path with certainty and could not find the right one;
 > measurement found the right one and could not say why.
 
+**9. Source reading says what *cannot* be true. Measurement says what *is*.
+Neither alone says *why*.**
+
+The sharpest instance, and it cost a commit and a revert. `video_to_audio` came
+back 50 dB down.
+
+* **Source** established that a video condition cannot attenuate audio in the
+  denoise loop — the conditioning mask is applied to `noise_pred_video` and
+  never touches `noise_pred_audio`. ✅ Correct, and it stayed correct.
+* **Measurement** produced a clean single-lever sweep at fixed seed: strength
+  0.8 → −55.0 dBFS, 0.5 → −5.1. ✅ Also correct.
+* **The synthesis was wrong.** The sweep measured a real *interaction* between
+  condition strength and a separate, broken guidance configuration — a genuine
+  effect inside a pipeline that no longer exists. Fixing the actual defect made
+  H9 healthy **at the unchanged strength of 0.8**.
+
+> **A single-lever same-seed sweep is strong evidence that something moves, and
+> no evidence about why.** Treating a clean correlation as a mechanism, *against
+> a source citation*, is the error — and the citation was doubted because the
+> correlation was tidier.
+
+**The corollary is about sets, not single measurements.** A cross-section
+comparing several misconfigured outputs *to each other* argued the guidance was
+innocent, because they all sorted plausibly. **Comparing a set of misconfigured
+outputs to each other cannot reveal a defect they all share.** Only the
+intervention could — and when it ran, all twelve moved. That is the same shape
+as one artifact being rejected as a control because it was pinned to the rail:
+**a baseline has to be established, not assumed from internal consistency.**
+
 ### 9.1.6 The ladder, and the rung that is still hand-built
 
 Each rung was added because the one below it passed while something was broken:

@@ -71,17 +71,24 @@ All ✅ measured on the real `get_pipeline` path, no bypass, `verify_streams` 0.
 > batch ✅. A reader comparing 5.6 s against 25.7 s is comparing generation, not
 > startup.
 >
-> ⏸️ **These predate the schedule-and-guidance fix.** Eleven of the twelve ran
-> with a linear sigma schedule and SFT guidance — see §4.7. **Expect every
-> figure here to move** when the corrected matrix runs; they are recorded so the
-> before/after pair can be judged, not as a target.
+> ⚠️ **These sizes predate the schedule-and-guidance fix** (gap **7**). The
+> corrected matrix has since run and **all twelve modes changed** — so treat
+> these as the *before* half of a pair, not as expected values. Corrected
+> timings are in gap 7; **every run is roughly 3× faster**, and the flagship
+> 1216×704 with stereo now takes **21.0 s**.
 
 > ### ⚠️ Structure is not content
 >
-> **Twelve runs produced artifacts with the expected stream structure. Content
-> was inspected for two of them, and one looked wrong** — see **§4.5**. Nothing
-> here should be read as "nine modes produce correct output"; it says they
-> produce well-formed files, which is a weaker and different claim.
+> Every run here passed `verify_streams`. **The one defect that mattered most
+> was invisible to it**: `video_to_audio` came back 50 dB below its siblings
+> with correct codec, channels, rate, duration and a non-empty file. **Silence
+> and a healthy signal have identical stream layout.**
+>
+> It was found because someone measured RMS on an artifact that had already
+> been signed off, and it led to a defect affecting **all twelve modes** (gap
+> 7). A green table says these are well-formed files. **It is a weaker claim
+> than "correct output", and the gap between the two is where this build spent
+> its afternoon.**
 >
 > H8 and H9 are byte-identical in size because uncompressed PCM of equal
 > duration always is. That is why size proves nothing about content, and why it
@@ -227,40 +234,43 @@ caches per image or per cold worker is ⏸️ unknown and decides its severity.
    and both documented recipes mention only the spatial one. We download it
    (0.2619 GB) and do **not** wire it in. Not a defect; an open question.
 
-5. ### ✅ `video_to_audio` near-silence — **found and fixed**
+5. ### ✅ `video_to_audio` near-silence — **fixed, and the first diagnosis was wrong**
 
-   H9 produced audio at **−55.0 dBFS** against `text_to_audio`'s −5.2 ✅. The
-   cause was the `strength=0.8` request default reaching the video condition.
-   Measured sweep at seed 1234:
+   H9 came back at **−55.0 dBFS** against `text_to_audio`'s −5.2 ✅. **The cause
+   was the distilled recipe reaching only the stage-2 path (item 7).** With that
+   corrected, H9 runs at **−17.8 dBFS** — 2.5 dB from its siblings — at the
+   **unchanged** condition strength of 0.8.
 
-   | strength | audio | |
-   |---:|---:|---|
-   | 0.99 | −38.6 dBFS | near-silent |
-   | **0.80** | **−55.0 dBFS** | near-silent — the default that shipped |
-   | **0.50** | **−5.1 dBFS** | **healthy**, matches text-only |
-   | 0.20 | −11.5 dBFS | healthy |
-   | 0.05 | −13.2 dBFS | healthy |
+   | | before | after |
+   |---|---:|---:|
+   | H9 `video_to_audio` | −55.0 dBFS, peak 0.0146 | **−17.8 dBFS**, peak 0.5078 |
+   | H8 `text_to_audio` | −5.2 dBFS, **peak 1.0000** (railed) | **−15.3 dBFS**, peak 0.6953 |
+   | gap | **~50 dB** | **2.5 dB** |
 
-   **The mechanism is schedule truncation, not masking.** Strength sets where in
-   the sigma schedule the run *starts*, so at 0.8 only the last ~20% of steps
-   execute. The video stream does not care — the condition anchors it. **The
-   audio stream has nothing anchoring it and never gets denoised**, staying near
-   its initialisation.
+   **One mode 50 dB down and another driven into the rail were the same
+   misconfiguration seen from opposite ends.**
 
-   ⚠️ **It is a cliff, not a curve. Do not interpolate a new value.** 0.99 is
-   *louder* than 0.80 and 0.50 is louder than 0.20. `video_to_audio` now caps at
-   **0.5 because that was measured**; `video_to_video` is unchanged, because
-   high condition strength is exactly what its fidelity needs.
+   ⚠️ **The first diagnosis blamed condition strength and was wrong.** A
+   single-lever sweep at fixed seed gave 0.8 → −55.0 and 0.5 → −5.1, and that
+   was read as the cause. It was a real interaction **between condition strength
+   and the broken guidance** — a genuine effect inside a pipeline that no longer
+   exists. A per-mode strength cap was written, committed and reverted.
 
-   **How it was found is the point.** Every structural check passed on H9 —
-   channels, rate, duration, non-empty, `verify_streams` 0. Silence and a
-   healthy signal have identical stream layout. It took someone measuring RMS on
-   an artifact that had already been signed off.
+   > **A single-lever same-seed sweep is strong evidence that something moves,
+   > and no evidence about why.**
 
-7. ### ⏸️ Every artifact in §2 predates the schedule fix
+   The source citation said throughout that a video condition *cannot* attenuate
+   audio in the denoise loop — the conditioning mask is applied to
+   `noise_pred_video` and never touches `noise_pred_audio`. It was correct, and
+   a clean correlation was believed over it.
 
-   Eleven of the twelve runs sent **no sigmas at all**. `DISTILLED_SIGMA_VALUES`
-   reached the pipeline only when stage 2 was enabled, so upstream built its own
+6. **The audio input rate is 16000, the vocoder output is 48000.** 📄 They are
+   not symmetric. Anything that assumes one rate for both directions will
+   pitch-shift audio without erroring.
+
+7. ### ✅ The distilled recipe reached only the stage-2 path — **fixed**
+
+   Eleven of twelve runs sent **no sigmas at all**, so upstream built its own
    schedule and five guidance parameters took their **SFT** defaults —
    `audio_guidance_scale` at **7.0** against an intended 1.0.
 
@@ -269,16 +279,28 @@ caches per image or per cold worker is ⏸️ unknown and decides its severity.
    intended:  [1.0, 0.99375, 0.9875, 0.98125, 0.975, 0.909375, 0.725, 0.421875]
    ```
 
-   Five of eight steps above σ=0.97 with a floor of 0.42, against one and 0.125
-   — a different denoising trajectory, not a mistuning. **Fixed**, and `H14` is
-   the only recorded run that used the correct schedule. ⏸️ **The corrected
-   matrix has not yet run**, so every size, time and level in §2 is a
-   pre-fix measurement. It was **not** the cause of the H9 silence (§4.5);
-   levels sorted by condition type while every run shared these settings.
+   **All twelve modes changed when it was corrected** ✅ — nothing silently
+   survived it. The magnitudes order by conditioning strength (text-only 37–59
+   mean |diff|, image-conditioned 15–16, video-conditioned **3.71**), which is
+   what makes them coherent rather than noise: the strongest condition pins the
+   output hardest and leaves the guidance least room to move it.
 
-6. **The audio input rate is 16000, the vocoder output is 48000.** 📄 They are
-   not symmetric. Anything that assumes one rate for both directions will
-   pitch-shift audio without erroring.
+   **It cost 3× the compute as well as the quality.** At `guidance_scale=1.0`
+   with STG and modality zeroed there are no classifier-free branches, so it is
+   one forward pass per step rather than two or three:
+
+   | | before | after |
+   |---|---:|---:|
+   | H1 `text_to_video` | 25.7 s | **8.4 s** |
+   | H8 `text_to_audio` | 5.6 s | **1.8 s** |
+   | H14 stage 2 | 84.3 s | **35.2 s** |
+   | H16 **1216×704 + stereo** | 68.7 s | **21.0 s** |
+
+   Clipping went with it — highest peak **1.7811 → 1.0050** ✅ — so no limiter is
+   needed and `outputs._write_audio`'s *"what comes back is what the vocoder
+   produced"* principle stands. **Our path never added gain; the material was
+   arriving at ±1.0.** Stage 2's brightness falloff was this too, not stage 2:
+   mean `99.48 → 34.44` collapsing before, `82.52 → 110.47` stable after.
 
 ---
 
