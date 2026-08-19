@@ -41,6 +41,7 @@ from dataclasses import dataclass
 
 from . import model_files
 from .constraints import (
+    DEFAULT_FRAME_RATE,
     DEFAULT_SPATIAL_COMPRESSION_RATIO,
     DEFAULT_TEMPORAL_COMPRESSION_RATIO,
     DISTILLED_SIGMA_VALUES,
@@ -54,6 +55,7 @@ __all__ = [
     "PipelineBundle",
     "StageRunner",
     "assert_compression_ratios",
+    "assert_frame_rate_default",
     "clear_cache",
     "get_pipeline",
     "stage_1_kwargs",
@@ -105,6 +107,34 @@ def assert_compression_ratios(vae) -> tuple[int, int]:
     return temporal, spatial
 
 
+def assert_frame_rate_default(pipeline_object) -> None:
+    """Tripwire on upstream's own ``frame_rate`` default.
+
+    Same shape as the compression-ratio tripwire: we thread one rate to both the
+    generation and the container, and ``DEFAULT_FRAME_RATE`` is our copy of
+    upstream's. If upstream changes its default, a caller that omits the kwarg
+    would generate at one rate while the container declares another -- and a
+    container written at the wrong rate plays at the wrong speed and reports no
+    error.
+    """
+    import inspect
+
+    try:
+        default = inspect.signature(pipeline_object).parameters["frame_rate"].default
+    except (TypeError, ValueError, KeyError):
+        return  # nothing to compare against; not worth failing a load over
+    if default is not inspect.Parameter.empty and float(default) != float(DEFAULT_FRAME_RATE):
+        raise ModelLoadError(
+            component="transformer",
+            reason=(
+                f"upstream's frame_rate default changed to {default} (we carry "
+                f"{DEFAULT_FRAME_RATE}). Generation and the muxed container would be written at "
+                f"different rates, which plays at the wrong speed without any error. Update "
+                f"DEFAULT_FRAME_RATE in constraints.py before continuing."
+            ),
+        )
+
+
 def _text_encoder_model_type(pipeline) -> str:
     encoder = getattr(pipeline, "text_encoder", None)
     config = getattr(encoder, "config", None)
@@ -153,6 +183,7 @@ def get_pipeline(*, pipeline: str = "condition", dtype=None, device: str | None 
     vae = getattr(built, "vae", None)
     if vae is not None:
         assert_compression_ratios(vae)
+    assert_frame_rate_default(built)
 
     runner = StageRunner(built, kind=pipeline)
     _CACHE[pipeline] = runner

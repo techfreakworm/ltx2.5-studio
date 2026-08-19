@@ -129,6 +129,12 @@ def _base_kwargs(request, *, min_resolution: bool) -> dict:
     width = MIN_RESOLUTION if min_resolution else getattr(request, "width", None)
     height = MIN_RESOLUTION if min_resolution else getattr(request, "height", None)
     candidates = {
+        # Passed to the PIPELINE as well as to the encoder. It looks redundant
+        # only because both values are 24.0 today: without this the rate the
+        # model generates at and the rate the container declares are two
+        # independent numbers that happen to agree, and the first change to
+        # either plays the video at the wrong speed with no error at all.
+        "frame_rate": getattr(request, "frame_rate", None),
         "prompt": getattr(request, "prompt", None),
         "negative_prompt": getattr(request, "negative_prompt", None),
         "width": width,

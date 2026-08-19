@@ -38,6 +38,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from . import constraints, modes
+from .constraints import DEFAULT_FRAME_RATE
 from .errors import DecodeError, EmptyOutputError, EncodeError, ModelLoadError
 
 logger = logging.getLogger(__name__)
@@ -114,6 +115,9 @@ class GenerationRequest:
     width: int = 704
     height: int = 480
     num_frames: int = 121
+    #: Frames per second, for BOTH the generation and the container. One value,
+    #: threaded to both, so they cannot drift into disagreeing.
+    frame_rate: float = DEFAULT_FRAME_RATE
     seed: int = RANDOM_SEED
     image: object | None = None
     video: object | None = None
@@ -411,6 +415,7 @@ def generate(
             "mode": request.mode,
             "exports": spec.exports,
             "seed": seed,
+            "frame_rate": request.frame_rate,
         }
         sampling_rate = _export_sampling_rate(pipe)
         if sampling_rate is not None:

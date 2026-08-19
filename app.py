@@ -76,6 +76,13 @@ _GPU_KWARGS = zerogpu.gpu_decorator_kwargs(
 _log.info("spaces.GPU kwargs: %s", sorted(_GPU_KWARGS))
 
 
+# Bound at import, deliberately: the entrypoint must call the real generate, not
+# whatever the module attribute happens to point at later. Resolving it by
+# attribute lets any wrapper installed after startup send the worker straight
+# back through itself.
+_GENERATE = generate_module.generate
+
+
 @spaces.GPU(**_GPU_KWARGS)
 def run_generation(**params):
     """The only function that runs on the GPU. Decorated statically at import.
@@ -86,7 +93,7 @@ def run_generation(**params):
     """
     token = generate_module._IN_GPU_WORKER.set(True)
     try:
-        return zerogpu.assert_returnable(generate_module.generate(**params))
+        return zerogpu.assert_returnable(_GENERATE(**params))
     finally:
         generate_module._IN_GPU_WORKER.reset(token)
 
