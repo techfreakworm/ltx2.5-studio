@@ -67,7 +67,11 @@ ERROR_SPECS = {
     ),
     # -- LoRA (PLAN §4.3) ------------------------------------------------
     "LoRATooLargeError": (
-        {"source": "/tmp/huge.safetensors", "size_bytes": 12_000_000_000, "max_bytes": 10_000_000_000},
+        {
+            "source": "/tmp/huge.safetensors",
+            "size_bytes": 12_000_000_000,
+            "max_bytes": 10_000_000_000,
+        },
         ["huge.safetensors", "12", "10"],
     ),
     "LoRAFormatError": (

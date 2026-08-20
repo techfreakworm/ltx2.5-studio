@@ -117,9 +117,7 @@ def test_no_raw_dataframe_row_reaches_the_pipeline(mode_id, tmp_path):
 
 
 @pytest.mark.parametrize("mode_id", CONDITIONABLE_MODES)
-def test_every_condition_reaching_the_pipeline_carries_a_source_and_an_index(
-    mode_id, tmp_path
-):
+def test_every_condition_reaching_the_pipeline_carries_a_source_and_an_index(mode_id, tmp_path):
     """Whatever the convention, a built condition has these three fields."""
     conditions = run_with_shots(mode_id, [shot_row(3)], tmp_path)
 

@@ -201,7 +201,7 @@ def test_the_tensor_move_that_triggers_packing_is_executable():
     ]
 
     assert moves, (
-        "no executable `.to(\"cuda\")` (or `.to(device)`) exists anywhere in the tree, so "
+        'no executable `.to("cuda")` (or `.to(device)`) exists anywhere in the tree, so '
         "ZeroGPU never packs the weights (PLAN §8.3). Every docstring describing the packing "
         "model is describing something that does not happen."
     )
@@ -436,8 +436,7 @@ def test_the_entrypoint_guards_what_it_returns(imported_app):
         and any(_is_spaces_gpu(decorator) for decorator in node.decorator_list)
         and any(
             isinstance(inner, ast.Call)
-            and getattr(inner.func, "attr", getattr(inner.func, "id", None))
-            == "assert_returnable"
+            and getattr(inner.func, "attr", getattr(inner.func, "id", None)) == "assert_returnable"
             for inner in ast.walk(node)
         )
     ]

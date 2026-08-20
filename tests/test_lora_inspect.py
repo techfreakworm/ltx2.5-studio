@@ -389,6 +389,4 @@ def test_synthetic_fixtures_are_readable_by_the_real_safetensors_library(good_lo
     safetensors = pytest.importorskip("safetensors")
     with safetensors.safe_open(str(good_lora), framework="numpy") as handle:
         assert handle.metadata() == OFFICIAL_METADATA
-        assert set(handle.keys()) == set(
-            lora_tensors(NATIVE_PREFIX, TRANSFORMER_MODULE_PATHS)
-        )
+        assert set(handle.keys()) == set(lora_tensors(NATIVE_PREFIX, TRANSFORMER_MODULE_PATHS))

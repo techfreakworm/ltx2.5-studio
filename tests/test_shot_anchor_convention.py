@@ -209,9 +209,9 @@ def test_the_conversion_branch_is_actually_reachable_in_these_tests(diffusers_co
     from ltx25_studio import pipelines
 
     spec = conditioning.ConditionSpec(source="img.png", kind="image", index=4, strength=1.0)
-    converted = pipelines._with_real_conditions(
-        {"conditions": [spec], "num_frames": NUM_FRAMES}
-    )["conditions"][0]
+    converted = pipelines._with_real_conditions({"conditions": [spec], "num_frames": NUM_FRAMES})[
+        "conditions"
+    ][0]
 
     assert isinstance(converted, diffusers_condition_type), (
         "the conditions were returned unconverted, so the diffusers branch did not run and "
@@ -220,9 +220,7 @@ def test_the_conversion_branch_is_actually_reachable_in_these_tests(diffusers_co
 
 
 @pytest.mark.parametrize("latent", [1, 3, 4, 5])
-def test_a_spec_that_already_carries_a_latent_index_is_left_alone(
-    latent, diffusers_condition_type
-):
+def test_a_spec_that_already_carries_a_latent_index_is_left_alone(latent, diffusers_condition_type):
     """Idempotence, at the layer where a second conversion could still creep in.
 
     ``StageRunner`` normalises anything that is not already a ``ConditionSpec``.
@@ -232,9 +230,7 @@ def test_a_spec_that_already_carries_a_latent_index_is_left_alone(
     """
     from ltx25_studio import pipelines
 
-    already = conditioning.ConditionSpec(
-        source="img.png", kind="image", index=latent, strength=1.0
-    )
+    already = conditioning.ConditionSpec(source="img.png", kind="image", index=latent, strength=1.0)
     converted = pipelines._with_real_conditions(
         {"conditions": [already], "num_frames": NUM_FRAMES}
     )["conditions"][0]
@@ -309,7 +305,7 @@ def test_a_frame_mid_span_is_reported_as_inexact(frame, latent, first):
 
 @pytest.mark.parametrize(("frame", "latent", "first"), INEXACT_ANCHORS)
 def test_the_readout_says_where_an_inexact_anchor_actually_lands(frame, latent, first):
-    """"Frame 30 → latent 4 (frames 25–32 share this anchor)" is honest.
+    """ "Frame 30 → latent 4 (frames 25–32 share this anchor)" is honest.
 
     Telling the user the rule is weaker than showing them the span, because the
     rule is the part people misread — and finding out after a metered run is the
@@ -335,7 +331,9 @@ def test_two_frames_the_user_thinks_are_apart_are_named_as_the_same_anchor():
     Frames 25 and 30 are five frames apart on screen and identical to the model.
     The readout has to be the place that says so.
     """
-    assert conditioning.latent_group_for(25)["latent"] == conditioning.latent_group_for(30)["latent"]
+    assert (
+        conditioning.latent_group_for(25)["latent"] == conditioning.latent_group_for(30)["latent"]
+    )
 
     readout = handlers.on_shots_change([shot_row(25), shot_row(30)], NUM_FRAMES)
     assert "⟵" in readout or "snap" in readout.lower(), (

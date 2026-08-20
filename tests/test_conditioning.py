@@ -123,7 +123,7 @@ def test_ltx25_text_encoders_select_crf_18(model_type):
 
 @pytest.mark.parametrize("model_type", ["gemma3", "t5", "llama"])
 def test_other_text_encoders_select_the_generic_crf(model_type):
-    """"hardcoding either number is wrong for the other" — so it is derived from
+    """ "hardcoding either number is wrong for the other" — so it is derived from
     ``text_encoder.config.model_type`` at runtime, not written down."""
     from ltx25_studio import constraints
 

@@ -233,9 +233,7 @@ def _is_filename_shaped(template: str) -> bool:
     return stripped.endswith(MODEL_EXTENSIONS)
 
 
-@pytest.mark.parametrize(
-    "path", SOURCE_FILES, ids=lambda p: str(p.relative_to(REPO_ROOT))
-)
+@pytest.mark.parametrize("path", SOURCE_FILES, ids=lambda p: str(p.relative_to(REPO_ROOT)))
 def test_no_shard_filename_fragment_lives_outside_model_files(path):
     """Catches the stem however it is later assembled.
 
@@ -257,9 +255,7 @@ def test_no_shard_filename_fragment_lives_outside_model_files(path):
     )
 
 
-@pytest.mark.parametrize(
-    "path", SOURCE_FILES, ids=lambda p: str(p.relative_to(REPO_ROOT))
-)
+@pytest.mark.parametrize("path", SOURCE_FILES, ids=lambda p: str(p.relative_to(REPO_ROOT)))
 def test_no_filename_is_assembled_from_fragments_outside_model_files(path):
     """Supersedes the literal-only half of ``test_no_hardcoded_hub_strings_outside_model_files``.
 
@@ -287,27 +283,27 @@ def test_no_filename_is_assembled_from_fragments_outside_model_files(path):
 # the detector itself, anchored on the exact bypass and on what must stay legal
 # --------------------------------------------------------------------------
 
-_BYPASS = '''
+_BYPASS = """
 _STEM = "diffusion_pytorch_model-00001-of-00004"
 
 
 def shard():
     return f"{_STEM}.safetensors"
-'''
+"""
 
-_CONCATENATION_BYPASS = '''
+_CONCATENATION_BYPASS = """
 def shard(stem):
     return stem + ".safetensors"
-'''
+"""
 
-_LEGITIMATE = '''
+_LEGITIMATE = """
 UPLOAD_FILTER = [".safetensors"]
 HELP = "Upload a .safetensors adapter, or paste a Hub repo id."
 
 
 def describe(name):
     return f"validating {name} as a LoRA adapter"
-'''
+"""
 
 
 def test_the_detector_catches_the_f_string_bypass():

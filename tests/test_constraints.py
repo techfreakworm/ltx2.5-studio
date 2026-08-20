@@ -153,7 +153,14 @@ def test_a_nonsense_ratio_raises_our_error_not_zerodivisionerror(bad_ratio):
 
 @pytest.mark.parametrize(
     "num_frames,expected",
-    [(120, (113, 121)), (122, (121, 129)), (121, (121, 121)), (1, (1, 1)), (0, (1, 1)), (-4, (1, 1))],
+    [
+        (120, (113, 121)),
+        (122, (121, 129)),
+        (121, (121, 121)),
+        (1, (1, 1)),
+        (0, (1, 1)),
+        (-4, (1, 1)),
+    ],
 )
 def test_nearest_valid_num_frames(num_frames, expected):
     assert constraints.nearest_valid_num_frames(num_frames) == expected

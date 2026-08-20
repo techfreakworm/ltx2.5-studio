@@ -50,7 +50,10 @@ pytestmark = pytest.mark.network
 HUB = "https://huggingface.co"
 
 POSITIVE = ("AhsanHareem/reelbids-ltx25-camera-lora", "lora_weights_step_01250.safetensors")
-WRONG_ARCHITECTURE = ("charlied98/ltxv_2b_lora_soft_draw_v1", "comfy_lora_weights_step_03000.safetensors")
+WRONG_ARCHITECTURE = (
+    "charlied98/ltxv_2b_lora_soft_draw_v1",
+    "comfy_lora_weights_step_03000.safetensors",
+)
 IN_CONTEXT = ("DoctorDiffusion/LTX-2.3-IC-LoRA-Colorizer", None)
 
 

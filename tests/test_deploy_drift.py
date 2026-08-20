@@ -210,7 +210,6 @@ def test_the_runtime_download_still_comes_from_model_files():
     )
 
 
-
 # --------------------------------------------------------------------------
 # every direct dependency has a floor AND a ceiling (PLAN §5.1)
 # --------------------------------------------------------------------------

@@ -205,7 +205,9 @@ def test_missing_file_error_names_both_the_filename_and_its_url():
     """The 2.3 lesson: when Lightricks deletes a file, the message must tell the
     operator exactly which URL to go and look at."""
     with pytest.raises(MissingModelFileError) as excinfo:
-        model_files.require_file("transformer", "diffusion_pytorch_model-00099-of-00004.safetensors")
+        model_files.require_file(
+            "transformer", "diffusion_pytorch_model-00099-of-00004.safetensors"
+        )
     message = str(excinfo.value)
     assert "diffusion_pytorch_model-00099-of-00004.safetensors" in message
     assert "https://huggingface.co/Lightricks/LTX-2.5-Diffusers" in message
@@ -261,9 +263,7 @@ def _is_a_hardcoded_filename(value):
 SOURCE_FILES_TO_SWEEP = package_python_files(exclude=("model_files.py",)) + [REPO_ROOT / "app.py"]
 
 
-@pytest.mark.parametrize(
-    "path", SOURCE_FILES_TO_SWEEP, ids=lambda p: str(p.relative_to(REPO_ROOT))
-)
+@pytest.mark.parametrize("path", SOURCE_FILES_TO_SWEEP, ids=lambda p: str(p.relative_to(REPO_ROOT)))
 def test_no_hardcoded_hub_strings_outside_model_files(path):
     """An upstream rename must be a one-line change in one file (PLAN §5.2).
 

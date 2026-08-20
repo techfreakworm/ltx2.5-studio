@@ -321,8 +321,8 @@ MAPS = f"""\
 7f0000040000-7f0000050000 r--p 00000000 00:1b 222 /usr/lib/x86_64-linux-gnu/libc.so.6
 """
 
-MAPPED = 0x7F0000000100      # inside the blob
-ANONYMOUS = 0x7F0000025000   # a cast or a clone lands here
+MAPPED = 0x7F0000000100  # inside the blob
+ANONYMOUS = 0x7F0000025000  # a cast or a clone lands here
 WRONG_FILE = 0x7F0000045000  # file-backed, but not a prunable blob
 
 
@@ -374,7 +374,7 @@ def test_a_tensor_backed_by_the_wrong_file_is_caught():
 
 
 def test_being_unable_to_check_is_reported_not_passed():
-    """"could not check" and "checked and fine" must never look the same.
+    """ "could not check" and "checked and fine" must never look the same.
 
     On macOS there is no /proc/self/maps. Returning a quiet pass there would be
     the same defect as the startup report that defaulted to 37/37.

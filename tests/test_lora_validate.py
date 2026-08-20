@@ -293,7 +293,9 @@ def test_an_unknown_convention_is_rejected(validate_via, write_safetensors):
 def test_the_convention_error_names_the_prefixes_actually_found(write_safetensors):
     tensors = lora_tensors("unet.", ("down_blocks.0.resnets.0.conv1",))
     tensors |= lora_tensors("controlnet.", ("input_blocks.0.0",))
-    path = write_safetensors(name="mystery.safetensors", tensors=tensors, metadata=OFFICIAL_METADATA)
+    path = write_safetensors(
+        name="mystery.safetensors", tensors=tensors, metadata=OFFICIAL_METADATA
+    )
     with pytest.raises(LoRAConventionError) as excinfo:
         lora_validate.validate_lora(path)
     message = str(excinfo.value)
@@ -306,7 +308,9 @@ def test_a_key_without_the_lora_substring_is_rejected(validate_via, write_safete
     """Upstream's only check, done earlier and with a better message."""
     tensors = lora_tensors(NATIVE_PREFIX, ("transformer_blocks.0.attn1.to_q",))
     tensors["diffusion_model.transformer_blocks.0.attn1.to_q.bias"] = ("F32", [8])
-    path = write_safetensors(name="stray-key.safetensors", tensors=tensors, metadata=OFFICIAL_METADATA)
+    path = write_safetensors(
+        name="stray-key.safetensors", tensors=tensors, metadata=OFFICIAL_METADATA
+    )
     with pytest.raises(LoRAError):
         validate_via(path)
 
@@ -332,7 +336,9 @@ def test_a_correctly_paired_kohya_adapter_passes(validate_via, write_safetensors
 def test_lora_a_without_its_b_is_rejected(validate_via, write_safetensors):
     tensors = lora_tensors(NATIVE_PREFIX, TRANSFORMER_MODULE_PATHS)
     del tensors[f"{NATIVE_PREFIX}{TRANSFORMER_MODULE_PATHS[0]}.lora_B.weight"]
-    path = write_safetensors(name="unpaired-a.safetensors", tensors=tensors, metadata=OFFICIAL_METADATA)
+    path = write_safetensors(
+        name="unpaired-a.safetensors", tensors=tensors, metadata=OFFICIAL_METADATA
+    )
     with pytest.raises(LoRAPairingError):
         validate_via(path)
 
@@ -340,7 +346,9 @@ def test_lora_a_without_its_b_is_rejected(validate_via, write_safetensors):
 def test_lora_b_without_its_a_is_rejected(validate_via, write_safetensors):
     tensors = lora_tensors(NATIVE_PREFIX, TRANSFORMER_MODULE_PATHS)
     del tensors[f"{NATIVE_PREFIX}{TRANSFORMER_MODULE_PATHS[0]}.lora_A.weight"]
-    path = write_safetensors(name="unpaired-b.safetensors", tensors=tensors, metadata=OFFICIAL_METADATA)
+    path = write_safetensors(
+        name="unpaired-b.safetensors", tensors=tensors, metadata=OFFICIAL_METADATA
+    )
     with pytest.raises(LoRAPairingError):
         validate_via(path)
 
@@ -348,7 +356,9 @@ def test_lora_b_without_its_a_is_rejected(validate_via, write_safetensors):
 def test_lora_down_without_its_up_is_rejected(validate_via, write_safetensors):
     tensors = lora_tensors(NATIVE_PREFIX, TRANSFORMER_MODULE_PATHS, style="kohya")
     del tensors[f"{NATIVE_PREFIX}{TRANSFORMER_MODULE_PATHS[0]}.lora_up.weight"]
-    path = write_safetensors(name="unpaired-down.safetensors", tensors=tensors, metadata=OFFICIAL_METADATA)
+    path = write_safetensors(
+        name="unpaired-down.safetensors", tensors=tensors, metadata=OFFICIAL_METADATA
+    )
     with pytest.raises(LoRAPairingError):
         validate_via(path)
 
@@ -373,7 +383,9 @@ def test_the_pairing_error_names_the_unpaired_key(write_safetensors):
 # --------------------------------------------------------------------------
 
 
-def test_a_wrong_architecture_adapter_passes_stages_one_to_six(validate_via, wrong_architecture_lora):
+def test_a_wrong_architecture_adapter_passes_stages_one_to_six(
+    validate_via, wrong_architecture_lora
+):
     """This is not a bug in the validator — it is the point.
 
     With no transformer to compare against — which is the pre-load UI case, and

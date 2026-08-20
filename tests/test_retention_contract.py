@@ -138,7 +138,7 @@ def test_the_sweep_evicts_oldest_first(tmp_path):
 
 
 def test_the_sweep_never_evicts_the_run_that_just_finished(tmp_path):
-    """"Generating a video and deleting it in the same breath is not a policy."
+    """ "Generating a video and deleting it in the same breath is not a policy."
 
     The cap here is far below the artifact the run just wrote, so a naive sweep
     would delete the very file it is about to hand back.
@@ -170,7 +170,7 @@ def test_every_mode_sweeps_after_a_successful_run(mode_id, tmp_path):
 
 
 def test_an_eviction_is_reported_on_the_result(tmp_path):
-    """"Discovering your outputs are gone by not finding them is worse than being told."
+    """ "Discovering your outputs are gone by not finding them is worse than being told."
 
     ``enforce_retention`` returns what it evicted precisely so the caller can say
     so. A caller that drops the list re-creates the silent sweep the policy is
@@ -195,7 +195,9 @@ def test_a_run_that_evicts_nothing_says_nothing(tmp_path):
 
     result = run(tmp_path, retention_bytes=10**9)
 
-    assert result.warnings == (), f"nothing was evicted but the run warned anyway: {result.warnings}"
+    assert result.warnings == (), (
+        f"nothing was evicted but the run warned anyway: {result.warnings}"
+    )
 
 
 # --------------------------------------------------------------------------
@@ -265,7 +267,7 @@ def test_a_runs_age_is_its_oldest_file_not_its_directory(tmp_path):
 
 
 def test_whole_run_directories_are_evicted_never_loose_files(tmp_path):
-    """"Half an evicted run is worse than none of it."""
+    """ "Half an evicted run is worse than none of it."""
     old = make_old_run(tmp_path, "run-old", age_seconds=3000)
     (old / outputs.AUDIO_FILENAME).write_bytes(b"\x00" * OLD_RUN_BYTES)
 

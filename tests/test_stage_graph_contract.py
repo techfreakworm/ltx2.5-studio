@@ -803,6 +803,11 @@ def install_fake_stack(monkeypatch, snapshot, **classes):
 
     defaults = {
         "diffusers": (
+            # BOTH, as real diffusers exports both. If the fake omitted the
+            # component-level class, a mutation using it would fail on an
+            # ImportError rather than on the type assertion -- and a mutant that
+            # breaks execution is not a mutant.
+            "PipelineQuantizationConfig",
             "BitsAndBytesConfig",
             "LTX2ConditionPipeline",
             "LTX2Pipeline",
@@ -1099,7 +1104,7 @@ def test_the_schedule_is_not_truncated_for_a_partially_noised_run():
 # --------------------------------------------------------------------------
 
 
-def _loaded_kwargs(monkeypatch, tmp_path, quantization):
+def _loaded(monkeypatch, tmp_path, quantization):
     from ltx25_studio import config, model_files
 
     snapshot = tmp_path / "snapshots" / model_files.REVISION
@@ -1109,12 +1114,12 @@ def _loaded_kwargs(monkeypatch, tmp_path, quantization):
 
     pipelines._base_pipeline()
 
-    return recorders["LTX2ConditionPipeline"].calls[-1]
+    return recorders["LTX2ConditionPipeline"].calls[-1], recorders
 
 
 def test_int8_reaches_from_pretrained(monkeypatch, tmp_path):
     """The whole point of the deploy: the variable must change the load."""
-    sent = _loaded_kwargs(monkeypatch, tmp_path, "int8")
+    sent, _recorders = _loaded(monkeypatch, tmp_path, "int8")
 
     assert "quantization_config" in sent, (
         f"LTX25_QUANTIZATION=int8 and from_pretrained was called with {sorted(sent)}. "
@@ -1126,7 +1131,7 @@ def test_int8_reaches_from_pretrained(monkeypatch, tmp_path):
 
 def test_bf16_sends_no_quantization_config(monkeypatch, tmp_path):
     """The default must be the baseline every measurement was taken against."""
-    sent = _loaded_kwargs(monkeypatch, tmp_path, "bf16")
+    sent, _recorders = _loaded(monkeypatch, tmp_path, "bf16")
 
     assert "quantization_config" not in sent, (
         f"the bf16 default sent a quantization_config: {sorted(sent)}"
@@ -1135,7 +1140,7 @@ def test_bf16_sends_no_quantization_config(monkeypatch, tmp_path):
 
 def test_the_dtype_is_still_sent_when_quantising(monkeypatch, tmp_path):
     """The a14ebe8 lesson: an omitted dtype is not a neutral omission."""
-    sent = _loaded_kwargs(monkeypatch, tmp_path, "int8")
+    sent, _recorders = _loaded(monkeypatch, tmp_path, "int8")
 
     assert sent.get("torch_dtype") is not None, (
         "quantising dropped torch_dtype; diffusers then resolves it to float32"
@@ -1146,8 +1151,48 @@ def test_the_load_still_comes_from_the_local_snapshot_when_quantising(monkeypatc
     """Quantising must not reintroduce the 44.33 GB repo-id refetch."""
     from ltx25_studio import model_files
 
-    sent = _loaded_kwargs(monkeypatch, tmp_path, "int8")
+    sent, _recorders = _loaded(monkeypatch, tmp_path, "int8")
 
     assert model_files.REPO_ID not in str(sent["target"]), (
         f"the quantised load went to the repo id ({sent['target']})"
+    )
+
+
+def test_the_config_is_the_pipeline_level_class_with_the_right_backend(monkeypatch, tmp_path):
+    """The rung past "the argument arrived": **is it the type the callee takes?**
+
+    A bare `BitsAndBytesConfig` reaches `from_pretrained` exactly as well as the
+    right one — the kwargs test cannot tell them apart — and the pipeline then
+    rejects it on the Space::
+
+        ValueError: `quantization_config` must be an instance of
+        `PipelineQuantizationConfig`.
+
+    Component-level `from_pretrained` takes the former; the pipeline-level one
+    takes the latter. That cost a deploy cycle.
+    """
+    _sent, recorders = _loaded(monkeypatch, tmp_path, "int8")
+
+    built = recorders["PipelineQuantizationConfig"].calls
+    assert built, (
+        "the pipeline-level quantisation class was never constructed; a bare "
+        "BitsAndBytesConfig reaches from_pretrained and is rejected there"
+    )
+    assert built[-1]["quant_backend"] == "bitsandbytes_8bit", built[-1]
+
+
+def test_bound_b_is_expressed_as_an_argument(monkeypatch, tmp_path):
+    """Transformer-only used to be an intent a source scan had to assert.
+
+    It is now `components_to_quantize`, so widening it is a visible change to a
+    value this test reads — not a change to what a call happens to produce.
+    """
+    _sent, recorders = _loaded(monkeypatch, tmp_path, "int8")
+
+    built = recorders["PipelineQuantizationConfig"].calls
+    assert built, "the pipeline-level class was not constructed at all"
+    assert built[-1]["components_to_quantize"] == ["transformer"], (
+        "quantisation is no longer transformer-only. Bound B was chosen over A "
+        "deliberately: widening buys headroom we do not need and costs the ability "
+        "to attribute a quality change to the denoiser rather than prompt encoding."
     )

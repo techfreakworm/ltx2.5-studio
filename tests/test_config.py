@@ -11,8 +11,6 @@ output, and it exists because bf16 does not fit ZeroGPU's disk.
 
 from __future__ import annotations
 
-import inspect
-
 import pytest
 
 from ltx25_studio import config
@@ -47,26 +45,10 @@ def test_an_unrecognised_precision_is_refused_rather_than_defaulted(monkeypatch)
     assert "fp8" in str(excinfo.value)
 
 
-def test_only_the_transformer_is_quantised():
-    """Widening costs attributability: a quality change could not then be
-    ascribed to the denoiser rather than to prompt encoding.
-
-    ⚠️ **This inspects source text, and that is all it can do.** It asserts the
-    function is *written* to quantise the transformer alone. It says nothing
-    about whether its result reaches ``from_pretrained`` — verified by deleting
-    the ``load_kwargs["quantization_config"]`` line, which leaves this test
-    **green** while the Space would deploy bf16 under an int8 variable.
-
-    ``test_int8_reaches_from_pretrained`` is what stands behind the lever. This
-    keeps a narrower job: that transformer-only is **expressed as an intent**
-    rather than merely being what today's call happens to produce, so widening
-    it later is a visible decision.
-    """
-    from ltx25_studio import pipelines
-
-    source = inspect.getsource(pipelines._quantization_config)
-    assert "load_in_8bit=True" in source
-    assert "text_encoder" not in source.split('"""')[2], (
-        "the text encoder is named in the quantisation call; B was chosen "
-        "deliberately over A and widening needs its own decision"
-    )
+# NOTE: `test_only_the_transformer_is_quantised` lived here and is retired.
+# It inspected the source of `_quantization_config` to assert transformer-only
+# was *expressed*, because at the time it was an intent rather than a value.
+# It is now `components_to_quantize=["transformer"]` -- a real argument -- so
+# `test_bound_b_is_expressed_as_an_argument` asserts it behaviourally instead.
+# A source-text test earns its place only while the thing it checks has no
+# observable form; this one stopped earning it the moment the API gave it one.

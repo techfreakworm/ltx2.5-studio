@@ -169,7 +169,7 @@ def test_the_expectation_map_comes_from_the_transformer_not_a_hardcoded_table(
 def test_a_key_targeting_a_module_that_does_not_exist_is_a_distinct_failure(
     wrong_architecture_lora, fake_transformer
 ):
-    """"A key whose target module does not exist at all is a **distinct** failure
+    """ "A key whose target module does not exist at all is a **distinct** failure
     — that is what a genuinely foreign adapter looks like." A wrong *dimension*
     and a wrong *module* are different diagnoses and get different errors."""
     with pytest.raises(errors.LoRAError) as excinfo:
@@ -245,7 +245,7 @@ def test_a_foreign_architecture_signal_is_rejected_at_stage_four(
 
 @pytest.mark.parametrize("metadata", [None, {}], ids=["metadata_absent", "metadata_empty"])
 def test_both_shapes_of_absent_metadata_only_warn(metadata, write_safetensors, fake_transformer):
-    """"metadata **present but empty** is a different shape from metadata
+    """ "metadata **present but empty** is a different shape from metadata
     **absent**, and both mean no version signal." The positive GPU fixture
     (``AhsanHareem/reelbids-ltx25-camera-lora``) is the empty-dict shape."""
     path = write_safetensors(

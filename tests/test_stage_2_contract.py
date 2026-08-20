@@ -165,7 +165,9 @@ def test_the_registry_beats_the_user_where_the_video_is_discarded(mode_id):
     rather than letting it lie.
     """
     spec = modes.get_mode(mode_id)
-    assert generate_module.stage_2_enabled(spec, a_request(mode=mode_id, enable_stage_2=True)) is False, (
+    assert (
+        generate_module.stage_2_enabled(spec, a_request(mode=mode_id, enable_stage_2=True)) is False
+    ), (
         f"mode {mode_id!r} has skip_stage_2=True — its video is generated and discarded — but "
         f"the user's toggle overrode the registry. That is quota spent upscaling a frame "
         f"nobody will see."

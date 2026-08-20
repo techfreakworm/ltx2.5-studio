@@ -261,7 +261,7 @@ def _quantization_config(quantization: str):
     if quantization != "int8":
         return None
     try:
-        from diffusers import BitsAndBytesConfig
+        from diffusers import PipelineQuantizationConfig
     except ImportError as exc:
         raise ModelLoadError(
             component="transformer",
@@ -271,7 +271,24 @@ def _quantization_config(quantization: str):
                 f"floor is 0.46.0 rather than the 0.43.3 diffusers itself mandates."
             ),
         ) from exc
-    return BitsAndBytesConfig(load_in_8bit=True)
+
+    # ⚠️ `PipelineQuantizationConfig`, NOT `BitsAndBytesConfig`. A bare
+    # `BitsAndBytesConfig` is what a COMPONENT's `from_pretrained` takes;
+    # `DiffusionPipeline.from_pretrained` rejects it outright:
+    #
+    #   ValueError: `quantization_config` must be an instance of
+    #   `PipelineQuantizationConfig`.
+    #
+    # ✅ `quant_backend="bitsandbytes_8bit"` is a key in both backend mappings
+    # at the pinned SHA (`quantizers/auto.py:45,57`), not a guessed string.
+    return PipelineQuantizationConfig(
+        quant_backend="bitsandbytes_8bit",
+        quant_kwargs={"load_in_8bit": True},
+        # Bound B, now expressed as an ARGUMENT rather than as an intent a
+        # source-inspection test had to assert. Widening is one list entry and
+        # the kwargs test sees it.
+        components_to_quantize=["transformer"],
+    )
 
 
 def _snapshot_path():
