@@ -160,20 +160,27 @@ assumptions 1 and 2 hold; both are cheap to test and neither costs GPU quota.
 1 byte/element against bf16's 2. **Runtime quantization shrinks the packed copy
 even though the snapshot on disk stays bf16.**
 
-| scheme | packed | peak (snap + packed + ~10 image) | steady state **if the prune fails** |
+| scheme | packed | peak = **steady if the prune fails** | steady **if the prune fires** |
 |---|---:|---:|---:|
-| bf16 — current | 72.2 | **154.4 — OVER** | 144.4 |
-| **int8** | 38.1 | **120.3 ✓** | **110.3 ✓** |
-| int8, connectors left bf16 | 41.2 | 123.4 ✓ | 113.4 ✓ |
-| nf4 / 4-bit | 21.0 | 103.2 ✓ | 93.2 ✓ |
+| bf16 — current | 72.2 | **154.4 — OVER** | 82.2 |
+| **int8** | 38.1 | **120.3 ✓** | 48.1 |
+| int8, connectors left bf16 | 41.2 | 123.4 ✓ | 51.2 |
+| nf4 / 4-bit | 21.0 | 103.2 ✓ | 31.0 |
 
-Non-quantised remainder (vae, audio_vae, vocoder, upsamplers, diffusion_decoder)
-is 3.95 GB.
+All columns include the ~10 GB image. Non-quantised remainder (vae, audio_vae,
+vocoder, upsamplers, diffusion_decoder) is 3.95 GB.
 
-**The last column is why this is the robust option.** Every other route needs the
-prune to work. Int8 fits **in both branches** — if quantised tensors were to break
-the mmap capture and nothing were ever freed, steady state is still 110 GB and
-still fits. It does not need a second thing to go right.
+> ⚠️ **The middle column used to read 8–12 GB lower**, because a "steady state"
+> column had the image subtracted out. **If the prune never fires, nothing is
+> freed — steady state *is* the peak**, image included. And **the image is
+> precisely the term that pushes bf16 over the cap**, so dropping it understated
+> the hard case in the favourable direction, in the one row a reader quotes.
+> Corrected; the conclusion is unchanged.
+
+**The middle column is why this is the robust option.** Every other route needs
+the prune to work. Int8 fits **in both branches** — if quantised tensors break
+the mmap capture and nothing is ever freed, it is still 120.3 GB and still fits.
+**It does not need a second thing to go right.**
 
 **✅ bitsandbytes is explicitly supported and needs no special handling.**
 `spaces/zero/torch/bitsandbytes.py` is a 43-line version check that **no-ops for
@@ -303,32 +310,47 @@ nothing** — the right-hand column is that world, and it is already priced in.
 was chosen to survive.** Every other option needs the prune to work, and the
 prune is the one thing that cannot be exercised off-platform.
 
-### What would still sink it
+### ✅ The derivation retrodicts the evictions
 
-⏸️ Not disk. The bounds clear the cap by 12.6 GB even in the conservative case.
-The open risks are **RAM during the quantising load** (a community cgroup
-observation of ~68 GB, never measured by us) and whether `spaces` packs
-quantised tensor subclasses at all — 📄 `bitsandbytes ≥ 0.46.0` is explicitly
+**The strongest thing that can be said for this arithmetic is that it predicts
+a failure nobody fed into it.** bf16 comes out at **152.4 – 156.4 GB against a
+150 GB cap**, and the Space **evicted twice**. The model was built from
+component sizes and a published ceiling, with no reference to what happened;
+it explains what happened anyway.
+
+✅ And the input reconciles to a host measurement: the derived snapshot of
+**72.185 GB** against the **72,186,355,712 B** actually downloaded — **agreement
+to about 1 MB.**
+
+That moves this from *internally consistent* to *having a confirmed
+prediction*, which is the only kind of arithmetic worth deploying on.
+
+### ⚠️ What would still sink it: RAM, not disk
+
+⏸️ **Disk is not the risk.** The bounds clear the cap by 12.6 GB even in the
+conservative case, and the model has a confirmed retrodiction behind it.
+
+**RAM is, and it is now quantified from one side.** ✅ A bf16 load peaks at
+**20.05 GiB** host RSS against **65.370 GiB** of weights — far below, because
+safetensors is **mmap-backed** and the pages are never all resident.
+
+⚠️ **A quantising load loses exactly that property.** It materialises int8
+tensors, which is anonymous memory by construction — *the same mechanism this
+document already relies on to argue the post-pack prune may free nothing.* One
+mechanism, and it decides both questions.
+
+So int8's RSS should be expected to approach the **materialised** weight size —
+order **38 GB for A, 53 GB for B** — plus whatever of the bf16 source is
+resident while converting. **Not 20 GiB.** That turns the ~68 GB cgroup figure
+from ⚠️ *a number someone mentioned* into **the binding constraint, and the
+first thing to measure.** `_base_pipeline` logs peak RSS across the load for
+exactly this reason.
+
+The other open one is whether `spaces` packs quantised tensor subclasses at all — 📄 `bitsandbytes ≥ 0.46.0` is explicitly
 no-op'd by `spaces/zero/torch/bitsandbytes.py` (`patching.py:328/355/445`),
 which is what makes bnb the supported path and **torchao not one**.
 
 
-
-**The chosen route.** Not for its headline number but for a property none of the
-others have:
-
-| | peak |
-|---|---:|
-| int8, superseded by §4.2 | — |
-| int8, **if the prune never fires** | ~110 GB steady |
-
-**It survives both branches.** Every other option requires the prune to work,
-and the prune is the thing we cannot exercise off-platform.
-
-⚠️ **The interaction that would otherwise be rediscovered as a defect:** a
-quantised load **materialises new tensors**, so the autoprune may free nothing.
-That is *already priced into the ~110 GB figure* — it is a known cost, not a
-surprise waiting.
 
 📄 **bitsandbytes ≥ 0.46.0 needs no ZeroGPU handling at all**:
 `spaces/zero/torch/bitsandbytes.py` no-ops `_patch`/`_unpatch`/`_move` above that
