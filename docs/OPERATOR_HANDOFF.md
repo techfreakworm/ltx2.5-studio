@@ -137,17 +137,19 @@ Three things a reader needs:
   when they are two of the three that moved most.
 - **~3× faster everywhere.** At `guidance_scale=1.0` with STG and modality
   zeroed there are no classifier-free branches, so it is one forward pass per
-  step instead of two or three. **The defect cost 3× the compute as well as
-  the quality.**
+  step instead of two or three. **This is the one column here that seeding does
+  not confound** — wall-clock is not drawn from a distribution — and it follows
+  from the mechanism rather than merely accompanying it.
 
 > ### ⚠️ These pairs are not yet controlled — the audio evidence is
 >
 > **The seed never reached the model** until `4ebb8b9` (gap 8), so both halves
 > of every pair above were unconditionally random. **The pixel differences
 > cannot evidence that the recipe fix caused them** — two runs of one mode
-> differed anyway. ✅ Seeding is now fixed and verified byte-identical, so the
-> **seeded gallery supersedes this table** for attribution; these figures remain
-> as the record of what the defect cost.
+> differed anyway. ✅ Seeding is fixed, and verified byte-identical **for
+> `audio_to_audio`**; a seeded gallery would supersede this table for
+> attribution ⏸️ **once the video path is shown reproducible too**. These
+> figures remain as the record of what the defect cost.
 >
 > **The audio levels do stand on their own**, because they are systematic and
 > orders of magnitude outside run-to-run variation:
@@ -164,11 +166,10 @@ Three things a reader needs:
 > verified for `audio_to_audio`; the **video** path is still being checked, and
 > the seeded gallery can only attribute per-pair change once it is.
 
-> ### ⏸️ Sizes differ between the two code paths, and it is not known why
+> ### ✅ Sizes differed between the two code paths — almost certainly just the seed
 >
-> Three modes were run both through a **bypass** (`_base_pipeline` plus an
-> injected `StageRunner`) and through the **real** `get_pipeline` path at the
-> same seed:
+> Three modes were run through a **bypass** (`_base_pipeline` plus an injected
+> `StageRunner`) and through the **real** `get_pipeline` path, **all pre-fix**:
 >
 > | | bypass | real path |
 > |---|---:|---:|
@@ -176,23 +177,30 @@ Three things a reader needs:
 > | H2 | **577,051 B** | **432,486 B** — 25% smaller |
 > | H3 | 1,040,007 B | 1,130,178 B |
 >
-> **This is recorded as open, not as noise.** It may be GPU non-determinism —
-> cuDNN picks convolution algorithms heuristically and small pixel differences
-> compound hard through h264 — or it may be a genuine difference between the two
-> routes. ⏸️ Nobody has established which, and calling it non-determinism would
-> be a guess in the reassuring direction.
+> This was recorded as an open question — *"GPU non-determinism, or a genuine
+> difference between the routes?"* — and described as *"at the same seed."*
 >
-> Either way: **assert stream layout, never an exact size.** A byte-count check
-> here would fail for reasons nobody understands, and be "fixed" by loosening it
-> until it proved nothing.
+> **It was not at the same seed. The seed reached nothing** (gap 8). These are
+> six unconditionally random runs, and two runs of one mode differed by this
+> much anyway. **There was never an anomaly to explain**, and the phrase *"at
+> the same seed"* was doing all the work: it made an ordinary difference look
+> like a finding.
+>
+> ⏸️ Cheap to settle properly now — run one mode both ways at a fixed seed.
+> Nobody has, so it is *probably* the seed rather than certainly.
+>
+> The advice it produced stands on its own and is worth more than the question:
+> **assert stream layout, never an exact size.**
 
 ### 2.3 Beyond the baseline
 
 | Run | What it proves | Result |
 |---|---|---|
-| **H16** high resolution | usability, not just correctness | ✅ `text_to_audio_video` at **1216 × 704** @24, f=121 + aac 48000 Hz 2 ch — **2,331,528 B** |
-| **H15** `duration_head` | the model chose the length, rather than a default leaking through | ✅ **f=97**, not 121 — 704 × 480, 684,374 B |
-| **H14** stage 2 | upsample → 3-step schedule → diffusion decode | ✅ **1408 × 960**, 121 frames, 2,254,799 B, 84.3 s |
+| **H16** high resolution | usability, not just correctness | ✅ `text_to_audio_video` at **1216 × 704** @24, f=121 + aac 48000 Hz 2 ch — 1,775,743 B, **21.0 s** |
+| **H15** `duration_head` | the model chose the length, rather than a default leaking through | ✅ **f=97**, not 121 — 704 × 480, 593,527 B, 5.9 s |
+| **H14** stage 2 | upsample → 3-step schedule → diffusion decode | ✅ **1408 × 960**, f=121 — 1,807,646 B, 35.2 s |
+
+*Post-fix figures, matching §2.2. §2.5 carries the pre-fix column.*
 
 H15 is worth understanding: `num_frames` is *omitted* and the duration head
 picks. Had it returned 121 — the default — the run would have looked identical
@@ -342,11 +350,27 @@ caches per image or per cold worker is ⏸️ unknown and decides its severity.
    intended:  [1.0, 0.99375, 0.9875, 0.98125, 0.975, 0.909375, 0.725, 0.421875]
    ```
 
-   **All twelve modes changed when it was corrected** ✅ — nothing silently
-   survived it. The magnitudes order by conditioning strength (text-only 37–59
-   mean |diff|, image-conditioned 15–16, video-conditioned **3.71**), which is
-   what makes them coherent rather than noise: the strongest condition pins the
-   output hardest and leaves the guidance least room to move it.
+   ✅ All twelve artifacts differed before and after, with magnitudes ordering
+   by conditioning strength (text-only 37–59 mean |diff|, image-conditioned
+   15–16, video-conditioned **3.71**).
+
+   ⏸️ **Neither of those establishes the fix caused them, and the ordering is
+   not the corroboration it looks like.** Both halves were unseeded (gap 8), so
+   two runs of one mode differed anyway — and a **more strongly conditioned mode
+   is more constrained, so its run-to-run variance is smaller too.** The
+   ordering is exactly what random variation would produce. It cannot separate
+   the two explanations, and an earlier draft of this section claimed it could.
+
+   **What does stand, unconfounded:**
+
+   - **the timings.** 25.7 → 8.4 s is not run-to-run variation, and it follows
+     directly from the mechanism: unguided means one forward pass per step
+     instead of two or three. **The defect cost 3× the compute**, and that is
+     measured rather than inferred.
+   - **the audio levels and peaks** — −55.0 → −17.8 dBFS, highest peak
+     1.7811 → 1.0050. Systematic and orders of magnitude outside variation.
+   - 📄 **that the schedule and guidance were wrong at all**, which is a source
+     fact and needs no run.
 
    **It cost 3× the compute as well as the quality.** At `guidance_scale=1.0`
    with STG and modality zeroed there are no classifier-free branches, so it is
@@ -632,10 +656,19 @@ requested. Before it ran, the control was re-checked: **it had been measured
 against a tree that predated the seeding fix.** At the tip, two runs are
 byte-identical.
 
-> **The true claim was stronger than either draft**: `seed` determines the
-> output byte-for-byte, on GPU, with no deterministic-algorithm flags. Both
-> drafted sentences were weaker *and* wrong, and both would have shipped if the
-> reluctance to write an unmeasured claim had not held for one more exchange.
+> **The true claim was stronger than either draft**: on `audio_to_audio`, `seed`
+> determines the output byte-for-byte, on GPU, with no deterministic-algorithm
+> flags. Both drafted sentences were weaker *and* wrong, and both would have
+> shipped if the reluctance to write an unmeasured claim had not held for one
+> more exchange.
+
+**And then the corrected sentence was written without its scope, twice more in
+this document** — as a property of the build rather than of one mode. ⏸️ The
+video path is still unverified. Recording that here because the lesson is not
+*"be careful"*: it is that **a claim narrowed in one place does not narrow
+itself in the others**, and a document is exactly where that goes wrong. §4
+gap 8 carries the scope; §2.5 and this paragraph each had to be found and
+fixed separately.
 
 **Refusing to write a sentence you cannot yet support is the same discipline as
 refusing to change a threshold to make a test green** — and it is the cheaper
