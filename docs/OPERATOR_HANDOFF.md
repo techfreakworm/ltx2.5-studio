@@ -19,8 +19,14 @@ A Gradio studio for **LTX-2.5** (Lightricks' 22B video+audio model) covering
 inference time**. One model load serves every mode. Python 3.12, `diffusers`
 pinned to an exact SHA, weights pinned to an exact revision.
 
-Intended destination is a private HuggingFace ZeroGPU Space. **It does not run
-there today** — see §3.
+Destination is a private HuggingFace ZeroGPU Space. ✅ **It runs and generates
+there** — startup, one clean GPU worker, and a content-verified video, at Space
+sha `8fb292d6`.
+
+⏸️ **That is one mode, once.** Ten of the eleven have never executed on that
+platform; §2's eleven-of-eleven is a **hinode** result and stays one. §3 is the
+section that keeps those two evidence bases apart — read it before treating
+either as the other.
 
 ---
 
@@ -230,27 +236,87 @@ mechanism, which is what makes the rejection trustworthy rather than lucky.
 
 ---
 
-## 3. ZEROGPU-PENDING — read this before believing §2
+## 3. SPACE-PROVEN vs HOST-PROVEN — read this before believing §2
 
-> ### ⛔ The Space has evicted twice and has never run.
+> ### ✅ The Space runs and generates. ⏸️ That is **one mode, once.**
 >
-> Nothing in §2 is evidence that it will. A green table on a dedicated host and
-> a working deployment are different claims, and only the first has been made.
+> `text_to_video` at 256×256×9 produced a real, content-verified video on the
+> live private Space ✅. **Ten of the eleven modes have never executed there.**
+>
+> A green table on a dedicated host and a working deployment are different
+> claims. **Both have now been made — about different things.** That is exactly
+> why this section still exists: the two evidence bases have diverged rather
+> than merged, and §2's eleven-of-eleven remains a **hinode** claim.
+
+**Detailed record: [`SPACE_GENERATION_FINDING.md`](SPACE_GENERATION_FINDING.md)**
+— the first deploy, the killed workers, the falsified ceiling, and the run that
+generated. Not restated here on purpose.
 
 hinode is an **unpartitioned** card with **124 GB RAM** and an ordinary
-filesystem. ZeroGPU is none of those things, so Part A cannot answer:
+filesystem. ZeroGPU is none of those things. **The first deploy answered several
+of these questions and changed the answer to one of them:**
 
-- **Tensor packing** — ZeroGPU intercepts `.to("cuda")`, rewrites it, and packs
-  every tensor to `~/.zerogpu/tensors` via O_DIRECT. Never exercised.
-- **The 150 GB ephemeral-disk ceiling** — see
-  [`ZEROGPU_DISK.md`](ZEROGPU_DISK.md) for the arithmetic, which is not
-  restated here on purpose.
-- **RAM** — 124 GB on hinode against a **~68 GB** community cgroup observation
-  ⚠️ *inferred, never measured by us*.
-- **The `size` kwarg**, the **fork boundary**, and **quota metering** — all
-  first-contact.
-- **The private-Space fetch path** — weights download at runtime because
-  `preload_from_hub` 401s on a private repo.
+- ✅ **Tensor packing** — exercised. Packing ran and the post-pack prune fired,
+  freeing 65.25 GB.
+- ✅ **The 150 GB ephemeral-disk ceiling** — never the binding constraint. The
+  disk line read **82.2 GB of 150 [OK]** while the workload died of something
+  else. Arithmetic in [`ZEROGPU_DISK.md`](ZEROGPU_DISK.md).
+- ⛔ **RAM — the ~68 GB figure is FALSIFIED.** See the finding below; this is the
+  single most important correction in this document.
+- ✅ **The private-Space fetch path** — works. 37/37 files at the pinned revision,
+  downloaded at runtime because `preload_from_hub` 401s on a private repo.
+- ✅ **The `size` kwarg** and the **fork boundary** — reached; a worker forked,
+  ran, and released cleanly (`fail=false`).
+- ⏸️ **Quota metering** — still unreadable. All three candidate endpoints 404, so
+  billed seconds can only be **bounded**, never measured.
+- ⏸️ **Ten of eleven modes** — no conditioning, no stage 2, no LoRA, and **no
+  audio path** has run on ZeroGPU. The audio modes exercise the mel front-end,
+  the `av` loader and the 16 kHz/48 kHz asymmetry; none of that has executed
+  there once.
+
+---
+
+### The three findings from the first deploy
+
+> #### 1. ⛔ The **~68 GB** RAM ceiling is **FALSIFIED**
+>
+> It was a community cgroup observation — **inherited, never ours**, and
+> load-bearing in planning since before any deploy. Startup reached
+> **87.13 GiB = 93.56 GB** peak RSS and **was not killed**.
+>
+> ✅ **Replace it with our own measured lower bound: the ceiling is above
+> 93.56 GB.** Every headroom figure computed against ~68 GB was wrong by at
+> least 25.56 GB.
+
+> #### 2. ⚠️ Quantising **more** raised peak RSS by **31.24 GiB**
+>
+> Adding the text encoder to `components_to_quantize` moved RSS **up**, from
+> 55.89 to 87.13 GiB, in a change made to bring it down. `safetensors` mmaps
+> lazily; **quantisation materialises those weights as anonymous memory**, so
+> quantising a component destroys the laziness that was keeping it cheap.
+>
+> This is the **same single mechanism** `ZEROGPU_DISK.md` §4.2 already used to
+> settle two other questions, now deciding a third — in the opposite direction
+> from what we predicted.
+
+> #### 3. ⏸️ The `SIGKILL` is **still unexplained**
+>
+> cgroup-OOM is **dead** as an explanation: with the ceiling above 93.56 GB
+> there was never the narrow margin the hypothesis required. ✅ **Route C —
+> instrument the worker — is now the LEADING path, not the fallback.** It is the
+> only route that returns evidence rather than another inference, and every
+> inference made about this kill has been wrong at least once.
+
+> #### ⛔ And the fix is **UNATTRIBUTED**
+>
+> Two things changed between the failing and succeeding runs: the quantisation
+> widening **and a full container rebuild**. n=1 against n=1 with two variables.
+> **"The Space now serves" is established; "the widening is why" is not** — and
+> the hypothesis that motivated the widening is itself dead. Do not let any
+> document claim the widening fixed generation.
+
+**Cost so far: ≤ 243.58 GPU-seconds** of 2400/day ⚠️ *a bound, not a
+measurement* — quota endpoint 404s.
 
 **One hinode number with a direct ZeroGPU consequence.** Stage 2 peaked at
 **83.897 GiB** ✅, against 70.497 GiB for a single-stage run. So **stage 2 cannot
@@ -526,9 +592,42 @@ python3.12 -m venv .venv && .venv/bin/pip install -e '.[dev]'
 
 ### On a Space
 
-Not currently possible — §3. The parked analysis in
-[`ZEROGPU_DISK.md`](ZEROGPU_DISK.md) lists four routes with what each costs;
-choosing between them is an operator decision, not a code change.
+✅ **This works.** The repo *is* the Space — `README.md`'s YAML front matter is
+the Space config, and the `space` remote points at it:
+
+```bash
+git remote -v | grep space
+# space  https://huggingface.co/spaces/techfreakworm/LTX2.5-Studio
+```
+
+Deploying is a push to that remote's `main`. ⛔ **This team does not push** — not
+to `origin`, not to `space`. The orchestrator does it; that is a deliberate
+boundary, not a missing capability.
+
+**What the deploy depends on, all of it already load-bearing:**
+
+| | |
+|---|---|
+| `app_file: app.py`, `sdk: gradio 6.24.0`, `python_version: "3.12"` | 📄 front matter |
+| `suggested_hardware: zero-a10g` | 📄 **a legacy id string — not an A10G.** Changing it moves the Space onto paid dedicated hardware |
+| `startup_duration_timeout: 1h` | 📄 **required.** The default is 30 min and this Space downloads 72.19 GB at build time. When it blows, the failure looks like something else entirely |
+| an HF token secret with access to the gated model repo | 📄 weights fetch at **runtime**, because `preload_from_hub` 401s on a private Space |
+
+`tests/test_deploy_drift.py` asserts these rather than trusting them — run the
+suite before any deploy and the drift shows up locally instead of as a
+40-minute build that dies at the end.
+
+**Reading the startup log is the cheapest diagnostic available**, and it costs
+zero GPU quota because packing and loading happen at module scope, before the
+first `@spaces.GPU` call. The load line names its own configuration:
+
+```
+quantised transformer, text_encoder as int8 | peak RSS 0.91 -> 87.13 GiB
+```
+
+⚠️ **That peak is the number to watch.** It is a *peak across the load*, not a
+steady state — we have never measured steady state, and the RAM questions are
+about steady state. See [`SPACE_GENERATION_FINDING.md`](SPACE_GENERATION_FINDING.md) §7.
 
 ---
 
@@ -564,6 +663,29 @@ Three instances in one day, all in tests that were otherwise excellent:
 
 The mitigation that worked: **check the fake against the real thing.** In (2)
 that check failed within a minute of existing.
+
+### A search that cannot see the claim reports that the claim is gone
+
+Three defects in this build share one shape: **the instrument returned a
+confident negative it was structurally incapable of turning positive.**
+
+- **A wrapped line.** §7 said *"The Space has evicted twice and has never run"*
+  as one line. §1 said the same thing **split across a line break**, so a grep
+  for the phrase found the occurrences that fit on one line and pronounced the
+  audit clean.
+- **A shell modifier.** `"$c:ltx25_studio/..."` is parsed by zsh as the `:l`
+  lowercase modifier, so `git show` got a mangled path and **every** commit
+  answered *"constant absent"* — including the one that demonstrably contains it.
+- **A stale marker.** A `⚠️ (inherited)` pointing at a section that had been
+  rewritten to say **FALSIFIED** still scanned as *merely unverified*.
+
+**None of the three raised an error.** Each returned a clean, plausible, wrong
+answer, and two of them nearly closed an audit.
+
+The defence is not a better search string. It is **running the instrument
+against a case whose answer you already know**: if the check cannot go positive
+on a known positive, its negatives carry no information. The zsh case was caught
+only because *"absent at HEAD too"* was impossible on its face.
 
 ### A claim moving known → unknown is nearly always a regression
 
@@ -747,6 +869,9 @@ the real path.** ✅ H14's exact 2× resolution, H15's 97 frames, H17's round-tr
 recovering 4/4 tones under a strict gate, both LoRA directions, and every audio
 level — all structural or systematic, and none of them depends on seeding.
 
-**And read §3 before treating any of this as a deployment.** The Space has
-evicted twice and has never run.
+**And read §3 before treating any of this as a deployment.** ✅ The Space now
+runs and generates — ⏸️ **for one of the eleven modes.** Everything in this
+section is a **hinode** result; the Space has proven `text_to_video` at
+256×256×9 and nothing else. Those are different claims about different machines,
+and §3 is where they are kept apart.
 
