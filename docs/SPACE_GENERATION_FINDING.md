@@ -156,6 +156,15 @@ POST http://device-api.zero/startup-report "HTTP/1.1 200 OK"
 * Running on local URL: http://0.0.0.0:7860, with SSR
 ```
 
+> **[On `loaded transformer as int8`]** — accurate as printed. At the time of this
+> run `components_to_quantize=["transformer"]`: **one** component was quantised,
+> and the single `bitsandbytes` line above corroborates it. The build changed twice
+> afterwards — `02fe943` added the text encoder, `c7617b1` made the log name every
+> component it quantises — so the same load today prints `quantised transformer,
+> text_encoder as int8`. Expect doc and code to differ **here and only here**; the
+> quote is left byte-identical because it is the record of what ran. Consequence
+> for §6: **the 55.89 GiB was measured with one component in int8, not two.**
+
 **Everything the deploy was built to do, it did** ✅ — the 37-file runtime
 download at the pinned revision, the int8 transformer load, tensor packing, and
 the post-pack prune. **On a Space that had evicted twice and never run.**
