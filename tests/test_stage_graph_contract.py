@@ -35,7 +35,9 @@ constructor arguments — so none of this needs diffusers, torch or a GPU.
 
 from __future__ import annotations
 
+import contextlib
 import inspect
+import logging
 import pathlib
 
 import pytest
@@ -1213,6 +1215,79 @@ def test_the_quantised_components_are_exactly_the_declared_set(monkeypatch, tmp_
         f"['transformer', 'text_encoder']. Changing the deployed precision must "
         f"be deliberate."
     )
+
+
+def test_the_load_log_names_every_component_it_quantised(monkeypatch, tmp_path):
+    """The line the RAM verdict will be read off, on both paths.
+
+    It said `loaded transformer as int8` while TWO components were quantised.
+    Not silent -- wrong in the direction that misdirects: a new peak-RSS number
+    beside the word "transformer" invites attributing the whole change to the
+    transformer, and that is the number deciding whether the RAM hypothesis
+    survives. `expected_weights_gb` in miniature.
+
+    The log DERIVES its list from `QUANTIZED_COMPONENTS`; this test writes the
+    expectation OUT. That asymmetry is deliberate and is not the mistake the
+    sibling test warns about -- a test must assert an independent expectation,
+    while a log must report what was requested, so only one of the two may move
+    on its own. Widening the constant updates the log and turns this red, which
+    is the point: the format is an instrument, and instruments change on
+    purpose.
+    """
+    with caplog_at_info() as records:
+        _loaded(monkeypatch, tmp_path / "int8", "int8")
+    int8_line = _rss_line(records)
+    assert int8_line.startswith("quantised transformer, text_encoder as int8"), (
+        f"the int8 load logged {int8_line!r}; expected it to open with "
+        f"'quantised transformer, text_encoder as int8' so the peak RSS beside "
+        f"it cannot be misread as the transformer's alone"
+    )
+
+    with caplog_at_info() as records:
+        _loaded(monkeypatch, tmp_path / "bf16", "bf16")
+    bf16_line = _rss_line(records)
+    # The bf16 path quantises NOTHING. Saying "quantised ... as bf16" there
+    # would be a false statement in the same log the verdict is read from.
+    assert bf16_line.startswith("no components quantised; all at bf16"), (
+        f"the bf16 load logged {bf16_line!r}; expected 'no components "
+        f"quantised; all at bf16' -- bf16 is not a quantisation"
+    )
+    assert "quantised transformer" not in bf16_line, (
+        f"the bf16 log claims a component was quantised: {bf16_line!r}"
+    )
+
+
+@contextlib.contextmanager
+def caplog_at_info():
+    """Capture records off the studio logger without depending on caplog's
+    propagation settings, which `install_fake_stack` does not control."""
+    records = []
+
+    class _Sink(logging.Handler):
+        def emit(self, record):
+            records.append(record)
+
+    sink = _Sink()
+    logger = logging.getLogger("ltx25_studio")
+    previous = logger.level
+    # `setLevel`, NOT `logger.level = ...`. Assigning the attribute leaves
+    # `Logger._cache` stale, so `isEnabledFor(INFO)` keeps returning whatever it
+    # answered under the old level and the record is dropped before any handler
+    # sees it. Only `setLevel` invalidates that cache. This cost a red that
+    # looked like the log line was missing when it was being emitted fine.
+    logger.setLevel(logging.INFO)
+    logger.addHandler(sink)
+    try:
+        yield records
+    finally:
+        logger.removeHandler(sink)
+        logger.setLevel(previous)
+
+
+def _rss_line(records):
+    hits = [r.getMessage() for r in records if "peak RSS" in r.getMessage()]
+    assert len(hits) == 1, f"expected exactly one peak-RSS line, got {hits!r}"
+    return hits[0]
 
 
 def test_an_unknown_component_name_is_refused_rather_than_ignored(monkeypatch):

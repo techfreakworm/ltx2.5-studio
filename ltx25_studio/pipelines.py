@@ -415,7 +415,7 @@ def _base_pipeline(*, dtype=None, device: str | None = None, quantization: str |
         quantization_config = _quantization_config(quantization)
         load_kwargs = {"torch_dtype": dtype or getattr(torch, WEIGHT_DTYPE)}
         if quantization_config is not None:
-            # Applied to the transformer alone -- see `_quantization_config`.
+            # Covers `QUANTIZED_COMPONENTS` -- see `_quantization_config`.
             load_kwargs["quantization_config"] = quantization_config
         built = LTX2ConditionPipeline.from_pretrained(_snapshot_path(), **load_kwargs)
         after = peak_rss_gib()
@@ -423,9 +423,28 @@ def _base_pipeline(*, dtype=None, device: str | None = None, quantization: str |
         # footprint because safetensors mmaps; a quantising load materialises
         # tensors and does not, so this number is the one that decides whether
         # int8 is viable on a memory-capped platform -- not the disk arithmetic.
+        #
+        # ⚠️ It named only the transformer while TWO components were quantised.
+        # Not silent -- wrong in the direction that misdirects, because this is
+        # the line read to decide whether the RAM hypothesis survives, and a new
+        # RSS number beside "loaded transformer as int8" invites attributing the
+        # whole change to the transformer.
+        #
+        # DERIVED from QUANTIZED_COMPONENTS, deliberately. That is the opposite
+        # of the rule for a test's expectation -- a message interpolating the
+        # constant it checks tracks any mutation and can never contradict it --
+        # and the difference is what each one is FOR. A test asserts an
+        # independent expectation; **a log reports what was requested**, so it
+        # must move when the request moves. The guard in `_quantization_config`
+        # is what makes "requested" and "what happened" the same thing for any
+        # name that survives it. Do not "fix" this into a hardcoded string.
+        if quantization_config is not None:
+            what = f"quantised {', '.join(QUANTIZED_COMPONENTS)} as {quantization}"
+        else:
+            what = f"no components quantised; all at {WEIGHT_DTYPE_LABEL}"
         _log().info(
-            "loaded transformer as %s | peak RSS %.2f -> %.2f GiB",
-            quantization,
+            "%s | peak RSS %.2f -> %.2f GiB",
+            what,
             before if before is not None else float("nan"),
             after if after is not None else float("nan"),
         )
