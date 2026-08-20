@@ -1184,21 +1184,51 @@ def test_the_config_is_the_pipeline_level_class_with_the_right_backend(monkeypat
     assert built[-1]["quant_backend"] == "bitsandbytes_8bit", built[-1]
 
 
-def test_bound_b_is_expressed_as_an_argument(monkeypatch, tmp_path):
-    """Transformer-only used to be an intent a source scan had to assert.
+def test_the_quantised_components_are_exactly_the_declared_set(monkeypatch, tmp_path):
+    """The value that reaches the pipeline, not merely that a value does.
 
-    It is now `components_to_quantize`, so widening it is a visible change to a
-    value this test reads — not a change to what a call happens to produce.
+    ⚠️ **A wrong name here would not raise.** `PipelineQuantizationConfig` does
+    no validation — `pipe_quant_config.py:171` is a bare membership test — so a
+    typo'd component silently loads at full precision. `_quantization_config`
+    guards the names; this asserts the ones that actually arrive.
+
+    **Widened from `["transformer"]` deliberately.** Transformer-only was right
+    while there was no measured baseline: adding the text encoder would have
+    confounded an int8-vs-bf16 comparison. The live Space then supplied one —
+    55.89 GiB peak RSS, 60.0 GB steady — and a measured baseline turns that
+    confound into a control. If this test goes red, someone has changed the
+    deployed precision, and that needs to be on purpose.
     """
     _sent, recorders = _loaded(monkeypatch, tmp_path, "int8")
 
     built = recorders["PipelineQuantizationConfig"].calls
     assert built, "the pipeline-level class was not constructed at all"
-    assert built[-1]["components_to_quantize"] == ["transformer"], (
-        "quantisation is no longer transformer-only. Bound B was chosen over A "
-        "deliberately: widening buys headroom we do not need and costs the ability "
-        "to attribute a quality change to the denoiser rather than prompt encoding."
+    # The expected value is written out, NOT read from QUANTIZED_COMPONENTS. A
+    # message that interpolates the constant under test tracks any mutation of
+    # it and can never contradict it -- it printed "reached as ['transformer'],
+    # not the declared ['transformer']" before this was fixed.
+    assert built[-1]["components_to_quantize"] == ["transformer", "text_encoder"], (
+        f"components_to_quantize reached from_pretrained as "
+        f"{built[-1]['components_to_quantize']}, expected "
+        f"['transformer', 'text_encoder']. Changing the deployed precision must "
+        f"be deliberate."
     )
+
+
+def test_an_unknown_component_name_is_refused_rather_than_ignored(monkeypatch):
+    """Upstream ignores unknown names silently; we must not.
+
+    A component that is never matched loads at full precision, the deploy uses
+    more memory than intended, and nothing says so — the same shape as the
+    `LTX25_TEXT_ENCODER_PRECISION` variable that was wired to nothing.
+    """
+    monkeypatch.setattr(pipelines, "QUANTIZED_COMPONENTS", ("transformer", "text_encodr"))
+
+    with pytest.raises(ModelLoadError) as excinfo:
+        pipelines._quantization_config("int8")
+
+    message = str(excinfo.value)
+    assert "text_encodr" in message and "silently" in message, message
 
 
 # --------------------------------------------------------------------------

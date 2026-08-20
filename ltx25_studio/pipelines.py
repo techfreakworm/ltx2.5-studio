@@ -77,6 +77,7 @@ __all__ = [
     "startup_report",
     "disk_footprint",
     "ZEROGPU_DISK_CAP_GB",
+    "QUANTIZED_COMPONENTS",
     "peak_rss_gib",
 ]
 
@@ -250,19 +251,76 @@ def peak_rss_gib() -> float | None:
     return peak / 1024**2
 
 
-def _quantization_config(quantization: str):
-    """The transformer's quantisation config, or ``None`` for the bf16 default.
+#: Which pipeline components load in int8. **Names must match
+#: ``model_index.json``'s own keys** -- verified at revision ``871165de...``,
+#: where ``text_encoder`` maps to ``Gemma4UnifiedForConditionalGeneration``.
+#:
+#: WARNING: a typo here fails SILENTLY. ``PipelineQuantizationConfig`` does not
+#: validate these names -- ``pipe_quant_config.py:171`` is a bare
+#: ``module_name in components_to_quantize`` membership test, so an unrecognised
+#: entry never matches and that component quietly loads at full precision. That
+#: is the advertised-lever-attached-to-nothing shape again, which is why
+#: :func:`_quantization_config` checks them against ``model_files.COMPONENTS``.
+QUANTIZED_COMPONENTS = ("transformer", "text_encoder")
 
-    **Transformer only, deliberately.** It is the largest single component
-    (37.98 GB of 72.19) and quantising it alone takes the ZeroGPU packing peak
-    from 152.4-156.4 GB to 133.4-137.4 against :data:`ZEROGPU_DISK_CAP_GB` -- enough, with
-    12.6 GB to spare. Widening to the text encoder buys headroom we do not need
-    and costs something we do: **it would make an int8-vs-bf16 comparison
-    unable to say whether a quality change came from the denoiser or from
-    prompt encoding.**
+
+def _quantization_config(quantization: str):
+    """The quantisation config, or ``None`` for the bf16 default.
+
+    **Transformer only, originally — and that reasoning was right at the time.**
+    The transformer is the largest single component (37.98 GB of 72.19), and
+    quantising it alone took the packing peak from 152.4-156.4 GB to
+    133.4-137.4 against :data:`ZEROGPU_DISK_CAP_GB`. Widening to the text
+    encoder bought headroom we did not need and cost something we did: **it
+    would have made an int8-vs-bf16 comparison unable to say whether a quality
+    change came from the denoiser or from prompt encoding.**
+
+    ✅ **The ground moved and that argument no longer binds.** The live Space at
+    sha ``a1791c9e`` gave a *measured* transformer-only baseline — **55.89 GiB
+    peak RSS, 60.0 GB steady state.** Adding the text encoder is now
+    attributable **against that baseline** rather than confounded with it:
+    the very thing that made widening a confound is what a measured baseline
+    turns into a control.
+
+    **And it is load-bearing now rather than optional.** Disk was never the
+    binding constraint — the run died with the disk line reporting **[OK]** at
+    82.2 GB against :data:`ZEROGPU_DISK_CAP_GB`, killed at ~60.0 GB of RAM
+    against a ceiling measurably above that (ours)
+    and ~68 GB (⚠️ inherited). See ``docs/SPACE_GENERATION_FINDING.md``.
+
+    ✅ **Revised arithmetic**, derived from ``model_files`` component sizes:
+
+    * transformer only ....... packed 53.197 GB, peak 133.4 - 137.4
+    * **+ text encoder** ..... packed **41.237 GB**, peak **121.4 - 125.4**
+
+    ⚠️ ~11.96 GB less packed, and ~46.6 GB expected RSS **if** the 1.13x
+    transient factor the measured run implies holds — **one data point, so an
+    extrapolation rather than a rate.**
     """
     if quantization != "int8":
         return None
+
+    # Checked BEFORE reaching for diffusers: validating our own constant does not
+    # need a heavy optional dependency, and a config error should surface as a
+    # config error rather than behind an ImportError on a machine without it.
+    #
+    # Guarded because upstream will not guard it: an unknown component name is
+    # silently ignored, so a typo would deploy that component at full precision
+    # and raise nothing. `model_files.COMPONENTS` is the registry the download
+    # allow-list is built from, so a name that survives this check is one the
+    # checkpoint really has.
+    unknown = [c for c in QUANTIZED_COMPONENTS if c not in model_files.COMPONENTS]
+    if unknown:
+        raise ModelLoadError(
+            component="transformer",
+            reason=(
+                f"QUANTIZED_COMPONENTS names {unknown}, which the checkpoint does not "
+                f"have. PipelineQuantizationConfig ignores unknown names silently and "
+                f"would load those components at full precision -- a lever attached to "
+                f"nothing. Known: {sorted(model_files.COMPONENTS)}."
+            ),
+        )
+
     try:
         from diffusers import PipelineQuantizationConfig
     except ImportError as exc:
@@ -290,7 +348,7 @@ def _quantization_config(quantization: str):
         # Bound B, now expressed as an ARGUMENT rather than as an intent a
         # source-inspection test had to assert. Widening is one list entry and
         # the kwargs test sees it.
-        components_to_quantize=["transformer"],
+        components_to_quantize=list(QUANTIZED_COMPONENTS),
     )
 
 
