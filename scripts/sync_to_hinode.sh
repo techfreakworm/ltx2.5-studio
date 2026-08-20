@@ -29,7 +29,18 @@ fi
 # delete what the new tree removed without ever reaching .venv/ or outputs/.
 OWNED="app.py ltx25_studio tests docs README.md requirements.txt pyproject.toml .gitignore .claude scripts"
 
-git archive --format=tar "$REF" | gzip -6 | ssh -o BatchMode=yes "$HOST" \
+# ConnectTimeout so an unreachable box fails in ~20s rather than on ssh's ~75s
+# system default. The failure itself is already safe -- extraction is staged and
+# swapped remotely, so a box that never accepted the connection has been left
+# entirely untouched -- but a slow failure invites someone to assume it hung and
+# start a second one.
+if ! ssh -o BatchMode=yes -o ConnectTimeout=20 "$HOST" 'exit 0' 2>/dev/null; then
+  echo "ERROR: cannot reach $HOST. Nothing was sent and the box is untouched." >&2
+  echo "  Check 'tailscale status' / connectivity, then retry." >&2
+  exit 4
+fi
+
+git archive --format=tar "$REF" | gzip -6 | ssh -o BatchMode=yes -o ConnectTimeout=20 "$HOST" \
   "set -euo pipefail
    mkdir -p '$STAGE' '$DEST'
    tar xzf - -C '$STAGE'
