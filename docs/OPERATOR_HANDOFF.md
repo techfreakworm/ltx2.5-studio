@@ -265,8 +265,18 @@ of these questions and changed the answer to one of them:**
   single most important correction in this document.
 - ✅ **The private-Space fetch path** — works. 37/37 files at the pinned revision,
   downloaded at runtime because `preload_from_hub` 401s on a private repo.
-- ✅ **The `size` kwarg** and the **fork boundary** — reached; a worker forked,
-  ran, and released cleanly (`fail=false`).
+- ✅ **The fork boundary** — crossed. A worker forked, ran, and released cleanly
+  (`fail=false` → 200).
+- ✅ **The `size` kwarg's *plumbing*** — the name survived
+  `gpu_decorator_kwargs`'s signature filter and raised **no import-time
+  `TypeError`**. That is the risk PLAN §5.8 actually named — the platform pins
+  its own `spaces` and lags PyPI — so this is a real ✅ **on its own terms**.
+- ⏸️ **An explicit `size` value — never passed.** `app.py:107` sends
+  `size=None` whenever `LTX25_ZEROGPU_SIZE` is `auto`, which is its default and
+  what the Space runs. **ZeroGPU chose, not us.** ⚠️ It chose `xlarge` *by
+  inference* — packed 51.1 GB exceeds the documented 42.00 GiB threshold 📄 —
+  **not by us reading it back**, because the endpoint that would confirm it is
+  the same one that 404s for quota.
 - ⏸️ **Quota metering** — still unreadable. All three candidate endpoints 404, so
   billed seconds can only be **bounded**, never measured.
 - ⏸️ **Ten of eleven modes** — no conditioning, no stage 2, no LoRA, and **no
@@ -332,6 +342,14 @@ caches per image or per cold worker is ⏸️ unknown and decides its severity.
 ---
 
 ## 4. Known gaps, stated plainly
+
+0. **The `size` kwarg has never carried a value.** ⏸️ Every run so far has been
+   `auto`, so the branch that sends an explicit `large` or `xlarge` has executed
+   **zero times** on the platform — and `large` is a 48 GB MIG slice that §3's
+   own stage-2 measurement says cannot hold stage 2 at all. If anyone sets
+   `LTX25_ZEROGPU_SIZE` to force a size, they are exercising an untested path
+   **and** possibly selecting one the workload does not fit. The ✅ next to the
+   kwarg in §3 covers its plumbing only.
 
 1. **H10 / H11 — the audio-input modes — have not passed.** ⏸️ The path they
    need was connected to nothing until very recently: the UI collected a file,
