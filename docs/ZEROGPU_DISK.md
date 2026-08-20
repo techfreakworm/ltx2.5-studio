@@ -261,14 +261,65 @@ it fails immediately or not at all.
 
 ---
 
-## 4.2 ✅ RULED: int8 via bitsandbytes
+## 4.2 ✅ RULED: int8 via bitsandbytes — **the arithmetic, derived here**
+
+**Both bounds fit, and the conservative one has 12.6 GB of headroom.**
+
+Derived from `model_files` component sizes rather than taken from an earlier
+estimate. **The snapshot stays bf16 on disk** — that is what we download — so
+only the *packed* copy shrinks, and the peak is `snapshot + packed + image`.
+
+```
+snapshot on disk (bf16)                      72.185 GB
+  Linear-heavy: transformer/text_encoder/connectors   68.240
+  conv-only:    vae/audio_vae/vocoder/decoder/upsamplers  3.909
+  tokenizer/scheduler/duration_head                       0.036
+```
+
+| | packed | peak (+image 8–12) | vs 150 GB |
+|---|---:|---:|---|
+| **A** all Linear-heavy quantised | 38.065 | **118.3 – 122.3** | ✅ fits |
+| **B** transformer only *(conservative)* | 53.197 | **133.4 – 137.4** | ✅ fits |
+| — bf16 today, for contrast | 72.185 | **152.4 – 156.4** | ⛔ over |
+
+**Both bounds are given because the split cannot be determined from here.**
+`bitsandbytes` `Linear8bitLt` replaces `nn.Linear` **only** — convolutions,
+norms and embedding tables keep their dtype. **A** assumes every Linear-heavy
+component halves; **B** assumes only the transformer does, which covers the
+common case of leaving the text encoder alone and the possibility that Gemma's
+embedding table is a large non-Linear share of its 23.9 GB. ⏸️ The true figure
+is between them and needs measuring on the platform.
+
+### Why this is the route: it fits **whether or not the prune fires**
+
+| | prune fires | prune never fires |
+|---|---:|---:|
+| **A** steady state | ~50 GB | **118.3 – 122.3** ✅ |
+| **B** steady state | ~65 GB | **133.4 – 137.4** ✅ |
+
+⚠️ **A quantised load materialises new tensors, so the autoprune may free
+nothing** — the right-hand column is that world, and it is already priced in.
+**That is not a defect waiting to be discovered; it is the branch this option
+was chosen to survive.** Every other option needs the prune to work, and the
+prune is the one thing that cannot be exercised off-platform.
+
+### What would still sink it
+
+⏸️ Not disk. The bounds clear the cap by 12.6 GB even in the conservative case.
+The open risks are **RAM during the quantising load** (a community cgroup
+observation of ~68 GB, never measured by us) and whether `spaces` packs
+quantised tensor subclasses at all — 📄 `bitsandbytes ≥ 0.46.0` is explicitly
+no-op'd by `spaces/zero/torch/bitsandbytes.py` (`patching.py:328/355/445`),
+which is what makes bnb the supported path and **torchao not one**.
+
+
 
 **The chosen route.** Not for its headline number but for a property none of the
 others have:
 
 | | peak |
 |---|---:|
-| int8, **if** the mmap prune works | ~120 GB |
+| int8, superseded by §4.2 | — |
 | int8, **if the prune never fires** | ~110 GB steady |
 
 **It survives both branches.** Every other option requires the prune to work,
