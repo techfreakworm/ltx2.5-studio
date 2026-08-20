@@ -35,6 +35,7 @@ constructor arguments — so none of this needs diffusers, torch or a GPU.
 
 from __future__ import annotations
 
+import inspect
 import pathlib
 
 import pytest
@@ -1271,3 +1272,58 @@ def test_the_startup_report_does_not_use_filesystem_free_space():
         "which on the Space is 8.6 TB and has no relationship to the 150 GB quota "
         "the platform enforces by watching the workload."
     )
+
+
+def test_the_footprint_says_it_is_a_floor(monkeypatch):
+    """A number presented as complete when it is a floor is how the old line
+    survived two evictions: it looked like a total."""
+    monkeypatch.setattr(pipelines, "_directory_bytes", lambda path: 0)
+
+    line = pipelines.disk_footprint()
+
+    assert "FLOOR" in line, f"the line does not declare itself a floor: {line}"
+    assert "NOT measurable" in line, (
+        f"the line does not say the image is invisible from inside: {line}"
+    )
+
+
+def test_the_footprint_is_reported_at_both_phases():
+    """Before packing answers 'is there room?'; after answers 'did we fit?'."""
+    assert "[before packing]" in pipelines.disk_footprint()
+    assert "[after packing]" in pipelines.disk_footprint(phase="after packing")
+
+
+def test_the_after_packing_report_comes_after_the_device_move():
+    """ZeroGPU packs inside `.to(device)`, so reporting before it would print
+    'after packing' over a measurement taken before any packing happened.
+
+    A mislabelled report is the defect this check exists to remove, and the
+    first version of it had exactly that bug.
+    """
+    source = inspect.getsource(pipelines._base_pipeline)
+    move = source.index("built.to(device)")
+    report = source.index('disk_footprint(phase="after packing")')
+
+    assert move < report, (
+        "the after-packing footprint is reported before .to(device), which is "
+        "where ZeroGPU packs. The label would be false."
+    )
+
+
+def test_the_cap_is_one_constant_not_a_number_in_four_docstrings():
+    """It was quoted in three docstrings before it was a constant, and making it
+    a constant without pointing them at it made a fourth place to diverge."""
+    import pathlib as _pathlib
+
+    for module in ("pipelines.py", "config.py"):
+        text = (_pathlib.Path(pipelines.__file__).parent / module).read_text()
+        bare = [
+            line
+            for line in text.splitlines()
+            if "150 GB" in line and "ZEROGPU_DISK_CAP_GB" not in line
+        ]
+        assert not bare, (
+            f"{module} states the cap as a bare number: {bare}. It is "
+            f"ZEROGPU_DISK_CAP_GB, and a number in two places is a number that "
+            f"will diverge."
+        )

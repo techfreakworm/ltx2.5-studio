@@ -193,7 +193,7 @@ def derive_pipeline(base, target_cls):
 
     ``from_pretrained`` twice materialises two complete, independent copies of
     the model -- ~67 GiB each. On ZeroGPU that is ~134 GiB packed to disk
-    against a 150 GB cap, and the packing runs after both builds; on a 96 GiB
+    against :data:`ZEROGPU_DISK_CAP_GB`, and packing runs after both builds; on a 96 GiB
     card it is an outright OOM. The two pipeline classes take **identical**
     weight-bearing components at our pinned revision, so there is no version of
     this where two copies are wanted.
@@ -255,7 +255,7 @@ def _quantization_config(quantization: str):
 
     **Transformer only, deliberately.** It is the largest single component
     (37.98 GB of 72.19) and quantising it alone takes the ZeroGPU packing peak
-    from 152.4-156.4 GB to 133.4-137.4 against a 150 GB cap -- enough, with
+    from 152.4-156.4 GB to 133.4-137.4 against :data:`ZEROGPU_DISK_CAP_GB` -- enough, with
     12.6 GB to spare. Widening to the text encoder buys headroom we do not need
     and costs something we do: **it would make an int8-vs-bf16 comparison
     unable to say whether a quality change came from the denoiser or from
@@ -387,6 +387,13 @@ def _base_pipeline(*, dtype=None, device: str | None = None, quantization: str |
         # entirely and re-transfers from RAM on every cold worker. Only the base
         # is moved: everything else shares these very modules.
         built.to(device)
+        # The second reporting point, and it must be HERE. ZeroGPU intercepts
+        # `.to(device)` and packs every tensor to disk inside that call, so this
+        # is the first moment the packed copy exists. Reporting it before the
+        # move would print "after packing" over a measurement taken before any
+        # packing happened -- a mislabelled report, which is the defect this
+        # whole check exists to remove.
+        _log().info("disk %s", disk_footprint(phase="after packing"))
 
     vae = getattr(built, "vae", None)
     if vae is not None:
@@ -905,35 +912,47 @@ def _directory_bytes(path) -> int:
     return total
 
 
-def disk_footprint() -> str:
-    """**Our footprint against the cap**, not the filesystem's free space.
+def disk_footprint(*, phase: str = "before packing") -> str:
+    """**What we consume against the cap** — and it is a floor, which it says.
 
     ⚠️ ``shutil.disk_usage(".")`` was here and could never see the constraint.
     On the Space it reported *"1969.8 GB free of 8589.9 GB"* — **the host
     filesystem, 8.6 TB** — while the workload was being evicted for exceeding
-    150 GB. It said that twice, through two evictions, and looked like a check
-    the whole time.
+    :data:`ZEROGPU_DISK_CAP_GB`. It said that through **two evictions** and
+    looked like a check the whole time.
 
     It is not fixable by pointing it somewhere better: **the cap is not a
-    filesystem limit.** The platform enforces it by watching the workload, so no
-    ``statvfs`` anywhere reports it.
+    filesystem limit.** The platform enforces it by watching the workload, which
+    is why exceeding it arrives as an eviction rather than ``ENOSPC``, and why
+    no ``statvfs`` anywhere reports it.
 
-    So this measures the two directories we actually fill — the HF snapshot and
-    ZeroGPU's packed copy — and adds the image as a stated constant, against a
-    cap we know from documentation. **That is the quantity that evicts us**, and
-    it is the check that would have fired both times.
+    **The measured figure excludes the container image, which cannot be seen
+    from inside — so it is a lower bound and the line says so.** A number
+    presented as complete when it is a floor is exactly how the old line
+    survived two evictions: it looked like a total. *A floor that declares
+    itself is useful; a floor that does not is worse than nothing.*
+
+    Reported at two points because they answer different questions:
+
+    * **before packing** — is there room to pack? This is the report that would
+      have predicted both evictions *before* they happened.
+    * **after packing** — did we fit, and by how much? This is where the
+      53.197 GB packed prediction gets tested from inside rather than inferred.
     """
     from . import preflight
 
     snapshot = _directory_bytes(preflight.cache_repo_dir()) / 1e9
     packed_dir = os.environ.get("ZEROGPU_OFFLOAD_DIR") or os.path.expanduser("~/.zerogpu/tensors")
     packed = _directory_bytes(packed_dir) / 1e9
-    used = snapshot + packed + IMAGE_FOOTPRINT_GB
-    headroom = ZEROGPU_DISK_CAP_GB - used
-    verdict = "OK" if headroom > 0 else "OVER"
+    measured = snapshot + packed
+    remaining = ZEROGPU_DISK_CAP_GB - measured
+    verdict = "OVER" if measured + IMAGE_FOOTPRINT_GB > ZEROGPU_DISK_CAP_GB else "OK"
     return (
-        f"{used:.1f} GB of {ZEROGPU_DISK_CAP_GB:.0f} GB cap [{verdict}] "
-        f"= snapshot {snapshot:.1f} + packed {packed:.1f} + image ~{IMAGE_FOOTPRINT_GB:.0f}"
+        f"[{phase}] {measured:.1f} GB measured of {ZEROGPU_DISK_CAP_GB:.0f} GB cap "
+        f"[{verdict}] = snapshot {snapshot:.1f} + packed {packed:.1f}; "
+        f"{remaining:.1f} GB left for the image (~{IMAGE_FOOTPRINT_GB:.0f} GB, "
+        f"NOT measurable from inside) and anything else. "
+        f"**Measured is a FLOOR, not the total.**"
     )
 
 

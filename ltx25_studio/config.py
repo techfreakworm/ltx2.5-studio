@@ -72,8 +72,8 @@ DEFAULT_LORA_MAX_GB = 12.0
 #: baseline every measurement on this build was taken against.
 #:
 #: ``int8`` exists for ZeroGPU, where bf16 does not fit: the packing peak is
-#: ``snapshot + packed + image`` and bf16 gives 152.4-156.4 GB against a 150 GB
-#: cap. Quantising the transformer alone brings the peak to 133.4-137.4 GB --
+#: ``snapshot + packed + image`` and bf16 gives 152.4-156.4 GB against
+#: ``pipelines.ZEROGPU_DISK_CAP_GB``. Quantising the transformer alone brings the peak to 133.4-137.4 GB --
 #: see ``docs/ZEROGPU_DISK.md`` §4.2 for the derivation and both bounds.
 #:
 #: ⚠️ **A real lever, unlike the ones removed from this file.** It changes
