@@ -44,10 +44,30 @@ LOG_NAME="$(basename "$SCRIPT" .py)"
 # measurement of the right code -- that is how "seeding is incomplete" got reported
 # when the box simply did not have the seeding commit. The SHA was a thing assumed
 # constant and never checked, which is the same shape as a fixture never varied.
-BOX_SHA="$(ssh -o BatchMode=yes -o ConnectTimeout=15 "$HOST" \
-  "cat $(dirname "${LTX25_HINODE_DIR:-/home/wakeuser/ltx25-studio}")/$(basename "${LTX25_HINODE_DIR:-/home/wakeuser/ltx25-studio}")/.synced_sha 2>/dev/null" || true)"
+DEST_DIR="${LTX25_HINODE_DIR:-/home/wakeuser/ltx25-studio}"
+if BOX_SHA="$(ssh -o BatchMode=yes -o ConnectTimeout=15 "$HOST" \
+      "cat '$DEST_DIR/.synced_sha'" 2>/dev/null)"; then
+  :
+else
+  # "Could not determine" is NOT "fine". Treating an unreachable box as a clean
+  # staleness check is the same defect as startup_report's `missing_files=None`
+  # once meaning "nothing is missing" -- a check that cannot fail is not a check.
+  # Without this, an offline box skipped the guard entirely and then died 20s
+  # later on a raw ssh timeout, which reads as a network blip rather than as
+  # "your staleness check did not run".
+  echo "ERROR: cannot reach $HOST to read .synced_sha, so staleness is UNKNOWN." >&2
+  echo "  Not proceeding: a result attributed to the wrong tree is worse than no" >&2
+  echo "  result. Check 'tailscale status' / connectivity, then retry." >&2
+  exit 4
+fi
+BOX_SHA="$(printf '%s' "$BOX_SHA" | tr -d '[:space:]')"
 LOCAL_SHA="$(git rev-parse HEAD)"
-if [ -n "$BOX_SHA" ] && [ "$BOX_SHA" != "$LOCAL_SHA" ]; then
+if [ -z "$BOX_SHA" ]; then
+  echo "ERROR: $HOST has no .synced_sha -- nothing has been synced there yet." >&2
+  echo "  Run ./scripts/sync_to_hinode.sh first." >&2
+  exit 4
+fi
+if [ "$BOX_SHA" != "$LOCAL_SHA" ]; then
   BEHIND="$(git rev-list --count "$BOX_SHA..$LOCAL_SHA" 2>/dev/null || echo "?")"
   echo "=======================================================================" >&2
   echo "WARNING: the box is NOT at local HEAD." >&2
