@@ -1113,9 +1113,13 @@ direction — 0.1 keeps the upload, 0.9 discards it by design.
 **The control exists because `_sampled` calls `latent_dist.sample()` with no
 generator**, while upstream's `retrieve_latents` threads one — so the audio latents
 are sampled unseeded and H10b's differing halves could have been sampling noise.
-At 1.8% it is a **reproducibility gap, not a confound**: `audio_to_audio` is not
-bit-reproducible under a pinned seed while every other mode is. Otherwise `_sampled`
-matches upstream's default `sample_mode="sample"` exactly.
+~~At 1.8% it is a reproducibility gap: `audio_to_audio` is not bit-reproducible
+under a pinned seed while every other mode is.~~ **WITHDRAWN, and wrong twice.**
+`audio_to_audio` **is** bit-reproducible (byte-identical md5s, below) — and *"while
+every other mode is"* was **never measured at all**. The video path's reproducibility
+remains unverified to this day, so that half was an assumption stated as a fact
+about modes never tested. `_sampled` does match upstream's default
+`sample_mode="sample"`; that part stands.
 
 ## H17 — PASS on the strict criterion, with no loosening
 
@@ -1226,7 +1230,13 @@ is established; the pixel diffs cannot carry it.
 Eleven of eleven modes still produce correct, verified artifacts. What is outstanding
 is the **evidence quality of three comparisons**, not the function of any mode.
 
-## Reproducibility is still incomplete after the seeding fix
+## ~~Reproducibility is still incomplete after the seeding fix~~ — WITHDRAWN
+
+> **⚠️ WITHDRAWN. This whole section is wrong.** The control below ran against a box
+> at `4804da1`, which **predates the seeding commit `4ebb8b9`** — it was never
+> re-synced, so it measured the pre-seeding code. Seeding works and is byte-exact;
+> see *"Seeding: verified byte-exact"* below. Kept rather than deleted because the
+> error is the instructive part, and because a deleted mistake teaches nobody.
 
 Same mode, same `noise_scale=0.5`, same seed 1234, same fixture, back to back:
 
@@ -1294,3 +1304,73 @@ comparisons** — which has been the robust half of every measurement here.
 
 All three are about how well things can be **evidenced**, which is a different class
 from the defects this host started with.
+
+---
+
+# Seeding: verified byte-exact — and the two claims above that were wrong
+
+```
+H10c_a  run-b9dde07ed8bb   md5 2988f01159a5322afb28abb6e9a73d26   rms 0.296711  -10.6 dBFS
+H10c_b  run-a1d35aaaab06   md5 2988f01159a5322afb28abb6e9a73d26   rms 0.296711  -10.6 dBFS
+cmp: BYTE-IDENTICAL
+```
+
+Two runs at identical config and seed, **byte for byte identical**. So this stack is
+**bitwise reproducible under a pinned seed on GPU, with no deterministic-algorithm
+flags** — a stronger property than anyone expected, and worth recording as measured
+rather than assumed.
+
+**And `4ebb8b9` was correct the moment it landed.** The byte-identical result alone
+cannot distinguish "correct on landing" from "repaired afterwards", so:
+
+```
+git log -S 'generator' 4804da1..e4e8df1 -- ltx25_studio/   ->   4ebb8b9 only
+```
+
+Nothing touched the generator after it. **There was no second residual and nothing
+was subsequently fixed** — any record of a second seeding defect would be recording
+one that never existed and crediting a fix never made.
+
+## The measurement error, kept because it is the instructive part
+
+The withdrawn section reported 8.7% variation and mismatched md5s as the seeding fix
+being incomplete, and speculated it might be build-wide. **The box was at `4804da1`,
+which predates `4ebb8b9`.** The run was never re-synced. The numbers were real; they
+were measurements of the wrong tree.
+
+**Four wrong attributions in one day, one shape.** The constants never checked, in
+order: a file's provenance, an input's configuration, the fixture, and the tree.
+
+> **Every measurement has a context, and context is invisible unless something
+> forces it into the record.**
+
+`RUNS.manifest` forces the *inputs* into the record. **Nothing was forcing the code
+version in** — so the one constant left unrecorded is the one that bit.
+
+### The fix, and why it exits rather than warns
+
+`scripts/hinode_run.sh` now compares the box's `.synced_sha` against local `HEAD`,
+**names the missing commits, and exits** rather than running. `LTX25_ALLOW_STALE=1`
+makes proceeding a deliberate act. Verified firing.
+
+**A guard against a silent failure cannot itself be silent.** A warning on stderr
+scrolls past above a long log, and the failure it prevents is silent by
+construction — the run succeeds and the conclusion is wrong.
+
+### And the reporting half, which was upstream of everything
+
+The report that caused a downstream document to be edited wrongly said *"8.7% apart,
+seeding is incomplete"* and **did not say which SHA the box was at.** That
+information was available and was not included. **A reader cannot verify a context
+they were never given**, so the missing step was upstream of the edit, not in it.
+
+## Still unverified: the video path's reproducibility
+
+The byte-identical result is **`audio_to_audio` only.** Nothing establishes that the
+video modes are bitwise reproducible, and **the entire twelve-mode pixel-diff table
+depends on it** — if the video path has its own unseeded draw, those per-pair numbers
+stay unattributable however good the audio seeding is.
+
+`text_to_video` twice at one seed settles it, and means something either way:
+attributable pairs, or a real finding in the video path. **Not yet run** — hinode went
+offline mid-gallery.
