@@ -170,6 +170,13 @@ even though the snapshot on disk stays bf16.**
 All columns include the ~10 GB image. Non-quantised remainder (vae, audio_vae,
 vocoder, upsamplers, diffusion_decoder) is 3.95 GB.
 
+> **§4.2 is authoritative for the int8 figures.** This table exists to compare
+> *schemes*, so it uses one ~10 GB image across every row; §4.2 carries the
+> 8–12 GB range and the two bounds, giving **118.3 – 122.3** where this reads
+> 120.3. Same quantity, and the range is the one to quote. *A number stated in
+> two places is a number that will diverge — these two just did, by the image
+> term, and this pointer is what stops it happening again.*
+
 > ⚠️ **The middle column used to read 8–12 GB lower**, because a "steady state"
 > column had the image subtracted out. **If the prune never fires, nothing is
 > freed — steady state *is* the peak**, image included. And **the image is
