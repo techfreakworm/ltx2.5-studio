@@ -65,6 +65,11 @@ LTX25_QUANTIZATION           = int8      LTX25_OUTPUT_RETENTION_GB   = 20
 HF_HUB_DISABLE_XET           = 1
 ```
 
+⚠️ **The two `*_PRECISION` variables were inert** — not wired to anything, at
+this run or ever. They are recorded here because they were genuinely set on the
+Space at the time, not because they did anything. **Both have since been deleted
+from the Space.** See §9.1.
+
 ---
 
 ## 3. The failure
@@ -239,8 +244,13 @@ this run separates them.
 
 ## 9. Recommendation — route B, and its first signal is free
 
-**Flip `LTX25_TEXT_ENCODER_PRECISION` to int8, restart, and read the peak-RSS
-line.**
+**Widen `components_to_quantize` to include the text encoder, redeploy, and read
+the peak-RSS line.**
+
+> ⛔ **An earlier version of this section said "flip
+> `LTX25_TEXT_ENCODER_PRECISION` to int8". That instruction was false** — the
+> variable is wired to nothing. See **§9.1**, which is the more important half
+> of this section.
 
 ### ✅ The first signal costs zero GPU quota
 
@@ -259,8 +269,9 @@ Either outcome is informative and neither spends quota to get there.
 
 ⚠️ **A previously-circulated figure of 15.13 GB was wrong.** It came from
 `ZEROGPU_DISK.md`'s bound **A**, which quantises the text encoder **and**
-connectors. The lever actually available — `LTX25_TEXT_ENCODER_PRECISION` —
-covers the **text encoder alone**: 23.92 GB bf16 📄, so **≈ 12 GB saved.**
+connectors. The change actually available — adding `"text_encoder"` to
+`components_to_quantize` in `_quantization_config` — covers the **text encoder
+alone**: 23.92 GB bf16 📄, so **≈ 12 GB saved.**
 
 | | packed | expected RSS | headroom if ceiling ≈ 68 GB ⚠️ *(inherited, §6)* |
 |---|---:|---:|---:|
@@ -286,6 +297,83 @@ rather than *"flip it and retry the generation"*.
 signed-off bf16 baseline, so *"what does int8 cost in quality?"* could be
 answered in one look. **Running it as a fix spends that**, and it cannot be
 recovered later without re-running both halves.
+
+---
+
+## 9.1 ⛔ The instruction in §9 was false, and this document nearly proved the RAM hypothesis wrong
+
+**`LTX25_TEXT_ENCODER_PRECISION` is not a lever. It is wired to nothing.**
+
+✅ Verified by mutation rather than by reading, twice and independently:
+
+```
+grep -rn TEXT_ENCODER_PRECISION ltx25_studio/ app.py   ->  no match, any file
+
+config, variable UNSET     -> RuntimeConfig(..., quantization='bf16')
+config, variable = 'int8'  -> RuntimeConfig(..., quantization='bf16')
+IDENTICAL under mutation                                  True
+illegal value 'fp4-nonsense' accepted silently            True
+
+CONTRAST — a lever that IS wired:
+LTX25_QUANTIZATION='fp4-nonsense'  ->  ConfigError: not a recognised value.
+```
+
+It is not half-wired. **It is not a `RuntimeConfig` field at all**, so it is
+never resolved, never validated and never logged. 📄 `PLAN.md` records why: both
+precision variables were **removed** because *"an advertised lever attached to
+nothing is worse than no lever at all"*. The Space Variables were leftovers from
+before that removal.
+
+**And the running Space said so, in a line already quoted in §5:**
+
+```
+dtype : bf16 (fixed; no precision switch)
+```
+
+**Nobody read it.** The evidence was in the log we were all working from.
+
+### What it would have cost
+
+Flipping the variable and restarting would have produced **no change in peak
+RSS** — because nothing would have changed. **We would have read an unmoved
+number as evidence against the RAM hypothesis** (§8.1), abandoned the leading
+explanation, and gone looking elsewhere.
+
+> **A wrong conclusion from a real experiment, indistinguishable from a
+> legitimate negative result.**
+
+That is the same failure shape this project has now hit four times, and it is
+the one `997b080`'s commit message describes for the transformer config: *if the
+config never reaches `from_pretrained`, the Space deploys bf16 while the variable
+says int8 … and the conclusion drawn is "int8 does not fit", from a run in which
+int8 was never applied.*
+
+**This document was written to warn about that class, and contained a live
+instance of it.** Writing the warning does not confer immunity to it.
+
+### How it happened — the sequence, which is the useful part
+
+1. The **orchestrator** set the Space Variable believing it was a live lever. In
+   his words: *"it is not wired, so it did nothing except trigger a pointless
+   restart … A false instruction sitting in the only record of this failure is
+   the worst possible place for one, and it is my instruction that is false."*
+2. The **lead's dispatch repeated it** without checking whether it was wired.
+3. The **implementer wrote it into this file** — the only record of the failure
+   — likewise unchecked.
+4. The **operator imposed a wiring check** before any reading from a restart
+   would be trusted.
+5. The **mutation test settled it** before a restart could be misinterpreted.
+
+**Three people passed the same unverified claim along, and the check that caught
+it cost about thirty seconds.** The variable had been sitting in the Space doing
+nothing, and the startup log had been announcing that fact the whole time.
+
+📄 `PLAN.md` §9.1.6 lists ladder rung 5 as *"hand-built, one call site at a
+time"*. **This is rung 5 applied to an environment variable rather than a call
+site — and it caught a live one.** The ladder is not only about function
+arguments; anything that looks like an input has a rung 5.
+
+---
 
 ### The routes not recommended
 
