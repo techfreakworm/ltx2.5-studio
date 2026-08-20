@@ -1,5 +1,18 @@
-# The Space starts and cannot generate
+# The Space: a killed worker, a falsified ceiling, and a working generation
 
+> ## ✅ RESOLVED — the Space generates. **Read §9.3 before citing why.**
+>
+> A real **39,146-byte** video, **content-verified**, at sha `8fb292d6`.
+>
+> ⚠️ **The fix is NOT attributed.** Two things changed between the failing and
+> succeeding runs, not one. **"The Space now serves" is established; "the
+> widening is why" is not.** §9.3.
+>
+> The investigation below is kept exactly as written. Its measurements stand, and
+> **two of its central claims were falsified** by the run that resolved it —
+> including one this build had been planning against since before any deploy.
+
+> **Original framing, first attempt — accurate as history:**
 > **First generation ever attempted on the live private Space. Startup succeeded;
 > the generation failed.** The forked ZeroGPU worker was **killed twice, with no
 > Python traceback**, and `spaces` returned `'GPU task aborted'`.
@@ -31,6 +44,10 @@ pinned source or the platform* · ⚠️ *inferred* · ⏸️ *not established*.
 
 **Startup: healthy.** **Generation: failed.** Those are two different claims and
 the rest of this file exists to keep them apart.
+
+> ✅ **Superseded on the retry at sha `8fb292d6`: generation now succeeds.** The
+> separation above is what made that legible — startup never broke, so the
+> failure was always in the second claim. §9.3.
 
 ---
 
@@ -534,18 +551,95 @@ survive the experiment it justified.
 > Keeping a change whose motivating hypothesis is dead, at **31.24 GiB** of
 > additional peak RSS, for an unmeasured benefit, is not defensible.
 
-### ⏸️ PLACEHOLDER — retry outcome
+### ✅ Retry outcome — it succeeded
 
-**The retry is running at sha `8fb292d6` as this is written.** Everything above
-is independent of how it lands: the ceiling is falsified either way, the
-mechanism applied a third time either way, and the RAM arithmetic is dead either
-way.
+**It did not fail, so `02fe943` STAYS.** The standing revert decision above is
+discharged, not overridden. Detail and the attribution limit: §9.3.
 
-| | |
-|---|---|
-| retry result | ⏸️ **pending** |
-| if it **succeeds** | generation works at two-component int8; §8's ⏸️ *(kill at fork vs at load)* stays open but stops blocking, and the steady-state measurement in §7 becomes the next thing to take |
-| if it **fails** | `02fe943` reverted per the standing decision above; the kill is unexplained at **both** RSS levels, which is itself strong evidence against RAM as the mechanism, and **route C** is the path |
+---
+
+## 9.3 ✅ The Space generated — and what that does **not** establish
+
+```
+PREDICT_WALL_CLOCK_SECONDS 21.44
+RESULT: ["output.mp4", null, "✅ Text to video complete. seed 1234 · run directory outputs/run-fc6d3a762eaa"]
+```
+
+### The artifact is real — structure **and** content
+
+Structure alone was not accepted, because **H9 taught this build that a green
+stream table and a silent file are indistinguishable.** So the video got the
+analogue of the RMS check that caught H9:
+
+```
+39,146 bytes · h264 · 256x256 · 24 fps · 9 frames · duration 0.375 s
+verify_streams text_to_video -> MATCHES, exit 0   (video: True, audio: False -- correct for this mode)
+
+global pixel std        72.657      (~0 would be a flat/blank frame)
+mean |frame-to-frame|   18.894      per-pair 57.17 .. 8.35, none near zero
+distinct frames         9 of 9
+dynamic range           0.0 .. 255.0 on every frame
+```
+
+✅ **Varied, moving, all frames distinct.** Not a blank file that passes a
+schema.
+
+### The device-API contrast — the cleanest evidence in this file
+
+```
+FAILED run:  schedule -> allow tok=2bca839a pid=262 -> release fail=true  404
+             schedule -> allow tok=1c3ef0c9 pid=286 -> release fail=true  404   (same taskId, spaces retried)
+SUCCESS run: schedule -> allow tok=34ddf8b8 pid=258 -> release fail=FALSE 200   (one worker, no retry)
+```
+
+**`fail=true` twice against `fail=false` once**, from the platform's own
+accounting rather than from ours.
+
+---
+
+### ⛔ The caveat, stated as prominently as the success: **the fix is not attributed**
+
+**The failing and succeeding runs differ by TWO things:**
+
+1. `02fe943` — the text encoder moved to int8.
+2. **A full container rebuild** — new image, new download, plausibly a different
+   worker node.
+
+**This is not the clean A/B we had for the RSS number, and the difference is
+worth being exact about.** For RSS, an AST diff of the shipped package showed the
+quantised set was the *sole* runtime variable between the two measurements — so
+the 31.24 GiB rise is attributable. Here a rebuild sits in the middle, and a
+rebuild changes things we do not observe.
+
+> **n=1 success against n=1 failure, with two variables between them, supports
+> "the Space now serves" and does not support "the widening is why."**
+
+**And the reason to resist the causal reading is stronger than the usual one:**
+the hypothesis that motivated `02fe943` — cgroup OOM against a ~68 GB ceiling —
+is **dead**, falsified by our own 87.13 GiB survival (§6). So we changed
+something for a reason that turned out to be wrong, and the thing then worked.
+**Those are two facts, not one causal chain.** ⏸️ Readings still open:
+
+- RAM at fork was real, with different arithmetic than ours, and the lower steady
+  state genuinely helped.
+- The first failure was a platform-side transient; **the rebuild alone fixed it.**
+- Something else about the new container.
+
+✅ **Route C — instrument the worker — remains the leading path.** This success
+does not retire it; it makes it *cheaper to justify*, because there is now a
+**working baseline to instrument against** instead of a dead Space.
+
+### Costs
+
+```
+failed run    100.35 s wall-clock, TWO worker attempts
+success run    21.44 s wall-clock, ONE worker attempt
+session total 121.79 s wall-clock; at xlarge 2x that is <= ~243.58 GPU-seconds
+budget        2400 GPU-seconds/day (PRO) -> ~10.2% consumed
+```
+
+⏸️ Exact billed seconds remain unmeasurable — no readable ZeroGPU quota endpoint
+(404 on all three probed). The figure above is a **bound**, not a measurement.
 
 ---
 
@@ -562,6 +656,12 @@ tested by accident, on the first real failure, and it passed.
 The error was surfaced as an error, named as **not ours**, and no artifact was
 fabricated to accompany it.
 
+> ✅ **And now the other half.** On the successful run the app returned a path
+> **and the file behind it was real** — 39,146 bytes, 9 distinct frames, pixel
+> std 72.657 (§9.3). The invariant has now been exercised in both directions:
+> **no file claimed on failure, and a genuine file behind the claim on success.**
+> A build that only ever failed could not have shown the second half.
+
 ---
 
 ## 11. Follow-ups this run created
@@ -572,16 +672,19 @@ fabricated to accompany it.
 | 2 | **`ZEROGPU_DISK.md` §4.2**: upgrade the RSS prediction and the prune branch ⏸️ → ✅ from this run. | ⏸️ gated, docs-last |
 | 3 | **`OPERATOR_HANDOFF.md` §3 and §5 are stale in *both* directions** — §3 says the Space *"has never run"*, §5 says a deploy is *"not currently possible"*. **Startup demonstrably works and generation demonstrably does not**, and the document currently cannot express that distinction. | ⏸️ gated, docs-last |
 | 4 | ⏸️ **No readable ZeroGPU quota endpoint** — all three candidate URLs 404, so billed seconds cannot be measured, only bounded. Worst case ~200 GPU-s of 2400/day for this run (`xlarge` bills at 2×; packed 51.1 GB is over the 42.00 GiB threshold 📄). | ⏸️ open |
+| 5 | **Bus defect**: `lead-gate.mjs:1709` computes `isLead = (session_id === SOMA_LEAD_SESSION_UUID)`. A `/clear` rotates the session id while the env var stays baked in from launch, so every soma bus tool is denied and the lead cannot file a report. **Side effect: it also disarms the lead-only `git push` / `git merge` guard.** | ⏸️ open, infrastructure |
 | 6 | ⏸️ **No steady-state RSS measurement exists.** `peak_rss_gib()` reports the load peak; the RAM question is about what remains resident when the load settles. Every RSS number in this document is a peak. **This is the measurement that would have prevented the wrong prediction in §7** and it is still not taken. | ⏸️ open |
 | 7 | ⛔ **The ~68 GB ceiling was inherited, never measured, and is now falsified** (§6). Audit any other planning number with the same provenance — carried in from outside, never verified here, and load-bearing. It survived this long because it was *consistent* with our data, which is not the same as supported by it. | ⏸️ open |
-| 8 | ⚠️ **`02fe943` is provisional.** It stands on a hypothesis this run killed and costs 31.24 GiB of peak RSS for an unmeasured steady-state saving. Reverted if the retry fails (§9.2). | ⏸️ pending retry |
-| 5 | **Bus defect**: `lead-gate.mjs:1709` computes `isLead = (session_id === SOMA_LEAD_SESSION_UUID)`. A `/clear` rotates the session id while the env var stays baked in from launch, so every soma bus tool is denied and the lead cannot file a report. **Side effect: it also disarms the lead-only `git push` / `git merge` guard.** | ⏸️ open, infrastructure |
+| 8 | ⚠️ **`02fe943` STAYS** — the retry succeeded, so the revert condition never triggered (§9.2). But it stands on a hypothesis this run killed and costs 31.24 GiB of peak RSS for a steady-state saving still unmeasured. **Kept because it did not fail, not because it was shown to help.** | ✅ resolved, ⚠️ unjustified |
+| 9 | ⛔ **The fix is unattributed** — a container rebuild changed alongside `02fe943`, so n=1 vs n=1 with two variables (§9.3). Distinguishing them needs either a revert-and-retry on the same image, or route C. **Until then no document should say the widening fixed generation.** | ⏸️ open |
+| 10 | ⏸️ **Only 1 of 11 modes has ever run on the Space** — `text_to_video`, 256x256x9, no conditioning, no stage 2, no LoRA, no audio. The audio modes exercise the mel front-end and the 16 kHz/48 kHz asymmetry, none of which has run on this platform. | ⏸️ open |
 
 ---
 
 ## 12. Repo state at the time of writing
 
-- **Six commits unpushed**; `origin/soma/ltx25-studio` is at `cbaa3ad`. Pushing
+- **`origin/soma/ltx25-studio` is at `1802bfd`** — the six earlier commits were
+  pushed by the orchestrator; the findings commits after it are unpushed. Pushing
   is the orchestrator's — this team does not push by design. Verified with
   `git rev-list --count origin/soma/ltx25-studio..HEAD`, which is the only
   authority on this; an earlier count taken from *"what I authored this round"*
