@@ -1374,3 +1374,52 @@ stay unattributable however good the audio seeding is.
 `text_to_video` twice at one seed settles it, and means something either way:
 attributable pairs, or a real finding in the video path. **Not yet run** — hinode went
 offline mid-gallery.
+
+---
+
+# A host measurement that bears on the int8 route
+
+`docs/ZEROGPU_DISK.md` §4.2 rules int8 via bitsandbytes and states its remaining
+risk as **RAM during the quantising load** — *"a community cgroup observation of
+~68 GB, never measured by us"*. This host measured the bf16 half of that.
+
+**A bf16 load peaks at 20.05 GiB host RSS**, against 65.370 GiB of weights on the
+card. The gap is that **safetensors is mmap-backed**: the pages are file-backed and
+never all resident, so host RSS stays far below the weight size.
+
+**A quantising load loses that property** — and by the same mechanism §4.2 already
+relies on for its prune argument. Quantisation **materialises new tensors**, which
+are anonymous memory rather than file-backed. So int8 host RSS should be expected to
+approach the *materialised* weight size — order 38 GB for option A, 53 GB for
+option B — plus whatever of the bf16 source stays resident during conversion, rather
+than remaining near 20 GiB.
+
+That does not settle the ~68 GB ceiling, but it moves it from a number someone
+mentioned to **the binding constraint worth measuring first**, and it is consistent
+with §4.2's own reasoning rather than a competing theory. **Disk is not the risk;
+RAM is.**
+
+## Two arithmetic notes from auditing §4.2
+
+**The snapshot term is right, and it reconciles here.** §4.2's
+`snapshot on disk (bf16) 72.185 GB` against the download measured on this host:
+**72,186,355,712 B = 72.186 GB**. Agreement to about a megabyte, and every component
+line sums correctly (68.2402 Linear-heavy + 3.9089 conv-only + 0.036 misc).
+
+**Its bf16 row predicts the failure that actually happened.** `152.4 – 156.4 GB`
+against a 150 GB cap, and the Space evicted twice with `150G`. A derivation that
+predicts an observed failure is worth more than one that only justifies a choice.
+
+⚠️ **But the summary's headline understates itself.** It reports
+*"int8, if the prune never fires: ~110 GB steady"* where the derivation gives
+**118.3 – 122.3**:
+
+```
+72.185 + 38.065           = 110.25        <- the ~110 figure: image term OMITTED
+72.185 + 38.065 + 8..12   = 118.3–122.3   <- the derivation: image included
+```
+
+The dropped term is the **image**, which is the term that pushed bf16 over the cap in
+the first place. The conclusion survives — 122.3 against 150 leaves 27.7 GB — but a
+summary more favourable than its own derivation is the number that gets quoted
+onward and then defended.
