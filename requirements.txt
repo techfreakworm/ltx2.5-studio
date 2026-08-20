@@ -57,6 +57,19 @@ hf_xet>=1.6.0,<2
 # the BlockMask. See ltx25_studio/pipelines.py::_stage_2_parts.
 kernels>=0.16.0,<0.17
 
+# `bitsandbytes` is the int8 path for ZeroGPU, where bf16 does not fit: the
+# packing peak is snapshot + packed + image, and bf16 gives 152.4-156.4 GB
+# against a 150 GB cap. See docs/ZEROGPU_DISK.md 4.2 for the derivation.
+#
+# THE FLOOR IS 0.46.0 AND IT IS NOT DIFFUSERS' FLOOR. diffusers mandates
+# 0.43.3 (bnb_quantizer.py:70). The binding constraint is ZeroGPU:
+# spaces/zero/torch/bitsandbytes.py no-ops _patch/_unpatch/_move only ABOVE
+# 0.46.0, wired at patching.py:328/355/445. Below that the packer would try to
+# move quantised tensor subclasses itself. There is no equivalent module for
+# torchao at any version, which is what makes bnb the supported path rather
+# than a preference.
+bitsandbytes>=0.46.0,<0.51
+
 # --- UI -----------------------------------------------------------------------
 # gradio 5.x is END OF LIFE (last stable 5.50.0, 2025-11-21).
 #

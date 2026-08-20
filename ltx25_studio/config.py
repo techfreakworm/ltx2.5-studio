@@ -26,6 +26,8 @@ from .errors import ConfigError
 __all__ = [
     "ENV_GPU_DURATION_SECONDS",
     "ENV_LORA_MAX_GB",
+    "ENV_QUANTIZATION",
+    "QUANTIZATION_CHOICES",
     "ENV_OUTPUT_DIR",
     "ENV_OUTPUT_RETENTION_GB",
     "ENV_ZEROGPU_SIZE",
@@ -39,6 +41,7 @@ ENV_GPU_DURATION_SECONDS = "LTX25_GPU_DURATION_SECONDS"
 ENV_OUTPUT_RETENTION_GB = "LTX25_OUTPUT_RETENTION_GB"
 ENV_OUTPUT_DIR = "LTX25_OUTPUT_DIR"
 ENV_LORA_MAX_GB = "LTX25_LORA_MAX_GB"
+ENV_QUANTIZATION = "LTX25_QUANTIZATION"
 
 #: ``auto`` means "do not pass ``size`` at all". ZeroGPU promotes us to xlarge
 #: by itself once packed weights exceed its 42.00 GiB threshold, and passing the
@@ -64,6 +67,21 @@ DEFAULT_GPU_DURATION_SECONDS = 60
 DEFAULT_OUTPUT_RETENTION_GB = 20.0
 DEFAULT_OUTPUT_DIR = "outputs"
 DEFAULT_LORA_MAX_GB = 12.0
+
+#: Weight precision for the **transformer only**. bf16 is the default and is the
+#: baseline every measurement on this build was taken against.
+#:
+#: ``int8`` exists for ZeroGPU, where bf16 does not fit: the packing peak is
+#: ``snapshot + packed + image`` and bf16 gives 152.4-156.4 GB against a 150 GB
+#: cap. Quantising the transformer alone brings the peak to 133.4-137.4 GB --
+#: see ``docs/ZEROGPU_DISK.md`` §4.2 for the derivation and both bounds.
+#:
+#: ⚠️ **A real lever, unlike the ones removed from this file.** It changes
+#: output quality, which is why it is a separate switch rather than folded into
+#: the recipe: an int8-vs-bf16 pair at one seed answers "what does int8 cost?"
+#: in one look, and only if the two can be run independently.
+DEFAULT_QUANTIZATION = "bf16"
+QUANTIZATION_CHOICES = ("bf16", "int8")
 
 
 def _choice(name: str, default: str, allowed: tuple[str, ...]) -> str:
@@ -102,6 +120,7 @@ class RuntimeConfig:
     output_retention_gb: float
     output_dir: str
     lora_max_gb: float
+    quantization: str = DEFAULT_QUANTIZATION
 
     @property
     def lora_max_bytes(self) -> int:
@@ -139,4 +158,5 @@ def load_config() -> RuntimeConfig:
         ),
         output_dir=os.environ.get(ENV_OUTPUT_DIR) or DEFAULT_OUTPUT_DIR,
         lora_max_gb=_number(ENV_LORA_MAX_GB, DEFAULT_LORA_MAX_GB, minimum=0.01),
+        quantization=_choice(ENV_QUANTIZATION, DEFAULT_QUANTIZATION, QUANTIZATION_CHOICES),
     )

@@ -38,6 +38,7 @@ the whole package -- stays importable with no GPU, no weights and no diffusers.
 from __future__ import annotations
 
 import inspect
+import sys
 from dataclasses import dataclass
 from types import MappingProxyType
 
@@ -73,6 +74,7 @@ __all__ = [
     "upsample_kwargs",
     "STAGE_2_STRIPPED_KEYS",
     "startup_report",
+    "peak_rss_gib",
 ]
 
 #: Mandatory. See the module docstring -- the default silently corrupts output.
@@ -223,6 +225,55 @@ def derive_pipeline(base, target_cls):
     return target_cls(**shared)
 
 
+def peak_rss_gib() -> float | None:
+    """Peak resident set size so far, in GiB, or ``None`` where unavailable.
+
+    Logged around the model load because **a bf16 load is not a floor for a
+    quantised one.** ✅ Measured: a full bf16 load peaked at 20.05 GiB against
+    65.4 GiB of weights, because safetensors **mmaps** and the pages stay
+    file-backed. A quantising load materialises new int8 tensors -- anonymous
+    memory by construction, the same mechanism that defeats ZeroGPU's post-pack
+    prune -- so that 20 GiB says nothing about this path.
+    """
+    try:
+        import resource
+    except ImportError:
+        return None
+    peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    # ru_maxrss is KiB on Linux and bytes on macOS. The Space and the host are
+    # Linux; the branch keeps a local run from reporting a nonsense number.
+    if sys.platform == "darwin":
+        return peak / 1024**3
+    return peak / 1024**2
+
+
+def _quantization_config(quantization: str):
+    """The transformer's quantisation config, or ``None`` for the bf16 default.
+
+    **Transformer only, deliberately.** It is the largest single component
+    (37.98 GB of 72.19) and quantising it alone takes the ZeroGPU packing peak
+    from 152.4-156.4 GB to 133.4-137.4 against a 150 GB cap -- enough, with
+    12.6 GB to spare. Widening to the text encoder buys headroom we do not need
+    and costs something we do: **it would make an int8-vs-bf16 comparison
+    unable to say whether a quality change came from the denoiser or from
+    prompt encoding.**
+    """
+    if quantization != "int8":
+        return None
+    try:
+        from diffusers import BitsAndBytesConfig
+    except ImportError as exc:
+        raise ModelLoadError(
+            component="transformer",
+            reason=(
+                f"int8 was requested and the quantisation stack is not importable ({exc}). "
+                f"`bitsandbytes` is a pinned requirement; see requirements.txt for why the "
+                f"floor is 0.46.0 rather than the 0.43.3 diffusers itself mandates."
+            ),
+        ) from exc
+    return BitsAndBytesConfig(load_in_8bit=True)
+
+
 def _snapshot_path():
     """The local directory every component loads from.
 
@@ -246,10 +297,15 @@ def _snapshot_path():
     return path
 
 
-def _base_pipeline(*, dtype=None, device: str | None = None):
+def _base_pipeline(*, dtype=None, device: str | None = None, quantization: str | None = None):
     """Load the model ONCE. Every workflow is derived from this."""
     if _BASE_CACHE_KEY in _CACHE:
         return _CACHE[_BASE_CACHE_KEY]
+
+    if quantization is None:
+        from .config import load_config
+
+        quantization = load_config().quantization
 
     try:
         import torch
@@ -277,9 +333,23 @@ def _base_pipeline(*, dtype=None, device: str | None = None):
         #
         # The checkpoint is bf16 and WEIGHT_DTYPE is bfloat16, so this is a
         # no-op load rather than a conversion. Do not "helpfully" add a cast.
-        built = LTX2ConditionPipeline.from_pretrained(
-            _snapshot_path(),
-            torch_dtype=dtype or getattr(torch, WEIGHT_DTYPE),
+        before = peak_rss_gib()
+        quantization_config = _quantization_config(quantization)
+        load_kwargs = {"torch_dtype": dtype or getattr(torch, WEIGHT_DTYPE)}
+        if quantization_config is not None:
+            # Applied to the transformer alone -- see `_quantization_config`.
+            load_kwargs["quantization_config"] = quantization_config
+        built = LTX2ConditionPipeline.from_pretrained(_snapshot_path(), **load_kwargs)
+        after = peak_rss_gib()
+        # Reported whatever happens. A bf16 load peaks far below the weight
+        # footprint because safetensors mmaps; a quantising load materialises
+        # tensors and does not, so this number is the one that decides whether
+        # int8 is viable on a memory-capped platform -- not the disk arithmetic.
+        _log().info(
+            "loaded transformer as %s | peak RSS %.2f -> %.2f GiB",
+            quantization,
+            before if before is not None else float("nan"),
+            after if after is not None else float("nan"),
         )
     except Exception as exc:
         raise ModelLoadError(component=BASE_KIND, reason=str(exc)) from exc
