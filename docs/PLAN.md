@@ -1827,7 +1827,20 @@ Each rung was added because the one below it passed while something was broken:
 | 1 | the module is **imported** | it can be imported by a UI readout and dead on the generation path |
 | 2 | it is **reached by the path that does the work** | a live module can contain a dead function |
 | 3 | this specific **function ran** | a function can run with the wrong arguments |
-| 4 | the **arguments match the vendor's specification** | ⏸️ hand-built, one call site at a time |
+| 4 | the **arguments match the vendor's specification** | an argument of the right *shape* can be the wrong **type** |
+| 5 | the argument is the **type the callee accepts** | ⏸️ hand-built, one call site at a time |
+
+**Rung 5 was added by a failed deploy.** A `quantization_config` was built,
+threaded, and proven to reach `from_pretrained` by a test written for rung 4 —
+and the pipeline rejected it, because a bare `BitsAndBytesConfig` is what a
+*component* takes and `DiffusionPipeline.from_pretrained` requires
+`PipelineQuantizationConfig`. **Both arrive equally well; the test could not
+tell them apart, and nothing at rung 4 could.**
+
+> That is the first time on this build we were bitten **one step past the rung
+> the instrument was built for**, which is the useful shape: an instrument
+> answers the question it was designed for, and the next question is invisible
+> to it *precisely because* it looked answered.
 
 Rung 4 is where `DISTILLED_SIGMA_VALUES` hid: defined, documented as mandatory,
 quoted in its own module docstring, and **referenced** — from a function applied
