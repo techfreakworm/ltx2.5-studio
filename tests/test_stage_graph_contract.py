@@ -35,6 +35,8 @@ constructor arguments — so none of this needs diffusers, torch or a GPU.
 
 from __future__ import annotations
 
+import pathlib
+
 import pytest
 
 from ltx25_studio import pipelines
@@ -1195,4 +1197,77 @@ def test_bound_b_is_expressed_as_an_argument(monkeypatch, tmp_path):
         "quantisation is no longer transformer-only. Bound B was chosen over A "
         "deliberately: widening buys headroom we do not need and costs the ability "
         "to attribute a quality change to the denoiser rather than prompt encoding."
+    )
+
+
+# --------------------------------------------------------------------------
+# the disk line reports our footprint, not the host's free space
+#
+# `shutil.disk_usage(".")` was here. On the Space it printed "1969.8 GB free of
+# 8589.9 GB" -- the HOST filesystem, 8.6 TB -- while the workload was evicted
+# for exceeding 150 GB. It said that through two evictions and looked like a
+# check the whole time. A report attached to nothing is a lever attached to
+# nothing, with the added harm that a reader believes it.
+# --------------------------------------------------------------------------
+
+
+def test_the_disk_line_measures_against_the_cap(monkeypatch):
+    monkeypatch.setattr(pipelines, "_directory_bytes", lambda path: 0)
+
+    line = pipelines.disk_footprint()
+
+    assert "150 GB cap" in line, f"the cap is not named: {line}"
+    assert "free of" not in line, (
+        f"the line still reports filesystem free space: {line}. That quantity is "
+        f"~8.6 TB on the Space and cannot see the 150 GB the platform enforces."
+    )
+
+
+def test_it_says_OVER_when_our_footprint_exceeds_the_cap(monkeypatch):
+    """The state it was silent through, twice."""
+    monkeypatch.setattr(pipelines, "_directory_bytes", lambda path: 72_185_000_000)
+
+    line = pipelines.disk_footprint()
+
+    assert "[OVER]" in line, (
+        f"snapshot + packed at 72.2 GB each plus the image is 154.4 GB against a "
+        f"150 GB cap, and the line does not say so: {line}"
+    )
+
+
+def test_it_names_all_three_terms(monkeypatch):
+    """Including the image, which is the term that pushes bf16 over.
+
+    72.2 + 72.2 is 144.4 and fits; it is the image that does not.
+    """
+    monkeypatch.setattr(pipelines, "_directory_bytes", lambda path: 1_000_000_000)
+
+    line = pipelines.disk_footprint()
+
+    for term in ("snapshot", "packed", "image"):
+        assert term in line, f"{term!r} is not broken out: {line}"
+
+
+def test_the_startup_report_does_not_use_filesystem_free_space():
+    """Pinned because the replacement looks like the thing it replaced.
+
+    Both print a number followed by 'GB'. Only one of them can fail.
+    """
+    # AST, not a text search: the docstring of `disk_footprint` names
+    # `shutil.disk_usage` to explain what was removed and why, and a substring
+    # scan cannot tell an explanation from a call. Same lesson as a scan that
+    # reported "duplicate definitions" that were source inside string literals.
+    import ast
+
+    tree = ast.parse(pathlib.Path(pipelines.__file__).read_text())
+    called = {
+        node.func.attr
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+    }
+
+    assert "disk_usage" not in called, (
+        "shutil.disk_usage is back in pipelines.py. It reports the host filesystem, "
+        "which on the Space is 8.6 TB and has no relationship to the 150 GB quota "
+        "the platform enforces by watching the workload."
     )

@@ -38,6 +38,7 @@ the whole package -- stays importable with no GPU, no weights and no diffusers.
 from __future__ import annotations
 
 import inspect
+import os
 import sys
 from dataclasses import dataclass
 from types import MappingProxyType
@@ -74,6 +75,8 @@ __all__ = [
     "upsample_kwargs",
     "STAGE_2_STRIPPED_KEYS",
     "startup_report",
+    "disk_footprint",
+    "ZEROGPU_DISK_CAP_GB",
     "peak_rss_gib",
 ]
 
@@ -873,6 +876,67 @@ def _audio_of(output):
     return getattr(output, "audio", None)
 
 
+#: ZeroGPU's ephemeral-disk ceiling. 📄 Documented platform constant, **not
+#: readable from inside the container**: the cap is not a filesystem limit but a
+#: quota the platform enforces by watching the workload, which is why exceeding
+#: it arrives as an eviction rather than as ``ENOSPC``.
+ZEROGPU_DISK_CAP_GB = 150.0
+
+#: The container image itself — torch, CUDA, the wheels. ⚠️ **Not measurable
+#: from inside**, so it is carried as a constant and shown as such. It is also
+#: the term that pushes bf16 over: 72.2 + 72.2 alone is 144.4 and fits.
+IMAGE_FOOTPRINT_GB = 10.0
+
+
+def _directory_bytes(path) -> int:
+    """Bytes under ``path``, or 0 if it does not exist."""
+    total = 0
+    stack = [path]
+    while stack:
+        try:
+            with os.scandir(stack.pop()) as entries:
+                for entry in entries:
+                    if entry.is_dir(follow_symlinks=False):
+                        stack.append(entry.path)
+                    elif entry.is_file(follow_symlinks=False):
+                        total += entry.stat(follow_symlinks=False).st_size
+        except OSError:
+            continue
+    return total
+
+
+def disk_footprint() -> str:
+    """**Our footprint against the cap**, not the filesystem's free space.
+
+    ⚠️ ``shutil.disk_usage(".")`` was here and could never see the constraint.
+    On the Space it reported *"1969.8 GB free of 8589.9 GB"* — **the host
+    filesystem, 8.6 TB** — while the workload was being evicted for exceeding
+    150 GB. It said that twice, through two evictions, and looked like a check
+    the whole time.
+
+    It is not fixable by pointing it somewhere better: **the cap is not a
+    filesystem limit.** The platform enforces it by watching the workload, so no
+    ``statvfs`` anywhere reports it.
+
+    So this measures the two directories we actually fill — the HF snapshot and
+    ZeroGPU's packed copy — and adds the image as a stated constant, against a
+    cap we know from documentation. **That is the quantity that evicts us**, and
+    it is the check that would have fired both times.
+    """
+    from . import preflight
+
+    snapshot = _directory_bytes(preflight.cache_repo_dir()) / 1e9
+    packed_dir = os.environ.get("ZEROGPU_OFFLOAD_DIR") or os.path.expanduser("~/.zerogpu/tensors")
+    packed = _directory_bytes(packed_dir) / 1e9
+    used = snapshot + packed + IMAGE_FOOTPRINT_GB
+    headroom = ZEROGPU_DISK_CAP_GB - used
+    verdict = "OK" if headroom > 0 else "OVER"
+    return (
+        f"{used:.1f} GB of {ZEROGPU_DISK_CAP_GB:.0f} GB cap [{verdict}] "
+        f"= snapshot {snapshot:.1f} + packed {packed:.1f} + image ~{IMAGE_FOOTPRINT_GB:.0f}"
+    )
+
+
 def startup_report(runtime_config, *, cached_files=None, missing_files=None, gpu_size=None) -> str:
     """The lines we will be reading at a distance when something goes wrong.
 
@@ -888,7 +952,6 @@ def startup_report(runtime_config, *, cached_files=None, missing_files=None, gpu
     nothing"), and the ZeroGPU size actually obtained after packing (so the 2x
     quota cost is visible rather than assumed).
     """
-    import shutil
 
     # `missing_files=None` means "go and look", NOT "nothing is missing". The
     # default used to be `()`, so any caller that omitted the argument got a
@@ -904,8 +967,7 @@ def startup_report(runtime_config, *, cached_files=None, missing_files=None, gpu
     expected_files = len(model_files.download_allow_list())
     found = expected_files - len(missing_files) if cached_files is None else cached_files
     try:
-        usage = shutil.disk_usage(".")
-        disk = f"{usage.free / 1e9:.1f} GB free of {usage.total / 1e9:.1f} GB"
+        disk = disk_footprint()
     except OSError:  # pragma: no cover - unusual filesystems
         disk = "unavailable"
 
