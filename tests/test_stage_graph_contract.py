@@ -803,6 +803,7 @@ def install_fake_stack(monkeypatch, snapshot, **classes):
 
     defaults = {
         "diffusers": (
+            "BitsAndBytesConfig",
             "LTX2ConditionPipeline",
             "LTX2Pipeline",
             "LTX2LatentUpsamplePipeline",
@@ -1079,4 +1080,74 @@ def test_the_schedule_is_not_truncated_for_a_partially_noised_run():
         "the schedule is now truncated for a partially-noised run. That may be right, "
         "but it needs a measurement showing it improves output -- agreeing with the "
         "contract is not evidence, and it costs six of eight denoise steps at 0.5."
+    )
+
+
+# --------------------------------------------------------------------------
+# the quantization lever is CONNECTED, not merely present
+#
+# A test that inspects the source of `_quantization_config` asserts the
+# function looks right. It passes with the `load_kwargs["quantization_config"]`
+# line deleted -- and then the Space deploys bf16 while the variable says int8,
+# evicts because bf16 does not fit, and the conclusion drawn is "int8 does not
+# fit" from a run in which int8 was never applied. A wrong conclusion from a
+# real experiment, costing a 72 GB deploy cycle, looking exactly like a
+# legitimate negative result.
+#
+# This is ladder rung 4 (PLAN 9.1.6): we can prove a function ran; this proves
+# its result was used.
+# --------------------------------------------------------------------------
+
+
+def _loaded_kwargs(monkeypatch, tmp_path, quantization):
+    from ltx25_studio import config, model_files
+
+    snapshot = tmp_path / "snapshots" / model_files.REVISION
+    snapshot.mkdir(parents=True)
+    monkeypatch.setenv(config.ENV_QUANTIZATION, quantization)
+    recorders = install_fake_stack(monkeypatch, snapshot)
+
+    pipelines._base_pipeline()
+
+    return recorders["LTX2ConditionPipeline"].calls[-1]
+
+
+def test_int8_reaches_from_pretrained(monkeypatch, tmp_path):
+    """The whole point of the deploy: the variable must change the load."""
+    sent = _loaded_kwargs(monkeypatch, tmp_path, "int8")
+
+    assert "quantization_config" in sent, (
+        f"LTX25_QUANTIZATION=int8 and from_pretrained was called with {sorted(sent)}. "
+        f"The Space would deploy bf16 while the variable says int8, evict because bf16 "
+        f"does not fit, and the eviction would read as 'int8 does not fit'."
+    )
+    assert sent["quantization_config"] is not None
+
+
+def test_bf16_sends_no_quantization_config(monkeypatch, tmp_path):
+    """The default must be the baseline every measurement was taken against."""
+    sent = _loaded_kwargs(monkeypatch, tmp_path, "bf16")
+
+    assert "quantization_config" not in sent, (
+        f"the bf16 default sent a quantization_config: {sorted(sent)}"
+    )
+
+
+def test_the_dtype_is_still_sent_when_quantising(monkeypatch, tmp_path):
+    """The a14ebe8 lesson: an omitted dtype is not a neutral omission."""
+    sent = _loaded_kwargs(monkeypatch, tmp_path, "int8")
+
+    assert sent.get("torch_dtype") is not None, (
+        "quantising dropped torch_dtype; diffusers then resolves it to float32"
+    )
+
+
+def test_the_load_still_comes_from_the_local_snapshot_when_quantising(monkeypatch, tmp_path):
+    """Quantising must not reintroduce the 44.33 GB repo-id refetch."""
+    from ltx25_studio import model_files
+
+    sent = _loaded_kwargs(monkeypatch, tmp_path, "int8")
+
+    assert model_files.REPO_ID not in str(sent["target"]), (
+        f"the quantised load went to the repo id ({sent['target']})"
     )

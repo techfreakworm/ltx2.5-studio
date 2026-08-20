@@ -49,7 +49,19 @@ def test_an_unrecognised_precision_is_refused_rather_than_defaulted(monkeypatch)
 
 def test_only_the_transformer_is_quantised():
     """Widening costs attributability: a quality change could not then be
-    ascribed to the denoiser rather than to prompt encoding."""
+    ascribed to the denoiser rather than to prompt encoding.
+
+    ⚠️ **This inspects source text, and that is all it can do.** It asserts the
+    function is *written* to quantise the transformer alone. It says nothing
+    about whether its result reaches ``from_pretrained`` — verified by deleting
+    the ``load_kwargs["quantization_config"]`` line, which leaves this test
+    **green** while the Space would deploy bf16 under an int8 variable.
+
+    ``test_int8_reaches_from_pretrained`` is what stands behind the lever. This
+    keeps a narrower job: that transformer-only is **expressed as an intent**
+    rather than merely being what today's call happens to produce, so widening
+    it later is a visible decision.
+    """
     from ltx25_studio import pipelines
 
     source = inspect.getsource(pipelines._quantization_config)
