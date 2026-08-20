@@ -159,6 +159,10 @@ Three things a reader needs:
 > | highest peak, any mode | **1.7811** | **1.0050** |
 >
 > A 50 dB gap and a clipped peak going away are not a seed.
+>
+> ⏸️ **And the replacement is not yet in hand.** Bitwise reproducibility is
+> verified for `audio_to_audio`; the **video** path is still being checked, and
+> the seeded gallery can only attribute per-pair change once it is.
 
 > ### ⏸️ Sizes differ between the two code paths, and it is not known why
 >
@@ -372,17 +376,28 @@ caches per image or per cold worker is ⏸️ unknown and decides its severity.
    pipeline's own device, threaded to the pipeline **and** to
    `audio_vae.encode`'s `.sample()`.
 
-   ✅ **Verified on the card.** Two runs at identical seed and configuration:
+   ✅ **Verified on the card, for `audio_to_audio`.** Two runs at identical seed
+   and configuration:
 
    ```
    run-a1d35aaaab06/output.wav   md5 2988f01159a5322afb28abb6e9a73d26
    run-b9dde07ed8bb/output.wav   md5 2988f01159a5322afb28abb6e9a73d26
    ```
 
-   > **`seed` determines the output byte-for-byte, on GPU, with no
-   > deterministic-algorithm flags set.** That is a stronger property than was
-   > expected — the weaker *"seed-consistent but not bit-reproducible"* was
-   > drafted and never needed.
+   ✅ And the fix was complete when it landed, not repaired afterwards:
+   `git log -S 'generator' 4804da1..e4e8df1 -- ltx25_studio/` returns `4ebb8b9`
+   alone.
+
+   > **On this path, `seed` determines the output byte-for-byte, on GPU, with no
+   > deterministic-algorithm flags set.** Stronger than expected — the weaker
+   > *"seed-consistent but not bit-reproducible"* was drafted and never needed.
+
+   ⏸️ **Scope, and it matters for §2.5:** that measurement is **one mode**. The
+   **video path is not yet shown to be bitwise reproducible**, and the whole
+   twelve-mode pixel-diff gallery depends on it — if a video mode carries its
+   own unseeded draw, those per-pair numbers stay unattributable however good
+   the audio seeding is. A `text_to_video` pair at one seed is running to
+   settle it.
 
    **The remaining consequence is narrow**: the §2.5 comparison table was
    measured *before* this worked, so its pixel diffs cannot attribute the change
