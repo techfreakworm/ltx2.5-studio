@@ -171,7 +171,7 @@ the post-pack prune. **On a Space that had evicted twice and never run.**
 
 ---
 
-## 6. The RAM ceiling — one measured bound of ours, one inherited number
+## 6. The RAM ceiling — two measured bounds of ours, one inherited number now falsified
 
 > ### ✅ Ours: the ceiling is **above 60.0 GB**
 >
@@ -180,17 +180,34 @@ the post-pack prune. **On a Space that had evicted twice and never run.**
 > datum, from this platform, from this run** — the first real information anyone
 > on this build has had about that number.
 
-> ### ⚠️ Inherited: the **~68 GB** figure
+> ### ✅ Ours, superseding: the ceiling is **above 93.56 GB**
 >
-> A community cgroup observation. **We have never measured it.** It is
-> *consistent* with our lower bound and it is not confirmed by it. Every
-> headroom figure computed against ~68 GB inherits that status, and they are all
-> marked ⚠️ below for that reason.
+> The route-B run at sha `8fb292d6` — transformer **and** text encoder in int8 —
+> reached **87.13 GiB = 93.56 GB** peak RSS and **was not killed either.**
+> Startup completed, packing ran, the Space came up RUNNING. Same platform, same
+> kind of datum, and it replaces the bound above as our best lower bound.
+>
+> The 60.0 GB figure stays exactly as recorded: it is a true measurement of a
+> **different configuration** (§5), and the note at that log line already says so.
 
-**These are different kinds of claim.** One is a bound we established; the other
-is a value someone else reported. The distance between them — `>60.0` versus
-`≈68` — is exactly the room the hypotheses in §8 live in, so collapsing them
-would erase the uncertainty that matters.
+> ### ⛔ Inherited: the **~68 GB** figure is **FALSIFIED**
+>
+> A community cgroup observation. **We never measured it, and now we have
+> measured past it.** A process on this platform survived **93.56 GB — 25.56 GB
+> above it.** It is no longer "unconfirmed but consistent"; for this Space it is
+> **wrong**, and every headroom figure computed against it was wrong by at least
+> that margin.
+>
+> **What it cost while it stood:** it made the 60.0 GB run look like ~8 GB from
+> the edge. The true headroom at that moment was **≥ 33.56 GB**. The whole
+> cgroup-OOM hypothesis in §8 was built inside a gap that did not exist.
+
+**The axis was right, and the inherited half is the half that broke.** Keeping
+"ours" apart from "inherited" is what made this correctable in one step: nothing
+we measured had to be revisited, and the falsification landed on exactly the
+claims already marked ⚠️. Had the two been collapsed into a single "≈68 GB
+ceiling", surviving 93.56 GB would have read as our own data contradicting
+itself, rather than as a refutation of someone else's number.
 
 ---
 
@@ -214,25 +231,98 @@ a floor for a quantising load — the mechanism given at the time (safetensors
 mmaps; quantisation materialises anonymous memory) is the same mechanism that
 governs the prune, and both halves behaved as that predicted.
 
+⛔ **One correction inside that quote.** It called the ~68 GB figure *"the
+binding constraint, and the first thing to measure."* **The instruction was
+right and the number was wrong** — we measured it, and §6 now records it as
+falsified. The quote is left byte-identical because it is the record of what was
+predicted; what it got right was *what to measure*, not *what the value was*.
+
 ⏸️ **`ZEROGPU_DISK.md` §4.2 should be upgraded ⏸️ → ✅ from this run.** Not done
 here — that file is gated behind the operator's docs-last order. See §11.
 
 ---
 
+### ⛔ The same mechanism, third application — and this time it ran against us
+
+§4.2 gave **one** mechanism: a quantising load materialises int8 tensors as
+anonymous memory, losing the laziness `safetensors` mmap provides. It used that
+one mechanism to settle two questions — why int8 RSS approaches the materialised
+weight size, and why the post-pack prune might free nothing. **It has now
+settled a third, in the direction opposite to the one we expected:**
+
+> **Quantising the text encoder materialised what `safetensors` had been keeping
+> lazy. Peak RSS went UP by 31.24 GiB (33.54 GB)** — from 55.89 GiB to
+> **87.13 GiB** — in a change made to bring it *down*.
+
+That is a stronger result than a new explanation would have been. It is not a
+mechanism we lacked; it is **the mechanism we already had, predicting an outcome
+we still got wrong.**
+
+✅ **And §9 said so, in prose, two paragraphs below the table that got it wrong:**
+*"Quantising more raises **transient** load-time RSS even as it lowers steady
+state ... If the kill is at load rather than at fork, B makes things worse, not
+better."* The transient half of that landed exactly.
+
+---
+
+### The instrument lesson — why the arithmetic missed what the prose had
+
+Projected **~46.5 GB**; measured **93.56 GB**. Wrong by 47.6 GB, in the opposite
+direction. The cause is visible in §9's table, inside a single column:
+
+| row | `expected RSS` | what that number actually is |
+|---|---:|---|
+| now — transformer int8 only | **60.0 GB ✅ measured** | a **peak**, from `peak_rss_gib()` |
+| + text encoder int8 | ~46.5 GB ⚠️ | a projected **steady state** |
+
+**Those are different quantities, and the table subtracted one from the other.**
+A weight-footprint saving — ~12 GB of bf16 text encoder — was deducted from a
+measured *peak*, yielding a number that is neither one nor the other. The
+transient cost was named in the prose underneath and never entered the
+arithmetic.
+
+`peak_rss_gib()` reports the maximum across the load. **That is the right number
+for "will loading survive" and the wrong number for "how much room does a forked
+worker have."** It answered the question it was built to answer; the question we
+needed — steady state, once the load settles — was invisible to it, and still is.
+
+⏸️ **We have no steady-state measurement, and steady state is what the RAM
+hypothesis was always about.** This is §9.1.6's ladder one rung further out: the
+argument reached the function, with the right arguments, of the right type — and
+measured **a different quantity than the one the decision needed.**
+
+---
+
 ## 8. Hypotheses
 
-### 1. LEADING — host RAM: the forked worker is cgroup-OOM-killed
+### 1. ⛔ WAS LEADING — host RAM: the forked worker is cgroup-OOM-killed
 
-Steady state **60.0 GB ✅**, against a ceiling **> 60.0 GB ✅ (ours)** and
-**≈ 68 GB ⚠️ (inherited)**. A fork that touches shared pages copy-on-write adds
-to that, and there is little room to add into.
+> ⛔ **The arithmetic this hypothesis stood on is falsified.** It needed a
+> ceiling near ≈68 GB with the load sitting ~8 GB beneath it. The ceiling is
+> **above 93.56 GB** (§6) and the load at that moment sat **≥ 33.56 GB** beneath
+> it. **There was no narrow margin for a copy-on-write fork to exhaust.**
 
-**The signature fits:** instant death, **twice**, **no traceback**, no
-exception, both `fail=true`. That is `SIGKILL`, and `SIGKILL` is what a cgroup
-OOM does.
+⚠️ **Two errors are corrected here, not one.** This paragraph previously opened
+*"Steady state **60.0 GB ✅**"*. **60.0 GB was a peak, not a steady state** —
+`peak_rss_gib()` reports the maximum across the load (§7). Marked ✅, a
+mislabelled quantity was reading as a confirmed one, and it was the quantity the
+hypothesis turned on.
 
-**This now rests on two of our own measurements plus one inherited number**,
-rather than on the inherited number alone.
+**The signature still fits, and still has nothing to attach to:** instant death,
+**twice**, **no traceback**, no exception, both `fail=true`. That is `SIGKILL` —
+which is what a cgroup OOM does, and also what several other things do.
+
+**Precisely what died and what did not:**
+
+| claim | status |
+|---|---|
+| the ceiling is ≈68 GB and we sat ~8 GB below it | ⛔ **falsified** (§6) |
+| the kill was a cgroup OOM of the forked worker | ⚠️ **severely weakened, not disproven** |
+| RAM is involved at all | ⏸️ **open** |
+
+RAM-at-fork is **not strictly excluded**: we know neither the steady state (§7)
+nor what the forked worker materialises on top of it. What is gone is the
+*reason to believe it* — and that reason was arithmetic, not evidence.
 
 ### 2. WEAKER — the 60-second duration reservation
 
@@ -274,6 +364,13 @@ and the device-api trace confirms it: `startup-report` precedes the first
 
 Either outcome is informative and neither spends quota to get there.
 
+> ⛔ **Neither branch fired. The signal was free, and it was a third outcome the
+> section did not enumerate:** RSS **rose** to 93.56 GB and startup **survived**
+> anyway. Both branches assumed the ceiling was close; the run falsified the
+> ceiling instead of choosing between them. ✅ The claim that the signal costs no
+> quota held — packing and loading precede the first `@spaces.GPU` call, exactly
+> as the device-api trace predicted.
+
 ### The corrected saving
 
 ⚠️ **A previously-circulated figure of 15.13 GB was wrong.** It came from
@@ -282,7 +379,7 @@ connectors. The change actually available — adding `"text_encoder"` to
 `components_to_quantize` in `_quantization_config` — covers the **text encoder
 alone**: 23.92 GB bf16 📄, so **≈ 12 GB saved.**
 
-| | packed | expected RSS | headroom if ceiling ≈ 68 GB ⚠️ *(inherited, §6)* |
+| | packed | expected RSS | headroom if ceiling ≈ 68 GB ⛔ *(falsified, §6)* |
 |---|---:|---:|---:|
 | **now** — transformer int8 only | 53.2 GB | **60.0 GB ✅ measured** | ~8 GB ⚠️ |
 | **+ text encoder int8** | ~41.2 GB ⚠️ | ~46.5 GB ⚠️ | ~21.5 GB ⚠️ |
@@ -290,6 +387,14 @@ alone**: 23.92 GB bf16 📄, so **≈ 12 GB saved.**
 ⚠️ The derived column scales by the **1.13 transient factor** the measured run
 implies — **one data point**, so it is an extrapolation from a single
 observation, not a rate.
+
+> ⛔ **Superseded by measurement — kept because it is the reasoning the change
+> was made on.** Two independent faults: the ceiling is not ≈68 GB (§6), and the
+> `expected RSS` column mixes a measured **peak** with a projected **steady
+> state** (§7). Measured outcome of the `+ text encoder int8` row:
+> **87.13 GiB = 93.56 GB peak**, against ~46.5 GB projected — **wrong by 47.6 GB
+> and in the opposite direction.** The `packed ~41.2 GB` estimate is not
+> contradicted by this run; only the RSS column is.
 
 ### ⚠️ Two costs, and the first is serious
 
@@ -389,9 +494,58 @@ arguments; anything that looks like an input has a rung 5.
 - ⚠️ **Route A — duration 60 → 180.** No free signal, and it targets the branch
   the evidence already argues against: both workers died **under** the existing
   reservation.
-- ⏸️ **Route C — instrument the worker.** The only route that returns
-  **evidence** rather than a better inference. More expensive; worth it if B's
-  free signal is ambiguous.
+- ✅ **Route C — instrument the worker. NOW THE LEADING ROUTE**, no longer the
+  fallback. B's free signal has been spent: it returned a real measurement, that
+  measurement **falsified the ceiling** rather than confirming the margin, and
+  the kill is unexplained again. Route C is the only remaining path that returns
+  **evidence** instead of another inference — and every inference we have made
+  about this kill has now been wrong at least once.
+
+---
+
+## 9.2 What route B bought, what it cost, and the risk it introduced
+
+**Bought:** ✅ the ceiling, as a real number of ours — *above 93.56 GB* — which
+falsified an inherited figure that had been load-bearing in planning since before
+any deploy. ✅ Confirmation that the widening reaches the checkpoint: **two**
+`bitsandbytes` module lines where the measured run had one —
+
+```
+The module 'Gemma4UnifiedForConditionalGeneration' has been loaded in `bitsandbytes` 8bit
+The module 'LTX2VideoTransformer3DModel'          has been loaded in `bitsandbytes` 8bit
+```
+
+**Cost:** ⚠️ the attributability §9 warned about is spent — int8 was run as a fix
+rather than as a same-seed pair against a signed-off bf16 baseline, and it cannot
+be recovered without re-running both halves.
+
+### ⚠️ The new risk, stated plainly
+
+**The load now peaks 33.54 GB higher than the configuration that was working,
+and we know the ceiling only as "above 93.56 GB" — not by how much.**
+
+We may be loading far closer to the real limit than before, and we are paying
+that for a **steady-state saving we have never measured** (§7). The motivating
+hypothesis for the change — a tight RAM margin at fork — is itself the thing the
+change disproved. That is an uncomfortable position: the justification did not
+survive the experiment it justified.
+
+> ⛔ **Operator's standing decision: if the retry fails, `02fe943` is reverted.**
+> Keeping a change whose motivating hypothesis is dead, at **31.24 GiB** of
+> additional peak RSS, for an unmeasured benefit, is not defensible.
+
+### ⏸️ PLACEHOLDER — retry outcome
+
+**The retry is running at sha `8fb292d6` as this is written.** Everything above
+is independent of how it lands: the ceiling is falsified either way, the
+mechanism applied a third time either way, and the RAM arithmetic is dead either
+way.
+
+| | |
+|---|---|
+| retry result | ⏸️ **pending** |
+| if it **succeeds** | generation works at two-component int8; §8's ⏸️ *(kill at fork vs at load)* stays open but stops blocking, and the steady-state measurement in §7 becomes the next thing to take |
+| if it **fails** | `02fe943` reverted per the standing decision above; the kill is unexplained at **both** RSS levels, which is itself strong evidence against RAM as the mechanism, and **route C** is the path |
 
 ---
 
@@ -418,14 +572,20 @@ fabricated to accompany it.
 | 2 | **`ZEROGPU_DISK.md` §4.2**: upgrade the RSS prediction and the prune branch ⏸️ → ✅ from this run. | ⏸️ gated, docs-last |
 | 3 | **`OPERATOR_HANDOFF.md` §3 and §5 are stale in *both* directions** — §3 says the Space *"has never run"*, §5 says a deploy is *"not currently possible"*. **Startup demonstrably works and generation demonstrably does not**, and the document currently cannot express that distinction. | ⏸️ gated, docs-last |
 | 4 | ⏸️ **No readable ZeroGPU quota endpoint** — all three candidate URLs 404, so billed seconds cannot be measured, only bounded. Worst case ~200 GPU-s of 2400/day for this run (`xlarge` bills at 2×; packed 51.1 GB is over the 42.00 GiB threshold 📄). | ⏸️ open |
+| 6 | ⏸️ **No steady-state RSS measurement exists.** `peak_rss_gib()` reports the load peak; the RAM question is about what remains resident when the load settles. Every RSS number in this document is a peak. **This is the measurement that would have prevented the wrong prediction in §7** and it is still not taken. | ⏸️ open |
+| 7 | ⛔ **The ~68 GB ceiling was inherited, never measured, and is now falsified** (§6). Audit any other planning number with the same provenance — carried in from outside, never verified here, and load-bearing. It survived this long because it was *consistent* with our data, which is not the same as supported by it. | ⏸️ open |
+| 8 | ⚠️ **`02fe943` is provisional.** It stands on a hypothesis this run killed and costs 31.24 GiB of peak RSS for an unmeasured steady-state saving. Reverted if the retry fails (§9.2). | ⏸️ pending retry |
 | 5 | **Bus defect**: `lead-gate.mjs:1709` computes `isLead = (session_id === SOMA_LEAD_SESSION_UUID)`. A `/clear` rotates the session id while the env var stays baked in from launch, so every soma bus tool is denied and the lead cannot file a report. **Side effect: it also disarms the lead-only `git push` / `git merge` guard.** | ⏸️ open, infrastructure |
 
 ---
 
 ## 12. Repo state at the time of writing
 
-- `b26c2d0` is **unpushed**; `origin/soma/ltx25-studio` is at `cbaa3ad`. Pushing
-  is the orchestrator's — this team does not push by design.
+- **Six commits unpushed**; `origin/soma/ltx25-studio` is at `cbaa3ad`. Pushing
+  is the orchestrator's — this team does not push by design. Verified with
+  `git rev-list --count origin/soma/ltx25-studio..HEAD`, which is the only
+  authority on this; an earlier count taken from *"what I authored this round"*
+  said four and silently omitted `51e1985`, this document.
 - PR **#1** is OPEN and draft:
   <https://github.com/techfreakworm/ltx2.5-studio/pull/1>
-- Offline gate at that tip: **2051 passed, 13 skipped, 0 failed.**
+- Offline gate at that tip: **2053 passed, 13 skipped, 0 failed.**
