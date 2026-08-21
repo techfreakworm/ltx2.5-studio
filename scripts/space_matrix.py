@@ -45,6 +45,15 @@ content thresholds sit far below the one real measurement we have (pixel std
 default, opt out -- puts a metered resource one forgotten flag away from being
 consumed, and the default-safe path is the one that gets typed at 3am.
 
+**The ceiling spans invocations, because the budget does.** It did not, once:
+the counter lived in one process's memory, so five separate invocations each
+started at zero and each independently announced that they fit. Five runs of
+1900 GPU-s would each have printed FITS while spending 9500 of a 2400/day
+budget. That is the same defect class as an advertised lever attached to
+nothing, except worse -- an inert *lever* merely does nothing, while an inert
+*report* tells you that you are safe. :class:`PersistentQuota` is the fix, keyed
+to the UTC day and kept at a fixed path a routine flag cannot move.
+
 Assumptions stated rather than hidden, because they are genuinely ambiguous:
 
 * The projected cost of a not-yet-started run comes from
@@ -60,11 +69,13 @@ Assumptions stated rather than hidden, because they are genuinely ambiguous:
 from __future__ import annotations
 
 import argparse
+import json
 import shutil
 import sys
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -95,7 +106,9 @@ __all__ = [
     "Ledger",
     "MatrixOutcome",
     "MissingFixtureError",
+    "PersistentQuota",
     "QuotaCeilingReached",
+    "QuotaLedgerUnreadable",
     "RunConfig",
     "RunRecord",
     "SpaceRunError",
@@ -109,6 +122,7 @@ __all__ = [
     "validate_config",
     "verify_audio_content",
     "verify_video_content",
+    "utc_day",
 ]
 
 # ---------------------------------------------------------------------------
@@ -163,6 +177,19 @@ BILLING_SIZE_MULTIPLIER = 2.0
 #: nothing for the operator to debug with afterwards, and the run that discovers
 #: the quota is gone is the run you most wanted to inspect.
 DEFAULT_QUOTA_CEILING_SECONDS = 0.8 * DAILY_QUOTA_SECONDS
+
+#: Where the cross-invocation quota ledger lives, relative to the repo root.
+#:
+#: FIXED, and deliberately not under ``--fixture-dir`` or ``--download-dir``.
+#: The whole defect :class:`PersistentQuota` exists to close is a guard that only
+#: sees its own invocation; a ledger path that a routine flag can move would
+#: reintroduce it, because two invocations with different directories would each
+#: keep their own total and each announce that they fit.
+#:
+#: Inside ``outputs/``, which ``.gitignore`` already excludes, so accounting
+#: state never becomes an untracked file in the working tree. Dotted so it does
+#: not look like a run directory to anything sweeping that tree.
+DEFAULT_QUOTA_LEDGER = "outputs/.space-quota-ledger.json"
 
 # ---------------------------------------------------------------------------
 # the cheapest configuration that still proves a code path
@@ -471,6 +498,150 @@ def projected_gpu_seconds(config: RunConfig, *, reservation_seconds=None) -> flo
     return BILLING_SIZE_MULTIPLIER * float(zerogpu.estimate_duration(**params))
 
 
+def utc_day(now=None) -> str:
+    """Today's date in UTC, as ``YYYY-MM-DD``.
+
+    UTC and not local time, because the budget is the platform's and the
+    platform does not know where the operator is. A ledger keyed on local
+    midnight resets at a different instant than the thing it is tracking.
+    """
+    moment = datetime.now(UTC) if now is None else now
+    return moment.strftime("%Y-%m-%d")
+
+
+class QuotaLedgerUnreadable(RuntimeError):
+    """The ledger file exists and could not be read. Refuses rather than zeroing.
+
+    A corrupt accounting file is not evidence that nothing was spent, and
+    treating it as zero is how a guard silently hands back the whole budget at
+    the worst possible moment. ``--reset-quota-ledger`` is the deliberate way to
+    say "yes, start today's count from zero".
+    """
+
+
+class PersistentQuota:
+    """Cumulative upper-bound spend for one UTC day, shared across invocations.
+
+    **The defect this closes.** The ceiling used to live entirely in one
+    process's memory, so every invocation started at zero and every invocation
+    independently announced that it fit. Five runs of 1900 GPU-s each would each
+    print FITS while spending 9500 of a 2400/day budget. That is an advertised
+    guard attached to nothing -- and an inert *report* is worse than an inert
+    lever, because the lever merely does nothing while the report actively tells
+    you that you are safe.
+
+    **Why a JSON file, and why at a FIXED path.** The state has to outlive the
+    process and be found by the next one whatever flags it was given. Putting it
+    under ``--fixture-dir`` or ``--download-dir`` would reintroduce the very
+    defect: two invocations pointed at different directories would each keep
+    their own total and each announce FITS. So the location is fixed, and
+    ``--quota-ledger`` exists to move it deliberately rather than by accident.
+    JSON rather than a database because the file's whole job is to be readable
+    by a human at 3am who wants to know how much of today is gone.
+
+    **Not keyed on the Space.** The 2400 s/day allowance is per ACCOUNT, not per
+    Space, so two Spaces on one token share one budget and must share one
+    ledger.
+
+    **Every number in it is an upper bound.** The file says so in its own
+    ``unit`` field, so the label survives being read by something other than
+    this program.
+
+    ⏸️ **Whether the platform's own reset is a UTC-day boundary or a rolling
+    24-hour window is NOT established here.** The daily figure is documented; the
+    reset mechanism was never probed, and there is no readable quota endpoint to
+    probe it with. If it is a rolling window, this ledger's midnight reset
+    under-counts for up to a day -- the unsafe direction -- so a rollover prints
+    the previous day's total rather than silently discarding it.
+    """
+
+    SCHEMA = 1
+    UNIT = "gpu-seconds, wall-clock-derived UPPER BOUND — NOT billed seconds"
+
+    def __init__(self, path, *, day=None, reset: bool = False):
+        self.path = Path(path)
+        self.day = day or utc_day()
+        self.spent_upper_bound = 0.0
+        self.invocations = 0
+        #: ``(day, spent)`` discarded by a rollover, so the report can say what
+        #: was dropped instead of quietly starting from zero.
+        self.rolled_over_from: tuple[str, float] | None = None
+        if not reset:
+            self._read()
+
+    def _read(self) -> None:
+        if not self.path.exists():
+            return
+        try:
+            data = json.loads(self.path.read_text())
+            stored_day = str(data["utc_day"])
+            stored_spent = float(data["spent_upper_bound"])
+            stored_invocations = int(data.get("invocations", 0))
+        except Exception as exc:
+            raise QuotaLedgerUnreadable(
+                f"{self.path} exists and could not be read as a quota ledger "
+                f"({type(exc).__name__}: {exc}).\n\n"
+                f"Refusing to treat that as zero: a corrupt accounting file is not evidence "
+                f"that nothing was spent, and starting from zero here is how the guard hands "
+                f"back a whole day's budget at the worst possible moment. Inspect the file, or "
+                f"pass --reset-quota-ledger to start today's count from zero on purpose."
+            ) from exc
+        if stored_day != self.day:
+            self.rolled_over_from = (stored_day, stored_spent)
+            return
+        self.spent_upper_bound = stored_spent
+        self.invocations = stored_invocations
+
+    def begin_invocation(self) -> None:
+        """Count this process against the day, before it spends anything."""
+        self.invocations += 1
+        self.save()
+
+    def add(self, gpu_seconds_upper_bound: float) -> None:
+        self.spent_upper_bound += float(gpu_seconds_upper_bound)
+        self.save()
+
+    def save(self) -> None:
+        """Write atomically: a crash mid-write must not produce a file we refuse."""
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "schema": self.SCHEMA,
+            "unit": self.UNIT,
+            "utc_day": self.day,
+            "spent_upper_bound": round(self.spent_upper_bound, 3),
+            "invocations": self.invocations,
+            "daily_quota_seconds": DAILY_QUOTA_SECONDS,
+            "note": (
+                "Derived from wall clock x the xlarge size multiplier. There is no readable "
+                "ZeroGPU quota endpoint, so this bounds the spend from above and is never a "
+                "measurement of billed seconds."
+            ),
+        }
+        temporary = self.path.with_suffix(self.path.suffix + ".tmp")
+        temporary.write_text(json.dumps(payload, indent=2) + "\n")
+        temporary.replace(self.path)
+
+    def render(self) -> str:
+        lines = [
+            f"quota ledger {self.path}",
+            f"  carried      <= {self.spent_upper_bound:.1f} GPU-s already bounded on UTC "
+            f"{self.day} across {self.invocations} earlier invocation(s)  "
+            f"*** UPPER BOUND, NOT MEASURED BILLING ***",
+        ]
+        if self.rolled_over_from is not None:
+            previous_day, previous_spent = self.rolled_over_from
+            lines.append(
+                f"  NEW UTC DAY  reset to 0; UTC {previous_day} ended at <= "
+                f"{previous_spent:.1f} GPU-s upper bound."
+            )
+            lines.append(
+                "               ⏸️ If the platform's reset is a rolling 24h window rather than "
+                "a UTC-day boundary, some of that may still count against you. This ledger "
+                "cannot tell, and no readable quota endpoint exists to ask."
+            )
+        return "\n".join(lines)
+
+
 @dataclass
 class Ledger:
     """Cumulative upper-bound spend, and the refusal that keeps it under a ceiling.
@@ -480,6 +651,11 @@ class Ledger:
     meters and blurring them is how a plan that fit becomes a budget that did
     not: the projection can under-shoot when the platform retries a killed
     worker, and the observation cannot.
+
+    ``store`` is what makes the ceiling mean anything across invocations. Without
+    it this counter starts at zero every time the process does, and five runs of
+    1900 each would each announce that they fit while spending 9500 of a 2400
+    budget -- an advertised guard attached to nothing. See :class:`PersistentQuota`.
     """
 
     ceiling_seconds: float = DEFAULT_QUOTA_CEILING_SECONDS
@@ -487,6 +663,26 @@ class Ledger:
     reservation_seconds: int | None = None
     spent_upper_bound: float = 0.0
     records: list = field(default_factory=list)
+    #: Cross-invocation accounting. ``None`` means this ledger sees only itself,
+    #: which is correct for a unit test and wrong for a real run.
+    store: PersistentQuota | None = None
+    #: What was already on the books when this process started, so the report can
+    #: separate "this invocation" from "today".
+    carried_upper_bound: float = 0.0
+
+    @classmethod
+    def from_store(cls, store: PersistentQuota, **kwargs) -> Ledger:
+        """A ledger that starts where today's accounting already stands."""
+        return cls(
+            store=store,
+            spent_upper_bound=store.spent_upper_bound,
+            carried_upper_bound=store.spent_upper_bound,
+            **kwargs,
+        )
+
+    @property
+    def spent_this_invocation(self) -> float:
+        return self.spent_upper_bound - self.carried_upper_bound
 
     def projected_for(self, config: RunConfig) -> float:
         return projected_gpu_seconds(config, reservation_seconds=self.reservation_seconds)
@@ -505,6 +701,13 @@ class Ledger:
     def charge(self, record: RunRecord) -> None:
         self.spent_upper_bound += record.gpu_seconds_upper_bound
         self.records.append(record)
+        if self.store is not None:
+            # Write THROUGH, per run, not once at the end. A matrix that dies on
+            # run 7 has still spent the first six, and an accounting file that
+            # only lands on a clean exit loses exactly the runs worth knowing
+            # about -- which is the same shape as the failure this whole class
+            # exists to close, one level out.
+            self.store.add(record.gpu_seconds_upper_bound)
 
     @property
     def headroom(self) -> float:
@@ -512,13 +715,20 @@ class Ledger:
 
     def render(self) -> str:
         percent = 100.0 * self.spent_upper_bound / self.daily_quota_seconds
-        return (
+        line = (
             f"cumulative <= {self.spent_upper_bound:.1f} GPU-s of a "
             f"{self.ceiling_seconds:.1f} ceiling "
             f"({self.headroom:.1f} left) · <= {percent:.1f}% of the "
             f"{self.daily_quota_seconds:.0f}/day budget  "
             f"*** UPPER BOUND, NOT MEASURED BILLING ***"
         )
+        if self.carried_upper_bound:
+            line += (
+                f"\n             of which <= {self.carried_upper_bound:.1f} carried from "
+                f"{self.store.invocations - 1 if self.store else '?'} earlier invocation(s) "
+                f"on UTC {self.store.day if self.store else '?'}"
+            )
+        return line
 
 
 # ---------------------------------------------------------------------------
@@ -1277,14 +1487,24 @@ def render_plan(configs, ledger: Ledger, *, live: bool) -> str:
             f"{','.join(config.needs) or '-':<12} {projected:>9.1f} {running:>9.1f}"
         )
     lines.append("")
+    # "carried" and "this plan" stay SEPARATE numbers on purpose. Folding them
+    # into one "plan total" is how a figure that includes four earlier
+    # invocations gets quoted as the cost of this one.
+    if ledger.spent_upper_bound:
+        lines.append(
+            f"  carried      <= {ledger.spent_upper_bound:.1f} GPU-s already bounded earlier "
+            f"today (UTC {ledger.store.day if ledger.store else '?'})"
+        )
     lines.append(
         f"  ceiling      {ledger.ceiling_seconds:.1f} GPU-s "
         f"({100 * ledger.ceiling_seconds / ledger.daily_quota_seconds:.0f}% of the "
         f"{ledger.daily_quota_seconds:.0f}/day PRO budget)"
     )
+    lines.append(f"  this plan    <= {running - ledger.spent_upper_bound:.1f} GPU-s")
     lines.append(
-        f"  plan total   <= {running:.1f} GPU-s  *** UPPER BOUND from "
-        f"zerogpu.estimate_duration x {BILLING_SIZE_MULTIPLIER:g}, NOT measured billing ***"
+        f"  projected    <= {running:.1f} GPU-s for UTC today once this plan finishes  "
+        f"*** UPPER BOUND from zerogpu.estimate_duration x {BILLING_SIZE_MULTIPLIER:g}, "
+        f"NOT measured billing ***"
     )
     if crossed is None:
         lines.append(
@@ -1315,7 +1535,13 @@ def render_summary(outcome: MatrixOutcome) -> str:
     if outcome.stopped:
         lines.append(f"  STOPPED before {outcome.stopped_at.mode_id}: {outcome.stop_reason}")
     lines.append("")
+    if outcome.ledger.carried_upper_bound:
+        lines.append(
+            f"  this invocation <= {outcome.ledger.spent_this_invocation:.1f} GPU-s upper bound"
+        )
     lines.append(f"  {outcome.ledger.render()}")
+    if outcome.ledger.store is not None:
+        lines.append(f"  persisted to {outcome.ledger.store.path} (UTC {outcome.ledger.store.day})")
     lines.append(
         "  There is no readable ZeroGPU quota endpoint, so the figure above is a BOUND "
         "derived from wall clock. Do not quote it as billed seconds."
@@ -1389,6 +1615,23 @@ def _parse_args(argv):
             "and it is what the platform reserves against."
         ),
     )
+    parser.add_argument(
+        "--quota-ledger",
+        default=None,
+        help=(
+            "cross-invocation spend ledger, keyed to the UTC day "
+            f"(default {DEFAULT_QUOTA_LEDGER}). Deliberately NOT derived from --fixture-dir: "
+            "a ledger a routine flag can move is a ceiling that only sees one invocation."
+        ),
+    )
+    parser.add_argument(
+        "--reset-quota-ledger",
+        action="store_true",
+        help=(
+            "start today's count from zero on purpose. The only way past an unreadable "
+            "ledger, which is otherwise refused rather than silently treated as zero."
+        ),
+    )
     parser.add_argument("--fixture-dir", default=None)
     parser.add_argument("--download-dir", default=None)
     parser.add_argument(
@@ -1436,11 +1679,25 @@ def main(argv=None, *, log=print) -> int:
         log(f"the plan is not runnable: {type(exc).__name__}: {exc}")
         return 2
 
-    ledger = Ledger(
+    # Read BEFORE the plan is rendered, so the plan is judged against today's
+    # real standing rather than against an empty counter. A dry run reads it and
+    # never writes it -- that is what makes --dry-run free in the ledger as well
+    # as on the GPU.
+    ledger_path = args.quota_ledger or (REPO / DEFAULT_QUOTA_LEDGER)
+    try:
+        store = PersistentQuota(ledger_path, reset=args.reset_quota_ledger)
+    except QuotaLedgerUnreadable as exc:
+        log(f"{exc}")
+        return 2
+
+    ledger = Ledger.from_store(
+        store,
         ceiling_seconds=args.quota_ceiling,
         reservation_seconds=args.reservation_seconds,
     )
     live = args.live and not args.dry_run
+    log(store.render())
+    log("")
     log(render_plan(configs, ledger, live=live))
 
     if not live:
@@ -1449,7 +1706,10 @@ def main(argv=None, *, log=print) -> int:
             "DRY RUN: every config above was validated offline with "
             "`constraints.validate_dimensions` / `validate_num_frames`."
         )
-        log("ZERO GPU-seconds were spent. Re-run with --live to execute this plan.")
+        log(
+            "ZERO GPU-seconds were spent and the quota ledger was READ, not written. "
+            "Re-run with --live to execute this plan."
+        )
         return 0
 
     # Defaults INSIDE `outputs/`, which `.gitignore` already excludes. A fixture
@@ -1458,6 +1718,11 @@ def main(argv=None, *, log=print) -> int:
     fixture_dir = args.fixture_dir or (REPO / "outputs" / "space-fixtures")
     fixtures = FixtureStore(fixture_dir)
     log(f"\nfixture directory: {fixtures.directory}")
+
+    # Counted against the day BEFORE anything is spent. An invocation that dies
+    # on its first run must still show up in the ledger, or "how many times did
+    # we hit the Space today" is answerable only for the runs that succeeded.
+    store.begin_invocation()
 
     client = connect(
         args.space,

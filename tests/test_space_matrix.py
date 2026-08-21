@@ -31,6 +31,7 @@ of quietly costing GPU-seconds.
 
 from __future__ import annotations
 
+import json
 import sys
 from fractions import Fraction
 from pathlib import Path
@@ -199,6 +200,21 @@ def clock(monkeypatch):
 def quiet_log():
     lines: list[str] = []
     return lines.append, lines
+
+
+@pytest.fixture(autouse=True)
+def isolated_quota_ledger(tmp_path, monkeypatch):
+    """Point the default quota ledger at a throwaway file, for EVERY test here.
+
+    Autouse rather than opt-in: the ledger's default path is a real file in the
+    repo that records the operator's actual spend for the day. A test that reads
+    it is merely flaky; a test that writes it corrupts the one number standing
+    between the next run and the daily budget. Nothing in this file should be one
+    forgotten argument away from that.
+    """
+    path = tmp_path / "quota-ledger.json"
+    monkeypatch.setattr(space_matrix, "DEFAULT_QUOTA_LEDGER", str(path))
+    return path
 
 
 # ---------------------------------------------------------------------------
@@ -852,7 +868,8 @@ def test_dry_run_prints_the_ordered_plan_with_a_running_total(exploding_connect,
         assert mode_id in plan
     assert "cumul" in plan
     assert "ceiling" in plan
-    assert "plan total" in plan
+    assert "this plan" in plan
+    assert "projected" in plan
     assert exploding_connect == []
 
 
@@ -989,6 +1006,267 @@ def test_the_default_fixture_directory_is_inside_the_ignored_outputs_tree():
     source = (REPO_ROOT / "scripts" / "space_matrix.py").read_text()
     assert 'REPO / "outputs" / "space-fixtures"' in source
     assert "outputs/" in (REPO_ROOT / ".gitignore").read_text()
+
+
+# ---------------------------------------------------------------------------
+# the ceiling spans invocations, because the budget does
+#
+# The regression this section exists for: the counter used to live entirely in
+# one process's memory, so five separate invocations each started at zero and
+# each independently announced FITS. Five runs of 1900 would each have printed
+# FITS while spending 9500 of a 2400/day budget.
+# ---------------------------------------------------------------------------
+
+
+def test_a_fresh_ledger_starts_at_zero(tmp_path):
+    store = space_matrix.PersistentQuota(tmp_path / "ledger.json", day="2026-08-22")
+    assert store.spent_upper_bound == 0.0
+    assert store.invocations == 0
+    assert store.rolled_over_from is None
+
+
+def test_spend_survives_the_process(tmp_path):
+    path = tmp_path / "ledger.json"
+    first = space_matrix.PersistentQuota(path, day="2026-08-22")
+    first.begin_invocation()
+    first.add(43.1)
+    first.add(88.8)
+
+    second = space_matrix.PersistentQuota(path, day="2026-08-22")
+    assert second.spent_upper_bound == pytest.approx(131.9)
+    assert second.invocations == 1
+
+
+def test_the_ledger_file_states_its_own_unit(tmp_path):
+    """Anyone who cats the file must see that it is a bound, not billed seconds."""
+    path = tmp_path / "ledger.json"
+    space_matrix.PersistentQuota(path, day="2026-08-22").add(43.1)
+    payload = json.loads(path.read_text())
+    assert payload["utc_day"] == "2026-08-22"
+    assert payload["spent_upper_bound"] == pytest.approx(43.1)
+    assert "UPPER BOUND" in payload["unit"]
+    assert "NOT billed seconds" in payload["unit"]
+    assert "no readable ZeroGPU quota endpoint" in payload["note"]
+
+
+def test_a_new_utc_day_resets_and_says_what_it_dropped(tmp_path):
+    path = tmp_path / "ledger.json"
+    space_matrix.PersistentQuota(path, day="2026-08-21").add(346.0)
+
+    tomorrow = space_matrix.PersistentQuota(path, day="2026-08-22")
+    assert tomorrow.spent_upper_bound == 0.0
+    assert tomorrow.rolled_over_from == ("2026-08-21", pytest.approx(346.0))
+    rendered = tomorrow.render()
+    assert "NEW UTC DAY" in rendered
+    assert "346.0" in rendered, "a rollover must say what it dropped, not silently zero"
+    assert "rolling 24h window" in rendered, "the unverified reset mechanism must be stated"
+
+
+def test_the_same_utc_day_does_not_reset(tmp_path):
+    path = tmp_path / "ledger.json"
+    space_matrix.PersistentQuota(path, day="2026-08-22").add(346.0)
+    same = space_matrix.PersistentQuota(path, day="2026-08-22")
+    assert same.spent_upper_bound == pytest.approx(346.0)
+    assert same.rolled_over_from is None
+
+
+def test_utc_day_is_utc_not_local():
+    from datetime import UTC, datetime
+
+    assert space_matrix.utc_day(datetime(2026, 8, 22, 23, 59, tzinfo=UTC)) == "2026-08-22"
+    assert space_matrix.utc_day(datetime(2026, 8, 23, 0, 1, tzinfo=UTC)) == "2026-08-23"
+
+
+def test_an_unreadable_ledger_is_refused_rather_than_read_as_zero(tmp_path):
+    """A corrupt accounting file is not evidence that nothing was spent."""
+    path = tmp_path / "ledger.json"
+    path.write_text("{ this is not json")
+    with pytest.raises(space_matrix.QuotaLedgerUnreadable) as caught:
+        space_matrix.PersistentQuota(path, day="2026-08-22")
+    assert "not evidence that nothing was spent" in str(caught.value)
+    assert "--reset-quota-ledger" in str(caught.value)
+
+
+def test_reset_starts_the_day_from_zero_on_purpose(tmp_path):
+    path = tmp_path / "ledger.json"
+    path.write_text("{ this is not json")
+    store = space_matrix.PersistentQuota(path, day="2026-08-22", reset=True)
+    assert store.spent_upper_bound == 0.0
+
+
+def test_main_refuses_an_unreadable_ledger_and_recovers_with_the_flag(
+    tmp_path, exploding_connect, quiet_log
+):
+    log, lines = quiet_log
+    path = tmp_path / "broken.json"
+    path.write_text("nonsense")
+    assert space_matrix.main(["--dry-run", "--quota-ledger", str(path)], log=log) == 2
+    assert any("could not be read as a quota ledger" in line for line in lines)
+
+    assert (
+        space_matrix.main(
+            ["--dry-run", "--quota-ledger", str(path), "--reset-quota-ledger"], log=log
+        )
+        == 0
+    )
+
+
+def test_a_second_invocation_starts_where_the_first_left_off(
+    tmp_path, fake_connect, clock, quiet_log
+):
+    log, lines = quiet_log
+    clock(step=10.0)
+    video = str(write_video(tmp_path / "out.mp4"))
+    ledger_path = tmp_path / "ledger.json"
+    argv = [
+        "--live",
+        "--modes",
+        "text_to_video",
+        "--quota-ledger",
+        str(ledger_path),
+        "--fixture-dir",
+        str(tmp_path / "fixtures"),
+    ]
+
+    fake_connect(FakeClient([video, None, "ok"]))
+    assert space_matrix.main(argv, log=log) == 0
+    assert json.loads(ledger_path.read_text())["spent_upper_bound"] == pytest.approx(20.0)
+
+    lines.clear()
+    fake_connect(FakeClient([video, None, "ok"]))
+    assert space_matrix.main(argv, log=log) == 0
+    payload = json.loads(ledger_path.read_text())
+    assert payload["spent_upper_bound"] == pytest.approx(40.0)
+    assert payload["invocations"] == 2
+    # And the second invocation SAID it was carrying the first's spend.
+    assert any("carried      <= 20.0" in line for line in lines)
+
+
+def test_separate_invocations_cannot_each_announce_that_they_fit(
+    tmp_path, fake_connect, clock, quiet_log
+):
+    """The headline regression, stated as a test.
+
+    Two invocations under one ceiling: the first fits and spends, the second is
+    refused BECAUSE of the first. Before the ledger persisted, the second would
+    have started from zero and announced that it fit.
+    """
+    log, lines = quiet_log
+    clock(step=30.0)
+    video = str(write_video(tmp_path / "out.mp4"))
+    ledger_path = tmp_path / "ledger.json"
+    argv = [
+        "--live",
+        "--modes",
+        "text_to_video",
+        "--quota-ceiling",
+        "150",
+        "--reservation-seconds",
+        "50",
+        "--quota-ledger",
+        str(ledger_path),
+        "--fixture-dir",
+        str(tmp_path / "fixtures"),
+    ]
+
+    first = FakeClient([video, None, "ok"])
+    fake_connect(first)
+    assert space_matrix.main(argv, log=log) == 0
+    assert len(first.calls) == 1  # 0 + 100 projected <= 150
+
+    lines.clear()
+    second = FakeClient([video, None, "ok"])
+    fake_connect(second)
+    assert space_matrix.main(argv, log=log) == 3
+    assert len(second.calls) == 0, (
+        "the second invocation must be refused on the FIRST invocation's spend — "
+        "a ceiling that only sees its own process is an inert report"
+    )
+    assert any("STOPPED AT THE QUOTA CEILING" in line for line in lines)
+    # 60 spent, not 120: the refused run was never sent.
+    assert json.loads(ledger_path.read_text())["spent_upper_bound"] == pytest.approx(60.0)
+
+
+def test_the_dry_run_reads_the_ledger_and_never_writes_it(tmp_path, exploding_connect, quiet_log):
+    log, lines = quiet_log
+    ledger_path = tmp_path / "ledger.json"
+    space_matrix.PersistentQuota(ledger_path, day=space_matrix.utc_day()).add(346.0)
+    before = ledger_path.read_text()
+
+    assert space_matrix.main(["--dry-run", "--quota-ledger", str(ledger_path)], log=log) == 0
+    plan = "\n".join(lines)
+    assert "carried      <= 346.0" in plan, "the dry run must judge the plan against today"
+    assert "READ, not written" in plan
+    assert ledger_path.read_text() == before
+
+
+def test_the_ledger_is_written_through_per_run_not_at_the_end(
+    tmp_path, fake_connect, clock, quiet_log
+):
+    """A matrix that dies on run 2 has still spent run 1."""
+    log, _lines = quiet_log
+    clock(step=10.0)
+    video = str(write_video(tmp_path / "out.mp4"))
+    ledger_path = tmp_path / "ledger.json"
+    fake_connect(FakeClient([video, None, "ok"], [None, None, SPACE_FAILURE_TEXT]))
+
+    with pytest.raises(space_matrix.SpaceRunError):
+        space_matrix.main(
+            [
+                "--live",
+                "--modes",
+                "text_to_video,text_to_video",
+                "--quota-ledger",
+                str(ledger_path),
+                "--fixture-dir",
+                str(tmp_path / "fixtures"),
+            ],
+            log=log,
+        )
+    # Both runs are on the books: the one that worked and the one that burned a
+    # slot and failed.
+    assert json.loads(ledger_path.read_text())["spent_upper_bound"] == pytest.approx(40.0)
+
+
+def test_the_ledger_path_is_not_derived_from_the_fixture_dir(
+    tmp_path, fake_connect, clock, quiet_log
+):
+    """Two invocations with DIFFERENT fixture dirs must share one ledger.
+
+    A ledger under --fixture-dir would reintroduce the whole defect: each
+    invocation would keep its own total and each would announce FITS.
+    """
+    log, _lines = quiet_log
+    clock(step=10.0)
+    video = str(write_video(tmp_path / "out.mp4"))
+    ledger_path = tmp_path / "ledger.json"
+
+    for name in ("fixtures-a", "fixtures-b"):
+        fake_connect(FakeClient([video, None, "ok"]))
+        assert (
+            space_matrix.main(
+                [
+                    "--live",
+                    "--modes",
+                    "text_to_video",
+                    "--quota-ledger",
+                    str(ledger_path),
+                    "--fixture-dir",
+                    str(tmp_path / name),
+                ],
+                log=log,
+            )
+            == 0
+        )
+    assert json.loads(ledger_path.read_text())["spent_upper_bound"] == pytest.approx(40.0)
+
+
+def test_the_default_ledger_path_is_fixed_and_inside_the_ignored_outputs_tree():
+    source = (REPO_ROOT / "scripts" / "space_matrix.py").read_text()
+    assert 'DEFAULT_QUOTA_LEDGER = "outputs/.space-quota-ledger.json"' in source
+    assert "outputs/" in (REPO_ROOT / ".gitignore").read_text()
+    # Resolved from the module constant, never from a directory flag.
+    assert "args.quota_ledger or (REPO / DEFAULT_QUOTA_LEDGER)" in source
 
 
 def test_the_module_never_writes_the_token_anywhere():
