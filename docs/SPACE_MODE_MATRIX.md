@@ -1,18 +1,22 @@
-# The mode matrix on the live Space: 9 of 11, and one defect localised to video input
+# The mode matrix on the live Space: 11 of 11, and the defect that took two of them out
 
-> ## ✅ Nine of eleven modes generate on the live Space, content-verified.
+> ## ✅ All eleven modes generate on the live Space, content-verified.
 >
-> `video_to_video` and `video_to_audio` fail — **both video-INPUT modes, and only
-> those.** Every other mode passes, including both audio-input modes.
+> The matrix itself found **9 of 11**. The two failures were `video_to_video` and
+> `video_to_audio` — **both video-INPUT modes, and only those.** The cause was a
+> **missing video decoder**, not a decode failure (§3); it was recovered from the
+> **Space run log**, which `spaces` prints even when it strips it from the client
+> response (§4), and fixed at `d2eb6f2`.
 >
-> ✅ **Both failures are now diagnosed, and the cause is fixed offline.** They
-> returned `'DecodeError'`; the real exception was recovered from the **Space run
-> log**, which `spaces` prints even when it strips it from the client response
-> (§4). The cause is a **missing video decoder**, not a decode failure — §3.
-> Fixed at `d2eb6f2`.
+> ✅ **Both now pass on the live Space**, re-run at sha `287ba9c`:
 >
-> ⏸️ **Not yet re-run on the Space.** "Fixed" here means the offline gate agrees,
-> not that the Space has served these two modes. Only a live run closes that.
+> ```
+> video_to_audio   19.95 s wall   <= 39.9 GPU-s   63,438 B   48 kHz 2 ch  -19.5 dBFS
+> video_to_video   13.67 s wall   <= 27.3 GPU-s   33,812 B   9 frames / 9 distinct  mean |Δ| 17.277
+> ```
+>
+> ⏸️ **What this does not establish: that either mode FOLLOWS its conditioning
+> clip.** The numbers show real motion, not fidelity to the input. §9.
 >
 > §4 stands unchanged and still matters: the one string that would have made this
 > diagnosable in a single step was destroyed in transit, and recovering it took a
@@ -63,7 +67,10 @@ what the modes look like at a resolution anyone would ship.
 
 ## 2. Results
 
-**9 PASS ✅ · 2 FAIL ⛔**
+**As the matrix ran: 9 PASS ✅ · 2 FAIL ⛔.** The two failures were fixed and
+re-run afterwards on a later sha — §2.1. This table is left as the record of
+what the matrix itself measured, because that is what makes §3's localisation
+readable: nine passes and two failures, split cleanly along the input kind.
 
 | mode | verdict | wall ✅ | artifact ✅ | content ✅ |
 |---|---|---|---|---|
@@ -76,8 +83,8 @@ what the modes look like at a resolution anyone would ship.
 | `image_text_to_audio_video` | ✅ | ~15 s | 16,312 B | audio −11.1 dBFS; mean \|Δ\| 0.591 (§6) |
 | `audio_to_audio` | ✅ | ~15 s | — | 48 kHz, 2 ch, −8.8 dBFS |
 | `audio_to_video` | ✅ | 21.59 s | 7,619 B | mean \|Δ\| 0.905 (§6) |
-| `video_to_video` | ⛔ | see below | none | — |
-| `video_to_audio` | ⛔ | see below | none | — |
+| `video_to_video` | ⛔ → ✅ §2.1 | see below | none | — |
+| `video_to_audio` | ⛔ → ✅ §2.1 | see below | none | — |
 
 ⏸️ Cells marked `—` were not recorded in the handoff; they are absent from this
 record rather than estimated.
@@ -99,6 +106,37 @@ timed at **3.53 s**, **8.12 s** and **9.13 s** of wall clock — against the
 
 ⏸️ Which of the three attempts belongs to which mode is not recorded here. One
 of the three is the refutation run described in §3.
+
+## 2.1 ✅ Both re-run after the fix, and both pass on the live Space
+
+Re-run at Space sha `287ba9c`, carrying `d2eb6f2`. Same 256×256×9, same seed,
+same prompt as every row above:
+
+| mode | wall ✅ | cost | artifact ✅ | content ✅ |
+|---|---|---|---|---|
+| `video_to_audio` | 19.95 s | `<=` 39.9 GPU-s | 63,438 B | 48 kHz, 2 ch, **−19.5 dBFS** (§6.1) |
+| `video_to_video` | 13.67 s | `<=` 27.3 GPU-s | 33,812 B | 9 frames, 9 distinct, mean \|Δ\| **17.277** |
+
+**Both land inside the 13.67–21.59 s band every successful generation occupies**,
+against the 3.53–9.13 s the failures took. The timing alone separates a run that
+worked from one that aborted before starting.
+
+### ✅ The fixture was rebuilt first, and that matters
+
+The runner chains fixtures forward: each mode's output can become the next
+mode's input. By the end of the matrix `video.mp4` had drifted to
+`audio_to_video`'s output — **7,619 B at mean \|Δ\| 0.905**, one of the two
+near-static clips in §6. Conditioning on that would have proved very little: a
+near-static result from a near-static input is unreadable in either direction.
+
+✅ So the fixture was rebuilt before the re-run, and **both modes conditioned on
+run 1's 39,146 B clip at mean \|Δ\| 18.894** — the most active input the matrix
+produced. `video_to_video` returned **17.277** from that 18.894 input.
+
+> ⏸️ **That is motion, not fidelity.** 17.277 out of 18.894 is exactly as
+> consistent with faithfully following the conditioning clip as with ignoring it
+> and generating fresh video from the prompt. **Nothing here distinguishes those
+> two**, and no test in this document was designed to. §9.
 
 ---
 
@@ -156,8 +194,18 @@ around upstream's `TypeError`, which is why the name was so misleading.
 `(F, H, W, 3)` `uint8` at the `build_conditions` seam, so a video condition
 stops being a path before it can reach the pipeline. Offline gate 2140 passed.
 
-⏸️ **The Space has not re-run these two modes.** The fix is verified against the
-offline gate and against upstream's own dispatch, not against the platform.
+✅ **Confirmed on the metered side.** Both modes were re-run at Space sha
+`287ba9c` and both produced real, content-verified artifacts — §2.1. The
+diagnosis is therefore closed in both directions: the traceback said a `str`
+reached a field that dispatches on type, and supplying a decoded array made the
+mode work on the same platform that had refused it.
+
+✅ **The `uint8` choice is the part that was load-bearing here rather than
+locally.** Upstream re-compresses a single-frame condition at the model CRF and
+rejects a non-`uint8` array while doing it 📄. A float payload would have decoded
+cleanly against the offline gate and failed **only** on the Space — the exact
+shape of defect this build keeps paying for. It did not, because the decoder
+emits `uint8` at the source.
 
 The pre-run read, on record from before the matrix:
 
@@ -471,15 +519,61 @@ than `text_to_video` at the same geometry and seed.
 > because the number is far from its siblings and that is the kind of gap that
 > turns out to matter — exactly how H9's −55 dBFS was first noticed.
 
+## 6.1 ⚠️ `video_to_audio` is the quietest audio mode — also an observation
+
+| mode | rms ✅ |
+|---|---|
+| `text_to_video` (audio track) | −7.6 dBFS |
+| `text_to_audio_video` | −8.3 dBFS |
+| `audio_to_audio` | −8.8 dBFS |
+| `image_text_to_audio_video` | −11.1 dBFS |
+| **`video_to_audio`** | **−19.5 dBFS** |
+
+✅ Not silent, and it passes the level check — the floor for "silent" is −70 dBFS
+and the "very quiet" flag is −40 dBFS, so it is comfortably clear of both. But it
+sits **8 to 12 dB below every other audio mode** at the same geometry and seed.
+
+> ⏸️ **Observation, not a defect, and deliberately not shrugged off.** It is the
+> only audio mode conditioned on **video**, so a systematic difference is not
+> surprising — but "not surprising" is not evidence, and nothing here establishes
+> whether the gap is inherent to the conditioning path or a symptom.
+>
+> ⚠️ It is recorded at this length for one reason: **H9 was a −55 dBFS artifact
+> that passed every structural check**, and the lesson taken from it was that a
+> level far from its siblings is worth writing down before anyone has a theory
+> about it. This is that, at a much milder magnitude, on the mode H9 was about.
+
 ---
 
 ## 7. Cost
 
 ```
-matrix to date  <= ~346 GPU-seconds UPPER BOUND
-budget          2400 GPU-seconds/day (PRO) 📄  ->  <= 14.4% consumed
-ceiling         1920 GPU-seconds (80%)     ->  never approached
+matrix (9 modes + 3 failed attempts)  <= ~346   GPU-seconds UPPER BOUND
+re-run after the fix (2 modes)        <=   67.3 GPU-seconds UPPER BOUND
+                                      ------------
+today, all of it                      <= ~413   GPU-seconds UPPER BOUND
+budget   2400 GPU-seconds/day (PRO) 📄   ->  <= ~17.2% consumed
+ceiling  1920 GPU-seconds (80%)          ->  never approached
 ```
+
+> ### ⚠️ The ledger says `67.252`, and that is not today's total
+>
+> `scripts/space_matrix.py`'s quota ledger — the cross-invocation one added at
+> `62d612f` — reports **67.252 GPU-s** for this UTC day. **That is the re-run
+> alone.** The ledger was installed *after* the matrix had already run, and it
+> cannot see spend that predates its own first write.
+>
+> ⛔ **So the ledger's number is correct and incomplete at the same time**, and
+> those are easy to confuse: it is an accurate record of everything it observed,
+> and it observed only the last two runs of the day. Today's real bound is
+> **~413**, of which the ledger accounts for 67.252.
+>
+> **This is worth stating in its own right, because it is a fresh instance of the
+> class §8 is about.** A guard whose history begins mid-day reports a number that
+> is true, quotable, and wrong by everything that happened before it existed. It
+> is not inert — it works — but a figure read off it tomorrow without this
+> caveat understates the day by a factor of six. ⏸️ Nothing in the ledger's own
+> output says where its history starts.
 
 ⏸️ **Exact billed seconds remain unmeasurable** — there is no readable ZeroGPU
 quota endpoint, and all three candidate URLs 404 📄. The figure above is
@@ -495,13 +589,16 @@ upload, download and client overhead, none of which is GPU time.
 
 | | item | status |
 |---|---|---|
-| 1 | ✅ **Cause found and fixed offline.** A filepath `str` reached `LTX2VideoCondition(frames=…)`; `preprocess_conditions` dispatches that field over four types and raises for anything else (§3). Confirmed from the worker traceback, reproduced offline, fixed at **`d2eb6f2`**. ⏸️ **The Space has not re-run these two modes** — that is what remains open. | ⏸️ open: re-run on Space |
+| 1 | ✅ **CLOSED.** A filepath `str` reached `LTX2VideoCondition(frames=…)`; `preprocess_conditions` dispatches that field over four types and raises for anything else (§3). Confirmed from the worker traceback, reproduced offline, fixed at **`d2eb6f2`**, and **verified on the live Space at sha `287ba9c`** — both modes returned real content-verified artifacts (§2.1). 11 of 11 modes now generate. | ✅ closed |
 | 2 | ⛔ **22 of 27 error classes cannot survive the ZeroGPU fork** (§4), measured. The fix is a **PAIR** — `__reduce__` on `LTXStudioError` **and** deriving it from `gr.Error` — and neither half works alone: `__reduce__` alone is never consulted, and `gr.Error` alone fails to pickle onto `res_queue` and surfaces as `'PicklingError'`, **destroying the class name that survives today**. Design complete, unapplied, `errors.py` unowned and unauthorised. | ⏸️ open, cheap, offline |
 | 3 | ✅ **Settled from source: picklability alone would NOT restore the message.** `ExceptionResult` carries only `traceback`, `error_cls` and `gradio_error`, and the exception object travels only when it is a `gr.Error` 📄 (`types.py:28-31`, `wrappers.py:453`). Read at `spaces` 0.48.3 against a Space on 0.51.1; read-off-source, not measured on-Space. **No live run is needed to know this** — one would still confirm it end to end. | ✅ resolved |
 | 4 | ⏸️ **Reproducibility is evidenced, not proven** (§5). No two-run frame-hash comparison exists. Cheap to close. | ⏸️ open |
 | 5 | ⚠️ **`audio_to_video` and `image_text_to_audio_video` are near-static** (§6). May be expected at this geometry; nothing establishes it either way. | ⏸️ open, observation |
 | 6 | ⛔ **`audio.validate_audio_latents_against_video` has ZERO callers.** Found by inspection, not by this matrix. It is exported, documented as *"the check that stops a desynced file being emitted rather than refused"*, and nothing calls it — so supplied `audio_latents` set the audio length while `num_frames` sets the video length, with nothing comparing them. Both audio-input modes passed here **only because their fixture came from a same-geometry run**, which is a property of the runner's chaining and not a defect anyone would notice. | ⏸️ open |
 | 7 | ⏸️ **Only one configuration has been exercised** — 256×256×9, stage 2 off, no LoRA, no `auto_duration`. Nothing here says what any mode does at a shippable resolution, and stage 2 has never run on the Space at all. | ⏸️ open |
+| 8 | ⏸️ **No mode has been shown to FOLLOW its conditioning input.** Every check in this document is a property of the output alone — motion, level, distinctness. `video_to_video` returning mean \|Δ\| 17.277 from an 18.894 input is equally consistent with faithful conditioning and with ignoring the clip entirely (§2.1). Settling it needs a comparison the runner does not currently make: same seed, two different conditioning clips, and a difference in the output. | ⏸️ open |
+| 9 | ⚠️ **`video_to_audio` is 8–12 dB quieter than every other audio mode** (§6.1) — −19.5 dBFS against −7.6 to −11.1. Passes the level checks, is nowhere near the −40 dBFS flag, and is the only audio mode conditioned on video. Recorded because H9 was a level anomaly that passed every structural check. | ⏸️ open, observation |
+| 10 | ⚠️ **The quota ledger's history begins mid-day** (§7). It reports 67.252 GPU-s for a day whose real bound is ~413, because it was installed after the matrix ran. The figure is accurate for what it observed and misleading if quoted as a daily total; nothing in its output says where its history starts. | ⏸️ open |
 
 ### ⛔ Item 6 is the THIRD instance of one defect class, and that is the finding
 
@@ -529,10 +626,18 @@ says it is the last one, and two of these three were invisible to a green gate.
 
 ## 9. What this document does not say
 
-* It does **not** say the video modes now work on the Space. §3 gives the cause,
-  confirmed from the worker traceback, and a fix at `d2eb6f2` that the **offline
-  gate** accepts. ⏸️ Neither mode has been re-run on the platform, and this
-  document's own standard is that a green local gate is not a Space result.
+* It **does** say all eleven modes generate on the Space — and the evidence is
+  exactly this: each produced a non-empty artifact whose **decoded content** was
+  checked, not merely its container. For the two re-run modes that is 33,812 B at
+  9 distinct frames and 63,438 B at −19.5 dBFS, at sha `287ba9c` (§2.1). That is
+  the whole claim.
+* It does **not** say any mode **follows** its conditioning input. Every check
+  here reads the output alone: motion, level, distinctness. A mode that ignored
+  its conditioning clip entirely and generated from the prompt would pass every
+  test in this document. §2.1, follow-up #8.
+* It does **not** say the modes are *correct*, only that they run and return
+  something real. "Generates" is a much weaker claim than "generates what was
+  asked for", and only the first is established.
 * It does **not** say the fork-boundary fix has been applied or tried. §4's
   design is complete and read off `spaces` **0.48.3** while the Space runs
   **0.51.1**; nothing in it has been exercised against the platform.

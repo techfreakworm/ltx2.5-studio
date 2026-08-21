@@ -11,11 +11,11 @@
     HF_TOKEN=... .venv/bin/python scripts/space_matrix.py --live \
         --modes text_to_video,image_to_video --fixture-dir outputs/space-fixtures
 
-Nine of eleven modes now generate on the Space, exercised by this tool; the two
-video-INPUT modes fail and their cause is known (``docs/SPACE_MODE_MATRIX.md``).
-It was written when only ``text_to_video`` had ever run, around the three ways
-that exercise can lie -- and all three earned their place on the run that
-followed.
+All eleven modes now generate on the Space, exercised by this tool. It found the
+one real defect on the way -- both video-INPUT modes, fixed and re-verified here
+-- and ``docs/SPACE_MODE_MATRIX.md`` is the evidence. It was written when only
+``text_to_video`` had ever run, around the three ways that exercise can lie, and
+all three earned their place on the runs that followed.
 
 **1. A cost figure that reads as billing.** There is no readable ZeroGPU quota
 endpoint -- all three candidate URLs 404 -- so billed seconds cannot be measured
