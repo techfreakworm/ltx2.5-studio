@@ -1,0 +1,1003 @@
+"""Spec for ``scripts/space_matrix.py`` — the live-Space runner, with no Space.
+
+Every test here runs offline: a fake client stands in for ``gradio_client``, and
+the media the content checks read are **real containers built with ``av``**, the
+same way ``tests/test_verify_streams.py`` does it. Faking the probe would test
+the mock; building the file tests the checker.
+
+Four properties are what this file exists for, and each of them is a defect this
+project has already paid for once:
+
+**The ceiling refuses rather than reports.** A budget guard that notices
+afterwards is an accounting entry, not a guard. The refusal has to happen with
+the run unstarted, and the proof is that the fake client was never called.
+
+**A run that produced nothing raises.** ``ui/handlers.on_generate`` turns every
+failure into ``(None, None, <markdown>)`` — a success-SHAPED triple. There is no
+exception to catch and no falsy return to notice; the only thing that can tell
+the difference is a check against what the registry says the mode exports.
+
+**The content checks reject in both directions.** A checker that only ever
+passes is indistinguishable from no checker at all, so every rejection test has
+an acceptance test beside it. That symmetry is also the guard against the
+*inverse* error — this build has reported a false defect from a bad fixture, and
+a threshold tuned so tight that a healthy artifact fails is the same mistake
+wearing the opposite sign.
+
+**Dry run spends nothing.** Asserted by making ``connect`` explode: if the code
+path that dry-runs can reach the network at all, the test fails loudly instead
+of quietly costing GPU-seconds.
+"""
+
+from __future__ import annotations
+
+import sys
+from fractions import Fraction
+from pathlib import Path
+from types import SimpleNamespace
+
+import numpy as np
+import pytest
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(REPO_ROOT / "scripts") not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT / "scripts"))
+
+import space_matrix
+
+from ltx25_studio import modes
+from ltx25_studio.ui import fields
+
+av = pytest.importorskip("av")
+
+
+# ---------------------------------------------------------------------------
+# real media, built here
+# ---------------------------------------------------------------------------
+
+FIXTURE_SIZE = 64
+FIXTURE_RATE = 24
+
+
+def _frame(index: int, *, moving: bool, blank: bool) -> np.ndarray:
+    """A bright block on a dark field, at a position that depends on the index.
+
+    A block rather than per-pixel noise on purpose: h264 discards noise and
+    keeps structure, so a noise-based fixture can decode back flatter than it
+    went in and fail a motion check for reasons that have nothing to do with the
+    checker.
+    """
+    canvas = np.zeros((FIXTURE_SIZE, FIXTURE_SIZE, 3), dtype=np.uint8)
+    if blank:
+        return canvas
+    offset = (index * 8) % (FIXTURE_SIZE - 20) if moving else 0
+    canvas[10:30, offset : offset + 20] = 255
+    return canvas
+
+
+def write_video(path, *, frames=9, moving=True, blank=False, with_audio=False, silent=False):
+    """A real mp4 with exactly the streams and motion asked for."""
+    with av.open(str(path), "w") as container:
+        video = container.add_stream("h264", rate=FIXTURE_RATE)
+        video.width = video.height = FIXTURE_SIZE
+        video.pix_fmt = "yuv420p"
+        audio = None
+        if with_audio:
+            audio = container.add_stream("aac", rate=48000, layout="stereo")
+            audio.time_base = Fraction(1, 48000)
+
+        for index in range(frames):
+            frame = av.VideoFrame.from_ndarray(
+                _frame(index, moving=moving, blank=blank), format="rgb24"
+            )
+            frame.pts, frame.time_base = index, Fraction(1, FIXTURE_RATE)
+            for packet in video.encode(frame):
+                container.mux(packet)
+        for packet in video.encode():
+            container.mux(packet)
+
+        if audio is not None:
+            for index in range(8):
+                for packet in audio.encode(_audio_frame(index, silent=silent, rate=48000)):
+                    container.mux(packet)
+            for packet in audio.encode():
+                container.mux(packet)
+    return Path(path)
+
+
+def _audio_frame(index: int, *, silent: bool, rate: int, channels: int = 2):
+    samples = 1024
+    layout = "stereo" if channels == 2 else "mono"
+    if silent:
+        block = np.zeros((channels, samples), dtype="float32")
+    else:
+        t = (np.arange(samples) + index * samples) / float(rate)
+        tone = (0.4 * np.sin(2 * np.pi * 440.0 * t)).astype("float32")
+        block = np.stack([tone] * channels)
+    frame = av.AudioFrame.from_ndarray(np.ascontiguousarray(block), format="fltp", layout=layout)
+    frame.rate, frame.pts = rate, index * samples
+    frame.time_base = Fraction(1, rate)
+    return frame
+
+
+def write_wav(path, *, silent=False, rate=48000, channels=2, blocks=16):
+    """A real pcm_s16le wav — the shape ``outputs.write_output`` emits for audio-only modes."""
+    with av.open(str(path), "w", format="wav") as container:
+        layout = "stereo" if channels == 2 else "mono"
+        stream = container.add_stream("pcm_s16le", rate=rate, layout=layout)
+        for index in range(blocks):
+            for packet in stream.encode(
+                _audio_frame(index, silent=silent, rate=rate, channels=channels)
+            ):
+                container.mux(packet)
+        for packet in stream.encode():
+            container.mux(packet)
+    return Path(path)
+
+
+# ---------------------------------------------------------------------------
+# the fake client and a fake clock
+# ---------------------------------------------------------------------------
+
+
+class FakeClient:
+    """Stands in for ``gradio_client.Client``. No network, no GPU, no quota.
+
+    Records every call so a test can assert on the POSITIONS arguments landed in
+    — which is the only way to catch a value shifted one slot left, the defect
+    ``fields.py`` and ``API_FIELD_KEYS`` both exist to prevent.
+    """
+
+    def __init__(self, *results):
+        self.results = list(results)
+        self.calls: list[dict] = []
+
+    def predict(self, *args, api_name=None):
+        self.calls.append({"args": args, "api_name": api_name})
+        if not self.results:
+            raise AssertionError("the runner called predict more times than the test planned for")
+        result = self.results.pop(0)
+        if isinstance(result, BaseException):
+            raise result
+        return result
+
+    def arg(self, key: str, call: int = 0):
+        """One call's value for a named UI field, resolved through the real ordering."""
+        return self.calls[call]["args"][1 + space_matrix.API_FIELD_KEYS.index(key)]
+
+
+class FakeClock:
+    """``time.time`` that advances a fixed step per read, so wall clock is exact."""
+
+    def __init__(self, step: float = 0.0):
+        self.now = 0.0
+        self.step = step
+
+    def __call__(self) -> float:
+        value = self.now
+        self.now += self.step
+        return value
+
+
+@pytest.fixture
+def clock(monkeypatch):
+    """Install a deterministic clock into the module's own namespace.
+
+    Patched on ``space_matrix.time`` rather than on the ``time`` module, so the
+    substitution cannot leak into anything else the suite is doing.
+    """
+
+    def install(step: float):
+        fake = FakeClock(step)
+        monkeypatch.setattr(space_matrix, "time", SimpleNamespace(time=fake))
+        return fake
+
+    return install
+
+
+@pytest.fixture
+def quiet_log():
+    lines: list[str] = []
+    return lines.append, lines
+
+
+# ---------------------------------------------------------------------------
+# the endpoint's argument order is DERIVED, not restated
+# ---------------------------------------------------------------------------
+
+
+def test_the_argument_order_is_the_ui_field_order_minus_the_state():
+    """``gr.State`` has no ``api_info``, so a client never sees it.
+
+    16 parameters after ``mode_id``, not 17. Getting this wrong shifts nothing
+    (``loras`` is last today) — but it would the moment a field is added above
+    it, and then every value lands one slot left with no error anywhere.
+    """
+    without_the_state = tuple(key for key in fields.FIELD_KEYS if key != "loras")
+    assert without_the_state == space_matrix.API_FIELD_KEYS
+    assert "loras" not in space_matrix.API_FIELD_KEYS
+    assert len(space_matrix.API_FIELD_KEYS) == len(fields.FIELD_KEYS) - 1
+
+
+def test_the_argument_order_matches_the_endpoint_gradio_actually_publishes():
+    """Built headlessly and compared against the real API signature.
+
+    This is the check that spans the client boundary: ``fields.py`` guarantees
+    the UI's two orderings agree with each other, and nothing but this
+    guarantees ours agrees with *theirs*.
+    """
+    pytest.importorskip("gradio")
+    from ltx25_studio.ui import build_ui
+
+    endpoint = build_ui().get_api_info()["named_endpoints"][space_matrix.ENDPOINT]
+    parameters = endpoint["parameters"]
+
+    assert len(parameters) == 1 + len(space_matrix.API_FIELD_KEYS)
+    assert parameters[0]["component"] == "Radio"  # mode_id
+
+    # `text` is the only kind whose component name is not just its own name.
+    component_for_kind = {"text": "textbox"}
+    for index, key in enumerate(space_matrix.API_FIELD_KEYS, start=1):
+        kind = fields.field_by_key(key).kind
+        expected = component_for_kind.get(kind, kind)
+        actual = parameters[index]["component"].lower()
+        assert actual == expected, (
+            f"argument {index} is a {actual}, but API_FIELD_KEYS puts {key!r} "
+            f"(a {kind}) there — the client's ordering has drifted from the UI's"
+        )
+
+    assert [r["component"] for r in endpoint["returns"]] == ["Video", "Audio", "Markdown"]
+
+
+def test_predict_args_are_read_out_through_the_key_order(tmp_path):
+    """Never appended positionally: a dict, read through ``API_FIELD_KEYS``."""
+    config = space_matrix.RunConfig(mode_id="text_to_video", seed=77, prompt="a lighthouse")
+    args = space_matrix.predict_args(config)
+
+    assert args[0] == "text_to_video"
+    assert len(args) == 1 + len(space_matrix.API_FIELD_KEYS)
+    named = dict(zip(space_matrix.API_FIELD_KEYS, args[1:], strict=True))
+    assert named["prompt"] == "a lighthouse"
+    assert named["seed"] == 77
+    assert named["width"] == named["height"] == space_matrix.CHEAPEST_SIZE
+    assert named["num_frames"] == space_matrix.CHEAPEST_FRAMES
+    assert named["image"] is named["video"] is named["audio"] is None
+    # The Dataframe's headers come from the same tuple the component is built
+    # from, so a renamed column cannot leave us sending a table it refuses.
+    assert named["conditions"]["headers"] == list(fields.SHOT_HEADERS)
+    assert named["conditions"]["data"] == []
+
+
+# ---------------------------------------------------------------------------
+# the plan
+# ---------------------------------------------------------------------------
+
+
+def test_the_default_order_covers_every_registered_mode():
+    assert set(space_matrix.DEFAULT_MODE_ORDER) == set(modes.MODES)
+    assert len(space_matrix.DEFAULT_MODE_ORDER) == len(modes.MODES)
+
+
+def test_the_default_order_is_a_dependency_order():
+    """Every consumer runs after something that produced its input.
+
+    Not decoration: a plan that puts ``image_to_video`` first spends nothing and
+    fails immediately, and a plan that puts it second-to-last spends the whole
+    budget before discovering the fixture never arrived.
+    """
+    available: set[str] = set()
+    for mode_id in space_matrix.DEFAULT_MODE_ORDER:
+        spec = modes.get_mode(mode_id)
+        needs = set(spec.inputs) & fields.MEDIA_KINDS
+        assert needs <= available, (
+            f"{mode_id} needs {sorted(needs - available)} and nothing before it produces that"
+        )
+        if "video" in spec.exports:
+            available |= {"video", "image"}  # the image fixture is a frame of the video
+        if "audio" in spec.exports:
+            available.add("audio")
+
+
+def test_a_named_subset_runs_in_the_order_given():
+    plan = space_matrix.build_plan(["video_to_audio", "text_to_video"])
+    assert [c.mode_id for c in plan] == ["video_to_audio", "text_to_video"]
+
+
+def test_an_unknown_mode_names_what_is_registered():
+    with pytest.raises(Exception) as caught:
+        space_matrix.build_plan(["text_to_hologram"])
+    assert "text_to_video" in str(caught.value)
+
+
+def test_the_cheapest_config_passes_the_real_validators():
+    """Uses ``constraints``, not a re-derived modulus."""
+    for config in space_matrix.build_plan():
+        space_matrix.validate_config(config)
+    assert space_matrix.CHEAPEST_SIZE % constraints_multiple() == 0
+    assert (space_matrix.CHEAPEST_FRAMES - 1) % 8 == 0
+
+
+def constraints_multiple() -> int:
+    from ltx25_studio import constraints
+
+    return constraints.DIMENSION_MULTIPLE
+
+
+def test_an_illegal_geometry_is_refused_offline():
+    from ltx25_studio.errors import DimensionError, FrameCountError
+
+    with pytest.raises(DimensionError):
+        space_matrix.validate_config(space_matrix.RunConfig(mode_id="text_to_video", width=250))
+    with pytest.raises(FrameCountError):
+        space_matrix.validate_config(space_matrix.RunConfig(mode_id="text_to_video", num_frames=10))
+
+
+def test_the_registry_overrides_are_reflected_in_the_plan():
+    """``min_resolution`` and ``skip_stage_2`` win over the request, so the plan
+    must report what will RUN and not what was asked for."""
+    audio_only = space_matrix.RunConfig(
+        mode_id="text_to_audio", width=704, height=480, enable_stage_2=True
+    )
+    assert audio_only.effective_width == modes.MIN_RESOLUTION
+    assert audio_only.effective_height == modes.MIN_RESOLUTION
+    assert audio_only.effective_stage_2 is False
+
+    plain = space_matrix.RunConfig(mode_id="text_to_video", width=704, enable_stage_2=True)
+    assert plain.effective_width == 704
+    assert plain.effective_stage_2 is True
+
+
+# ---------------------------------------------------------------------------
+# the quota ceiling — it REFUSES, it does not report
+# ---------------------------------------------------------------------------
+
+
+def test_the_default_ceiling_is_eighty_percent_of_the_daily_budget():
+    assert space_matrix.DAILY_QUOTA_SECONDS == 2400.0
+    assert space_matrix.DEFAULT_QUOTA_CEILING_SECONDS == 1920.0
+    assert space_matrix.BILLING_SIZE_MULTIPLIER == 2.0
+
+
+def test_the_cost_of_a_run_is_wall_clock_times_the_size_multiplier():
+    record = space_matrix.RunRecord(
+        config=space_matrix.RunConfig(mode_id="text_to_video"), wall_seconds=21.44, artifacts={}
+    )
+    assert record.gpu_seconds_upper_bound == pytest.approx(42.88)
+    rendered = record.render_cost()
+    assert "<=" in rendered
+    assert "UPPER BOUND" in rendered
+    assert "NOT MEASURED BILLING" in rendered
+
+
+def test_every_cost_figure_is_labelled_an_upper_bound():
+    """A bound that loses its label becomes a measurement the moment it is quoted."""
+    ledger = space_matrix.Ledger(spent_upper_bound=243.58)
+    assert "UPPER BOUND" in ledger.render()
+    assert "<=" in ledger.render()
+
+    plan = space_matrix.render_plan(space_matrix.build_plan(["text_to_video"]), ledger, live=False)
+    assert "UPPER BOUND" in plan
+    assert "ZERO GPU-seconds" in plan
+
+
+def test_the_ledger_refuses_a_run_that_would_cross_the_ceiling():
+    ledger = space_matrix.Ledger(
+        ceiling_seconds=150.0, reservation_seconds=50, spent_upper_bound=100.0
+    )
+    config = space_matrix.RunConfig(mode_id="text_to_video")
+    assert ledger.projected_for(config) == pytest.approx(100.0)  # 50s reserved x 2
+    assert ledger.would_cross(config) is True
+    with pytest.raises(space_matrix.QuotaCeilingReached) as caught:
+        ledger.check_before(config)
+    assert "text_to_video" in str(caught.value)
+    assert "150.0" in str(caught.value)
+
+
+def test_the_ceiling_stops_the_matrix_before_the_run_is_ever_sent(tmp_path, clock, quiet_log):
+    """The proof is the call count: the refused run was never sent to the Space.
+
+    Never "borrow tomorrow's" — a guard that lets one more run through because it
+    is nearly within budget is a guard with no threshold at all.
+    """
+    log, _lines = quiet_log
+    clock(step=30.0)  # each predict measures exactly 30s -> 60 GPU-s charged
+    video = write_video(tmp_path / "out.mp4")
+
+    client = FakeClient(
+        [str(video), None, "✅ Text to video complete."],
+        [str(video), None, "✅ Text to video complete."],
+    )
+    ledger = space_matrix.Ledger(ceiling_seconds=150.0, reservation_seconds=50)
+    outcome = space_matrix.run_matrix(
+        client,
+        space_matrix.build_plan(["text_to_video", "text_to_video"]),
+        fixtures=space_matrix.FixtureStore(tmp_path / "fixtures"),
+        ledger=ledger,
+        log=log,
+    )
+
+    # Run 1: 0 + 100 projected <= 150, so it starts and charges 2 x 30s = 60.
+    # Run 2: 60 + 100 = 160 > 150, so it is refused with nothing sent.
+    assert len(client.calls) == 1
+    assert len(outcome.records) == 1
+    assert outcome.stopped is True
+    assert outcome.stopped_at.mode_id == "text_to_video"
+    assert ledger.spent_upper_bound == pytest.approx(60.0)
+    assert ledger.spent_upper_bound < ledger.ceiling_seconds
+
+
+def test_the_stop_summary_reports_rather_than_crashing(tmp_path, clock, quiet_log):
+    log, lines = quiet_log
+    clock(step=30.0)
+    video = write_video(tmp_path / "out.mp4")
+    client = FakeClient([str(video), None, "ok"], [str(video), None, "ok"])
+    outcome = space_matrix.run_matrix(
+        client,
+        space_matrix.build_plan(["text_to_video", "text_to_video"]),
+        fixtures=space_matrix.FixtureStore(tmp_path / "fixtures"),
+        ledger=space_matrix.Ledger(ceiling_seconds=150.0, reservation_seconds=50),
+        log=log,
+    )
+    assert any("STOPPED AT THE QUOTA CEILING" in line for line in lines)
+    assert any("Nothing was spent on this run" in line for line in lines)
+    summary = space_matrix.render_summary(outcome)
+    assert "STOPPED before text_to_video" in summary
+    assert "UPPER BOUND" in summary
+
+
+def test_a_projection_that_undershoots_still_charges_the_observed_wall_clock(tmp_path, clock):
+    """The platform re-forks a killed worker, so a run CAN cost more than one
+    attempt. The ledger must accumulate what happened, not what was predicted."""
+    clock(step=100.0)
+    video = write_video(tmp_path / "out.mp4")
+    ledger = space_matrix.Ledger(ceiling_seconds=10_000.0, reservation_seconds=50)
+    record = space_matrix.run_one(
+        FakeClient([str(video), None, "ok"]),
+        space_matrix.RunConfig(mode_id="text_to_video"),
+        ledger=ledger,
+        log=lambda *a: None,
+    )
+    assert record.projected_gpu_seconds == pytest.approx(100.0)
+    assert record.gpu_seconds_upper_bound == pytest.approx(200.0)
+    assert ledger.spent_upper_bound == pytest.approx(200.0)
+
+
+# ---------------------------------------------------------------------------
+# fail loudly — a success-shaped result carrying nothing
+# ---------------------------------------------------------------------------
+
+SPACE_FAILURE_TEXT = (
+    "### ❌ Generation failed — unexpected `Error`\n\n"
+    "> 'GPU task aborted'\n\n"
+    "This error is not one of ours, which usually means it came from the pipeline "
+    "or the platform. The full traceback is in the Space logs."
+)
+
+
+def test_a_run_with_no_artifact_raises_and_quotes_the_spaces_own_words(tmp_path, quiet_log):
+    log, _lines = quiet_log
+    client = FakeClient([None, None, SPACE_FAILURE_TEXT])
+    with pytest.raises(space_matrix.SpaceRunError) as caught:
+        space_matrix.run_one(client, space_matrix.RunConfig(mode_id="text_to_video"), log=log)
+    message = str(caught.value)
+    assert "text_to_video" in message
+    assert "no video file" in message
+    assert "'GPU task aborted'" in message, "the Space's own error text must survive verbatim"
+    assert "success-SHAPED" in message
+
+
+def test_the_missing_track_named_is_the_one_the_registry_declares(tmp_path, quiet_log):
+    """``text_to_audio`` exports audio only — a returned video path is not a pass."""
+    log, _lines = quiet_log
+    video = write_video(tmp_path / "out.mp4")
+    client = FakeClient([str(video), None, SPACE_FAILURE_TEXT])
+    with pytest.raises(space_matrix.SpaceRunError) as caught:
+        space_matrix.run_one(client, space_matrix.RunConfig(mode_id="text_to_audio"), log=log)
+    assert "no audio file" in str(caught.value)
+    assert "text_to_audio" in str(caught.value)
+
+
+def test_an_empty_status_is_itself_reported_as_a_defect(quiet_log):
+    log, _lines = quiet_log
+    with pytest.raises(space_matrix.SpaceRunError) as caught:
+        space_matrix.run_one(
+            FakeClient([None, None, ""]), space_matrix.RunConfig(mode_id="text_to_video"), log=log
+        )
+    assert "NO status text at all" in str(caught.value)
+
+
+def test_a_zero_byte_artifact_is_not_a_pass(tmp_path, quiet_log):
+    """The inverse of the empty-output bug: a path that is real and a file that
+    is not. Scoring it as a pass is the same class of mistake."""
+    log, _lines = quiet_log
+    empty = tmp_path / "output.mp4"
+    empty.write_bytes(b"")
+    with pytest.raises(space_matrix.ArtifactContentError) as caught:
+        space_matrix.run_one(
+            FakeClient([str(empty), None, "✅ complete"]),
+            space_matrix.RunConfig(mode_id="text_to_video"),
+            log=log,
+        )
+    assert "ZERO BYTES" in str(caught.value)
+    assert "A path is not an artifact" in str(caught.value)
+
+
+def test_a_client_exception_still_charges_the_ledger(tmp_path, clock, quiet_log):
+    """A call that raised on our side may still have burned a slot on theirs."""
+    log, _lines = quiet_log
+    clock(step=15.0)
+    ledger = space_matrix.Ledger(ceiling_seconds=10_000.0)
+    with pytest.raises(space_matrix.SpaceRunError) as caught:
+        space_matrix.run_one(
+            FakeClient(TimeoutError("read timed out")),
+            space_matrix.RunConfig(mode_id="text_to_video"),
+            ledger=ledger,
+            log=log,
+        )
+    assert "TimeoutError" in str(caught.value)
+    assert ledger.spent_upper_bound == pytest.approx(30.0)
+
+
+def test_an_unexpected_response_shape_is_refused(quiet_log):
+    log, _lines = quiet_log
+    with pytest.raises(space_matrix.SpaceRunError) as caught:
+        space_matrix.run_one(
+            FakeClient("output.mp4"), space_matrix.RunConfig(mode_id="text_to_video"), log=log
+        )
+    assert "not the (video, audio, status) triple" in str(caught.value)
+
+
+def test_a_run_that_succeeds_is_not_reported_as_a_failure(tmp_path, quiet_log):
+    """The other direction. A checker that only ever raises is not a checker."""
+    log, _lines = quiet_log
+    video = write_video(tmp_path / "out.mp4")
+    record = space_matrix.run_one(
+        FakeClient([str(video), None, "✅ Text to video complete. seed `1234`"]),
+        space_matrix.RunConfig(mode_id="text_to_video"),
+        log=log,
+    )
+    assert record.artifacts["video"][1] > 0
+    assert record.video is not None
+    assert record.video.frames == 9
+    assert record.audio is None
+
+
+# ---------------------------------------------------------------------------
+# content, not existence — video
+# ---------------------------------------------------------------------------
+
+
+def test_a_moving_video_passes_and_reports_its_numbers(tmp_path):
+    content = space_matrix.verify_video_content(
+        write_video(tmp_path / "moving.mp4"), expected_frames=9
+    )
+    assert content.frames == 9
+    assert content.distinct_frames >= space_matrix.MIN_DISTINCT_FRAMES
+    assert content.pixel_std > space_matrix.MIN_PIXEL_STD
+    assert content.mean_abs_delta > space_matrix.MIN_MEAN_FRAME_DELTA
+    assert "distinct" in content.render()
+
+
+def test_a_frozen_video_is_rejected(tmp_path):
+    """Nine identical frames: correct codec, correct geometry, correct count,
+    ``verify_streams`` exit 0 — and nothing moved."""
+    frozen = write_video(tmp_path / "frozen.mp4", moving=False)
+    assert verify_streams_ok("text_to_video", frozen), "the structural check passes on this file"
+    with pytest.raises(space_matrix.ArtifactContentError) as caught:
+        space_matrix.verify_video_content(frozen, expected_frames=9)
+    assert "frozen" in str(caught.value) or "nothing moved" in str(caught.value)
+
+
+def test_a_blank_video_is_rejected(tmp_path):
+    with pytest.raises(space_matrix.ArtifactContentError) as caught:
+        space_matrix.verify_video_content(write_video(tmp_path / "blank.mp4", blank=True))
+    assert "flat" in str(caught.value)
+
+
+def test_a_short_video_is_rejected_because_upstream_floors_silently(tmp_path):
+    with pytest.raises(space_matrix.ArtifactContentError) as caught:
+        space_matrix.verify_video_content(
+            write_video(tmp_path / "short.mp4", frames=5), expected_frames=9
+        )
+    assert "decoded 5 frames, asked for 9" in str(caught.value)
+
+
+def test_a_file_with_no_video_frames_behind_it_is_rejected(tmp_path):
+    """A container that opens cleanly and yields nothing to look at.
+
+    ``verify_streams`` catches the missing-stream case from the registry side;
+    this is the same refusal one layer in, so the content checker is not
+    dependent on having been called in the right order to be honest.
+    """
+    with pytest.raises(space_matrix.ArtifactContentError) as caught:
+        space_matrix.verify_video_content(write_wav(tmp_path / "audio-only.wav"))
+    assert "ZERO video frames" in str(caught.value)
+    assert "not a pass" in str(caught.value)
+
+
+def verify_streams_ok(mode_id, path) -> bool:
+    """The structural verdict, so a test can state what it does NOT catch."""
+    return verify_streams_module().verify(mode_id, str(path)).ok
+
+
+def verify_streams_module():
+    import verify_streams
+
+    return verify_streams
+
+
+# ---------------------------------------------------------------------------
+# content, not existence — audio
+# ---------------------------------------------------------------------------
+
+
+def test_audible_audio_passes_and_reports_dbfs(tmp_path):
+    content = space_matrix.verify_audio_content(
+        write_wav(tmp_path / "loud.wav"), expected_sample_rate=48000
+    )
+    assert content.sample_rate == 48000
+    assert content.channels == 2
+    assert content.dbfs > space_matrix.SILENT_DBFS
+    assert "dBFS" in content.render()
+
+
+def test_silent_audio_is_rejected(tmp_path):
+    """H9: correct codec, correct rate, two channels, exit 0 — and no sound."""
+    silent = write_wav(tmp_path / "silent.wav", silent=True)
+    assert verify_streams_ok("text_to_audio", silent), "the structural check passes on this file"
+    with pytest.raises(space_matrix.ArtifactContentError) as caught:
+        space_matrix.verify_audio_content(silent, expected_sample_rate=48000)
+    assert "SILENT" in str(caught.value)
+    assert "dBFS" in str(caught.value)
+
+
+def test_quiet_audio_is_flagged_but_not_rejected(tmp_path):
+    """-55 dBFS is faint and audible. Calling it silence is what turned H9 into a
+    false defect report, so the two thresholds must stay far apart."""
+    assert space_matrix.SILENT_DBFS < -55.0 < space_matrix.VERY_QUIET_DBFS
+    content = space_matrix.AudioContent(
+        sample_rate=48000, channels=2, samples=1024, peak=0.01, rms=0.0018, dbfs=-55.0
+    )
+    assert "VERY QUIET" in content.render()
+
+
+def test_the_wrong_sample_rate_is_rejected(tmp_path):
+    with pytest.raises(space_matrix.ArtifactContentError) as caught:
+        space_matrix.verify_audio_content(
+            write_wav(tmp_path / "16k.wav", rate=16000), expected_sample_rate=48000
+        )
+    assert "sample rate 16000" in str(caught.value)
+
+
+def test_a_downmixed_track_is_rejected(tmp_path):
+    with pytest.raises(space_matrix.ArtifactContentError) as caught:
+        space_matrix.verify_audio_content(
+            write_wav(tmp_path / "mono.wav", channels=1), expected_sample_rate=48000
+        )
+    assert "1 channel(s), expected 2" in str(caught.value)
+
+
+def test_the_expected_channel_count_comes_from_verify_streams(tmp_path):
+    """Not restated here: one constant, read twice."""
+    import verify_streams
+
+    assert verify_streams.EXPECTED_AUDIO_CHANNELS == 2
+
+
+def test_the_audio_check_runs_on_a_muxed_mp4_too(tmp_path):
+    """Audio+video modes write ONE container with an AAC track inside it."""
+    muxed = write_video(tmp_path / "both.mp4", with_audio=True)
+    content = space_matrix.verify_audio_content(muxed, expected_sample_rate=48000)
+    assert content.channels == 2
+    assert content.dbfs > space_matrix.SILENT_DBFS
+
+
+def test_a_silent_muxed_track_is_rejected(tmp_path):
+    muxed = write_video(tmp_path / "silent-both.mp4", with_audio=True, silent=True)
+    with pytest.raises(space_matrix.ArtifactContentError):
+        space_matrix.verify_audio_content(muxed, expected_sample_rate=48000)
+
+
+# ---------------------------------------------------------------------------
+# fixture chaining — the right file into the right input
+# ---------------------------------------------------------------------------
+
+
+def test_a_video_run_seeds_both_the_video_and_the_image_fixture(tmp_path, quiet_log):
+    log, _lines = quiet_log
+    store = space_matrix.FixtureStore(tmp_path / "fixtures")
+    record = space_matrix.run_one(
+        FakeClient([str(write_video(tmp_path / "out.mp4")), None, "✅ complete"]),
+        space_matrix.RunConfig(mode_id="text_to_video"),
+        fixtures=store,
+        log=log,
+    )
+    assert set(record.fixtures_saved) == {"video", "image"}
+    assert store.has("video")
+    assert store.has("image")
+    assert store.path_for("image").suffix == ".png"
+    assert not store.has("audio"), "text_to_video exports no audio and must seed none"
+
+
+def test_the_image_fixture_is_a_middle_frame_not_frame_zero(tmp_path):
+    """Frame 0 of a conditioned run is the input echoed back, so an image fixture
+    taken from there conditions the next run on itself — a degenerate signal the
+    model can produce something plausible from while the anchor is wrong."""
+    source = write_video(tmp_path / "src.mp4", frames=9)
+    index = space_matrix.extract_image_fixture(source, tmp_path / "image.png")
+    assert index == 4
+    assert (tmp_path / "image.png").stat().st_size > 0
+
+
+def test_an_audio_only_run_seeds_a_real_wav(tmp_path, quiet_log):
+    log, _lines = quiet_log
+    store = space_matrix.FixtureStore(tmp_path / "fixtures")
+    record = space_matrix.run_one(
+        FakeClient([None, str(write_wav(tmp_path / "out.wav")), "✅ complete"]),
+        space_matrix.RunConfig(mode_id="text_to_audio"),
+        fixtures=store,
+        log=log,
+    )
+    assert record.fixtures_saved == ("audio",)
+    assert store.has("audio")
+    # A real decodable wav, not a renamed mp4.
+    with av.open(str(store.path_for("audio"))) as container:
+        assert container.streams.audio
+
+
+def test_a_muxed_artifact_is_transcoded_rather_than_renamed(tmp_path):
+    """Copying an mp4 to ``audio.wav`` would work — ``av`` sniffs content, not
+    extension — and would be a small lie that becomes a large one later."""
+    muxed = write_video(tmp_path / "both.mp4", with_audio=True)
+    dest = space_matrix.extract_audio_fixture(muxed, tmp_path / "audio.wav")
+    with av.open(str(dest)) as container:
+        assert container.format.name in ("wav", "wave")
+        assert not container.streams.video
+        assert container.streams.audio[0].codec_context.name.startswith("pcm")
+
+
+def test_the_chained_fixture_lands_in_the_right_argument_slot(tmp_path, quiet_log):
+    """The whole point of chaining: the image fixture must arrive as the IMAGE
+    argument, not one slot over."""
+    log, _lines = quiet_log
+    store = space_matrix.FixtureStore(tmp_path / "fixtures")
+    video = write_video(tmp_path / "out.mp4")
+    client = FakeClient(
+        [str(video), None, "✅ complete"],
+        [str(video), None, "✅ complete"],
+    )
+    space_matrix.run_matrix(
+        client,
+        space_matrix.build_plan(["text_to_video", "image_to_video"]),
+        fixtures=store,
+        ledger=space_matrix.Ledger(ceiling_seconds=10_000.0),
+        log=log,
+    )
+    assert len(client.calls) == 2
+    image_arg = client.arg("image", call=1)
+    assert isinstance(image_arg, dict)
+    assert Path(image_arg["path"]) == store.path_for("image")
+    # And nothing leaked into the slots this mode does not use.
+    assert client.arg("video", call=1) is None
+    assert client.arg("audio", call=1) is None
+
+
+def test_an_audio_input_mode_receives_the_audio_fixture(tmp_path, quiet_log):
+    log, _lines = quiet_log
+    store = space_matrix.FixtureStore(tmp_path / "fixtures")
+    wav = write_wav(tmp_path / "out.wav")
+    client = FakeClient(
+        [None, str(wav), "✅ complete"],
+        [None, str(wav), "✅ complete"],
+    )
+    space_matrix.run_matrix(
+        client,
+        space_matrix.build_plan(["text_to_audio", "audio_to_audio"]),
+        fixtures=store,
+        ledger=space_matrix.Ledger(ceiling_seconds=10_000.0),
+        log=log,
+    )
+    assert Path(client.arg("audio", call=1)["path"]) == store.path_for("audio")
+    assert client.arg("image", call=1) is None
+    assert client.arg("video", call=1) is None
+
+
+def test_a_missing_fixture_names_the_run_that_would_have_produced_it(tmp_path):
+    store = space_matrix.FixtureStore(tmp_path / "fixtures")
+    with pytest.raises(space_matrix.MissingFixtureError) as caught:
+        space_matrix.predict_args(space_matrix.RunConfig(mode_id="image_to_video"), fixtures=store)
+    message = str(caught.value)
+    assert "image_to_video needs a real image input" in message
+    assert "text_to_video" in message
+    assert "synthesised" in message, "the refusal must say NOT to substitute a fake"
+
+
+def test_a_fixture_directory_is_never_required_for_a_mode_that_takes_no_file():
+    """``--fixture-dir`` is optional for the modes that open the chain."""
+    args = space_matrix.predict_args(space_matrix.RunConfig(mode_id="text_to_video"))
+    assert args[0] == "text_to_video"
+
+
+# ---------------------------------------------------------------------------
+# --dry-run spends nothing, and it is the default
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def exploding_connect(monkeypatch):
+    """Any attempt to reach the network during a dry run fails the test loudly."""
+    calls = []
+
+    def _boom(*args, **kwargs):
+        calls.append((args, kwargs))
+        raise AssertionError("a dry run must never connect to the Space")
+
+    monkeypatch.setattr(space_matrix, "connect", _boom)
+    return calls
+
+
+def test_dry_run_is_the_default(exploding_connect, quiet_log):
+    log, lines = quiet_log
+    assert space_matrix.main([], log=log) == 0
+    assert exploding_connect == []
+    assert any("DRY RUN" in line for line in lines)
+    assert any("ZERO GPU-seconds were spent" in line for line in lines)
+
+
+def test_dry_run_prints_the_ordered_plan_with_a_running_total(exploding_connect, quiet_log):
+    log, lines = quiet_log
+    assert space_matrix.main(["--dry-run"], log=log) == 0
+    plan = "\n".join(lines)
+    for mode_id in space_matrix.DEFAULT_MODE_ORDER:
+        assert mode_id in plan
+    assert "cumul" in plan
+    assert "ceiling" in plan
+    assert "plan total" in plan
+    assert exploding_connect == []
+
+
+def test_the_safe_direction_wins_when_both_flags_are_given(exploding_connect, quiet_log):
+    log, _lines = quiet_log
+    assert space_matrix.main(["--live", "--dry-run"], log=log) == 0
+    assert exploding_connect == []
+
+
+def test_the_dry_run_validates_every_config_and_refuses_an_illegal_plan(quiet_log):
+    log, lines = quiet_log
+    assert space_matrix.main(["--dry-run", "--width", "250"], log=log) == 2
+    assert any("not runnable" in line for line in lines)
+
+
+def test_the_dry_run_says_where_the_ceiling_would_bind(exploding_connect, quiet_log):
+    log, lines = quiet_log
+    assert space_matrix.main(["--dry-run", "--quota-ceiling", "250"], log=log) == 0
+    plan = "\n".join(lines)
+    assert "DOES NOT FIT" in plan
+    assert "will be refused, not started" in plan
+
+
+def test_an_unknown_mode_is_a_usage_error_not_a_crash(quiet_log):
+    log, lines = quiet_log
+    assert space_matrix.main(["--modes", "not_a_mode"], log=log) == 2
+    assert any("not runnable" in line for line in lines)
+
+
+# ---------------------------------------------------------------------------
+# the --live wiring, driven end to end with a fake client
+#
+# Everything above tests `run_matrix` directly. That leaves the one seam nothing
+# had covered: the argv -> plan -> ledger -> client -> summary path inside
+# `main`. It is also the only path the operator actually types, so a mistake
+# there costs GPU-seconds to discover.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def fake_connect(monkeypatch):
+    """Hand ``main`` a fake client instead of a real connection."""
+
+    def install(client):
+        seen = {}
+
+        def _connect(space_id, *, token=None, download_dir=None, log=print):
+            seen.update(space_id=space_id, token=token, download_dir=download_dir)
+            return client
+
+        monkeypatch.setattr(space_matrix, "connect", _connect)
+        return seen
+
+    return install
+
+
+def test_live_runs_the_plan_and_returns_zero(tmp_path, fake_connect, clock, quiet_log):
+    log, lines = quiet_log
+    clock(step=10.0)
+    client = FakeClient([str(write_video(tmp_path / "out.mp4")), None, "✅ complete"])
+    seen = fake_connect(client)
+
+    code = space_matrix.main(
+        [
+            "--live",
+            "--modes",
+            "text_to_video",
+            "--fixture-dir",
+            str(tmp_path / "fixtures"),
+        ],
+        log=log,
+    )
+    assert code == 0
+    assert len(client.calls) == 1
+    assert client.calls[0]["api_name"] == space_matrix.ENDPOINT
+    assert seen["space_id"] == space_matrix.DEFAULT_SPACE_ID
+    summary = "\n".join(lines)
+    assert "SUMMARY" in summary
+    assert "UPPER BOUND" in summary
+    assert "Do not quote it as billed seconds" in summary
+
+
+def test_live_returns_three_when_the_ceiling_stops_it(tmp_path, fake_connect, clock, quiet_log):
+    """Non-zero but orderly: a stop is reported, not raised."""
+    log, lines = quiet_log
+    clock(step=30.0)
+    video = str(write_video(tmp_path / "out.mp4"))
+    client = FakeClient([video, None, "ok"], [video, None, "ok"])
+    fake_connect(client)
+
+    code = space_matrix.main(
+        [
+            "--live",
+            "--modes",
+            "text_to_video,text_to_video",
+            "--quota-ceiling",
+            "150",
+            "--reservation-seconds",
+            "50",
+            "--fixture-dir",
+            str(tmp_path / "fixtures"),
+        ],
+        log=log,
+    )
+    assert code == 3
+    assert len(client.calls) == 1
+    assert any("STOPPED AT THE QUOTA CEILING" in line for line in lines)
+
+
+def test_a_failed_run_raises_out_of_main_after_printing_the_ledger(
+    tmp_path, fake_connect, clock, quiet_log
+):
+    """The summary still gets printed: a run that blew up still spent quota, and
+    losing that number leaves the next session blind to how much of the day is
+    gone. Then it raises, because a traceback is the loudest thing available."""
+    log, lines = quiet_log
+    clock(step=10.0)
+    client = FakeClient([None, None, SPACE_FAILURE_TEXT])
+    fake_connect(client)
+
+    with pytest.raises(space_matrix.SpaceRunError):
+        space_matrix.main(
+            ["--live", "--modes", "text_to_video", "--fixture-dir", str(tmp_path / "fixtures")],
+            log=log,
+        )
+    summary = "\n".join(lines)
+    assert "SUMMARY" in summary
+    assert "20.0 GPU-s" in summary, "the run's bounded cost survives the failure"
+
+
+def test_the_default_fixture_directory_is_inside_the_ignored_outputs_tree():
+    """A fixture directory anywhere else leaves generated media untracked in the
+    working tree, and the first ``git add -A`` commits a video."""
+    source = (REPO_ROOT / "scripts" / "space_matrix.py").read_text()
+    assert 'REPO / "outputs" / "space-fixtures"' in source
+    assert "outputs/" in (REPO_ROOT / ".gitignore").read_text()
+
+
+def test_the_module_never_writes_the_token_anywhere():
+    """The token is read from the environment and handed straight to the client.
+
+    Asserted on the source because the failure mode is a token that reaches a log
+    line or a file, and by the time that happens in a run it is already leaked.
+    """
+    source = (REPO_ROOT / "scripts" / "space_matrix.py").read_text()
+    assert "hf_" not in source.replace("hf_gradio", "")
+    # Read once, at the single site that builds the client.
+    assert source.count('os.environ.get("HF_TOKEN")') == 1
