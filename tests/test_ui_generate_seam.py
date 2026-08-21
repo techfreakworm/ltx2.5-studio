@@ -27,7 +27,11 @@ marshalling (``strict=True``) rather than a convenient subset of it.
 
 from __future__ import annotations
 
+import tempfile
 from dataclasses import replace
+from fractions import Fraction
+from functools import lru_cache
+from pathlib import Path
 
 import pytest
 from conftest import STUB_WAVEFORM
@@ -55,6 +59,47 @@ EMPTY_OUTPUT_HEADLINE = render.empty_output_bug(
 MEDIA_KINDS = ("image", "video", "audio")
 
 
+@lru_cache(maxsize=1)
+def conditioning_video() -> str:
+    """One real, decodable mp4 — built once, on first use by a video mode.
+
+    **This used to be the string ``"conditioning-input.video"``, and that is how
+    the video-input defect reached the Space.** Nothing on the path had to
+    decode it, so a payload that could never work in production satisfied every
+    assertion in this file, and both video modes shipped broken past a green
+    gate. ``conditioning.decode_video_frames`` now decodes a video condition
+    before the pipeline sees it, which makes a real file the only honest
+    fixture — and restores this module's own opening rule, that nothing between
+    the layers is stubbed. It was true of every layer and one payload.
+
+    The image and audio placeholders stay strings deliberately: nothing decodes
+    those offline, so a real file there would assert nothing that this string
+    does not. (For audio that is itself a gap — the decode sits behind the real
+    pipe, so it is never exercised here — but it is a separate one.)
+
+    ``av`` is imported inside the function rather than skipped at module scope
+    on purpose. A module-level ``importorskip`` would silently drop this entire
+    seam suite if the media stack went missing, and this is the file that exists
+    because a whole seam went untested once already.
+    """
+    import av
+    import numpy as np
+
+    directory = Path(tempfile.mkdtemp(prefix="ltx25-seam-"))
+    path = directory / "conditioning-input.mp4"
+    with av.open(str(path), "w") as container:
+        stream = container.add_stream("h264", rate=24)
+        stream.width = stream.height = 64
+        stream.pix_fmt = "yuv420p"
+        frame = av.VideoFrame.from_ndarray(np.zeros((64, 64, 3), dtype=np.uint8), format="rgb24")
+        frame.pts, frame.time_base = 0, Fraction(1, 24)
+        for packet in stream.encode(frame):
+            container.mux(packet)
+        for packet in stream.encode():
+            container.mux(packet)
+    return str(path)
+
+
 def values_for(mode_id: str, **overrides) -> tuple:
     """One positional value per ``FIELD_KEYS`` entry, as Gradio would send them."""
     values = {spec.key: spec.default for spec in FIELDS}
@@ -63,7 +108,7 @@ def values_for(mode_id: str, **overrides) -> tuple:
     # the registry's kwarg builder is the shape the UI would really produce.
     for kind in modes.get_mode(mode_id).inputs:
         if kind in MEDIA_KINDS:
-            values[kind] = f"conditioning-input.{kind}"
+            values[kind] = conditioning_video() if kind == "video" else f"conditioning-input.{kind}"
     values.update(overrides)
     return tuple(values[key] for key in FIELD_KEYS)
 

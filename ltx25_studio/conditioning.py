@@ -22,14 +22,35 @@ user built.
 Image and video conditioning are the same mechanism (§3.1a): one list of
 conditions, each with a source, an index and a strength.
 
-Pure integer arithmetic at module level. ``diffusers`` is imported lazily inside
-:func:`build_conditions` so this module stays importable with no GPU present.
+**The payload, which is where the sameness stops.** Three input kinds reach
+conditioning by three different routes, and only two of them arrived decoded.
+``gr.Image(type="pil")`` hands over a PIL image and upstream takes it as-is;
+``audio.py`` is handed a path and decodes it itself with ``av``; ``gr.Video``
+is handed a **path** and nothing anywhere decoded it. So ``modes._conditions``
+built a perfectly well-formed ``ConditionSpec`` around a ``str``, and diffusers
+refused it at the last possible moment::
+
+    TypeError: Unsupported `frames` type for condition 0: <class 'str'>
+    # preprocess_conditions, pipeline_ltx2_condition.py:899 (pinned ac56fa2f)
+
+That is both video-input modes dead and the other nine fine — one missing
+decoder, not a conditioning bug. :func:`decode_video_frames` closes it here
+rather than in ``modes.py`` for two reasons: ``modes.py`` states as a property
+that it imports nothing heavy and stays testable with no media stack present,
+and this module is already the one that owns "normalised and range-checked,
+before diffusers". The index conversion below and this decode are the same job
+on two different fields of the same object.
+
+Integer arithmetic at module level, and the one piece of I/O — decoding a video
+condition — imports ``av`` lazily inside the function that needs it, so this
+module still imports with no media stack and no GPU present.
 """
 
 from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from pathlib import Path
 
 from .constraints import DEFAULT_TEMPORAL_COMPRESSION_RATIO, image_crf_for
 from .errors import ConstraintError
@@ -38,6 +59,7 @@ __all__ = [
     "SHOT_ROW_ANCHOR",
     "ConditionSpec",
     "build_conditions",
+    "decode_video_frames",
     "image_crf_for",
     "latent_group_for",
     "latent_index_for",
@@ -212,6 +234,108 @@ def normalise_condition(
     }
 
 
+def _already_decoded(source) -> bool:
+    """True if ``source`` is already a payload ``preprocess_conditions`` accepts.
+
+    Duck-typed rather than ``isinstance``-checked, because naming the accepted
+    types means importing them: ``torch`` and ``PIL`` both, on a path that runs
+    with no model stack present. The four accepted shapes are a PIL image, a
+    list of them, a numpy array and a tensor -- the last two are the ones with
+    ``ndim``, the first two are the ones that can ``convert``.
+
+    A payload that is already frames is left alone rather than re-decoded. A
+    spec can legitimately be rebuilt -- ``pipelines._with_real_conditions``
+    re-normalises anything reaching it that is not already a spec -- and a
+    second decode would be handed an array where a path is expected.
+    """
+    if isinstance(source, (str, Path)):
+        return False
+    if hasattr(source, "ndim") or hasattr(source, "convert"):
+        return True
+    if isinstance(source, (list, tuple)) and source:
+        return all(hasattr(frame, "convert") for frame in source)
+    return False
+
+
+def decode_video_frames(source, *, max_frames: int | None = None):
+    """A video path -> the RGB frames the pipeline will actually take.
+
+    Returns ``(F, H, W, 3)`` ``uint8``, which is one of the four payload types
+    ``preprocess_conditions`` dispatches on. Three things decided that shape:
+
+    * ``av``'s ``to_ndarray(format="rgb24")`` produces it directly, so there is
+      no conversion to get wrong. It is also the representation upstream builds
+      anyway -- the PIL-list branch is a ``np.stack`` of exactly this.
+    * ``uint8`` is **load-bearing**, not incidental. Upstream re-compresses a
+      single-frame condition at the model CRF and raises ``ValueError`` if the
+      array is not ``uint8`` while doing it. A float payload decodes fine here
+      and fails there, on the metered side.
+    * ``av`` rather than torchvision or imageio, for the reason ``audio.py``
+      already gives at length: it is a required dependency that bundles its own
+      FFmpeg, so it works where the system codecs are not ours to install.
+
+    **No resizing, deliberately.** Upstream scales the condition so the longer
+    side fills the target and centre-crops to exactly ``(height, width)``.
+    Re-deriving that here would be a second copy of somebody else's arithmetic,
+    and validating the source geometry against our own dimension rules would
+    reject a 1080p upload that upstream handles perfectly well.
+
+    ``max_frames`` bounds the decode, and it is not an optimisation.
+    ``trim_conditioning_sequence`` keeps ``min(F, target - start)`` frames and
+    takes the **first** of them, so everything past the target is decoded and
+    thrown away. That is not a rounding error on a real upload: a ten-minute
+    1080p clip is ~15,000 frames, and ``15_000 x 1920 x 1080 x 3`` bytes is
+    **~90 GB** of anonymous memory -- on the box whose RAM ceiling is the open
+    question of this build. ⏸️ Under ``auto_duration`` the real target is chosen
+    by the duration head after this runs, so the cap is the request's own
+    ``num_frames``; a head that picks a longer clip would see a condition
+    trimmed shorter than upstream would have trimmed it.
+
+    Raises :class:`ConstraintError` naming the file for anything undecodable.
+    The alternative is a bare ``av`` error, or worse a path travelling on to
+    become ``Unsupported `frames` type`` inside the forked worker -- where the
+    reason we attach is stripped on the way out and the file that caused it is
+    no longer named anywhere.
+    """
+    import av
+    import numpy as np
+
+    frames: list = []
+    try:
+        with av.open(str(source)) as container:
+            if not container.streams.video:
+                raise ConstraintError(
+                    f"{source} carries no video stream, so there is nothing to condition on. "
+                    f"Supply a video file rather than an audio-only or empty one."
+                )
+            for frame in container.decode(video=0):
+                frames.append(frame.to_ndarray(format="rgb24"))
+                if max_frames is not None and len(frames) >= max_frames:
+                    break
+    except ConstraintError:
+        raise
+    except Exception as exc:  # noqa: BLE001 -- every decode failure has one answer here
+        raise ConstraintError(
+            f"{source} could not be decoded as video ({type(exc).__name__}: {exc}). "
+            f"A video condition must be decoded before it reaches the pipeline; an "
+            f"undecodable one travels on as a path and fails the frames-type check inside "
+            f"the GPU worker, by which point the file that caused it is unnamed."
+        ) from exc
+
+    if not frames:
+        raise ConstraintError(
+            f"{source} declares a video stream and decoded to no frames at all. The file is "
+            f"truncated or empty -- a header is not evidence that anything is behind it, and "
+            f"an empty condition would leave the run looking like the prompt alone."
+        )
+    if len({frame.shape for frame in frames}) > 1:
+        raise ConstraintError(
+            f"{source} changes frame size partway through, so its frames cannot be stacked "
+            f"into one clip. Re-encode it at a single resolution."
+        )
+    return np.stack(frames)
+
+
 def build_conditions(
     conditions: Sequence,
     *,
@@ -220,9 +344,16 @@ def build_conditions(
 ) -> tuple[ConditionSpec, ...]:
     """Normalise every condition into a range-checked :class:`ConditionSpec`.
 
-    Pure arithmetic -- no diffusers, so it runs on every path including the ones
-    with no model present. That matters: this is where an out-of-range anchor is
-    caught, and upstream would skip it with only a log line and generate anyway.
+    No diffusers, so it runs on every path including the ones with no model
+    present. That matters: this is where an out-of-range anchor is caught, and
+    upstream would skip it with only a log line and generate anyway.
+
+    A **video** condition is also decoded here, which is the one step that is
+    not arithmetic -- see :func:`decode_video_frames` for why it belongs at this
+    seam and nowhere later. Everything else about the condition is left exactly
+    as it arrived: only the payload type was ever wrong, and a decode that
+    quietly reset an anchor or a strength would trade one silent defect for
+    another.
 
     The returned list is always the same length as the input. A condition that
     cannot be built raises; it never comes back quietly shorter, because a shot
@@ -236,10 +367,16 @@ def build_conditions(
             num_frames=num_frames,
             temporal_compression_ratio=temporal_compression_ratio,
         )
+        kind = getattr(condition, "kind", "image")
+        source = fields["source"]
+        if kind == "video" and not _already_decoded(source):
+            source = decode_video_frames(
+                source, max_frames=num_frames if num_frames and num_frames > 0 else None
+            )
         built.append(
             ConditionSpec(
-                source=fields["source"],
-                kind=getattr(condition, "kind", "image"),
+                source=source,
+                kind=kind,
                 index=fields["index"],
                 strength=fields["strength"],
             )
