@@ -677,7 +677,7 @@ fabricated to accompany it.
 | 7 | ⛔ **The ~68 GB ceiling was inherited, never measured, and is now falsified** (§6). Audit any other planning number with the same provenance — carried in from outside, never verified here, and load-bearing. It survived this long because it was *consistent* with our data, which is not the same as supported by it. | ⏸️ open |
 | 8 | ⚠️ **`02fe943` STAYS** — the retry succeeded, so the revert condition never triggered (§9.2). But it stands on a hypothesis this run killed and costs 31.24 GiB of peak RSS for a steady-state saving still unmeasured. **Kept because it did not fail, not because it was shown to help.** | ✅ resolved, ⚠️ unjustified |
 | 9 | ⛔ **The fix is unattributed** — a container rebuild changed alongside `02fe943`, so n=1 vs n=1 with two variables (§9.3). Distinguishing them needs either a revert-and-retry on the same image, or route C. **Until then no document should say the widening fixed generation.** | ⏸️ open |
-| 10 | ⏸️ **Only 1 of 11 modes has ever run on the Space** — `text_to_video`, 256x256x9, no conditioning, no stage 2, no LoRA, no audio. The audio modes exercise the mel front-end and the 16 kHz/48 kHz asymmetry, none of which has run on this platform. | ⏸️ open |
+| 10 | ✅ **SUPERSEDED — 9 of 11 modes have now run**, at the same 256x256x9. The mel front-end and the 16 kHz/48 kHz asymmetry have both been exercised on this platform and both passed. The two failures are the video-INPUT modes, and their cause is known: a filepath `str` reaching `LTX2VideoCondition(frames=…)`, fixed offline at `d2eb6f2` and ⏸️ not yet re-run on the Space. Full evidence: **`docs/SPACE_MODE_MATRIX.md`**. | ✅ resolved |
 
 ---
 

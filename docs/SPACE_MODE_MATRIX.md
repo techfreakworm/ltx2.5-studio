@@ -5,9 +5,18 @@
 > `video_to_video` and `video_to_audio` fail — **both video-INPUT modes, and only
 > those.** Every other mode passes, including both audio-input modes.
 >
-> ⚠️ **The two failures are not diagnosed.** They return `'DecodeError'`, and
-> §4 is about why that string is almost the only thing we know: **the specific
-> reason our own code attached was destroyed before it reached the user.**
+> ✅ **Both failures are now diagnosed, and the cause is fixed offline.** They
+> returned `'DecodeError'`; the real exception was recovered from the **Space run
+> log**, which `spaces` prints even when it strips it from the client response
+> (§4). The cause is a **missing video decoder**, not a decode failure — §3.
+> Fixed at `d2eb6f2`.
+>
+> ⏸️ **Not yet re-run on the Space.** "Fixed" here means the offline gate agrees,
+> not that the Space has served these two modes. Only a live run closes that.
+>
+> §4 stands unchanged and still matters: the one string that would have made this
+> diagnosable in a single step was destroyed in transit, and recovering it took a
+> Space-log extraction to learn what our own code had already written down.
 
 **Every load-bearing number is marked:** ✅ *we measured it* · 📄 *read off a
 pinned source or the platform* · ⚠️ *inferred* · ⏸️ *not established*.
@@ -121,10 +130,36 @@ workflow, and only the video one fails.
 The audio track is not the cause. Whatever fails, fails on the video input
 itself.
 
-### ⚠️ A mechanism that is consistent with all of it, and is not yet proven
+### ✅ The mechanism, now CONFIRMED from the worker's own traceback
 
-A pre-run read of the seam predicted this split, and the prediction is on record
-from before the matrix ran:
+The prediction below was made before the matrix ran, and it was right. It is
+kept as written because a prediction on record is worth more than the same
+sentence written afterwards — but it is no longer the reason to believe this.
+**The reason is the traceback**, recovered from the Space run log:
+
+```
+File "diffusers/pipelines/ltx2/pipeline_ltx2_condition.py", line 899,
+  in preprocess_conditions
+    raise TypeError(f"Unsupported `frames` type for condition {i}: {type(condition.frames)}")
+TypeError: Unsupported `frames` type for condition 0: <class 'str'>
+```
+
+✅ **A `str` reached `LTX2VideoCondition.frames`.** `preprocess_conditions`
+dispatches that field over four accepted types — `PIL.Image.Image`,
+`list[PIL.Image.Image]`, `np.ndarray`, `torch.Tensor` 📄 (read at the pinned SHA
+`ac56fa2f`) — and raises for anything else. **It is not a decode failure at
+all**: nothing ever attempted a decode. `'DecodeError'` was our own wrapper
+around upstream's `TypeError`, which is why the name was so misleading.
+
+✅ **Reproduced offline** before any fix was written, and ✅ **fixed at
+`d2eb6f2`** — `conditioning.decode_video_frames` decodes the upload to
+`(F, H, W, 3)` `uint8` at the `build_conditions` seam, so a video condition
+stops being a path before it can reach the pipeline. Offline gate 2140 passed.
+
+⏸️ **The Space has not re-run these two modes.** The fix is verified against the
+offline gate and against upstream's own dispatch, not against the platform.
+
+The pre-run read, on record from before the matrix:
 
 * `gr.Image(type="pil")` hands the handler a **PIL Image** 📄 — the same object
   `scripts/host_matrix.py` has always passed, on the one path where video
@@ -140,10 +175,14 @@ from before the matrix ran:
 So the video modes hand diffusers a `str` where every run that has ever worked
 handed a list of decoded frames.
 
-> ⏸️ **This is consistent, not established.** A `DecodeError` is also what a
-> genuinely unreadable file would produce, and — see §4 — **the one string that
-> would have distinguished them was destroyed in transit.** Fix §4 first; it is
-> cheap, it is offline, and it is what makes the next attempt at this diagnosable.
+> ✅ **Established — and note what it cost to establish.** When this section was
+> first written the reading was marked *consistent, not proven*, because
+> `'DecodeError'` is equally what a genuinely unreadable file produces and **the
+> string that distinguished them had been destroyed in transit** (§4). That
+> caution was correct: the two hypotheses were indistinguishable from the
+> client, and only the Space-log traceback separated them. §4 is still the
+> cheaper fix to make first — it is what turns the *next* failure of this kind
+> into one line instead of a log extraction.
 
 ---
 
@@ -184,8 +223,50 @@ its own class name and its own message.
 payload was the single-quoted string `'DecodeError'` — our class's *name*, not
 its message.
 
-> **So the exception was re-boxed somewhere between the GPU worker and
-> `render.py`, and the `reason=` we attach was destroyed in transit.**
+> **So the exception was re-boxed between the GPU worker and `render.py`, and
+> the `reason=` we attach was destroyed in transit.**
+
+### ✅ Where it is re-boxed — the exact line, and it REPRODUCES
+
+This was first recorded as ⚠️ inferred. It is now read off the `spaces` source
+and **reproduced byte for byte offline**, which is why it is marked ✅ here:
+
+1. `wrappers.py:227` / `:379` 📄 — `raise error("ZeroGPU worker error", res.error_cls)`
+2. `wrappers.py:41` 📄 — `from .gradio import error`
+3. `spaces/zero/gradio.py:171` 📄 — that helper returns
+   **`gr.Error(message, title=…, print_exception=False)`**
+
+✅ Both halves of the observed output follow from step 3, and neither is a
+coincidence of formatting:
+
+* **`unexpected \`Error\``** — the class really is `gradio.exceptions.Error`.
+  `"ZeroGPU worker error"` is passed as `title=`, **not** as the class, so
+  `exc.__class__.__name__` is the bare word `Error`.
+* **`'DecodeError'`, with the single quotes** — they are `repr()` of the message
+  inside gradio's `Error.__str__`, not punctuation of ours. **That quoting is a
+  signature of this path**, and it is what makes the `'GPU task aborted'`
+  corroboration below *exact* rather than merely similar: the same helper
+  produces it at `wrappers.py:217`/`:370` with a literal string.
+
+✅ Fed through our own `render.failure()` against the gradio this app pins
+(**6.24.0**), it emits the Space's message character for character — the loss is
+**by design, not by accident**: `render.py` truthfully reports "not one of ours",
+because by the time it sees the object, it genuinely is not.
+
+⚠️ **Read at `spaces` 0.48.3; the Space runs 0.51.1** 📄. The marshalling source
+is therefore near-but-not-identical to the deployed version. The *rendering* was
+reproduced against the same gradio we actually ship, and it matches observed
+0.51.1 output for **two different failures**.
+
+> ### ✅ And one sentence of ours is right here and wrong elsewhere
+>
+> Our copy ends *"The full traceback is in the Space logs."* **In this failure
+> mode that is true** — `wrappers.py:226`/`:378` does `print(res.traceback)`
+> before raising, and that is exactly how §3's root cause was recovered. **In a
+> `SIGKILL` it is false**: nothing is printed, and `SPACE_GENERATION_FINDING.md`
+> §3 already flags it as false there. **The same sentence, correct in one
+> failure mode and misleading in the other** — which is what makes it worth
+> rewriting rather than deleting. Recorded against follow-up #1 of that file.
 
 That `reason=` is not decoration. `generate.py` raises `DecodeError` at **four**
 sites, and they say different things:
@@ -205,9 +286,9 @@ that was lost.
 
 ### ✅ A mechanism, measured offline — this costs zero GPU
 
-The leading hypothesis was that `spaces` marshals worker exceptions lossily
-across the fork. That is ⚠️ inferred. But there is a concrete, **measured**
-reason our exceptions cannot survive a fork at all:
+Separately from *where* the re-boxing happens, there is a concrete **measured**
+reason our exceptions could not survive a fork even if they were eligible to
+travel — and it is the half that makes the fix a pair rather than a single line:
 
 ```
 >>> pickle.loads(pickle.dumps(DecodeError(mode="video_to_video", reason="…")))
@@ -239,35 +320,95 @@ The five that survive are the abstract bases nobody raises with arguments. **Eve
 error class written to carry actionable detail is one that cannot cross the
 fork.**
 
-### ⚠️ Corroboration, and the limit of it
+### ✅ Corroboration — and the asymmetry that turned out to be the mechanism
 
 The earlier `'GPU task aborted'` had the **identical shape** ✅ — class `Error`,
 payload a single-quoted string — and that one is definitely a `spaces`-runtime
 message 📄. So `Error('…')` is how the platform surfaces things.
 
-⚠️ One asymmetry is worth stating because it sharpens the inference: for the
-killed worker the payload was a **message**, and for ours it was a **class
-name**. That is what you would expect from a marshaller that could not
-reconstruct our object and fell back to naming its type.
+One asymmetry was recorded here as *sharpening the inference*: for the killed
+worker the payload was a **message**, and for ours it was a **class name** —
+"what you would expect from a marshaller that could not reconstruct our object
+and fell back to naming its type."
 
-> ⏸️ **NOT established: that fixing the pickling would restore the message.**
-> `spaces` might send only the class name regardless of picklability. Nothing
-> here distinguishes those, and the offline stub does not fork, so it cannot be
-> settled off-Space. Settling it costs **one** live run after the fix.
+✅ **That reading was right, and the source says why**: both come from the same
+helper, `wrappers.py:217`/`:370` passing a literal string and `:227`/`:379`
+passing `res.error_cls`. The asymmetry is not two behaviours; it is **one call
+with two different arguments**, and which argument you get depends solely on
+whether the worker was killed or raised.
 
-### ✅ The fix is one method, and it was verified offline
+> ✅ **SETTLED, from the source — and the answer is "no".** The caution above
+> was right to be raised and is now closed by reading `spaces` rather than by
+> spending a live run on it.
+>
+> `ExceptionResult` 📄 (`spaces/zero/types.py:28-31`) carries exactly three
+> fields — `traceback: str`, `error_cls: str`, `gradio_error: Err | None` — and
+> `exception_result()` (`wrappers.py:453`) populates `gradio_error` **only** when
+> `isinstance(exc, gr.Error)`. **The original exception object is never
+> transmitted otherwise.** So for a `DecodeError` nothing is ever pickled,
+> `__reduce__` is never consulted, and the parent still runs
+> `raise error("ZeroGPU worker error", res.error_cls)` — the class name alone.
+>
+> **Picklability alone changes nothing.** It becomes load-bearing only once the
+> object is eligible to travel at all — see the fix below, which is a pair.
 
-A single `__reduce__` on `LTXStudioError` restores class, message **and every
-attribute** for all 22 subclasses at once — confirmed by round-tripping a real
-`DecodeError`:
+### ✅ The fix is a PAIR, and neither half works alone
+
+An earlier version of this section said the fix was one method. **It is two, and
+that correction came from reading `spaces` rather than from trying it.** Both
+halves are needed and each is inert — or worse — without the other:
+
+| change | what actually happens |
+|---|---|
+| `__reduce__` only | The exception never enters `ExceptionResult` in the first place, so picklability is never consulted. **No improvement whatsoever.** |
+| `gr.Error` subclass only | `gradio_error` is populated, so the object must now cross a `multiprocessing.Queue` 📄 (`wrappers.py:14, 65, 83` — `ForkProcess`, `res_queue = Queue()`). Ours cannot pickle. **Strictly worse — see below.** |
+| **both** | `gradio_error` is populated **and** survives the queue; the parent runs `raise res.gradio_error` (`wrappers.py:224/376`) and the real object arrives with its real message. **This is the fix.** |
+
+✅ **The middle row is measured, not guessed.** `spaces` anticipates exactly this
+and handles it at `wrappers.py:272-275`:
+
+```python
+try:
+    res_queue.put(res)
+except PicklingError as e:
+    res_queue.put(exception_result(e))
+```
+
+The worker replaces the whole result with an `ExceptionResult` describing **the
+`PicklingError` itself** — which is not a `gr.Error`, so `gradio_error` is
+`None` and `error_cls` becomes `"PicklingError"`. Run through our own renderer,
+that is what the user would see:
+
+```
+### ❌ Generation failed — unexpected `Error`
+
+> 'PicklingError'
+```
+
+**A `gr.Error` subclass on its own would destroy the one piece of information
+that currently survives** — today `'DecodeError'` at least names the failure;
+after that change it would name a serialisation artefact instead. Half this fix
+is a regression.
+
+✅ The `__reduce__` half is verified offline by round-tripping a real
+`DecodeError`, restoring class, message **and every attribute** for all 22
+subclasses at once:
 
 ```
 class : DecodeError      str : decoding failed for mode 'video_to_video': the pipeline raised …
 mode  : video_to_video   reason : the pipeline raised ValueError('bad frames')
 ```
 
-⏸️ Not applied. `errors.py` was outside this task's file ownership, and the
-change touches 22 classes and their specs.
+⏸️ **Neither half is applied.** `errors.py` is outside this task's file
+ownership, the change touches 22 classes and their specs, and it has not been
+authorised. This is a follow-up with a complete design attached, which is a
+better thing to hand over than a half-diagnosed one.
+
+⚠️ **Version caveat, stated exactly.** Everything above is read off `spaces`
+**0.48.3**, the locally readable copy; the Space runs **0.51.1** 📄. This is
+read-off-source, **not** measured on the Space. What *was* reproduced against
+the same gradio our app actually pins (6.24.0) is the client-side rendering, and
+it matches the observed 0.51.1 output for both failures.
 
 ---
 
@@ -344,20 +485,47 @@ upload, download and client overhead, none of which is GPU time.
 
 | | item | status |
 |---|---|---|
-| 1 | ⛔ **`video_to_video` and `video_to_audio` fail on the live Space.** Localised to video input (§3); the AAC-track hypothesis is refuted. The leading mechanism — a filepath string reaching `LTX2VideoCondition(frames=…)` where a decoded frame list is expected — is ⚠️ consistent and unproven. | ⏸️ open |
-| 2 | ⛔ **22 of 27 error classes cannot survive the ZeroGPU fork** (§4), measured. Fix is one `__reduce__` on `LTXStudioError`, verified offline. **Do this before re-attempting item 1**: it is what makes the failure diagnosable instead of a class name. | ⏸️ open, cheap, offline |
-| 3 | ⏸️ **Whether restoring picklability restores the message across `spaces` is not established.** Costs one live run to settle, after item 2. | ⏸️ open |
+| 1 | ✅ **Cause found and fixed offline.** A filepath `str` reached `LTX2VideoCondition(frames=…)`; `preprocess_conditions` dispatches that field over four types and raises for anything else (§3). Confirmed from the worker traceback, reproduced offline, fixed at **`d2eb6f2`**. ⏸️ **The Space has not re-run these two modes** — that is what remains open. | ⏸️ open: re-run on Space |
+| 2 | ⛔ **22 of 27 error classes cannot survive the ZeroGPU fork** (§4), measured. The fix is a **PAIR** — `__reduce__` on `LTXStudioError` **and** deriving it from `gr.Error` — and neither half works alone: `__reduce__` alone is never consulted, and `gr.Error` alone fails to pickle onto `res_queue` and surfaces as `'PicklingError'`, **destroying the class name that survives today**. Design complete, unapplied, `errors.py` unowned and unauthorised. | ⏸️ open, cheap, offline |
+| 3 | ✅ **Settled from source: picklability alone would NOT restore the message.** `ExceptionResult` carries only `traceback`, `error_cls` and `gradio_error`, and the exception object travels only when it is a `gr.Error` 📄 (`types.py:28-31`, `wrappers.py:453`). Read at `spaces` 0.48.3 against a Space on 0.51.1; read-off-source, not measured on-Space. **No live run is needed to know this** — one would still confirm it end to end. | ✅ resolved |
 | 4 | ⏸️ **Reproducibility is evidenced, not proven** (§5). No two-run frame-hash comparison exists. Cheap to close. | ⏸️ open |
 | 5 | ⚠️ **`audio_to_video` and `image_text_to_audio_video` are near-static** (§6). May be expected at this geometry; nothing establishes it either way. | ⏸️ open, observation |
 | 6 | ⛔ **`audio.validate_audio_latents_against_video` has ZERO callers.** Found by inspection, not by this matrix. It is exported, documented as *"the check that stops a desynced file being emitted rather than refused"*, and nothing calls it — so supplied `audio_latents` set the audio length while `num_frames` sets the video length, with nothing comparing them. Both audio-input modes passed here **only because their fixture came from a same-geometry run**, which is a property of the runner's chaining and not a defect anyone would notice. | ⏸️ open |
 | 7 | ⏸️ **Only one configuration has been exercised** — 256×256×9, stage 2 off, no LoRA, no `auto_duration`. Nothing here says what any mode does at a shippable resolution, and stage 2 has never run on the Space at all. | ⏸️ open |
 
+### ⛔ Item 6 is the THIRD instance of one defect class, and that is the finding
+
+An advertised guard wired to nothing has now been found three times in this
+build, by three unrelated routes:
+
+| | the guard | how it was inert | how it was caught |
+|---|---|---|---|
+| 1 | `LTX25_TEXT_ENCODER_PRECISION` / `LTX25_TRANSFORMER_PRECISION` | not a `RuntimeConfig` field at all — never resolved, validated or logged | mutation test, after the value had already been written into a findings doc as a live lever 📄 |
+| 2 | `--quota-ceiling` | per-invocation; five invocations each announced **FITS** knowing nothing of the other four | reading the runner's own output across runs |
+| 3 | `audio.validate_audio_latents_against_video` | exported, documented, **zero callers** | inspection, not by this matrix |
+
+**The class is not "a bug that was missed". It is a mechanism that reports
+safety it never checked** — which is strictly worse than its absence, because an
+inert *lever* merely does nothing while an inert *report* actively tells you that
+you are safe. `PLAN.md` states the rule for levers already: *"an advertised lever
+attached to nothing is worse than no lever at all."* Three instances say the rule
+needs a **test-shaped** counterpart, not another restatement.
+
+⏸️ **The cheap generalisation nobody has run:** every guard in this package that
+is exported and documented, checked for callers. #3 was found by eye. Nothing
+says it is the last one, and two of these three were invisible to a green gate.
+
 ---
 
 ## 9. What this document does not say
 
-* It does **not** say why the video modes fail. §3 names a consistent mechanism
-  and §4 explains why the evidence that would confirm it was destroyed.
+* It does **not** say the video modes now work on the Space. §3 gives the cause,
+  confirmed from the worker traceback, and a fix at `d2eb6f2` that the **offline
+  gate** accepts. ⏸️ Neither mode has been re-run on the platform, and this
+  document's own standard is that a green local gate is not a Space result.
+* It does **not** say the fork-boundary fix has been applied or tried. §4's
+  design is complete and read off `spaces` **0.48.3** while the Space runs
+  **0.51.1**; nothing in it has been exercised against the platform.
 * It does **not** say any figure here is billed GPU-seconds. All of them are
   wall-clock-derived bounds.
 * It does **not** say the passing modes are *good*. They generate, and their

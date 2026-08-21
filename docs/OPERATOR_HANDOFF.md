@@ -153,9 +153,12 @@ Three things a reader needs:
 > of every pair above were unconditionally random. **The pixel differences
 > cannot evidence that the recipe fix caused them** — two runs of one mode
 > differed anyway. ✅ Seeding is fixed, and verified byte-identical **for
-> `audio_to_audio`**; a seeded gallery would supersede this table for
-> attribution ⏸️ **once the video path is shown reproducible too**. These
-> figures remain as the record of what the defect cost.
+> `audio_to_audio`**.
+>
+> ⛔ **The seeded gallery that was to supersede this table is DROPPED.** It lived
+> on a host that no longer exists, and nothing replaced it. **So this table is
+> permanently unattributable, not temporarily so** — these figures remain as the
+> record of what the defect cost, and that is now all they will ever be.
 >
 > **The audio levels do stand on their own**, because they are systematic and
 > orders of magnitude outside run-to-run variation:
@@ -168,9 +171,12 @@ Three things a reader needs:
 >
 > A 50 dB gap and a clipped peak going away are not a seed.
 >
-> ⏸️ **And the replacement is not yet in hand.** Bitwise reproducibility is
-> verified for `audio_to_audio`; the **video** path is still being checked, and
-> the seeded gallery can only attribute per-pair change once it is.
+> ⛔ **And the replacement will not arrive.** Bitwise reproducibility is verified
+> for `audio_to_audio`. The **video** path has since been *evidenced* on the
+> Space — a run returned bytes identical to one banked the previous day on a
+> different container at the same seed — but ⏸️ **evidenced is not proven**: no
+> two-run frame-hash comparison exists. See `docs/SPACE_MODE_MATRIX.md` §5. The
+> gallery that was to close this is dropped with the host it lived on.
 
 > ### ✅ Sizes differed between the two code paths — almost certainly just the seed
 >
@@ -501,17 +507,19 @@ caches per image or per cold worker is ⏸️ unknown and decides its severity.
    > *"seed-consistent but not bit-reproducible"* was drafted and never needed.
 
    ⏸️ **Scope, and it matters for §2.5:** that measurement is **one mode**. The
-   **video path is not yet shown to be bitwise reproducible**, and the whole
-   twelve-mode pixel-diff gallery depends on it — if a video mode carries its
-   own unseeded draw, those per-pair numbers stay unattributable however good
-   the audio seeding is. A `text_to_video` pair at one seed is running to
-   settle it.
+   **video path is not shown to be bitwise reproducible** — it is *evidenced* on
+   the Space (byte-identical output across two days and two containers at one
+   seed, plus `text_to_audio_video` matching `text_to_video`'s video statistics
+   to three decimals) and no two-run frame-hash comparison has ever been made.
+   `docs/SPACE_MODE_MATRIX.md` §5 states that limit explicitly.
 
-   **The remaining consequence is narrow**: the §2.5 comparison table was
-   measured *before* this worked, so its pixel diffs cannot attribute the change
-   to the recipe fix. The seeded gallery replaces it. Everything structural was
-   never affected — H14's exact 2× resolution, H15's 97 frames, H17's frequency
-   recovery, and every audio level.
+   ⛔ **The twelve-mode pixel-diff gallery that depended on it is DROPPED** — the
+   host it ran on is gone. **So the consequence is permanent rather than
+   pending**: the §2.5 comparison table was measured *before* seeding worked, its
+   pixel diffs cannot attribute the change to the recipe fix, and nothing is
+   coming to replace it. Everything structural was never affected — H14's exact
+   2× resolution, H15's 97 frames, H17's frequency recovery, and every audio
+   level.
 
    > The lever that should have caught it was ours: `decode_kwargs` took a
    > `generator` argument, **with a docstring explaining why the diffusion
