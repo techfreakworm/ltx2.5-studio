@@ -390,6 +390,16 @@ that currently survives** — today `'DecodeError'` at least names the failure;
 after that change it would name a serialisation artefact instead. Half this fix
 is a regression.
 
+⚠️ **And `gr.Error` is the obvious half.** It is what the source points at, and
+what anyone reading `exception_result` would reach for first — a one-line base
+class change with a clear rationale. **On its own it would have failed, for
+exactly the reason measured above.** That is what makes the picklability finding
+load-bearing rather than a curiosity: it is not a second improvement stacked on
+the first, it is the thing that makes the obvious change insufficient. Neither
+half looks necessary until you are holding both, which is the argument for
+recording the pair here rather than leaving the next person to discover it one
+failed deploy at a time.
+
 ✅ The `__reduce__` half is verified offline by round-tripping a real
 `DecodeError`, restoring class, message **and every attribute** for all 22
 subclasses at once:
