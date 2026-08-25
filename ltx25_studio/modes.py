@@ -122,7 +122,9 @@ _AUDIO_ONLY_NOTE = (
 
 _AUDIO_TO_VIDEO_NOTE = (
     "This mode encodes your audio into latents before generating, so it pays the audio "
-    "encode on top of a normal video render."
+    "encode on top of a normal video render. The file comes back with sound, and that "
+    "sound is the model's own track — generated jointly with the frames, not your upload "
+    "muxed back in. Your audio steered the render; it is not what you get back."
 )
 
 
@@ -317,12 +319,67 @@ _SPECS = (
         skip_stage_2=True,
     ),
     # -- 11: exports video, so it gets none of the audio-only mitigations -----
+    #
+    # ⛔ **It used to export video ONLY, and that was the defect.** A user who
+    # conditioned on audio got back an mp4 with ZERO audio streams -- confirmed
+    # twice on the live Space. The generated track was discarded by
+    # `outputs._write_video`'s `include_audio` branch and reported through
+    # `dropped_audio_warning`, which told the user to "use the matching
+    # audio+video mode to keep it". **There is no such mode.** `audio_counterpart`
+    # is None here, so the one mitigation the drop had pointed at nothing.
+    #
+    # ✅ **RULED: the muxed track is the audio the model GENERATED, not the audio
+    # the user supplied.** Both were defensible; the generated one is the one
+    # that cannot silently mislead. Six reasons, in the order that decided it:
+    #
+    # 1. **`audio_to_audio` already answers this question.** Mode 10 takes the
+    #    same audio input, through the same `_condition_builder(audio=True)`, on
+    #    the same `condition` pipeline, and returns the model's track -- nobody
+    #    argues it should hand the upload back. Mode 11 is that same joint render
+    #    with the video kept instead of discarded. Returning a DIFFERENT track
+    #    for one than for the other would make "the audio in this file" mean two
+    #    things across two modes that differ only in which track survives.
+    #
+    # 2. **Alignment is by construction for one and not the other.** The
+    #    generated audio comes off the same joint latent timeline as the frames.
+    #    The upload does not: `audio.reconcile_waveform_with_video` returns it
+    #    UNTOUCHED inside a +/-0.05 s tolerance, and when it does trim, it snaps
+    #    to `seconds_for_latent_frames(...)` -- upstream's latent grid -- not to
+    #    `num_frames / frame_rate`. The upload is never guaranteed video-length.
+    #
+    # 3. **The reconciled waveform does not exist at export time.** It is a local
+    #    in `generate._prepared_audio`, consumed into `audio_latents` and gone.
+    #    What survives is `request.audio`: the ORIGINAL, UNTRIMMED file. Muxing
+    #    that would reintroduce at the output end exactly the desync `2eaeb2c`
+    #    fixed at the input end -- a 10 s upload against a 5 s video conditions
+    #    on 5 s and would ship with 10 s of sound.
+    #
+    # 4. **Rates.** The upload carries the file's own rate; the writer is handed
+    #    `vocoder.config.output_sampling_rate` (48000 against the VAE's 16000 --
+    #    see `conftest`'s note on that trap). Muxing the upload at the vocoder's
+    #    rate pitch-shifts it silently, which is the defect class
+    #    `outputs._required` exists to refuse, and carrying a second rate would
+    #    double the writer's independent rate assumptions.
+    #
+    # 5. **It cannot mask a conditioning failure.** Muxing the upload back would
+    #    make every mode-11 file look and sound synchronised whether or not the
+    #    model actually followed the audio -- the user's own track papering over
+    #    a render that ignored it. The generated track cannot do that: if the
+    #    model ignored the conditioning, you hear it.
+    #
+    # 6. **Nothing is lost either way.** The user still holds their file and can
+    #    mux it over the video losslessly. The generated track, once dropped, is
+    #    gone and was paid for in GPU-seconds -- which is what the drop warning
+    #    always said, while pointing at a sibling mode that does not exist.
+    #
+    # The user is TOLD which track they got, every run, through the warnings
+    # channel -- `generate._prepared_audio`. Silence is what the defect was.
     ModeSpec(
         id="audio_to_video",
         label="Audio to video",
         pipeline="condition",
         inputs=("audio",),
-        exports=("video",),
+        exports=("audio", "video"),
         build_kwargs=_condition_builder(audio=True),
         cost_note=_AUDIO_TO_VIDEO_NOTE,
     ),

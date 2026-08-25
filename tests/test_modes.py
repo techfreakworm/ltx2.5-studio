@@ -76,7 +76,11 @@ EXPECTED_EXPORTS = {
     "text_to_audio": ("audio",),
     "video_to_audio": ("audio",),
     "audio_to_audio": ("audio",),
-    "audio_to_video": ("video",),
+    # Mode 11 conditions on audio and used to export video ONLY, which returned
+    # an mp4 with zero audio streams to a user who had just uploaded a track.
+    # It now exports both; the muxed track is the model's own, and `modes.py`
+    # carries the ruling and its six reasons at the spec.
+    "audio_to_video": ("audio", "video"),
 }
 
 EXPECTED_INPUTS = {

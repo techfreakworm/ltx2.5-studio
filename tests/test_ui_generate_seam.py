@@ -490,6 +490,158 @@ def test_a_mono_upload_is_reported_to_the_user_not_only_the_log(monkeypatch, tmp
     )
 
 
+# --------------------------------------------------------------------------
+# audio in, audio out -- and WHICH audio (the mode-11 defect)
+#
+# `audio_to_video` took an audio upload and returned an mp4 with ZERO audio
+# streams. Confirmed twice on the live Space: the operator hit it, and a
+# controlled run reproduced it as `audio: False` in the response tuple. The
+# generated track was discarded by `outputs._write_video`'s `include_audio`
+# branch and reported through `dropped_audio_warning` -- which advised the user
+# to "use the matching audio+video mode to keep it" when mode 11's
+# `audio_counterpart` is None and no such mode exists.
+#
+# The registry now declares `exports=("audio", "video")` for it, and the track
+# it muxes is the one the model GENERATED. `modes.py` carries the ruling and its
+# six reasons at the spec; these tests pin the two halves that can regress
+# silently -- that a file comes back with sound, and that the user is told whose
+# sound it is.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("mode_id", AUDIO_INPUT_MODES)
+def test_a_mode_that_conditions_on_audio_also_exports_audio(mode_id):
+    """The registry-level regression, stated in the terms the defect had.
+
+    Derived coverage exists -- ``audio_to_video`` is now in
+    ``test_encoder_contract.JOINT_MODES``, so the real PyAV encoder is checked
+    against a real container for it. That coverage is silent about WHY, and a
+    future edit narrowing ``exports`` back to ``("video",)`` would simply drop
+    out of the derived set with every test still green. This one fails.
+    """
+    exports = modes.get_mode(mode_id).exports
+    assert "audio" in exports, (
+        f"{mode_id!r} conditions on an audio upload and declares exports={list(exports)}, so "
+        f"`outputs._write_video` will drop the generated track and hand the user a file with "
+        f"no audio stream -- which is exactly the defect confirmed twice on the Space"
+    )
+
+
+@pytest.mark.parametrize("mode_id", AUDIO_INPUT_MODES)
+def test_the_user_is_told_the_audio_is_the_models_and_not_their_upload(
+    mode_id, tmp_path, monkeypatch
+):
+    """Muxing the right track silently is still a surprise.
+
+    A user who uploads a song to ``audio_to_video`` will assume the sound in the
+    result is that song. It is not: it is the model's own jointly-rendered
+    track. Choosing correctly and saying nothing is the same shape as the defect
+    being fixed, one step quieter, so the choice is stated every run.
+    """
+    from conftest import STUB_SAMPLING_RATE, STUB_WAVEFORM
+
+    from ltx25_studio import audio as audio_module
+
+    monkeypatch.setattr(
+        audio_module, "load_waveform", lambda source: (STUB_WAVEFORM, STUB_SAMPLING_RATE)
+    )
+
+    result = generate_module.generate(
+        mode=mode_id,
+        seed=7,
+        audio="a-song-the-user-cares-about.wav",
+        pipeline_factory=factory_returning(FakePipe()),
+        encoder=one_muxed_file_encoder,
+        output_root=tmp_path,
+        retention_bytes=10**9,
+    )
+
+    assert any("model's OWN track" in note for note in result.warnings), (
+        f"{mode_id!r} returned the model's audio and never said so, so a user who uploaded "
+        f"audio has no way to learn the file does not contain it: {result.warnings}"
+    )
+
+
+def test_the_programmatic_latents_route_is_told_which_track_too(tmp_path):
+    """The other way audio enters. Silence here would be the same defect.
+
+    ``_prepared_audio`` returns early down the supplied-``audio_latents`` branch
+    without ever touching ``request.audio``, so a note appended alongside the
+    file-encode path only would miss this caller entirely.
+    """
+    # Shapeless on purpose: that route's own sync check reports "could not
+    # check" and returns, which is the shortest path through the branch and the
+    # one a note appended further down would never reach.
+    result = generate_module.generate(
+        mode="audio_to_video",
+        seed=7,
+        audio_latents=object(),
+        pipeline_factory=factory_returning(FakePipe()),
+        encoder=one_muxed_file_encoder,
+        output_root=tmp_path,
+        retention_bytes=10**9,
+    )
+
+    assert any("model's OWN track" in note for note in result.warnings), (
+        f"audio was supplied as latents and the result never says which track came back: "
+        f"{result.warnings}"
+    )
+
+
+def test_the_track_note_is_gated_on_exports_not_on_the_mode_id():
+    """Tested directly, because no mode currently reaches this branch.
+
+    Every audio-input mode exports audio today, so the gate inside
+    ``_supplied_audio_note`` is unexercised end-to-end: deleting it leaves the
+    whole suite green. It is not decoration. The note asserts a fact about a
+    file the run produced -- "the audio in this file is the model's" -- and a
+    future audio-input mode that exports video only would make that sentence
+    describe a track the user never receives.
+
+    Deriving it from ``exports`` rather than from the mode id is what keeps the
+    note from outliving the behaviour it describes, and this is the only thing
+    that holds the derivation in place.
+    """
+    assert generate_module._supplied_audio_note("audio_to_video", ("audio", "video"))
+    assert generate_module._supplied_audio_note("audio_to_audio", ("audio",))
+    assert generate_module._supplied_audio_note("some_future_mode", ("video",)) == (), (
+        "a mode that exports no audio would be told its file contains the model's audio"
+    )
+    assert generate_module._supplied_audio_note("some_future_mode", ()) == ()
+
+
+@pytest.mark.parametrize(
+    "mode_id",
+    [
+        m
+        for m in MODE_IDS
+        if "audio" not in modes.get_mode(m).inputs and "audio" in modes.get_mode(m).exports
+    ],
+)
+def test_a_mode_given_no_audio_is_told_nothing_about_whose_audio_it_is(mode_id, tmp_path):
+    """The note must not fire where the user supplied nothing to confuse it with.
+
+    ``text_to_audio_video`` and its siblings export audio without taking any, so
+    "this is the model's track, not your upload" would be answering a question
+    nobody asked -- and warnings that fire when nothing is wrong are how a
+    warnings channel stops being read.
+    """
+    result = generate_module.generate(
+        mode=mode_id,
+        seed=7,
+        prompt="a prompt",
+        pipeline_factory=factory_returning(FakePipe()),
+        encoder=one_muxed_file_encoder,
+        output_root=tmp_path,
+        retention_bytes=10**9,
+    )
+
+    assert not any("model's OWN track" in note for note in result.warnings), (
+        f"{mode_id!r} was given no audio input and still explained whose audio it "
+        f"returned: {result.warnings}"
+    )
+
+
 def test_the_seed_reaches_the_pipeline_not_only_the_sidecar(monkeypatch, tmp_path):
     """The seed used to be recorded and never applied.
 

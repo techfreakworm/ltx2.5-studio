@@ -304,8 +304,53 @@ def _seeded_generator(pipe, seed: int):
     return generator
 
 
-def _prepared_audio(kwargs: dict, request: GenerationRequest, pipe) -> tuple[str, ...]:
+def _supplied_audio_note(mode: str, exports) -> tuple[str, ...]:
+    """Say which of the two audio tracks the user is holding. Never silent.
+
+    **An audio-conditioned mode has two candidate tracks and they are not the
+    same sound.** The user supplied one; the model, being jointly audio-visual,
+    rendered another. ``modes.py``'s mode-11 comment carries the ruling and its
+    six reasons -- the short form is that the generated track is the one that
+    cannot silently mislead, because muxing the upload back would make the file
+    look synchronised whether or not the render actually followed it.
+
+    A correct choice made silently is still a surprise. This is the sentence
+    that stops a user who uploaded a song from assuming the sound in the file is
+    that song, and it names the remedy, because muxing their own file over the
+    video is a thing they can do losslessly and we cannot do for them.
+
+    Gated on ``exports`` rather than on the mode id: a future audio-input mode
+    that exports no audio would make this note a lie, and deriving it from the
+    contract means the note cannot outlive the behaviour it describes.
+    """
+    if "audio" not in tuple(exports or ()):
+        return ()
+    # Lazily, like every other use of this module here: `audio` pulls torch and
+    # torchaudio, and `generate` is imported by layers that must stay cheap.
+    from .audio import DEFAULT_LENGTH_TOLERANCE_SECONDS
+
+    return (
+        f"the audio in this file is the model's OWN track, generated jointly with the "
+        f"frames -- not the audio you supplied. Your audio conditioned the render for mode "
+        f"{mode!r}; it was not muxed back in. The generated track is aligned to the frames "
+        f"by construction and your upload is not (it is reconciled to the video only within "
+        f"a {DEFAULT_LENGTH_TOLERANCE_SECONDS}s tolerance and on upstream's latent grid), so "
+        f"the two are not interchangeable. Mux your own file over the video yourself if that "
+        f"is what you wanted.",
+    )
+
+
+def _prepared_audio(
+    kwargs: dict, request: GenerationRequest, pipe, *, exports=()
+) -> tuple[str, ...]:
     """Encode the user's audio file into the latents the pipeline actually takes.
+
+    **Audio in does not mean that audio out**, and ``exports`` is threaded in so
+    this layer can say so. See :func:`_supplied_audio_note`: whenever audio
+    actually entered a run whose mode exports audio, the result carries one
+    sentence naming which track the file contains. Mode 11 shipped without it
+    and returned mp4s with no audio stream at all; the fix is not only to mux a
+    track but to say which track it is.
 
     **This is the step that did not exist.** There is no ``audio=`` argument on
     any LTX2 pipeline (PLAN §3.1c) -- audio enters as pre-encoded
@@ -321,9 +366,14 @@ def _prepared_audio(kwargs: dict, request: GenerationRequest, pipe) -> tuple[str
     programmatic route, which needs no file -- but that route is **checked**,
     not waved through: see :func:`_checked_supplied_audio_latents`.
     """
+    # Both routes are "the user gave us audio", so both get the note. The
+    # early return below is the only path where no audio entered at all, and it
+    # is the only one that must stay silent.
     supplied = kwargs.get("audio_latents")
     if supplied is not None:
-        return _checked_supplied_audio_latents(supplied, kwargs, request, pipe)
+        return _supplied_audio_note(request.mode, exports) + _checked_supplied_audio_latents(
+            supplied, kwargs, request, pipe
+        )
     source = getattr(request, "audio", None)
     if source is None:
         return ()
@@ -345,8 +395,9 @@ def _prepared_audio(kwargs: dict, request: GenerationRequest, pipe) -> tuple[str
     waveform, rate = audio_module.load_waveform(source)
     # Anything this path had to change about the user's file comes back through
     # `notes`, so it reaches `GenerationResult.warnings` rather than the Space
-    # log alone.
-    notes: list[str] = []
+    # log alone. It leads with which track the file will carry, because that is
+    # the fact a user who uploaded audio is most likely to get wrong.
+    notes: list[str] = list(_supplied_audio_note(request.mode, exports))
 
     # TRIM long, REFUSE short, never pad, never silent. A file longer than the
     # num_frames-derived video is cut to upstream's own latent grid and the cut
@@ -773,7 +824,7 @@ def generate(
             kwargs["generator"] = generator
 
         # After the pipeline exists, because encoding needs its `audio_vae`.
-        audio_notes = _prepared_audio(kwargs, request, pipe)
+        audio_notes = _prepared_audio(kwargs, request, pipe, exports=spec.exports)
         size_notes = ()
         if stage_2_enabled(spec, request):
             from . import pipelines

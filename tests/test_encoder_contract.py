@@ -221,6 +221,36 @@ def test_a_joint_mode_writes_a_container_that_really_carries_the_audio(mode_id, 
     )
 
 
+@pytest.mark.parametrize("mode_id", [m for m in MODE_IDS if "video" in modes.MODES[m].exports])
+def test_the_drop_warning_fires_exactly_where_a_track_is_actually_dropped(mode_id, tmp_path):
+    """``dropped_audio_warning`` had no test at all. Both directions, now pinned.
+
+    The model is jointly audio-visual with no video-off switch, so every
+    video-exporting run renders audio. A mode that does not export it discards
+    it and MUST say so -- the user paid GPU-seconds for that track. A mode that
+    does export it keeps it and must NOT say so.
+
+    The false direction is the one that just bit: ``audio_to_video`` conditioned
+    on an audio upload, dropped the generated track, and told the user to "use
+    the matching audio+video mode to keep it" -- when its ``audio_counterpart``
+    is None and no such mode has ever existed. A stale warning naming a remedy
+    that does not exist sends the user hunting for a mode nobody built, which is
+    worse than silence, not better.
+    """
+    result = run_production(mode_id, tmp_path)
+    dropped = [note for note in result.warnings if "dropped rather than muxed" in note]
+
+    if "audio" in modes.MODES[mode_id].exports:
+        assert not dropped, (
+            f"{mode_id!r} exports audio and keeps its track, yet reports it as dropped: {dropped}"
+        )
+    else:
+        assert dropped, (
+            f"{mode_id!r} exports video only, so this run rendered an audio track and threw it "
+            f"away, and the result says nothing about it: {list(result.warnings)}"
+        )
+
+
 @pytest.mark.parametrize("mode_id", JOINT_MODES)
 def test_the_muxed_audio_track_contains_actual_samples(mode_id, tmp_path):
     """An audio stream declared and never written is the same lie with a header."""

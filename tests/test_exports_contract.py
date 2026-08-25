@@ -220,12 +220,20 @@ JOINT_MODES: tuple[str, ...] = tuple(
 )
 
 
-def test_the_registry_still_declares_three_joint_audio_video_modes():
-    """PLAN §3.3 rows 5-7. If this changes, the regression below is aimed wrong."""
+def test_the_registry_still_declares_four_joint_audio_video_modes():
+    """PLAN §3.3 rows 5-7, plus mode 11. If this changes, the regression below is aimed wrong.
+
+    ``audio_to_video`` joined this set when the no-audio-stream defect was fixed:
+    it conditions on audio and used to return an mp4 with zero audio streams. The
+    ruling and its six reasons are in ``modes.py`` at the mode-11 spec. The count
+    is pinned by NAME rather than by length so that a mode arriving here silently
+    -- which is how a video-only mode would start muxing sound -- fails loudly.
+    """
     assert JOINT_MODES == (
         "text_to_audio_video",
         "image_to_audio_video",
         "image_text_to_audio_video",
+        "audio_to_video",
     )
 
 
