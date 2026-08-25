@@ -32,6 +32,7 @@ of quietly costing GPU-seconds.
 from __future__ import annotations
 
 import json
+import os
 import sys
 from fractions import Fraction
 from pathlib import Path
@@ -50,6 +51,46 @@ from ltx25_studio import modes
 from ltx25_studio.ui import fields
 
 av = pytest.importorskip("av")
+
+
+# ---------------------------------------------------------------------------
+# real banked artifacts
+#
+# A synthesised near-static fixture proves the checker is self-consistent. It
+# cannot prove the thresholds are right about REAL output, and getting that
+# wrong is what put a false defect report in this project twice. So the tests
+# that pin the temporal policy read the artifacts the Space actually returned —
+# tens of megabytes of mp4, kept out of the repo — and SKIP when they are not
+# there. A box that has never seen this build's output cannot honestly assert
+# on it in either direction, and a test that quietly passes without its evidence
+# is worse than one that says it was not run.
+# ---------------------------------------------------------------------------
+
+BANKED = Path(
+    os.environ.get(
+        "LTX25_BANKED_ARTIFACTS",
+        "/private/tmp/claude-502/-Users-techfreakworm--soma-worktrees-ltx25-studio-ltx25-studio"
+        "/e132fe51-c395-433b-bf41-2a9e53c8c0cc/scratchpad",
+    )
+)
+
+#: ``image_to_audio_video``, 512x960x121: a red balloon over a lake at dawn,
+#: structure 0.9974, high-freq 0.0559, block std 81.6, luma band 238.0 — and
+#: mean |Δ| 0.4071, for which the old gate destroyed it. Near-static because it
+#: is conditioned on a still image of that scene, which is the mode working.
+FALSELY_REFUSED = "m2/13013c1d91469a64a629b4a91ef03a165b7071818375e2dc63c28125ff57bda0/output.mp4"
+
+#: The same scene, a sibling run, at mean |Δ| 0.3859 — BELOW the 0.403 the old
+#: threshold was calibrated against. The two populations overlap.
+STILLER_SIBLING = "m2/e9ff3b66ebb44b7ffb68e438dac00133dc2ef72b2d1127449e6a8c0d46c7a82e/output.mp4"
+
+
+def banked(relative: str) -> Path:
+    """A real generated artifact, or a skip that names what is missing."""
+    path = BANKED / relative
+    if not path.is_file():
+        pytest.skip(f"banked artifact not present: {path}")
+    return path
 
 
 # ---------------------------------------------------------------------------
@@ -149,6 +190,34 @@ def near_static_stack(frames=9):
     base = _smooth_base()
     planes = np.stack([base + index * 1.4 for index in range(frames)])
     return np.repeat(np.clip(planes, 0, 255)[..., None], 3, axis=-1).astype(np.uint8)
+
+
+def barely_moving_stack(frames=9, step=0.4, scale=1.0):
+    """The artifact class the old temporal gate destroyed: structured, coherent,
+    and drifting far too slowly to satisfy an absolute ``mean |Δ|`` threshold.
+
+    Decodes at mean |Δ| 0.45 — the same neighbourhood as the real
+    ``image_to_audio_video`` render refused at 0.4071 — with structure 0.97 and
+    a freeze ratio of 0.0093, nine times clear of the floor. It must WARN and
+    pass.
+
+    ``scale`` dims the whole stack without changing the scene or its motion.
+    That is the axis an absolute threshold cannot survive: at ``scale=0.35`` the
+    measured |Δ| falls six-fold purely because the picture got darker.
+    """
+    base = _smooth_base() * scale
+    planes = np.stack([base + index * step * scale for index in range(frames)])
+    return np.repeat(np.clip(planes, 0, 255)[..., None], 3, axis=-1).astype(np.uint8)
+
+
+def frozen_stack(frames=9):
+    """One frame, N times — a real freeze, not a still scene.
+
+    Distinct from :func:`barely_moving_stack` by construction rather than by
+    degree: nothing changes between these frames at all, and what survives h264
+    is codec noise. That is precisely the case byte identity misses.
+    """
+    return np.repeat(near_static_stack(1), frames, axis=0)
 
 
 def murky_stack(frames=9):
@@ -653,7 +722,7 @@ def test_a_moving_video_passes_and_reports_its_numbers(tmp_path):
     assert content.frames == 9
     assert content.distinct_frames >= space_matrix.MIN_DISTINCT_FRAMES
     assert content.spatial_std > space_matrix.MIN_PIXEL_STD
-    assert content.mean_abs_delta > space_matrix.MIN_MEAN_FRAME_DELTA
+    assert content.mean_abs_delta > space_matrix.LOW_MEAN_FRAME_DELTA
     assert "distinct" in content.render()
 
 
@@ -664,7 +733,37 @@ def test_a_frozen_video_is_rejected(tmp_path):
     assert verify_streams_ok("text_to_video", frozen), "the structural check passes on this file"
     with pytest.raises(space_matrix.ArtifactContentError) as caught:
         space_matrix.verify_video_content(frozen, expected_frames=9)
-    assert "frozen" in str(caught.value) or "nothing moved" in str(caught.value)
+    assert "one frame N times" in str(caught.value)
+
+
+def test_byte_identity_alone_cannot_catch_a_frozen_render(tmp_path):
+    """Why the freeze floor exists at all, and why deleting it is not safe.
+
+    The obvious reading of ``MIN_DISTINCT_FRAMES`` is that it already covers
+    frozen video: every frame identical, one distinct frame, refused. It does
+    not. **h264 is lossy, so identical frames do not decode back identical** —
+    the fixture above goes in as nine copies of one array and comes back as
+    *eight distinct frames of nine*, which sails through the distinctness floor.
+
+    So byte identity catches only the lossless case, and every artifact this
+    tool ever sees is h264. Without a second, scale-free temporal refusal,
+    demoting the old ``mean |Δ|`` gate would have left a dead video with nothing
+    at all to fail: a frozen photograph has *perfect* spatial structure, so the
+    structure gates cannot see it either.
+    """
+    from ltx25_studio import outputs
+
+    frames = space_matrix._decode_video_frames(write_video(tmp_path / "frozen.mp4", moving=False))
+    distinct = len({frame.tobytes() for frame in frames})
+
+    assert distinct >= space_matrix.MIN_DISTINCT_FRAMES, (
+        f"the distinctness floor PASSES this frozen file ({distinct} of {len(frames)} distinct) — "
+        f"codec noise, not motion"
+    )
+    structure = outputs.measure_structure(frames)
+    assert outputs.structure_failure(structure) is None, (
+        "and the structure gates pass it too: a frozen picture is still a picture"
+    )
 
 
 def test_a_blank_video_is_rejected(tmp_path):
@@ -733,7 +832,10 @@ def test_every_other_content_check_passes_on_that_same_static(tmp_path):
     assert len(frames) == 9, "the frame-count check passes"
     assert distinct >= space_matrix.MIN_DISTINCT_FRAMES, "the distinctness check passes"
     assert spatial > space_matrix.MIN_PIXEL_STD, "the flatness check passes"
-    assert delta > space_matrix.MIN_MEAN_FRAME_DELTA, "and the motion check passes, by 100x"
+    assert delta > space_matrix.LOW_MEAN_FRAME_DELTA, (
+        "and the motion measure passes by 100x — it was a FAIL when this artifact came "
+        "back, and it scored this file a pass"
+    )
 
 
 def test_the_refusal_names_both_halves_of_the_conjunction(tmp_path):
@@ -757,6 +859,172 @@ def test_a_near_static_but_structured_video_is_accepted(tmp_path):
     assert content.structure.structure_ratio > space_matrix.MIN_STRUCTURE_RATIO
     assert content.structure.high_frequency_ratio < space_matrix.MAX_HIGH_FREQUENCY_RATIO
     assert content.warnings == (), content.render()
+
+
+# ---------------------------------------------------------------------------
+# temporal difference WARNS — the demoted gate
+#
+# This section is the counterpart of the one above, and it is the same lesson
+# with the sign reversed. The structure gates exist because a statistical check
+# scored mush a PASS. These exist because a statistical check scored a real
+# render a FAIL: `image_to_audio_video` at 512x960x121, a coherent photographic
+# scene, refused for mean |Δ| 0.4071 < 0.5 — for being still, while conditioned
+# on a still image of that scene.
+#
+# A temporal measure cannot separate a still scene from a dead one. Both measure
+# near zero, the populations were measured OVERLAPPING, and the gate had already
+# been observed landing the wrong way up. So it warns now, and these tests are
+# what stop it being quietly restored: structure decides, motion is reported.
+# ---------------------------------------------------------------------------
+
+
+def test_a_near_static_render_warns_and_is_not_rejected(tmp_path):
+    """The pin. Structurally sound, far too still for the old absolute gate,
+    and it must come back as a PASS carrying a note."""
+    content = space_matrix.verify_video_content(
+        write_frames(tmp_path / "still.mp4", barely_moving_stack()), expected_frames=9
+    )
+    assert content.mean_abs_delta < space_matrix.LOW_MEAN_FRAME_DELTA, (
+        f"the fixture must actually be in the destroyed artifact's neighbourhood, "
+        f"not merely near it: {content.mean_abs_delta:.4f}"
+    )
+    assert content.structure.structure_ratio > space_matrix.MIN_STRUCTURE_RATIO
+    assert content.structure.high_frequency_ratio < space_matrix.MAX_HIGH_FREQUENCY_RATIO
+    assert any("near-static" in note for note in content.warnings), content.render()
+    assert "*** WARNING:" in content.render(), "measured, printed, and not a verdict"
+
+
+def test_the_near_static_warning_says_it_is_not_a_defect(tmp_path):
+    """A warning a reader mistakes for a verdict is how the gate grows back."""
+    content = space_matrix.verify_video_content(
+        write_frames(tmp_path / "still.mp4", barely_moving_stack()), expected_frames=9
+    )
+    note = next(note for note in content.warnings if "near-static" in note)
+    assert "NOT proof of a defect" in note
+    assert "still scene from a dead one" in note
+
+
+def test_the_verdict_does_not_move_when_the_same_scene_is_merely_dimmer(tmp_path):
+    """Why the surviving temporal refusal is a RATIO.
+
+    Two encodes of one scene at one rate of motion, the second dimmed. The
+    absolute measure falls six-fold on exposure alone — so an absolute threshold
+    decides on how bright a render is, which is not a question about whether it
+    is alive. The freeze floor normalises by the frames' own spatial std and
+    both files land on the same side of it.
+    """
+    bright = space_matrix.verify_video_content(
+        write_frames(tmp_path / "bright.mp4", barely_moving_stack()), expected_frames=9
+    )
+    dim = space_matrix.verify_video_content(
+        write_frames(tmp_path / "dim.mp4", barely_moving_stack(scale=0.35)), expected_frames=9
+    )
+
+    assert dim.mean_abs_delta < bright.mean_abs_delta / 4.0, (
+        f"the absolute measure collapses with exposure: {bright.mean_abs_delta:.4f} -> "
+        f"{dim.mean_abs_delta:.4f}"
+    )
+    for content in (bright, dim):
+        assert content.relative_delta > space_matrix.MIN_RELATIVE_FRAME_DELTA, content.render()
+
+
+def test_a_frozen_stack_is_refused_and_the_moving_one_beside_it_is_not(tmp_path):
+    """Both directions in one test, on the same picture.
+
+    ``frozen_stack`` and ``barely_moving_stack`` render the identical scene; one
+    of them moves a fraction of a level per frame and the other does not move at
+    all. The freeze floor has to tell those apart, because that fraction is the
+    whole difference between an artifact worth keeping and a dead one.
+    """
+    with pytest.raises(space_matrix.ArtifactContentError) as caught:
+        space_matrix.verify_video_content(
+            write_frames(tmp_path / "frozen.mp4", frozen_stack()), expected_frames=9
+        )
+    assert "one frame N times" in str(caught.value)
+
+    alive = space_matrix.verify_video_content(
+        write_frames(tmp_path / "alive.mp4", barely_moving_stack()), expected_frames=9
+    )
+    assert alive.relative_delta > space_matrix.MIN_RELATIVE_FRAME_DELTA
+
+
+def test_the_freeze_floor_is_not_measured_where_there_is_no_contrast(tmp_path):
+    """0/0 is not a failure. Below :data:`MIN_PIXEL_STD` there is nothing to
+    normalise by, so the ratio reports ``None`` and the flatness check does the
+    condemning on its own terms — the same third state ``FrameStructure`` keeps
+    for SR and HF, for the same reason: "could not measure" must not read as
+    "measured and bad"."""
+    with pytest.raises(space_matrix.ArtifactContentError) as caught:
+        space_matrix.verify_video_content(
+            write_video(tmp_path / "blank.mp4", blank=True), expected_frames=9
+        )
+    message = str(caught.value)
+    assert "flat" in message
+    assert "one frame N times" not in message, "the flat file is diagnosed as flat, not as frozen"
+    assert "relative n/a" in message
+
+
+def test_the_banked_render_the_old_gate_destroyed_now_passes():
+    """The artifact itself, not a stand-in.
+
+    ``image_to_audio_video`` at 512x960x121: 121 of 121 distinct frames,
+    structure 0.9974, high-freq 0.0559 — a red balloon over a lake at dawn, and
+    the old absolute gate refused it at mean |Δ| 0.4071 for being too still.
+    """
+    content = space_matrix.verify_video_content(banked(FALSELY_REFUSED), expected_frames=121)
+
+    assert content.mean_abs_delta < space_matrix.LOW_MEAN_FRAME_DELTA, (
+        f"this is the artifact the old gate refused; if it is no longer under the old "
+        f"threshold the test has lost its subject: {content.mean_abs_delta:.4f}"
+    )
+    assert content.structure.structure_ratio > space_matrix.MIN_STRUCTURE_RATIO
+    assert content.structure.high_frequency_ratio < space_matrix.MAX_HIGH_FREQUENCY_RATIO
+    assert content.relative_delta > space_matrix.MIN_RELATIVE_FRAME_DELTA
+    assert any("near-static" in note for note in content.warnings)
+
+
+def test_the_legitimate_population_reaches_below_the_threshold_that_refused_it():
+    """The measurement that ends the argument.
+
+    The old gate looked defensible because the failure it was calibrated against
+    sat at 0.403 and the stillest *known* real render sat at 0.864 — a factor of
+    two. It was never a factor of two. A sibling of the destroyed artifact, the
+    same scene, structure 0.9973, measures 0.3859: **a legitimate render below
+    the failure the threshold was drawn against.** The populations overlap, so
+    no threshold on this axis separates them, so this one is a warning.
+    """
+    stiller = space_matrix.verify_video_content(banked(STILLER_SIBLING), expected_frames=121)
+
+    assert stiller.mean_abs_delta < 0.403, (
+        f"a real render measuring {stiller.mean_abs_delta:.4f}, under the 0.403 the old "
+        f"threshold was calibrated against"
+    )
+    assert stiller.structure.structure_ratio > space_matrix.MIN_STRUCTURE_RATIO, (
+        "and it is unambiguously a picture"
+    )
+    assert stiller.relative_delta > space_matrix.MIN_RELATIVE_FRAME_DELTA
+
+
+def test_a_frozen_copy_of_a_real_frame_is_refused_where_the_render_is_not(tmp_path):
+    """The freeze floor against the hardest real pair there is: a genuine
+    photographic frame, and that same frame held for the whole clip.
+
+    This is also where byte identity is measurably useless — the frozen re-encode
+    comes back with dozens of distinct frames — and where the structure gates are
+    blind, because a frozen photograph is still a photograph.
+    """
+    from ltx25_studio import outputs
+
+    frames = space_matrix._decode_video_frames(banked(FALSELY_REFUSED))
+    held = write_frames(tmp_path / "held.mp4", np.stack([frames[0]] * len(frames)))
+
+    decoded = space_matrix._decode_video_frames(held)
+    assert len({frame.tobytes() for frame in decoded}) >= space_matrix.MIN_DISTINCT_FRAMES
+    assert outputs.structure_failure(outputs.measure_structure(decoded)) is None
+
+    with pytest.raises(space_matrix.ArtifactContentError) as caught:
+        space_matrix.verify_video_content(held, expected_frames=len(frames))
+    assert "one frame N times" in str(caught.value)
 
 
 def test_a_monochrome_video_is_accepted(tmp_path):

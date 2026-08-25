@@ -106,10 +106,15 @@ def _base_pattern():
 def near_static_frames(count=FRAMES):
     """``r7b``-class: real structure, almost no motion. Must never FAIL.
 
-    The banked ``r7b`` is a legitimate 9-frame render whose mean frame-to-frame
-    |Δ| is 0.824 — only 2.0x above the operator's failure at 0.403. It is the
-    artifact that disqualifies temporal difference as the signal, so it gets a
-    stand-in here.
+    The banked ``r7b`` — a 9-frame render whose mean frame-to-frame |Δ| is 0.864,
+    only 2.0x above the operator's failure at 0.403 — is the artifact that
+    disqualified temporal difference as the signal, so it gets a stand-in here.
+    (``r7b`` predates the int8 conditioning fix and 898dad2 invalidates its
+    content; what it stands for here is the near-static *shape*, and the fixture
+    below is synthetic in any case.) The runner's absolute ``mean |Δ|`` gate has since been demoted
+    to a warning for exactly this reason, after it was caught refusing a real
+    512x960x121 render at 0.4071 whose sibling measures 0.3859 — a legitimate
+    artifact BELOW the failure the threshold was calibrated against.
     """
     base = _base_pattern()
     return _grey(np.stack([base + index * 1.4 for index in range(count)]))
@@ -197,9 +202,9 @@ def test_colour_static_is_condemned():
 def test_every_pre_existing_check_passes_on_that_same_static():
     """The reason this detector had to exist at all.
 
-    Distinct frames, a full pixel std, and motion an order of magnitude above
-    the frozen-video threshold. Not one of them is evidence of a picture — they
-    are all properties of noise, and noise has them in abundance.
+    Distinct frames, a full pixel std, and motion two orders of magnitude above
+    the level that would even raise an eyebrow. Not one of them is evidence of a
+    picture — they are all properties of noise, and noise has them in abundance.
     """
     frames = structureless_frames().astype("float32")
     distinct = len({frame.tobytes() for frame in structureless_frames()})
@@ -208,7 +213,7 @@ def test_every_pre_existing_check_passes_on_that_same_static():
 
     assert distinct == FRAMES, "9 of 9 distinct — exactly what the failure reported"
     assert per_frame_std > 1.0, "nowhere near flat"
-    assert delta > 0.5, "and it moves, by a factor of 100 over the frozen threshold"
+    assert delta > 0.5, "and it moves, by a factor of 100 over the near-static warning"
 
 
 # ---------------------------------------------------------------------------
@@ -250,10 +255,11 @@ def test_saturation_is_measured_and_never_asserted_on():
 
 
 def test_a_near_static_render_survives_where_the_temporal_gate_barely_would():
-    """``r7b`` measures 0.824 mean |Δ| against a 0.5 threshold and the operator's
-    static measures 0.403 — a factor of 2.0 between a pass and a fail. The
-    structure ratio separates the same two artifacts by 1.31x and 1.32x either
-    side of its gate, which is why it, not motion, is the load-bearing check."""
+    """``r7b`` measures 0.864 mean |Δ| against the 0.5 the runner used to refuse
+    on, and the operator's static measures 0.403 — a factor of 2.0 between what
+    was then a pass and a fail. The structure ratio separates the same two
+    artifacts by 1.31x and 1.32x either side of its gate, which is why it, not
+    motion, is the load-bearing check — and why motion is now only reported."""
     frames = near_static_frames().astype("float32")
     delta = float(np.mean([np.abs(frames[i + 1] - frames[i]).mean() for i in range(FRAMES - 1)]))
     measured, failure, _warnings = verdict(near_static_frames())

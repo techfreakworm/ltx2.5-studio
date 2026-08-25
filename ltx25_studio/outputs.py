@@ -433,14 +433,24 @@ def _encode_audio(container, stream, planes, *, sampling_rate: int) -> None:
 #   is small on a picture and larger than the signal itself on noise. Measured
 #   0.147..0.386 across the banked set, 3.146 on the failure.
 #
-# **Temporal difference is deliberately NOT the signal here.** The pre-existing
-# ``mean |Δ|`` gate does reject the operator's failure (0.403 < 0.5), but by
-# accident and with no usable margin: the banked ``r7b`` artifact is a
-# legitimate near-static 9-frame render measuring 0.824, only 2.0x above the
-# thing being rejected. A gate whose true and false cases are a factor of two
-# apart is a coin toss waiting to happen. SR's are 1.31x and 1.32x either side
-# of 0.70, which is the geometric middle of the two populations, and HF's are
-# 2.6x and 3.1x either side of 1.0.
+# **Temporal difference is deliberately NOT the signal here, and this module has
+# never carried a temporal refusal -- do not add one.** The offline runner did:
+# an absolute ``mean |Δ| < 0.5`` gate. It did reject the operator's failure
+# (0.403), but by accident and with no usable margin -- the banked ``r7b``
+# artifact, then believed to be a legitimate near-static 9-frame render, measures
+# 0.864, only 2.0x above the thing being rejected. A gate whose true and false cases are a factor
+# of two apart is a coin toss waiting to happen, and this one has since been
+# caught landing wrong: it refused a real 512x960x121 render at 0.4071, and that
+# render has a sibling at 0.3859 -- a legitimate artifact BELOW the failure the
+# threshold was calibrated against. The populations overlap, so the axis cannot
+# separate them, so it is a warning there now. SR's are 1.31x and 1.32x either
+# side of 0.70, which is the geometric middle of the two populations, and HF's
+# are 2.6x and 3.1x either side of 1.0.
+#
+# On this path the question does not even arise: **nothing measured about the
+# frames may refuse a write.** By the time they exist the user has paid the
+# GPU-seconds, and `structure_notes` demotes even the refusal-grade structure
+# finding to a note for exactly that reason.
 #
 # **Saturation is measured and never asserted on.** A deliberately monochrome
 # render measures 0.00 and is not a defect; making colour a requirement would

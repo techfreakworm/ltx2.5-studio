@@ -37,12 +37,13 @@ project, not polish.
 correct codec, the correct rate, two channels, ``verify_streams`` exit 0 -- and
 50 dB below every sibling. A structural check cannot see silence, and it cannot
 see a frozen video either. So every artifact is DECODED: video must have the
-frame count it asked for, distinct frames, and measurable motion; audio must
-have a level, a sample rate and a channel count. The inverse error is just as
-expensive -- a synthetic two-tone fixture once produced a *false* defect report
--- so fixtures here are real generated artifacts, never synthesised, and the
-content thresholds sit far below the one real measurement we have (pixel std
-72.657, mean frame delta 18.894) rather than near it.
+frame count it asked for, frames with something in them, and frames that are not
+the same frame N times; audio must have a level, a sample rate and a channel
+count. The inverse error is just as expensive -- a synthetic two-tone fixture
+once produced a *false* defect report -- so fixtures here are real generated
+artifacts, never synthesised, and the content thresholds sit far below the one
+real measurement we have (pixel std 72.657, mean frame delta 18.894) rather than
+near it.
 
 **4. A decoded artifact that is moving, distinct, full-range -- and static.** The
 three checks above are all satisfied by NOISE, and one artifact proved it: 121 of
@@ -54,6 +55,18 @@ structure at the 8x8 scale AND a pixel-to-pixel residual larger than the picture
 is refused. Two weaker findings (low block std, narrow luma band) only WARN,
 because a real murky render trips them. **Statistical measures demote artifacts
 here; they never promote one, and only that one two-term conjunction condemns.**
+
+**5. A liveness check that condemns a still scene.** The counterpart mistake, and
+this tool made it. Absolute frame-to-frame difference was a hard gate, and it
+refused a genuine 512x960x121 render -- a coherent photographic scene, structure
+0.9974 -- for being near-static, which is exactly what a mode conditioned on a
+still image is supposed to be. A temporal measure cannot tell a still scene from
+a dead one: both measure near zero, and the two populations were measured
+overlapping. So it no longer tries. Mean |Δ| is measured, printed and WARNED on;
+the structure gates carry the refusal; the only temporal refusal left is a
+scale-free freeze floor with a measured 9.5x gap between frozen and real. See
+:data:`LOW_MEAN_FRAME_DELTA` and :data:`MIN_RELATIVE_FRAME_DELTA` for the numbers
+and the policy -- **structure decides, motion is reported.**
 
 **Dry run is the default; ``--live`` is the flag.** Reversing that -- spend by
 default, opt out -- puts a metered resource one forgotten flag away from being
@@ -116,7 +129,9 @@ __all__ = [
     "ENDPOINT",
     "LOW_BLOCK_STD",
     "LOW_LUMA_BAND",
+    "LOW_MEAN_FRAME_DELTA",
     "MAX_HIGH_FREQUENCY_RATIO",
+    "MIN_RELATIVE_FRAME_DELTA",
     "MIN_STRUCTURE_RATIO",
     "ArtifactContentError",
     "AudioContent",
@@ -133,6 +148,7 @@ __all__ = [
     "VideoContent",
     "build_plan",
     "main",
+    "motion_warnings",
     "predict_args",
     "projected_gpu_seconds",
     "run_matrix",
@@ -258,15 +274,109 @@ PINNED_VOCODER_SAMPLING_RATE = 48000
 #: :class:`VideoContent`.
 MIN_PIXEL_STD = 1.0
 
-#: Mean absolute inter-frame difference, on the 0..255 scale. A frozen video is
-#: exactly 0.0.
-MIN_MEAN_FRAME_DELTA = 0.5
+# ---------------------------------------------------------------------------
+# temporal difference WARNS. It does not refuse, and it must not be made to
+# again -- this is a policy, not a tuning.
+#
+# ``MIN_MEAN_FRAME_DELTA = 0.5`` was a hard gate here for as long as temporal
+# delta was the only liveness signal this tool had. It was demoted on
+# 2026-08-25, the day it destroyed a real render, and the reason it has to stay
+# demoted is structural rather than numerical:
+#
+#   **A temporal measure cannot tell a still scene from a dead one.** Both
+#   measure near zero. What separates them lives INSIDE the frames, not between
+#   them, and no threshold on this axis can reach it.
+#
+# This build has now been burned in both directions, which is what makes the
+# rule load-bearing rather than a preference:
+#
+# * **mush that passed.** A colour-static artifact came back from the Space with
+#   121 of 121 distinct frames, the requested geometry, non-zero bytes, a full
+#   luma range and mean |Δ| a hundred times over this threshold. Every check
+#   this tool had scored it a PASS.
+# * **a real render that failed.** ``image_to_audio_video`` at 512x960x121 --
+#   structure 0.9974, high-freq 0.0559, block std 81.6, luma band 238.0, a
+#   coherent photographic scene (a red balloon over a lake at dawn) -- was
+#   REFUSED for mean |Δ| 0.4071 < 0.5. It is near-static because it is
+#   conditioned on a still image of that scene. That is the mode working.
+#
+# And the gate never had the margin it looked like it had. Measured with this
+# file's own decoder on the post-int8-fix ``m2`` runs -- the only artifacts in
+# the bank whose frames have been LOOKED AT and are photographs:
+#
+#     mean |Δ|   artifact                              structure
+#       0.3859   m2/e9ff3b66  512x960x121              SR 0.9973  <-- see below
+#       0.4071   m2/13013c1d  512x960x121              SR 0.9974  <-- the refusal
+#       0.4168   m2/6f537020  512x960x121              SR 0.9952
+#       0.403    the operator's colour static          (recorded, not banked)
+#
+# The two populations OVERLAP. ``e9ff3b66`` is the same scene as the artifact
+# that was refused, from a sibling run, and it measures BELOW the failure the
+# threshold was calibrated against. So the gate was never separating them -- it
+# was coin-tossing, and it has now been observed landing the wrong way up.
+#
+# (The older ``r7b`` at 0.864 used to be cited here as the legitimate end of the
+# range. It predates the int8 conditioning fix at ``eb1aa9f`` and 898dad2
+# invalidates its content along with every other pre-fix Space artifact, so it
+# is no longer load-bearing for anything. Nothing above depends on it.)
+#
+# **Structure decides; motion is reported.** ``MIN_STRUCTURE_RATIO`` and
+# ``MAX_HIGH_FREQUENCY_RATIO`` below carry the FAIL authority on artifact
+# content, because they at least ask whether there is a picture in the frame
+# rather than whether the picture changed. Their calibration is itself an open
+# question -- 898dad2 measures them passing colour static at SR 0.9183 / HF
+# 0.2254 and files matrix follow-up #11 to recalibrate -- but that is an
+# argument for retuning a spatial gate, never for restoring a temporal one:
+# temporal delta cannot separate these populations at any threshold, and the
+# standing project policy is that no artifact is a PASS until an eye has seen a
+# frame at native resolution. Do not restore a refusal on this axis.
+# ---------------------------------------------------------------------------
 
-#: Two distinct frames is "not frozen". The full ``distinct X of N`` ratio is
-#: always REPORTED -- a 7-of-9 is worth a human's attention -- but it is not
-#: asserted on, because a legitimately static shot can encode a repeated frame
-#: and failing that would be a false defect of exactly the kind this tool exists
-#: to avoid. The motion check above is the load-bearing one.
+#: Mean absolute inter-frame difference, on the 0..255 scale, below which the
+#: run is ANNOTATED. **WARN only.** Kept at the value the old gate refused on so
+#: the number stays comparable with every run recorded before the demotion.
+LOW_MEAN_FRAME_DELTA = 0.5
+
+#: The one temporal measure that still refuses: mean |Δ| as a fraction of the
+#: frames' OWN spatial std. Scale-free, for the same reason the structure ratios
+#: are divided by luma std -- it asks "did this picture change relative to how
+#: much picture there is", so a dim shot and a bright shot of the same scene land
+#: in the same place, which is exactly what the absolute gate could not do.
+#:
+#: This exists because byte-identity does NOT catch a frozen render. Nine
+#: identical frames through h264 decode back as 8 distinct of 9; a real 512x960
+#: frame frozen for 121 frames decodes back as 54 distinct of 121. Codec noise
+#: defeats :data:`MIN_DISTINCT_FRAMES` on every realistic frozen artifact, so
+#: dropping the temporal refusal outright would have left nothing at all
+#: standing between a dead video and a PASS -- a frozen photograph has perfect
+#: spatial structure, so the structure gates cannot see it either.
+#:
+#: Measured, both populations, with this file's decoder:
+#:
+#:   * frozen -- 0.000000 .. 0.000523, over 11 probes built by holding ONE frame
+#:     of a banked artifact for the whole clip and re-encoding: a real 512x960
+#:     photographic frame, the murky ``r4a`` frame, ``r7b``, the fog and night
+#:     derivations (the low-contrast worst case), and the block fixture.
+#:   * real renders -- 0.004948 .. 0.0217 across the three post-fix ``m2`` runs,
+#:     the floor being the same ``m2/e9ff3b66`` the absolute gate would have
+#:     destroyed. Pre-fix artifacts are excluded: 898dad2 invalidates their
+#:     content, and a threshold calibrated on mush is calibrated on nothing.
+#:
+#: A 9.5x gap with nothing in it, against the absolute gate's overlap. The
+#: threshold sits nearer the frozen end on purpose -- 1.9x above the worst frozen
+#: probe, 4.9x below the tightest real artifact -- because the two errors are not
+#: symmetric: a frozen video that only warns costs a second look, and a real
+#: render that raises costs the GPU-seconds that made it.
+MIN_RELATIVE_FRAME_DELTA = 0.001
+
+#: Two distinct frames is "not frozen". A weak check, kept because it is the
+#: only *exact* one here -- byte-identical frames are a certainty, not a
+#: statistic, and a lossless or skip-block encode does produce them (a repeated
+#: smooth frame decodes 1 of 9). It cannot stand alone: see
+#: :data:`MIN_RELATIVE_FRAME_DELTA` for what codec noise does to it. The full
+#: ``distinct X of N`` ratio is always REPORTED -- a 7-of-9 is worth a human's
+#: attention -- but only the floor is asserted on, because a legitimately static
+#: shot can encode a repeated frame.
 MIN_DISTINCT_FRAMES = 2
 
 #: Below this there is no signal at all. NOT the same as the -40 dBFS
@@ -291,11 +401,18 @@ VERY_QUIET_DBFS = -40.0
 # module's values rather than re-typed here, so the two cannot drift.
 #
 # One accident worth recording, because it is the reason temporal difference is
-# NOT the signal: ``MIN_MEAN_FRAME_DELTA`` above does reject the operator's
-# static artifact (0.403 < 0.5) -- and the banked ``r7b``, a legitimate 9-frame
-# near-static render, sits at 0.824, a factor of 2.0 away. That gate was right
-# by luck. The structure ratio puts 1.31x on one side and 1.32x on the other of
-# the same two artifacts, and it is right on purpose.
+# NOT the signal: the old absolute ``mean |Δ|`` gate above did reject the
+# operator's static artifact (0.403 < 0.5) -- and the banked ``r7b``, then taken
+# for a legitimate 9-frame near-static render, sits at 0.864, a factor of 2.0
+# away. That gate was right by luck, and it has since been caught being wrong: it
+# refused a genuine 512x960 render at 0.4071 and would have refused another at
+# 0.3859, BELOW the failure it was calibrated against. It is a WARN now. The
+# structure ratio puts 1.31x on one side and 1.32x on the other of the same two
+# artifacts, and it separates them on purpose rather than by luck -- though how
+# WELL it separates picture from static is itself reopened by 898dad2 (matrix
+# follow-up #11), which measures colour static clearing the gate at SR 0.9183.
+# The conclusion that survives both findings is the same one: a statistical gate
+# is a pre-filter, and no artifact is a PASS until an eye has seen a frame.
 # ---------------------------------------------------------------------------
 
 MIN_STRUCTURE_RATIO = outputs.MIN_STRUCTURE_RATIO
@@ -809,13 +926,33 @@ class VideoContent:
     structure: object | None = None
     warnings: tuple = ()
 
+    @property
+    def relative_delta(self) -> float | None:
+        """Mean |Δ| as a fraction of the frames' OWN spatial std, or ``None``.
+
+        The scale-free form of the motion measure, and the only temporal number
+        anything still refuses on -- see :data:`MIN_RELATIVE_FRAME_DELTA`.
+
+        ``None`` below :data:`MIN_PIXEL_STD`, where there is no contrast to
+        normalise by and the ratio is 0/0. That is a third state on purpose, the
+        same one :class:`ltx25_studio.outputs.FrameStructure` keeps for SR and
+        HF: "could not measure" must not read as "measured and bad", and flatness
+        is what the flatness check is for.
+        """
+        if self.spatial_std < MIN_PIXEL_STD:
+            return None
+        return self.mean_abs_delta / self.spatial_std
+
     def render(self, indent: int = 15) -> str:
         pad = "\n" + " " * indent
+        relative = "n/a" if self.relative_delta is None else f"{self.relative_delta:.6f}"
         line = (
             f"{self.frames} frames · {self.distinct_frames} distinct · "
             f"spatial std {self.spatial_std:.3f} · stack std {self.stack_std:.3f} "
             f"(reported, never asserted) · mean |Δ| {self.mean_abs_delta:.3f} "
-            f"(per-pair {self.min_abs_delta:.2f}..{self.max_abs_delta:.2f})"
+            f"(per-pair {self.min_abs_delta:.2f}..{self.max_abs_delta:.2f}, "
+            f"relative {relative}, >= {MIN_RELATIVE_FRAME_DELTA} is the only "
+            f"temporal refusal)"
         )
         if self.structure is not None:
             line += f"{pad}{self.structure.render()}"
@@ -914,6 +1051,30 @@ def _decode_video_frames(path, *, limit=512):
     return out
 
 
+def motion_warnings(content: VideoContent) -> tuple[str, ...]:
+    """How still the artifact is, said out loud and never acted on.
+
+    The demoted gate. This used to raise, and the raise is what has to stay gone:
+    an absolute frame-difference threshold refuses a still scene and a dead one
+    with equal confidence, because they measure the same. The number is still
+    worth printing -- a run that came back stiller than its mode should be is
+    worth a human's eye -- so it is printed, next to the reason it is not a
+    verdict.
+
+    Mirrors :func:`ltx25_studio.outputs.structure_warnings` deliberately: same
+    tier, same authority, same phrasing about what a statistic is allowed to do.
+    """
+    if content.mean_abs_delta >= LOW_MEAN_FRAME_DELTA:
+        return ()
+    return (
+        f"near-static: mean frame-to-frame |Δ| {content.mean_abs_delta:.4f} < "
+        f"{LOW_MEAN_FRAME_DELTA} on a 0..255 scale. Worth looking at, NOT proof of a defect -- "
+        f"a still-image-conditioned mode is supposed to land here, and this measure cannot tell "
+        f"a still scene from a dead one. The freeze floor and the structure gates are what "
+        f"refuse",
+    )
+
+
 def verify_video_content(path, *, expected_frames=None) -> VideoContent:
     """Decode the video and refuse a blank or frozen one. Raises, never returns False.
 
@@ -926,19 +1087,32 @@ def verify_video_content(path, *, expected_frames=None) -> VideoContent:
 
     * **no frames at all** -- a header with no packets behind it;
     * **flat frames** (per-frame std ~0) -- a blank or single-colour render;
-    * **no motion** (frame-to-frame delta 0) -- the same frame N times, which is
-      what a stuck decode or a discarded temporal axis looks like;
+    * **frozen** -- the same frame N times, which is what a stuck decode or a
+      discarded temporal axis looks like. Two checks, because neither is
+      sufficient alone: byte-identity is exact but codec noise defeats it, and
+      the freeze floor is a ratio against the frames' own spatial std rather
+      than an absolute delta;
     * **no structure** -- moving, distinct, full-range, and still nothing but
       colour static. This is the one every check above scores as a PASS, and one
       such artifact really did come back from the Space and really was scored a
       pass by this tool. See :func:`ltx25_studio.outputs.structure_failure`.
 
+    **Being near-static is not one of them, and must not become one again.** An
+    absolute ``mean |Δ| < 0.5`` refusal used to sit here and it destroyed a real
+    render: ``image_to_audio_video`` at 512x960x121, structure 0.9974, a coherent
+    photographic scene, refused at 0.4071 for being still -- while conditioned on
+    a still image of that scene. A temporal measure cannot separate a still scene
+    from a dead one; measured on the banked set the legitimate population reaches
+    down to 0.3859, *below* the failure the old threshold was calibrated against.
+    Mean |Δ| is now measured, printed and WARNED on. **Structure decides; motion
+    is reported.** See :data:`LOW_MEAN_FRAME_DELTA`.
+
     Two tiers, and they are not interchangeable. The refusals above raise. The
-    ``block std`` / ``luma band`` findings only WARN, because a legitimately
-    murky low-contrast render trips them (the banked ``r4a`` measures 5.33 and
-    24.76) and destroying a real artifact on a statistic is the more expensive
-    mistake. **A statistical measure may demote an artifact; it may not promote
-    one, and it may not condemn one on its own.**
+    ``mean |Δ|`` / ``block std`` / ``luma band`` findings only WARN, because a
+    legitimately still or murky render trips them (the banked ``r4a`` measures
+    5.33 and 24.76) and destroying a real artifact on a statistic is the more
+    expensive mistake. **A statistical measure may demote an artifact; it may not
+    promote one, and it may not condemn one on its own.**
     """
     import numpy as np
 
@@ -970,8 +1144,12 @@ def verify_video_content(path, *, expected_frames=None) -> VideoContent:
         min_abs_delta=min(deltas),
         max_abs_delta=max(deltas),
         structure=structure,
-        warnings=outputs.structure_warnings(structure),
+        warnings=(),
     )
+    # Order matters only in that the temporal note comes first: it is the one a
+    # reader is most likely to reach for a verdict, and it is the one that is
+    # explicitly not a verdict.
+    content.warnings = (*motion_warnings(content), *outputs.structure_warnings(structure))
 
     problems = []
     if expected_frames is not None and content.frames != expected_frames:
@@ -989,10 +1167,14 @@ def verify_video_content(path, *, expected_frames=None) -> VideoContent:
             f"{content.distinct_frames} distinct frame(s) of {content.frames} -- every frame is "
             f"byte-identical, so nothing moved"
         )
-    if content.mean_abs_delta < MIN_MEAN_FRAME_DELTA:
+    relative = content.relative_delta
+    if content.frames > 1 and relative is not None and relative < MIN_RELATIVE_FRAME_DELTA:
         problems.append(
-            f"mean frame-to-frame |Δ| {content.mean_abs_delta:.4f} < {MIN_MEAN_FRAME_DELTA} -- "
-            f"the video is frozen. The one healthy run measured 18.894 here"
+            f"mean frame-to-frame |Δ| {content.mean_abs_delta:.4f} is {relative:.6f} of the "
+            f"frames' own spatial std {content.spatial_std:.3f}, under "
+            f"{MIN_RELATIVE_FRAME_DELTA} -- this is one frame N times, not a still scene. "
+            f"Frozen artifacts measure 0.000523 and down here; the stillest real render in "
+            f"the banked set measures 0.004948"
         )
     structureless = outputs.structure_failure(structure)
     if structureless is not None:
