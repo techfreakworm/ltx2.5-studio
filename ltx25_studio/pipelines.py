@@ -64,9 +64,16 @@ __all__ = [
     "assert_compression_ratios",
     "assert_frame_rate_default",
     "clear_cache",
+    "configure_vae_tiling",
     "derive_pipeline",
     "get_pipeline",
     "mmap_backing_report",
+    "VAE_TILE_MIN_HEIGHT",
+    "VAE_TILE_MIN_WIDTH",
+    "VAE_TILE_MIN_NUM_FRAMES",
+    "VAE_TILE_STRIDE_HEIGHT",
+    "VAE_TILE_STRIDE_WIDTH",
+    "VAE_TILE_STRIDE_NUM_FRAMES",
     "stage_1_kwargs",
     "stage_2_size_note",
     "STAGE_2_SPATIAL_SCALE",
@@ -138,6 +145,109 @@ def assert_compression_ratios(vae) -> tuple[int, int]:
             ),
         )
     return temporal, spatial
+
+
+# ---------------------------------------------------------------------------
+# VAE decode tiling -- the envelope is the measured one, and the gate is
+# upstream's own dispatch
+# ---------------------------------------------------------------------------
+
+#: The largest decode PROVEN to fit the 96 GB MIG slice untiled, from live
+#: runs: 704x480x49 decoded clean; 1216x704x121 completed its denoise and then
+#: died inside ``vae.decode``'s conv3d on the CUDACachingAllocator (~26 GB per
+#: full-resolution intermediate at 121 frames, on ~35 GB of resident weights).
+#:
+#: These values are handed to ``AutoencoderKLLTX2.enable_tiling`` so that
+#: **upstream's own dispatch is the size gate**: its ``_decode`` compares the
+#: actual latent tensor against ``tile_sample_min_* // compression_ratio``
+#: with strict ``>`` (read at the pinned ``ac56fa2f``, byte-identical in the
+#: local 0.37.1 copy), so
+#:
+#: * anything at or inside the proven envelope -- 704x480 spatial, 49 frames
+#:   temporal, which includes the sha256-banked 256x256x9 -- takes the SAME
+#:   untiled code path as before this change, structurally byte-identical;
+#: * anything beyond it decodes in tiles of exactly the proven-fit shape,
+#:   temporal chunks re-dispatching through spatial tiling (upstream's
+#:   ``_temporal_tiled_decode`` composes both), so the peak decode tensor is
+#:   bounded by a shape the card has already survived.
+#:
+#: Keying on the tensor being decoded is also what makes stage 2 need no
+#: branch of ours: its inputs are 2x the request, and 2x is what the dispatch
+#: sees. (Stage 2's FINAL pixels come from the diffusion decoder, a separate
+#: model this flag set does not govern -- see StageRunner.)
+#:
+#: Always-on with upstream's DEFAULTS was measured against the source and
+#: rejected: the default 512px tile minimum would have re-routed the
+#: proven-fitting 704x480 decode through the tiled blend path, perturbing a
+#: working size for no memory benefit. The envelope values keep the change
+#: invisible everywhere the platform has already been proven.
+VAE_TILE_MIN_HEIGHT = 480
+VAE_TILE_MIN_WIDTH = 704
+#: 56 pixel frames -> a latent threshold of 56 // 8 = 7, and a 49-frame video
+#: occupies (49 - 1) // 8 + 1 = 7 latent frames -- so ``7 > 7`` is False and
+#: the proven 49-frame decode is EXACTLY the last untouched point. This is the
+#: off-by-one that matters: 57 frames occupy 8 latent frames and chunk.
+VAE_TILE_MIN_NUM_FRAMES = 56
+#: Strides preserve upstream's own default overlaps -- 64 px spatial blend
+#: (512 - 448) and 8-frame temporal blend (16 - 8) -- so the seam-blending
+#: behaviour for oversized decodes is exactly the one upstream ships, at our
+#: tile size.
+VAE_TILE_STRIDE_HEIGHT = 416
+VAE_TILE_STRIDE_WIDTH = 640
+VAE_TILE_STRIDE_NUM_FRAMES = 48
+
+
+def configure_vae_tiling(vae) -> None:
+    """Enable tiled + framewise decoding with the proven-fit envelope.
+
+    Set once on the ONE shared VAE at load: every derived pipeline and the
+    stage-2 upsampler hold this same object, so the envelope governs each
+    place a video tensor meets ``vae.decode`` or ``vae.encode`` -- the
+    in-pipeline decode that died at 1216x704x121, and the conditioning
+    encodes, whose flagship-size inputs carry the same arithmetic.
+
+    Both framewise flags are set although upstream's dispatch currently reads
+    only ``use_framewise_decoding`` (its ``_encode`` checks the *decoding*
+    flag -- an upstream quirk, identical at the pinned SHA): setting the
+    encoding flag too costs nothing today and keeps this correct the day the
+    quirk is fixed.
+
+    The divisibility tripwire is not pedantry: the dispatch converts these
+    pixel values to latent units by floor division, so a threshold that does
+    not divide exactly SHIFTS the envelope silently -- the proven boundary
+    would drift without any test noticing. Raise instead, naming the drift.
+    """
+    spatial = int(getattr(vae, "spatial_compression_ratio", DEFAULT_SPATIAL_COMPRESSION_RATIO))
+    temporal = int(getattr(vae, "temporal_compression_ratio", DEFAULT_TEMPORAL_COMPRESSION_RATIO))
+    exact = {
+        "VAE_TILE_MIN_HEIGHT": (VAE_TILE_MIN_HEIGHT, spatial),
+        "VAE_TILE_MIN_WIDTH": (VAE_TILE_MIN_WIDTH, spatial),
+        "VAE_TILE_STRIDE_HEIGHT": (VAE_TILE_STRIDE_HEIGHT, spatial),
+        "VAE_TILE_STRIDE_WIDTH": (VAE_TILE_STRIDE_WIDTH, spatial),
+        "VAE_TILE_MIN_NUM_FRAMES": (VAE_TILE_MIN_NUM_FRAMES, temporal),
+        "VAE_TILE_STRIDE_NUM_FRAMES": (VAE_TILE_STRIDE_NUM_FRAMES, temporal),
+    }
+    off_grid = {name: value for name, (value, ratio) in exact.items() if value % ratio}
+    if off_grid:
+        raise ModelLoadError(
+            component="vae",
+            reason=(
+                f"VAE tile thresholds must divide the compression ratios exactly "
+                f"(spatial {spatial}, temporal {temporal}) or the floor division in "
+                f"upstream's dispatch silently shifts the proven-fit envelope: {off_grid}. "
+                f"Fix the constants in pipelines.py before continuing."
+            ),
+        )
+    vae.enable_tiling(
+        tile_sample_min_height=VAE_TILE_MIN_HEIGHT,
+        tile_sample_min_width=VAE_TILE_MIN_WIDTH,
+        tile_sample_min_num_frames=VAE_TILE_MIN_NUM_FRAMES,
+        tile_sample_stride_height=VAE_TILE_STRIDE_HEIGHT,
+        tile_sample_stride_width=VAE_TILE_STRIDE_WIDTH,
+        tile_sample_stride_num_frames=VAE_TILE_STRIDE_NUM_FRAMES,
+    )
+    vae.use_framewise_decoding = True
+    vae.use_framewise_encoding = True
 
 
 def assert_frame_rate_default(pipeline_object) -> None:
@@ -548,6 +658,7 @@ def _base_pipeline(*, dtype=None, device: str | None = None, quantization: str |
     vae = getattr(built, "vae", None)
     if vae is not None:
         assert_compression_ratios(vae)
+        configure_vae_tiling(vae)
     assert_frame_rate_default(built)
 
     _CACHE[_BASE_CACHE_KEY] = built
