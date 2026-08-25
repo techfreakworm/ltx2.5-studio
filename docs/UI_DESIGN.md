@@ -182,10 +182,40 @@ sidecar file and the Space log only. The seed line now says what the seed is for
   `conditioning.py` converts exactly once. A user following the old note got a
   mis-anchored shot every time. Both places now say *frame*, and the note explains
   the 8:1 snap and points at the readout.
-* **Prompt enhancement stays documented-as-unavailable, no dead toggle** (PLAN
-  §3.5): a caption under the prompt fields names the missing component
-  (`google/gemma-4-E2B-it`), says why no toggle is offered, and tells the user what
-  to do instead (write the full shot; camera/lighting/motion language works).
+* **Prompt enhancement is documented-as-unaffordable, no dead toggle** (PLAN §3.5).
+  The **policy is unchanged** — an inert control is a lie with a checkbox — but the
+  **stated reason was wrong, in the flattering direction, and is corrected.**
+
+  The caption used to say the enhancer "needs `google/gemma-4-E2B-it`, which the
+  model pack does not ship, so no toggle is offered." That framed a budget decision
+  of ours as an omission of someone else's. ✅ Checked against the Hub rather than
+  assumed: **`google/gemma-4-E2B-it` is public, not gated, apache-2.0, nine files,
+  one weight file, 10.279 GB total.** It is one `hf download` away. Availability was
+  never the constraint.
+
+  ✅ **The constraint is disk budget, and specifically the ZeroGPU packing peak** —
+  `snapshot + packed + image` against the 150 GB cap — **not steady state.** The
+  enhancer is charged **twice** at that peak: ~10.28 GB in the bf16 snapshot, which
+  is unconditional, and ~10.28 GB again in the packed copy, because ZeroGPU
+  intercepts `.to(device)` and packs whatever is moved to CUDA. **~20.6 GB.**
+  [`ZEROGPU_DISK.md`](ZEROGPU_DISK.md) §4.2 derives this build's peak at
+  **121.4 – 137.4 GB** — the spread is how much of the Linear-heavy weight int8
+  actually reaches, since `TRANSFORMER_INT8_SKIP_MODULES` spares 316 Linears that
+  stay bf16 and push the packed copy above the 41.237 GB the blanket derivation
+  assumes. Adding 20.6 GB **clears 150 outright at the conservative bound** and eats
+  most of the margin at the optimistic one.
+
+  ⚠️ **The peak itself has never been measured**, which is the honest end of the
+  sentence. ⛔ **The `82.2 GB of 150 [OK]` figure that appears in several docs is the
+  pre-pack startup reading** — literally `snapshot 72.2 + packed 0.0 + image ~10` —
+  and is **neither headroom nor steady state.** It has been mistaken for available
+  space more than once in this project; it is not, and it must not be spent.
+
+  **What would have to give**, for whoever wants this later: a smaller or quantised
+  enhancer, or **CPU residency** — never moved to CUDA, therefore never packed, so
+  charged once at ~10.28 GB. That lands inside the cap on a margin nobody has
+  tested. The caption says exactly this, and still tells the user what to do instead
+  (write the full shot; camera/lighting/motion language works).
 * **`noise_scale=1.0` trap named**: the slider info now says that at 1.0 the upload
   contributes *nothing* and the run is a full-price generation of fresh audio.
 * **Seed reproducibility stated** on the field and in the run report.
