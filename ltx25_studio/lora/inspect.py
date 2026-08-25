@@ -99,6 +99,35 @@ class LoRAInspection:
     #: compares against the real modules, and it costs nothing to carry.
     shapes: MappingProxyType
 
+    # -- fork transport ---------------------------------------------------
+    #
+    # On ZeroGPU the GPU dispatch pickles the decorated function's ARGUMENTS
+    # onto the worker's arg queue, and a staged adapter rides in as
+    # ``GenerationRequest.loras[i]["report"]`` -- so this object must pickle
+    # or the run dies at dispatch, before any GPU work, as 'PicklingError:
+    # cannot pickle mappingproxy object'. That is the INBOUND half of the
+    # fork boundary; the OUTBOUND half (exceptions coming back) lives in
+    # ``errors.LTXStudioError.__reduce__``. mappingproxy refuses to pickle by
+    # design, so the state hooks unwrap the two proxy fields to plain dicts
+    # for transport and RE-WRAP on restore: the read-only invariant the
+    # proxies exist for holds identically on both sides of the fork, and no
+    # caller sees a different type in either process.
+
+    def __getstate__(self):
+        state = dict(self.__dict__)
+        state["metadata"] = dict(self.metadata)
+        state["shapes"] = dict(self.shapes)
+        return state
+
+    def __setstate__(self, state):
+        state = dict(state)
+        state["metadata"] = MappingProxyType(state["metadata"])
+        state["shapes"] = MappingProxyType(state["shapes"])
+        for name, value in state.items():
+            # frozen dataclass: normal attribute assignment is refused, which
+            # is the point of frozen -- restore the way dataclasses do.
+            object.__setattr__(self, name, value)
+
     @property
     def version_signals(self) -> dict[str, str]:
         """Every recognised version signal present, in priority order."""
