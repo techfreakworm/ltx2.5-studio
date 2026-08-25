@@ -793,6 +793,13 @@ def install_fake_stack(monkeypatch, snapshot, **classes):
 
     made = {}
     for name in (
+        # `transformers` is faked too, because the int8 path imports
+        # `transformers.BitsAndBytesConfig` for the Gemma text encoder. On the
+        # `quant_mapping` path each component's config must be the class ITS
+        # OWN loader accepts -- diffusers' for the transformer, transformers'
+        # for the text encoder -- so the two classes are separate recorders and
+        # a test can tell which one reached which component.
+        "transformers",
         "diffusers",
         "diffusers.models",
         "diffusers.models.autoencoders",
@@ -807,6 +814,7 @@ def install_fake_stack(monkeypatch, snapshot, **classes):
         monkeypatch.setitem(sys.modules, name, module)
 
     defaults = {
+        "transformers": ("BitsAndBytesConfig",),
         "diffusers": (
             # BOTH, as real diffusers exports both. If the fake omitted the
             # component-level class, a mutation using it would fail on an
@@ -830,7 +838,17 @@ def install_fake_stack(monkeypatch, snapshot, **classes):
     recorders = {}
     for module_name, attrs in defaults.items():
         for attr in attrs:
-            recorder = classes.get(attr) or LoadRecorder()
+            # Keyed BOTH ways. `BitsAndBytesConfig` exists in `diffusers` and in
+            # `transformers` and they are NOT interchangeable -- the int8 path
+            # must hand each component the class its own loader accepts -- so
+            # the bare name alone cannot address them. The qualified key is what
+            # a test asserting per-component classes uses; the bare key is kept
+            # so the other callers here need no change, and for a collision it
+            # resolves to the LAST module registered (`diffusers`), which is the
+            # one this package means when it says `BitsAndBytesConfig`.
+            qualified = f"{module_name}.{attr}"
+            recorder = classes.get(qualified) or classes.get(attr) or LoadRecorder()
+            recorders[qualified] = recorder
             recorders[attr] = recorder
             setattr(made[module_name], attr, recorder)
 
@@ -1163,7 +1181,7 @@ def test_the_load_still_comes_from_the_local_snapshot_when_quantising(monkeypatc
     )
 
 
-def test_the_config_is_the_pipeline_level_class_with_the_right_backend(monkeypatch, tmp_path):
+def test_the_config_is_the_pipeline_level_class_built_granularly(monkeypatch, tmp_path):
     """The rung past "the argument arrived": **is it the type the callee takes?**
 
     A bare `BitsAndBytesConfig` reaches `from_pretrained` exactly as well as the
@@ -1175,6 +1193,14 @@ def test_the_config_is_the_pipeline_level_class_with_the_right_backend(monkeypat
 
     Component-level `from_pretrained` takes the former; the pipeline-level one
     takes the latter. That cost a deploy cycle.
+
+    ⚠️ **And it must be built granularly.** This asserted
+    `quant_backend == "bitsandbytes_8bit"` while that blanket form was shipping
+    garbage frames — a green test on a broken deploy, because a backend name is
+    not a configuration. `quant_backend` and `quant_mapping` are mutually
+    exclusive upstream (`_validate_init_args` raises if both are given), so the
+    absence of `quant_backend` is exactly the assertion that the per-component
+    path is live.
     """
     _sent, recorders = _loaded(monkeypatch, tmp_path, "int8")
 
@@ -1183,7 +1209,15 @@ def test_the_config_is_the_pipeline_level_class_with_the_right_backend(monkeypat
         "the pipeline-level quantisation class was never constructed; a bare "
         "BitsAndBytesConfig reaches from_pretrained and is rejected there"
     )
-    assert built[-1]["quant_backend"] == "bitsandbytes_8bit", built[-1]
+    assert "quant_mapping" in built[-1], (
+        f"the pipeline quantisation config was built with {sorted(built[-1])}; expected "
+        f"a `quant_mapping`. The blanket `quant_backend` form quantises the "
+        f"transformer's conditioning path and renders static."
+    )
+    assert "quant_backend" not in built[-1], (
+        f"both `quant_mapping` and `quant_backend` were passed ({sorted(built[-1])}); "
+        f"upstream's `_validate_init_args` raises on that combination"
+    )
 
 
 def test_the_quantised_components_are_exactly_the_declared_set(monkeypatch, tmp_path):
@@ -1209,11 +1243,142 @@ def test_the_quantised_components_are_exactly_the_declared_set(monkeypatch, tmp_
     # message that interpolates the constant under test tracks any mutation of
     # it and can never contradict it -- it printed "reached as ['transformer'],
     # not the declared ['transformer']" before this was fixed.
-    assert built[-1]["components_to_quantize"] == ["transformer", "text_encoder"], (
-        f"components_to_quantize reached from_pretrained as "
-        f"{built[-1]['components_to_quantize']}, expected "
-        f"['transformer', 'text_encoder']. Changing the deployed precision must "
+    #
+    # On the `quant_mapping` path the MAPPING KEYS are what decides this;
+    # `components_to_quantize` is not consulted at all when a mapping is given
+    # (`_resolve_quant_config` takes the granular branch on `module_name in
+    # quant_mapping` and returns before ever reading it).
+    assert sorted(built[-1]["quant_mapping"]) == ["text_encoder", "transformer"], (
+        f"the quant_mapping reached from_pretrained covering "
+        f"{sorted(built[-1]['quant_mapping'])}, expected "
+        f"['text_encoder', 'transformer']. Changing the deployed precision must "
         f"be deliberate."
+    )
+
+
+class _ConfigRecorder:
+    """A config class that returns something identifiable rather than a shared fake.
+
+    `LoadRecorder.__call__` returns a fresh `FakeModel`, which records the call
+    but makes every constructed config indistinguishable from every other. That
+    is not enough here: the invariant is *which* class built the object that
+    landed under *which* mapping key, and `FakeModel() is not FakeModel()` can
+    only ever say "different", never "from the right class".
+    """
+
+    def __init__(self, tag):
+        self.tag = tag
+        self.calls = []
+
+    def __call__(self, **kwargs):
+        self.calls.append(kwargs)
+        return f"{self.tag}#{len(self.calls)}"
+
+
+def _int8_mapping(monkeypatch, tmp_path):
+    """Build the int8 config with the two `BitsAndBytesConfig` classes distinguishable."""
+    from ltx25_studio import config, model_files
+
+    snapshot = tmp_path / "snapshots" / model_files.REVISION
+    snapshot.mkdir(parents=True)
+    monkeypatch.setenv(config.ENV_QUANTIZATION, "int8")
+    overrides = {
+        "diffusers.BitsAndBytesConfig": _ConfigRecorder("diffusers"),
+        "transformers.BitsAndBytesConfig": _ConfigRecorder("transformers"),
+    }
+    recorders = install_fake_stack(monkeypatch, snapshot, **overrides)
+
+    pipelines._base_pipeline()
+
+    built = recorders["PipelineQuantizationConfig"].calls
+    assert built, "the pipeline-level quantisation class was never constructed"
+    return built[-1]["quant_mapping"], overrides
+
+
+def test_each_component_gets_the_config_class_its_own_loader_accepts(monkeypatch, tmp_path):
+    """diffusers' class for the transformer, transformers' class for the encoder.
+
+    ⚠️ **The granular branch ignores `is_diffusers`.** `pipeline_loading_utils`
+    calls `_resolve_quant_config(is_diffusers=is_diffusers_model, module_name=name)`,
+    but when a `quant_mapping` is given that method returns `quant_mapping[module_name]`
+    **verbatim** — it never looks at `is_diffusers`. So there is no layer left to
+    correct a wrong class: whatever object sits under a key is handed straight to
+    that component's own `from_pretrained`.
+
+    `text_encoder` is a Gemma model loaded by transformers, so it needs
+    `transformers.BitsAndBytesConfig`; the transformer is diffusers-owned and
+    needs diffusers'. Upstream's docs say it outright — "You need to import and
+    use `transformers.BitsAndBytesConfig` for components that come from
+    Transformers." Swapping them is invisible to every kwargs-level assertion
+    and fails only on the Space.
+    """
+    mapping, _overrides = _int8_mapping(monkeypatch, tmp_path)
+
+    assert mapping["transformer"].startswith("diffusers#"), (
+        f"the transformer's quantisation config was built by "
+        f"{mapping['transformer']!r}; it is a diffusers-owned component and must get "
+        f"`diffusers.BitsAndBytesConfig`"
+    )
+    assert mapping["text_encoder"].startswith("transformers#"), (
+        f"the text encoder's quantisation config was built by "
+        f"{mapping['text_encoder']!r}; Gemma is loaded by transformers and must get "
+        f"`transformers.BitsAndBytesConfig`"
+    )
+
+
+def test_the_transformer_skips_the_conditioning_path_and_the_encoder_does_not(
+    monkeypatch, tmp_path
+):
+    """The actual bug fix, asserted where it is configured.
+
+    Every frame the Space ever produced was correctly-shaped, high-variance
+    garbage because this list was absent and bnb replaced **every** `nn.Linear`
+    in the transformer — the adaLN/modulation heads and the input/output
+    projections included. Deterministic static at every resolution and in every
+    mode is broken *conditioning*, not lost precision.
+
+    **The text encoder must NOT get the list, and that is not an oversight.**
+    It is a Gemma LLM, which is the exact case `LLM.int8()` was designed and
+    validated for and is not implicated in this bug. The names here are
+    transformer module names; on a Gemma they would match nothing, and
+    `to_gate_logits` is precisely the kind of short leaf name that is a no-op on
+    one tree and a catastrophe on another. Per-component configs are the whole
+    reason this is a `quant_mapping`.
+
+    This asserts the *wiring*. `test_int8_skip_modules.py` asserts the names
+    themselves against the real checkpoint's module tree.
+    """
+    _mapping, overrides = _int8_mapping(monkeypatch, tmp_path)
+
+    transformer_calls = overrides["diffusers.BitsAndBytesConfig"].calls
+    encoder_calls = overrides["transformers.BitsAndBytesConfig"].calls
+    assert len(transformer_calls) == 1, transformer_calls
+    assert len(encoder_calls) == 1, encoder_calls
+
+    assert transformer_calls[0].get("load_in_8bit") is True, transformer_calls[0]
+    assert encoder_calls[0].get("load_in_8bit") is True, encoder_calls[0]
+
+    skips = transformer_calls[0].get("llm_int8_skip_modules")
+    assert skips, (
+        "the transformer's 8-bit config named no `llm_int8_skip_modules`. That is the "
+        "blanket config that rendered static at every resolution, in every mode, "
+        "deterministically."
+    )
+    # A list, not the tuple constant: `BitsAndBytesConfig.post_init` raises
+    # `TypeError: llm_int8_skip_modules must be a list of strings` on anything
+    # else, and `bnb_quantizer` then `.extend()`s it in place -- so it must also
+    # be a fresh copy rather than the module-level constant itself.
+    assert isinstance(skips, list), f"llm_int8_skip_modules must be a list, got {type(skips)}"
+    assert skips is not pipelines.TRANSFORMER_INT8_SKIP_MODULES, (
+        "the module-level constant was passed through by identity; bnb_quantizer "
+        "mutates this list in place, so repeated loads would grow it"
+    )
+    assert skips == list(pipelines.TRANSFORMER_INT8_SKIP_MODULES)
+
+    assert "llm_int8_skip_modules" not in encoder_calls[0], (
+        f"the Gemma text encoder was given transformer module names to skip "
+        f"({encoder_calls[0].get('llm_int8_skip_modules')}). Blanket LLM.int8() is "
+        f"exactly what that component wants; these names match nothing on it."
     )
 
 

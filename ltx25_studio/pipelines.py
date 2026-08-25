@@ -86,6 +86,7 @@ __all__ = [
     "disk_footprint",
     "ZEROGPU_DISK_CAP_GB",
     "QUANTIZED_COMPONENTS",
+    "TRANSFORMER_INT8_SKIP_MODULES",
     "peak_rss_gib",
 ]
 
@@ -374,6 +375,102 @@ def peak_rss_gib() -> float | None:
 #: :func:`_quantization_config` checks them against ``model_files.COMPONENTS``.
 QUANTIZED_COMPONENTS = ("transformer", "text_encoder")
 
+#: The transformer Linears that must stay bf16 under ``LLM.int8()``.
+#:
+#: ⚠️ **Read off the real checkpoint, not inferred from another DiT.** That
+#: distinction is the entire finding. The obvious skip list for a PixArt-lineage
+#: transformer is ``("norm_out.linear", "adaln_single", "caption_projection",
+#: "proj_out")`` — and on LTX-2.5 the first three match **nothing at all**:
+#:
+#: * ``norm_out`` is ``nn.LayerNorm(inner_dim, eps=1e-6, elementwise_affine=False)``
+#:   (``transformer_ltx2.py:1357``) — **zero parameters, no ``.linear`` child.**
+#: * ``adaln_single`` does not exist. The modulation Linears live in eight
+#:   *top-level* :class:`LTX2AdaLayerNormSingle` modules, named individually
+#:   below (``transformer_ltx2.py:1219-1257``). The blocks carry no adaLN Linear
+#:   of their own — their modulation is a bare ``scale_shift_table``.
+#: * ``caption_projection`` is gated on ``use_prompt_embeddings``, which is
+#:   ``false`` in this checkpoint's ``transformer/config.json``.
+#:
+#: A list of three no-ops and one real name would have looked like a fix,
+#: deployed, and produced the same garbage. The names here were derived from
+#: the 4091-entry ``diffusion_pytorch_model.safetensors.index.json`` weight map
+#: at revision ``871165de...`` and cross-checked against the module
+#: constructors at the pinned diffusers SHA. ``test_int8_skip_modules.py``
+#: re-derives them from that same index so this cannot rot.
+#:
+#: Every ``scale_shift_table`` is an ``nn.Parameter``, not a module, so bnb --
+#: which only replaces ``nn.Linear`` -- can never reach one. They need no entry
+#: and get none.
+#:
+#: ⚠️ **Do not shorten any of these.** bnb's matcher
+#: (``quantizers/bitsandbytes/utils.py:58-62``) has two gates: the entry equals
+#: a module's **local child name**, or ``"<entry>."`` appears as a **substring**
+#: of the full dotted path. The second is substring containment, not a path
+#: prefix test, so short names spread. Measured against the real tree:
+#:
+#: * ``"proj"`` alone skips **96** Linears — every feed-forward ``net.0.proj``
+#:   in all 48 blocks, video and audio, because ``proj`` is their local child
+#:   name and gate 1 fires. Those are the widest matrices in the model
+#:   (``FeedForward`` expands ``inner_dim`` by its ``mult``), so that is not a
+#:   safety margin; it un-quantises the single largest block of weights int8
+#:   was turned on to shrink, and reports nothing while doing it.
+#: * ``"linear"`` alone skips **8** — the ``LTX2AdaLayerNormSingle.linear``
+#:   leaves — while silently missing all sixteen ``linear_1``/``linear_2``
+#:   timestep-embedder Linears. Over-broad and under-broad at once.
+#:
+#: The list below is deliberately mixed: ``to_gate_logits`` is a leaf name and
+#: matches only via gate 1; the ``time_embed``-style entries are parent
+#: prefixes and match only via gate 2.
+#:
+#: ℹ️ **Two entries are redundant today and are kept anyway.** Because gate 2 is
+#: substring containment, ``time_embed`` already matches
+#: ``audio_time_embed.emb.timestep_embedder.linear_1`` — so ``audio_time_embed``
+#: and, for the same reason, ``audio_prompt_adaln`` spare nothing their video
+#: counterparts do not already spare. Removing them is measurably a no-op
+#: (``test_which_entries_are_load_bearing_is_pinned``). They stay for two
+#: reasons: the audio tower's coverage should be legible without deriving it
+#: from a matcher's substring semantics, and if upstream ever tightens gate 2
+#: into a real path-prefix test — which is what that matcher arguably should be
+#: — these stop being redundant and become the only thing covering the audio
+#: tower. ⚠️ The subsumption runs one way only: dropping ``prompt_adaln`` while
+#: keeping ``audio_prompt_adaln`` leaves the VIDEO prompt adaLN quantised.
+TRANSFORMER_INT8_SKIP_MODULES = (
+    # --- conditioning: the eight top-level LTX2AdaLayerNormSingle modules ----
+    # Each contributes `.emb.timestep_embedder.linear_1`, `.linear_2` and
+    # `.linear`. These compute the shift/scale/gate that every block's
+    # modulation is built from, so int8 error here is not attenuated -- it is
+    # multiplied across all 48 blocks and both towers. This is the collapse
+    # mechanism: quantised conditioning yields correctly-shaped, high-variance
+    # noise rather than a degraded picture.
+    "time_embed",
+    "audio_time_embed",
+    "prompt_adaln",
+    "audio_prompt_adaln",
+    "av_cross_attn_video_scale_shift",
+    "av_cross_attn_audio_scale_shift",
+    "av_cross_attn_video_a2v_gate",
+    "av_cross_attn_audio_v2a_gate",
+    # --- the input and output projections ------------------------------------
+    # One Linear each. `proj_out` is the last op before the latent leaves the
+    # transformer, so its error reaches the VAE unattenuated; upstream names it
+    # as the canonical skip in its own comment at `bnb_quantizer.py:261`:
+    # "We may keep some modules such as the `proj_out` in their original dtype
+    # for numerical stability reasons." `proj_in` is the mirror argument at the
+    # other end -- it is the only path the patchified latent has in.
+    "proj_in",
+    "proj_out",
+    "audio_proj_in",
+    "audio_proj_out",
+    # --- attention gates ------------------------------------------------------
+    # 288 Linears (6 attentions x 48 blocks), and the largest single block of
+    # skips. `to_gate_logits` is `nn.Linear(query_dim, heads)`
+    # (`transformer_ltx2.py:382`) -- a HEAD-COUNT-wide output, i.e. 32 numbers
+    # from 4096. Rounding a per-head gate is not a small perturbation of a big
+    # tensor; it is a coarse decision about whether an attention head
+    # contributes at all.
+    "to_gate_logits",
+)
+
 
 def _quantization_config(quantization: str):
     """The quantisation config, or ``None`` for the bf16 default.
@@ -407,6 +504,26 @@ def _quantization_config(quantization: str):
     ⚠️ ~11.96 GB less packed, and ~46.6 GB expected RSS **if** the 1.13x
     transient factor the measured run implies holds — **one data point, so an
     extrapolation rather than a rate.**
+
+    ❌ **Both of those arguments were about memory, and the config that came
+    out of them was blanket.** It was also the bug. Every frame the deployed
+    Space ever produced was correctly-shaped, high-variance garbage — colour
+    static and flat fields, at every resolution, in every mode,
+    deterministically. The same code on local MPS bf16 looked good. The only
+    difference in the deployed path is this function, and the config it
+    returned named no ``llm_int8_skip_modules`` at all, so bnb replaced
+    **every** ``nn.Linear`` in the transformer — including the adaLN/modulation
+    heads and the input/output projections.
+
+    Deterministic garbage at every setting is the signature of broken
+    *conditioning*, not of lost precision. Quantisation noise degrades an image;
+    it does not replace it with static. When the modulation path is rounded, the
+    shift/scale/gate that every one of the 48 blocks is conditioned on stops
+    carrying the timestep and the prompt, the denoiser is no longer steered by
+    the schedule, and what comes out is a correctly-shaped sample from the wrong
+    distribution — which is exactly what a high-variance field is.
+
+    :data:`TRANSFORMER_INT8_SKIP_MODULES` is the fix and carries the derivation.
     """
     if quantization != "int8":
         return None
@@ -433,7 +550,9 @@ def _quantization_config(quantization: str):
         )
 
     try:
+        from diffusers import BitsAndBytesConfig as DiffusersBitsAndBytesConfig
         from diffusers import PipelineQuantizationConfig
+        from transformers import BitsAndBytesConfig as TransformersBitsAndBytesConfig
     except ImportError as exc:
         raise ModelLoadError(
             component="transformer",
@@ -451,16 +570,84 @@ def _quantization_config(quantization: str):
     #   ValueError: `quantization_config` must be an instance of
     #   `PipelineQuantizationConfig`.
     #
-    # ✅ `quant_backend="bitsandbytes_8bit"` is a key in both backend mappings
-    # at the pinned SHA (`quantizers/auto.py:45,57`), not a guessed string.
-    return PipelineQuantizationConfig(
-        quant_backend="bitsandbytes_8bit",
-        quant_kwargs={"load_in_8bit": True},
-        # Bound B, now expressed as an ARGUMENT rather than as an intent a
-        # source-inspection test had to assert. Widening is one list entry and
-        # the kwargs test sees it.
-        components_to_quantize=list(QUANTIZED_COMPONENTS),
-    )
+    # ✅ **`quant_mapping`, NOT `quant_backend`.** The blanket
+    # `quant_backend="bitsandbytes_8bit"` form shipped every frame the Space
+    # ever produced as high-variance garbage, because it quantises the
+    # conditioning path (see `TRANSFORMER_INT8_SKIP_MODULES`). Three separate
+    # reasons say the fix belongs in a mapping rather than in wider
+    # `quant_kwargs`:
+    #
+    # 1. **The two components need different configs.** The transformer needs
+    #    the skips; `text_encoder` is a Gemma LLM, which is precisely the case
+    #    `LLM.int8()` was designed and validated for, and is not implicated in
+    #    this bug. `quant_backend` can only express ONE config for all of
+    #    `components_to_quantize`.
+    #
+    # 2. **`quant_backend` ALIASES the skip list across components.**
+    #    `pipe_quant_config.py:_resolve_quant_config` splats the same
+    #    `self.quant_kwargs` dict for every component, and
+    #    `BitsAndBytesConfig.__init__` stores `llm_int8_skip_modules` without
+    #    copying (`quantization_config.py:248`). `bnb_quantizer.py:261` then
+    #    takes that same list -- again without copying -- and `.extend()`s it
+    #    IN PLACE at `:267` and `:279`. So one shared list object accumulates
+    #    `keep_in_fp32_modules` and offloaded keys from every component in
+    #    turn. `quant_mapping` hands each component its own config object
+    #    (`_resolve_quant_config` returns `quant_mapping[module_name]`
+    #    verbatim), so the in-place mutation stays contained.
+    #
+    # 3. **`quant_backend` couples us to two libraries' signatures.**
+    #    `pipe_quant_config.py:_validate_init_kwargs_in_backends` raises unless
+    #    diffusers' and transformers' `BitsAndBytesConfig.__init__` parameter
+    #    sets are EQUAL. They are identical today, but requirements.txt pins
+    #    only `transformers>=5.15.1,<6` -- a minor release that adds one kwarg
+    #    on either side turns int8 into a hard startup failure. The
+    #    `quant_mapping` path skips that check entirely.
+    #
+    # ⚠️ The config CLASS differs per component and is not interchangeable. In
+    # the granular branch `_resolve_quant_config` ignores its own `is_diffusers`
+    # argument and returns the mapped object as-is, so each component's config
+    # must be the one ITS OWN loader accepts: diffusers' class for the
+    # diffusers-owned transformer, transformers' class for the Gemma text
+    # encoder. Upstream's own docs are explicit -- "You need to import and use
+    # `transformers.BitsAndBytesConfig` for components that come from
+    # Transformers."
+    #
+    # `llm_int8_threshold` is left at its 6.0 default deliberately. It governs
+    # a gradual outlier/fidelity tradeoff, not a collapse, and this change
+    # already moves one variable.
+    quant_mapping = {
+        "transformer": DiffusersBitsAndBytesConfig(
+            load_in_8bit=True,
+            # `list(...)`, not the tuple, for two independent reasons: the
+            # config's `post_init` rejects a non-list outright, and
+            # `bnb_quantizer` mutates whatever it is handed in place -- so a
+            # fresh copy per call keeps the module constant from growing
+            # entries across loads.
+            llm_int8_skip_modules=list(TRANSFORMER_INT8_SKIP_MODULES),
+        ),
+        "text_encoder": TransformersBitsAndBytesConfig(load_in_8bit=True),
+    }
+
+    # The mapping keys ARE `components_to_quantize` on this path, so the two
+    # declarations must not be able to drift. `QUANTIZED_COMPONENTS` remains the
+    # single source of truth -- it is what the guard above validates against
+    # `model_files.COMPONENTS` and what the load log reports -- and this asserts
+    # the mapping still covers exactly it. Without this, widening the constant
+    # would update the guard and the log while quietly quantising nothing new.
+    if set(quant_mapping) != set(QUANTIZED_COMPONENTS):
+        raise ModelLoadError(
+            component="transformer",
+            reason=(
+                f"the int8 quant_mapping covers {sorted(quant_mapping)} but "
+                f"QUANTIZED_COMPONENTS declares {sorted(QUANTIZED_COMPONENTS)}. On the "
+                f"quant_mapping path the mapping keys are the only thing that decides "
+                f"what is quantised, so a component named in the constant but absent "
+                f"from the mapping would load at full precision while the startup log "
+                f"reported it as quantised."
+            ),
+        )
+
+    return PipelineQuantizationConfig(quant_mapping=quant_mapping)
 
 
 def _snapshot_path():
