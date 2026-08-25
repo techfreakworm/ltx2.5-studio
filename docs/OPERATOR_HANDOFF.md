@@ -10,6 +10,25 @@
 ⚠️ *inferred* · ⏸️ *not yet established*.
 If a number carries no mark, treat that as a defect in this document.
 
+> ## ✅ State as of 2026-08-25 — read [`SPACE_SESSION_2026-08-25.md`](SPACE_SESSION_2026-08-25.md)
+>
+> A full GPU campaign ran on the Space that day and settled most of what this
+> document lists as open: **byte-level reproducibility sha256-VERIFIED** (three
+> containers, three code shas), **1216×704×121 generates** (tiled decode,
+> `cdb3211`), **stage 2 ran on the Space** (PASS at 704×480×25 input →
+> 1408×960; FAIL at ×49 — its ceiling is between those), **both LoRA
+> directions proven with a passing inertness check** (H12b's claim,
+> delivered), **conditioning shown to drive the output** (H4b's question,
+> answered by clip-swap), and the fork-boundary error fix **proven live in
+> both classes**. Total day ≤ ~675.5 GPU-s of 2400.
+>
+> **What genuinely remains open after that session:** the stage-2 ceiling
+> (diffusion-decoder chunking — its own investigation), the `video_to_audio`
+> −19.5 dBFS observation (now consistent-with the conditioning finding, still
+> not directly probed), the 2026-08-20 SIGKILL history
+> (documented-unexplained, by operator ruling) — and, still never exercised on
+> the platform: `auto_duration` and the **H10b** audio-input discriminator.
+
 ---
 
 ## 1. What this is
@@ -36,6 +55,10 @@ either as the other.
 > no LoRA, no `auto_duration`). Stage 2, LoRA, and every shippable resolution
 > remain hinode-only. §3's separation of the two evidence bases is what made
 > the merge legible — its annotation carries the detail.
+>
+> *Narrowed further on 2026-08-25: stage 2 (to its 25↔49-frame ceiling), LoRA
+> (both directions) and 1216×704×121 have now run on the Space too — see the
+> top-of-file note. Still hinode-only: the duration head.*
 
 ---
 
@@ -280,6 +303,12 @@ mechanism, which is what makes the rejection trustworthy rather than lucky.
 > (1408×960), the duration head, LoRA in both directions, the mel round-trip at
 > full length, and every shippable resolution. This section's discipline is
 > unchanged — it now keeps *configurations* apart instead of *platforms*.
+>
+> *That hinode-only list shrank again on 2026-08-25: stage 2 reached 1408×960
+> on the Space (from ≤25-frame input; its decoder ceiling is between 25 and 49
+> frames), LoRA ran in both directions, and 1216×704×121 passed via the tiled
+> decode. Remaining hinode-only: the duration head, and full-length audio
+> work. `SPACE_SESSION_2026-08-25.md`.*
 
 **Detailed record: [`SPACE_GENERATION_FINDING.md`](SPACE_GENERATION_FINDING.md)**
 — the first deploy, the killed workers, the falsified ceiling, and the run that
@@ -953,6 +982,13 @@ anything**, which is the mistake worth not repeating.
 > H4b are still runnable** — on the Space (none needs stage 2; each is one
 > same-seed pair at 256×256×9-class cost) or on a future host — and each still
 > establishes exactly what the table says.
+>
+> *Two of the three were delivered on the Space later on 2026-08-25: H12b's
+> claim (the adapter changed the output — `20a3a84b…` ≠ `b78803cc…` at the
+> same seed) and H4b's question (the conditioning clip reaches the model —
+> answered by clip-swap: outputs 17.277 vs 0.864, mirroring their inputs,
+> against a byte-identical control). **H10b is the last discriminator
+> standing.** `SPACE_SESSION_2026-08-25.md` §6–§7.*
 
 ### What is already earned, and does not need repeating
 
@@ -972,4 +1008,8 @@ and §3 is where they are kept apart.
 > (`SPACE_MODE_MATRIX.md`). What it has still proven nothing about: stage 2,
 > LoRA, `auto_duration`, and any resolution anyone would ship. §3's annotation
 > carries the merged state.
+>
+> *And later on 2026-08-25 that residue shrank to `auto_duration` alone (plus
+> the stage-2 ceiling's exact position): stage 2, LoRA and 1216×704×121 all
+> ran on the Space that day. Top-of-file note; `SPACE_SESSION_2026-08-25.md`.*
 

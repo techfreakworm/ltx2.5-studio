@@ -257,6 +257,12 @@ free quality win. On the three audio-only modes the registry overrides it regard
 the checkbox is shown pinned off and disabled rather than hidden: you can always see what
 will actually run.
 
+**Stage 2 has a measured ceiling on this hardware** (2026-08-25): it works at
+**704×480 input up to 25 frames** (output 1408×960) and fails in the diffusion
+decoder at 49 frames — the exact limit between those is unmeasured. Larger
+stage-2 requests will error rather than silently degrade; the UI already warns
+that stage 2 doubles the output geometry.
+
 ---
 
 ## Design documents

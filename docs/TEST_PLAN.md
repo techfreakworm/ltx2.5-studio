@@ -380,6 +380,12 @@ first-contact.** All of Part A is **HOST-PROVEN / ZEROGPU-PENDING**.
 > the platform. The economics and rules of engagement below still govern any
 > future Space run — with B.1's bf16-era packed-weight figure corrected where
 > marked.
+>
+> *Later on 2026-08-25 the session campaign covered R3's and R6's ground too —
+> LoRA in both directions with a passing inertness check, and stage 2 to its
+> decoder ceiling (PASS at 704×480×25 input, FAIL at ×49) —
+> `SPACE_SESSION_2026-08-25.md`. R7's ground (auto-duration) remains
+> unexercised on the platform.*
 
 ## B.1 The economics
 
