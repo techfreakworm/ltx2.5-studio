@@ -317,11 +317,15 @@ def _prepared_audio(kwargs: dict, request: GenerationRequest, pipe) -> tuple[str
     and only the user's own ears would ever have told them -- while the field's
     own help text said the encode had happened.
 
-    Skipped when ``audio_latents`` is already set, which is the programmatic
-    route and needs no file.
+    Encoding is skipped when ``audio_latents`` is already set -- the
+    programmatic route, which needs no file -- but that route is **checked**,
+    not waved through: see :func:`_checked_supplied_audio_latents`.
     """
+    supplied = kwargs.get("audio_latents")
+    if supplied is not None:
+        return _checked_supplied_audio_latents(supplied, kwargs, request, pipe)
     source = getattr(request, "audio", None)
-    if source is None or kwargs.get("audio_latents") is not None:
+    if source is None:
         return ()
 
     from . import audio as audio_module
@@ -355,6 +359,60 @@ def _prepared_audio(kwargs: dict, request: GenerationRequest, pipe) -> tuple[str
         generator=kwargs.get("generator"),
     )
     return tuple(notes)
+
+
+def _checked_supplied_audio_latents(latents, kwargs, request, pipe) -> tuple[str, ...]:
+    """Refuse a desynced run at the door, or say plainly that we could not check.
+
+    Supplied ``audio_latents`` set the audio length while ``num_frames`` still
+    governs the video (PLAN §5.7 row 11), and nothing upstream compares them:
+    a mismatched pair generates to completion and emits a desynced file with no
+    error anywhere. ``audio.validate_audio_latents_against_video`` was written,
+    exported and documented as exactly this check -- and called by **nothing**
+    (SPACE_MODE_MATRIX §8 follow-up #6, the third advertised-guard-wired-to-
+    nothing found in this build). This is the wiring, at the one seam every
+    supplied-latents run passes through.
+
+    Two deliberate non-checks, for different reasons:
+
+    * ``auto_duration`` (``num_frames`` absent from kwargs): the duration head
+      picks the video length, so there is no independent video length for the
+      supplied audio to disagree with. Nothing to check -- a silent skip.
+    * No ``audio_vae`` to read timing parameters from, or a shapeless latents
+      object: the check *cannot run*, and "could not check" must never look
+      like "checked and fine" (the ``check_mmap_backed`` rule). Reported as a
+      warning on the result rather than refusing a run that may well be fine.
+    """
+    num_frames = kwargs.get("num_frames")
+    if num_frames is None:
+        return ()
+
+    from . import audio as audio_module
+
+    target = getattr(pipe, "pipeline", pipe)
+    audio_vae = getattr(target, "audio_vae", None)
+    shape = getattr(latents, "shape", None)
+    if audio_vae is None or shape is None:
+        reason = (
+            "the pipeline exposes no audio_vae to read timing parameters from"
+            if audio_vae is None
+            else "the latents object has no shape"
+        )
+        return (
+            f"audio/video sync was NOT checked for the supplied audio_latents: {reason}. "
+            f"A desynced output cannot be ruled out for this run.",
+        )
+
+    frame_rate = kwargs.get("frame_rate") or getattr(request, "frame_rate", None)
+    # The same seconds convention the UI readout uses (ui/render.py): the two
+    # must agree, or the refusal quotes lengths the user was never shown.
+    video_seconds = float(num_frames) / float(frame_rate)
+    audio_module.validate_audio_latents_against_video(
+        shape,
+        params=audio_module.audio_params_from(audio_vae),
+        video_seconds=video_seconds,
+    )
+    return ()
 
 
 def _apply_loras(pipe, request: GenerationRequest):

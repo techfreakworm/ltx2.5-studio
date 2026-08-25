@@ -36,6 +36,7 @@ from conftest import PACKAGE_ROOT, code_string_constants, code_tokens
 
 from ltx25_studio import generate as generate_module
 from ltx25_studio.errors import (
+    AudioVideoDesyncError,
     DecodeError,
     EmptyOutputError,
     FrameCountError,
@@ -805,3 +806,120 @@ def test_a_pipeline_that_cannot_delete_adapters_is_refused(tmp_path):
             output_root=tmp_path,
         )
     assert "delete_adapters" in str(excinfo.value)
+
+
+# --------------------------------------------------------------------------
+# supplied audio_latents are checked against the video length -- §5.7 row 11
+# --------------------------------------------------------------------------
+#
+# Supplied audio_latents set the audio length while num_frames governs the
+# video, and upstream never compares them: a mismatched pair generates to
+# completion and emits a desynced file with no error anywhere. The check
+# below was exported and documented as exactly this guard and called by
+# nothing (SPACE_MODE_MATRIX §8 follow-up #6); these tests pin its wiring.
+#
+# Geometry chosen so the seconds are exact: hop 160 x temporal 4 / 16 kHz
+# = 0.04 s per latent frame, so 121 latent frames = 4.84 s, and the video
+# is 121 pixel frames at 25 fps = 4.84 s.
+
+
+class _SyncAudioVAE:
+    """The six §5.4 parameters where the real checkpoint keeps them: four in
+    config under upstream's names, two as instance attributes."""
+
+    config = {
+        "sample_rate": 16000,
+        "mel_hop_length": 160,
+        "mel_bins": 64,
+        "latent_channels": 8,
+    }
+    mel_compression_ratio = 4
+    temporal_compression_ratio = 4
+
+
+def _latents(frames):
+    return SimpleNamespace(shape=(1, 8, frames, 64))
+
+
+def _audio_request(**overrides):
+    fields = {
+        "mode": "audio_to_video",
+        "frame_rate": 25.0,
+        "num_frames": 121,
+        "audio": object(),
+        "noise_scale": 0.3,
+    }
+    fields.update(overrides)
+    return a_request(**fields)
+
+
+def test_matched_supplied_latents_generate_with_no_warning(tmp_path):
+    pipe = FakePipe()
+    pipe.audio_vae = _SyncAudioVAE()
+    result = generate(
+        _audio_request(audio_latents=_latents(121)),
+        pipeline_factory=factory_for(pipe),
+        encoder=good_encoder,
+        output_root=tmp_path,
+    )
+    assert not any("NOT checked" in w for w in result.warnings)
+    _, sent = pipe.calls[-1]
+    assert sent.get("audio_latents") is not None, "the supplied latents must still reach the pipe"
+
+
+def test_desynced_supplied_latents_are_refused_before_the_metered_call(tmp_path):
+    """4.84 s of video against 3.84 s of audio must refuse -- and refuse BEFORE
+    the pipeline runs, because the desynced generation costs real quota and
+    the file it produces is the §5.5 failure: emitted, not refused."""
+    pipe = FakePipe()
+    pipe.audio_vae = _SyncAudioVAE()
+    with pytest.raises(AudioVideoDesyncError) as excinfo:
+        generate(
+            _audio_request(audio_latents=_latents(96)),
+            pipeline_factory=factory_for(pipe),
+            encoder=good_encoder,
+            output_root=tmp_path,
+        )
+    assert pipe.calls == [], "the refusal must land before any pipeline work"
+    assert "4.84" in str(excinfo.value) and "3.84" in str(excinfo.value), (
+        "the refusal must name both lengths so the user can fix one"
+    )
+
+
+def test_auto_duration_skips_the_check_because_nothing_governs_the_video(tmp_path):
+    """With num_frames omitted the duration head picks the video length, so
+    there is no independent length for the audio to disagree with."""
+    pipe = FakePipe()
+    pipe.audio_vae = _SyncAudioVAE()
+    result = generate(
+        _audio_request(audio_latents=_latents(96), auto_duration=True),
+        pipeline_factory=factory_for(pipe),
+        encoder=good_encoder,
+        output_root=tmp_path,
+    )
+    assert not any("NOT checked" in w for w in result.warnings)
+
+
+def test_no_audio_vae_reports_could_not_check_rather_than_passing_silently(tmp_path):
+    """The check_mmap_backed rule: 'could not check' and 'checked and fine'
+    must never look the same. A pipe with no audio_vae cannot yield the six
+    timing parameters, so the run proceeds carrying a warning that says so."""
+    result = generate(
+        _audio_request(audio_latents=_latents(96)),
+        pipeline_factory=factory_for(FakePipe()),
+        encoder=good_encoder,
+        output_root=tmp_path,
+    )
+    assert any("NOT checked" in w and "audio_vae" in w for w in result.warnings)
+
+
+def test_shapeless_latents_report_could_not_check(tmp_path):
+    pipe = FakePipe()
+    pipe.audio_vae = _SyncAudioVAE()
+    result = generate(
+        _audio_request(audio_latents=object()),
+        pipeline_factory=factory_for(pipe),
+        encoder=good_encoder,
+        output_root=tmp_path,
+    )
+    assert any("NOT checked" in w and "shape" in w for w in result.warnings)
