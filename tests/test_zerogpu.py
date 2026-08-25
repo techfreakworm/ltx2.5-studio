@@ -391,3 +391,77 @@ def test_anonymous_regions_are_not_parsed_as_backing():
     regions = zerogpu.parse_maps(MAPS)
     assert zerogpu.backing_file(MAPPED, regions) == BLOB
     assert zerogpu.backing_file(ANONYMOUS, regions) is None
+
+
+# --------------------------------------------------------------------------
+# the duration estimator reads the call the LIVE dispatch actually makes
+# --------------------------------------------------------------------------
+#
+# generate() routes to the entrypoint as dispatch(request=GenerationRequest,
+# pipeline_factory=..., ...), and spaces invokes the estimator with those
+# same kwargs. So every request field the estimator wants lives on the
+# `request` OBJECT -- a read of params.get("enable_stage_2") alone is an
+# advertised lever attached to nothing on the live path: it resolves fine,
+# changes no behaviour, and every live run reserves the base duration.
+# These tests pin both shapes: the request-object read (the live path) and
+# the top-level kwarg (direct callers), for stage 2 and for LoRA.
+
+
+def _fake_request(**fields):
+    from types import SimpleNamespace
+
+    defaults = {"enable_stage_2": False, "loras": ()}
+    defaults.update(fields)
+    return SimpleNamespace(**defaults)
+
+
+BASE_SECONDS = zerogpu.estimate_duration()
+
+
+def test_stage_2_scales_the_reservation_through_the_request_object():
+    """The live-path shape. A top-level-only read makes stage 2 reserve the
+    base duration and die at the reservation kill, having proven nothing."""
+    got = zerogpu.estimate_duration(request=_fake_request(enable_stage_2=True))
+    assert got == int(BASE_SECONDS * 1.5)
+
+
+def test_stage_2_still_scales_for_a_direct_top_level_caller():
+    assert zerogpu.estimate_duration(enable_stage_2=True) == int(BASE_SECONDS * 1.5)
+
+
+def test_a_lora_run_reserves_extra_time_through_the_request_object():
+    """Inside the billed window a LoRA run additionally reads the adapter
+    payload and runs peft injection over ~3320 modules -- absent headroom
+    that spend can hit the reservation kill."""
+    got = zerogpu.estimate_duration(request=_fake_request(loras=({"source": "a"},)))
+    assert got == BASE_SECONDS + zerogpu.LORA_DURATION_SECONDS
+
+
+def test_a_lora_run_reserves_extra_time_for_a_direct_top_level_caller():
+    got = zerogpu.estimate_duration(loras=({"source": "a"},))
+    assert got == BASE_SECONDS + zerogpu.LORA_DURATION_SECONDS
+
+
+def test_no_staged_loras_means_no_lora_headroom():
+    """An empty tuple is the request default; it must not buy headroom, or
+    every run over-reserves and schedulability pays for nothing."""
+    assert zerogpu.estimate_duration(request=_fake_request()) == BASE_SECONDS
+    assert zerogpu.estimate_duration(loras=()) == BASE_SECONDS
+
+
+def test_lora_headroom_is_additive_after_the_stage_2_multiplier():
+    """The payload read and injection walk happen once, before any denoising:
+    their cost does not scale with the refinement chain, so the increment is
+    added after the multiplier, not multiplied by it."""
+    got = zerogpu.estimate_duration(
+        request=_fake_request(enable_stage_2=True, loras=({"source": "a"},))
+    )
+    assert got == int(BASE_SECONDS * 1.5) + zerogpu.LORA_DURATION_SECONDS
+
+
+def test_an_explicit_duration_is_still_scaled_and_padded():
+    got = zerogpu.estimate_duration(
+        gpu_duration_seconds=100,
+        request=_fake_request(enable_stage_2=True, loras=({"source": "a"},)),
+    )
+    assert got == 150 + zerogpu.LORA_DURATION_SECONDS

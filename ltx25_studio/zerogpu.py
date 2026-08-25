@@ -79,6 +79,7 @@ __all__ = [
     "check_mmap_backed",
     "backing_file",
     "estimate_duration",
+    "LORA_DURATION_SECONDS",
     "gpu_decorator_kwargs",
     "host_has_cuda",
     "is_zerogpu",
@@ -284,6 +285,34 @@ def will_use_gpu(spaces_module) -> bool:
     return host_has_cuda()
 
 
+#: Reservation headroom for a run with staged LoRA adapters, in seconds.
+#: Inside the billed window a LoRA run additionally reads the adapter payload
+#: off gradio's tmp disk (up to the 12 GB validator ceiling, though real
+#: adapters measure 0.2-0.4 GB -- seconds of I/O) and runs peft injection
+#: over ~3320 transformer modules. Both are seconds-to-low-tens, not minutes;
+#: 60 covers them with headroom. Deliberately flat rather than per-adapter:
+#: over-reserving costs schedulability, not billing, and stacked adapters
+#: share one injection walk.
+LORA_DURATION_SECONDS = 60
+
+
+def _request_field(params, name):
+    """Read a field from the call as the LIVE dispatch actually shapes it.
+
+    ``generate()`` routes through the entrypoint as ``dispatch(request=
+    GenerationRequest(...), ...)``, so the request's fields arrive on the
+    ``request`` object -- NOT as top-level kwargs. An estimator that reads
+    only ``params.get(name)`` is an advertised lever attached to nothing on
+    the live path (the §8 defect class): it resolves fine, changes no
+    behaviour, and every live run reserves the base duration. Top-level
+    kwargs are still honoured first for direct callers.
+    """
+    value = params.get(name)
+    if value is None:
+        value = getattr(params.get("request"), name, None)
+    return value
+
+
 def estimate_duration(**params) -> int:
     """Seconds to reserve for one generation.
 
@@ -308,10 +337,15 @@ def estimate_duration(**params) -> int:
             seconds = load_config().gpu_duration_seconds
         except Exception:
             seconds = DEFAULT_GPU_DURATION_SECONDS
-    if params.get("enable_stage_2"):
+    if _request_field(params, "enable_stage_2"):
         # Stage 2 adds an upsample pass plus three more denoise steps; a timeout
         # costs the whole reservation and proves nothing.
         seconds = int(seconds * 1.5)
+    if _request_field(params, "loras"):
+        # AFTER the stage-2 multiplier on purpose: the payload read and the
+        # injection walk happen once, before any denoising, so their cost is
+        # additive -- it does not scale with the refinement chain.
+        seconds = int(seconds) + LORA_DURATION_SECONDS
     return int(seconds)
 
 
