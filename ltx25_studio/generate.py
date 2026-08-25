@@ -343,13 +343,38 @@ def _prepared_audio(kwargs: dict, request: GenerationRequest, pipe) -> tuple[str
         )
 
     waveform, rate = audio_module.load_waveform(source)
+    # Anything this path had to change about the user's file comes back through
+    # `notes`, so it reaches `GenerationResult.warnings` rather than the Space
+    # log alone.
+    notes: list[str] = []
+
+    # TRIM long, REFUSE short, never pad, never silent. A file longer than the
+    # num_frames-derived video is cut to upstream's own latent grid and the cut
+    # is named in the result; a file shorter beyond tolerance is refused naming
+    # the largest num_frames it covers. The asymmetry is deliberate: trimming
+    # discards excess the user can see and undo, padding would fabricate input
+    # they never gave. Note the contrast with the supplied-latents branch,
+    # which refuses on ANY mismatch: supplied latents are a programmatic
+    # caller who meant something precise, while a file upload is an end user
+    # who should not need to know the frame arithmetic. Skipped under
+    # auto_duration for the same reason as there: no independent video length
+    # exists yet for the audio to disagree with.
+    num_frames = kwargs.get("num_frames")
+    if num_frames is not None:
+        waveform, trim_note = audio_module.reconcile_waveform_with_video(
+            waveform,
+            sampling_rate=rate,
+            params=audio_module.audio_params_from(audio_vae),
+            num_frames=int(num_frames),
+            frame_rate=float(kwargs.get("frame_rate") or getattr(request, "frame_rate", 0.0)),
+        )
+        if trim_note is not None:
+            notes.append(trim_note)
+
     # The same generator the pipeline gets: `audio_vae.encode` returns a
     # distribution and `.sample()` draws from it, so an unseeded draw makes two
     # runs differ regardless of any lever under test. That is the third reason
     # H10b established less than it appeared to.
-    # Anything the encode had to change about the user's file comes back here,
-    # so it reaches `GenerationResult.warnings` rather than the Space log alone.
-    notes: list[str] = []
     kwargs["audio_latents"] = audio_module.encode_waveform_to_latents(
         waveform,
         audio_vae=audio_vae,

@@ -572,7 +572,13 @@ class FakeVocoder:
 
 #: What the stub loader hands back. STEREO, matching the fake VAE's in_channels,
 #: so the default seam runs need no conversion and the mono case is explicit.
-STUB_WAVEFORM = waveform_of(2)
+#: LONG ENOUGH to cover the request the seam's field defaults produce — 121
+#: frames at 24 fps is 5.04 s — because `generate._prepared_audio` now
+#: reconciles upload length with the video (trim long, REFUSE short): the old
+#: 0.26 s stub would be refused against every default request, dragging every
+#: encode-seam test into the length policy's territory instead of the seam
+#: they are about. Derived from the same numbers, not a magic constant.
+STUB_WAVEFORM = waveform_of(2, samples=round(121 / 24.0 * 16000))
 #: Matches the audio VAE's own rate, so `_resampled` short-circuits and the
 #: offline gate needs no torchaudio. The VAE takes 16000; the VOCODER emits
 #: 48000. They are not symmetric and assuming they were is a real trap.

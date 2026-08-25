@@ -923,3 +923,93 @@ def test_shapeless_latents_report_could_not_check(tmp_path):
         output_root=tmp_path,
     )
     assert any("NOT checked" in w and "shape" in w for w in result.warnings)
+
+
+# --------------------------------------------------------------------------
+# uploaded audio FILES: trim long (with a visible note), refuse short
+# --------------------------------------------------------------------------
+#
+# The file branch deliberately accommodates where the supplied-latents branch
+# refuses: supplied latents are a programmatic caller who meant something
+# precise; a file upload is an end user who should not need to know the frame
+# arithmetic. Geometry as in the latents tests: 0.04 s per latent frame, and
+# 121 frames @ 25 fps = 4.84 s of video = 77440 samples at 16 kHz.
+
+
+def _file_audio_pipe():
+    from conftest import FakeAudioVae
+
+    pipe = FakePipe()
+    pipe.audio_vae = FakeAudioVae()
+    return pipe
+
+
+def _patched_upload(monkeypatch, samples):
+    from conftest import waveform_of
+
+    from ltx25_studio import audio as audio_module
+
+    monkeypatch.setattr(
+        audio_module, "load_waveform", lambda source: (waveform_of(2, samples=samples), 16000)
+    )
+
+
+def test_a_long_upload_is_trimmed_and_the_user_is_told(monkeypatch, tmp_path):
+    pipe = _file_audio_pipe()
+    _patched_upload(monkeypatch, samples=96000)  # 6.0 s against a 4.84 s video
+    result = generate(
+        _audio_request(),
+        pipeline_factory=factory_for(pipe),
+        encoder=good_encoder,
+        output_root=tmp_path,
+    )
+    assert "audio input trimmed from 6.00s to 4.84s to match 121 frames" in result.warnings
+    # The encoder must have consumed the TRIMMED waveform -- the note without
+    # the trim would be the inverted defect: reporting an alteration that
+    # never happened.
+    assert pipe.audio_vae.mels[-1].shape[-1] == 77440
+
+
+def test_a_matching_upload_is_encoded_whole_with_no_note(monkeypatch, tmp_path):
+    pipe = _file_audio_pipe()
+    _patched_upload(monkeypatch, samples=77440)
+    result = generate(
+        _audio_request(),
+        pipeline_factory=factory_for(pipe),
+        encoder=good_encoder,
+        output_root=tmp_path,
+    )
+    assert not any("trimmed" in w for w in result.warnings)
+    assert pipe.audio_vae.mels[-1].shape[-1] == 77440
+
+
+def test_a_short_upload_is_refused_before_the_metered_call(monkeypatch, tmp_path):
+    """Refuse, never pad: padding fabricates input the user never gave, and
+    the refusal must name the num_frames that would fit so the message is a
+    fix, not a shrug. It lands before the pipeline so it costs no quota."""
+    pipe = _file_audio_pipe()
+    _patched_upload(monkeypatch, samples=48000)  # 3.0 s
+    with pytest.raises(AudioVideoDesyncError) as excinfo:
+        generate(
+            _audio_request(),
+            pipeline_factory=factory_for(pipe),
+            encoder=good_encoder,
+            output_root=tmp_path,
+        )
+    assert pipe.calls == []
+    assert "num_frames=73" in str(excinfo.value)
+
+
+def test_auto_duration_leaves_the_upload_length_alone(monkeypatch, tmp_path):
+    """No num_frames, no independent video length, nothing to reconcile --
+    the duration head may well derive the length FROM this audio."""
+    pipe = _file_audio_pipe()
+    _patched_upload(monkeypatch, samples=96000)
+    result = generate(
+        _audio_request(auto_duration=True),
+        pipeline_factory=factory_for(pipe),
+        encoder=good_encoder,
+        output_root=tmp_path,
+    )
+    assert pipe.audio_vae.mels[-1].shape[-1] == 96000, "auto_duration must not trim"
+    assert not any("trimmed" in w for w in result.warnings)

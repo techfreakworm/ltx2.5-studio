@@ -46,8 +46,12 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
 
-from .constraints import DEFAULT_LENGTH_TOLERANCE_SECONDS, validate_audio_video_agreement
-from .errors import LTXStudioError
+from .constraints import (
+    DEFAULT_LENGTH_TOLERANCE_SECONDS,
+    nearest_valid_num_frames,
+    validate_audio_video_agreement,
+)
+from .errors import AudioVideoDesyncError, LTXStudioError
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +75,7 @@ __all__ = [
     "mel_front_end_for",
     "build_mel_front_end",
     "encoder_layout",
+    "reconcile_waveform_with_video",
     "batched",
     "mel_parameters",
     "MEL_PARAM_SOURCES",
@@ -327,6 +332,73 @@ def validate_audio_latents_against_video(
         tolerance_seconds=tolerance_seconds,
     )
     return audio_seconds
+
+
+def reconcile_waveform_with_video(
+    waveform,
+    *,
+    sampling_rate: int,
+    params: AudioParams,
+    num_frames: int,
+    frame_rate: float,
+    tolerance_seconds: float = DEFAULT_LENGTH_TOLERANCE_SECONDS,
+):
+    """Trim a LONG upload to the video length; refuse a SHORT one. Never pad.
+
+    Returns ``(waveform, note)`` where ``note`` is ``None`` when nothing was
+    changed, or one sentence for the result's warnings channel naming exactly
+    what was cut. Raises :class:`AudioVideoDesyncError` -- naming both lengths
+    *and* the largest ``num_frames`` the audio covers -- when the upload is
+    short beyond tolerance.
+
+    **The asymmetry is the policy, not an accident.** Trimming discards excess
+    input the user can see and undo; padding fabricates input the user never
+    gave; and this project's standing rule is that silent alteration is worse
+    than refusal. So the long case is accommodated *with a visible note*, the
+    short case is refused *with the exact change that would fit*, and there is
+    no quiet branch.
+
+    **The trim lands on upstream's own grid.** The pipeline reconciles nothing:
+    supplied ``audio_latents`` simply *replace* its duration-derived length
+    (``audio_num_frames`` is re-read from the tensor's shape), and its fresh-
+    noise path uses ``audio_num_frames = round(duration_s * sampling_rate /
+    hop / temporal_ratio)`` -- ``pipeline_ltx2_condition.py`` at the pinned
+    ``ac56fa2f``, and verbatim in 0.37.1. Nothing trims internally, so this is
+    the only reconciliation anywhere, and it targets exactly the latent count
+    the model would have generated fresh: whole latent frames, each an exact
+    multiple of hop x temporal ratio at the VAE rate -- the encoder never sees
+    a boundary that is not its own.
+
+    The kept sample count is converted to the *incoming* waveform's rate; the
+    resample to the VAE's rate happens later in the encode, as it always did.
+    """
+    samples = int(waveform.shape[-1])
+    audio_seconds = samples / float(sampling_rate)
+    video_seconds = float(num_frames) / float(frame_rate)
+
+    if abs(video_seconds - audio_seconds) <= tolerance_seconds:
+        return waveform, None
+
+    if audio_seconds < video_seconds:
+        # floor, not round: suggesting a frame count the audio does not quite
+        # reach would bounce the user straight back to this error.
+        fitting = int(audio_seconds * frame_rate)
+        raise AudioVideoDesyncError(
+            video_seconds=video_seconds,
+            audio_seconds=audio_seconds,
+            largest_fitting_num_frames=nearest_valid_num_frames(fitting)[0],
+        )
+
+    target_latent_frames = round(
+        video_seconds * params.audio_sampling_rate / params.samples_per_latent_frame
+    )
+    kept_seconds = params.seconds_for_latent_frames(target_latent_frames)
+    keep = int(round(kept_seconds * sampling_rate))
+    return (
+        waveform[..., :keep],
+        f"audio input trimmed from {audio_seconds:.2f}s to {kept_seconds:.2f}s "
+        f"to match {num_frames} frames",
+    )
 
 
 # ---------------------------------------------------------------------------

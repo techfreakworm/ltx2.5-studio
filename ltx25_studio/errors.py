@@ -268,14 +268,24 @@ class AudioVideoDesyncError(ConstraintError):
     duration-derived value, while ``num_frames`` still governs the video.
     """
 
-    def __init__(self, *, video_seconds, audio_seconds):
+    def __init__(self, *, video_seconds, audio_seconds, largest_fitting_num_frames=None):
         self.video_seconds = video_seconds
         self.audio_seconds = audio_seconds
-        super().__init__(
+        self.largest_fitting_num_frames = largest_fitting_num_frames
+        message = (
             f"video and audio lengths disagree: video is {video_seconds} s but audio is "
             f"{audio_seconds} s. Supplying audio_latents overrides the audio length while "
             f"num_frames still governs the video; adjust one so they match."
         )
+        if largest_fitting_num_frames is not None:
+            # Optional because only some raise sites can compute it: the
+            # file-upload path knows the frame rate and can name the exact
+            # change that would fit, and an error that names the fix beats one
+            # that only names the mismatch.
+            message += (
+                f" The longest video this audio covers is num_frames={largest_fitting_num_frames}."
+            )
+        super().__init__(message)
 
 
 # ---------------------------------------------------------------------------

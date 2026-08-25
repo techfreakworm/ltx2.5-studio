@@ -459,12 +459,16 @@ def test_a_mono_upload_is_reported_to_the_user_not_only_the_log(monkeypatch, tmp
     the audio is widened so it can be encoded at all, and the person who chose
     mono is told their file was altered.
     """
-    from conftest import STUB_SAMPLING_RATE, waveform_of
+    from conftest import STUB_SAMPLING_RATE, STUB_WAVEFORM, waveform_of
 
     from ltx25_studio import audio as audio_module
 
+    # Same length as the stereo stub: this test is about the CHANNEL note, and
+    # a short mono file would now trip the length policy's refusal instead.
     monkeypatch.setattr(
-        audio_module, "load_waveform", lambda source: (waveform_of(1), STUB_SAMPLING_RATE)
+        audio_module,
+        "load_waveform",
+        lambda source: (waveform_of(1, samples=STUB_WAVEFORM.shape[-1]), STUB_SAMPLING_RATE),
     )
     pipe = FakePipe()
 

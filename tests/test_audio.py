@@ -855,3 +855,109 @@ def test_a_tensor_already_matching_is_not_moved():
     already = FakeMel("bfloat16", device="cuda")
 
     assert _matched_to_module(already, FakeAudioVae(), name="audio_vae") is already
+
+
+# --------------------------------------------------------------------------
+# upload-length reconciliation -- TRIM long, REFUSE short, never pad
+# --------------------------------------------------------------------------
+#
+# Upstream reconciles nothing: supplied audio_latents wholesale REPLACE its
+# duration-derived length (audio_num_frames is re-read from the tensor), and
+# its fresh-noise path uses round(duration_s * rate / hop / temporal_ratio)
+# -- pipeline_ltx2_condition.py at the pinned ac56fa2f. So the trim below is
+# the only reconciliation anywhere, and it must land on exactly the latent
+# count the model would have generated fresh.
+#
+# The asymmetry is the policy: trimming discards excess the user can see and
+# undo; padding fabricates input they never gave; silent alteration is worse
+# than refusal.
+
+_RECON_PARAMS = audio.AudioParams(
+    audio_sampling_rate=16000,
+    audio_hop_length=160,
+    audio_mel_bins=64,
+    audio_vae_mel_compression_ratio=4,
+    audio_vae_temporal_compression_ratio=4,
+    audio_latent_channels=8,
+)
+# 160 * 4 / 16000 = 0.04 s per latent frame; 121 frames @ 25 fps = 4.84 s of
+# video = exactly 121 latent frames of audio.
+
+
+def _recon(waveform, *, sampling_rate=16000, num_frames=121, frame_rate=25.0):
+    return audio.reconcile_waveform_with_video(
+        waveform,
+        sampling_rate=sampling_rate,
+        params=_RECON_PARAMS,
+        num_frames=num_frames,
+        frame_rate=frame_rate,
+    )
+
+
+def test_a_matching_upload_passes_through_untouched():
+    wave = waveform_of(2, samples=77440)  # 4.84 s at 16 kHz, exactly the video
+    out, note = _recon(wave)
+    assert out is wave, "a matching upload must not be copied, resampled or resliced"
+    assert note is None
+
+
+def test_a_mismatch_inside_the_tolerance_is_left_alone():
+    wave = waveform_of(2, samples=77440 + 640)  # 0.04 s long -- under the 0.05 s band
+    out, note = _recon(wave)
+    assert out is wave
+    assert note is None
+
+
+def test_a_long_upload_is_trimmed_to_upstreams_own_latent_grid():
+    wave = waveform_of(2, samples=96000)  # 6.0 s against a 4.84 s video
+    out, note = _recon(wave)
+    assert out.shape[-1] == 77440, "round(4.84 s * 16 kHz) -- whole latent frames, no partial hop"
+    assert out.shape[-1] % _RECON_PARAMS.samples_per_latent_frame == 0
+    assert note == "audio input trimmed from 6.00s to 4.84s to match 121 frames"
+
+
+def test_the_trim_converts_to_the_incoming_files_own_rate():
+    """The grid is defined at the VAE rate; the file arrives at its own. The
+    kept SECONDS are grid-aligned and the sample count follows the file."""
+    wave = waveform_of(2, samples=288000)  # 6.0 s at 48 kHz
+    out, note = _recon(wave, sampling_rate=48000)
+    assert out.shape[-1] == round(4.84 * 48000)
+    assert note == "audio input trimmed from 6.00s to 4.84s to match 121 frames"
+
+
+def test_a_short_upload_is_refused_naming_the_change_that_would_fit():
+    from ltx25_studio.errors import AudioVideoDesyncError
+
+    wave = waveform_of(2, samples=48000)  # 3.0 s against a 4.84 s video
+    with pytest.raises(AudioVideoDesyncError) as excinfo:
+        _recon(wave)
+    # floor(3.0 * 25) = 75 raw frames; the largest LEGAL count at or below is
+    # 73 = 9*8 + 1. Suggesting 75 would bounce the user off the k*8+1 rule;
+    # suggesting 81 would bounce them straight back off this refusal.
+    assert excinfo.value.largest_fitting_num_frames == 73
+    assert "num_frames=73" in str(excinfo.value)
+    assert "4.84" in str(excinfo.value) and "3.0" in str(excinfo.value)
+    from ltx25_studio import constraints
+
+    assert constraints.is_valid_num_frames(excinfo.value.largest_fitting_num_frames)
+
+
+def test_a_short_upload_is_never_padded():
+    """The refusal IS the no-padding guarantee, asserted from the other side:
+    nothing returns a waveform longer than it was given."""
+    from ltx25_studio.errors import AudioVideoDesyncError
+
+    wave = waveform_of(2, samples=16000)
+    with pytest.raises(AudioVideoDesyncError):
+        _recon(wave)
+
+
+def test_an_absurdly_short_upload_still_gets_a_legal_suggestion():
+    from ltx25_studio.errors import AudioVideoDesyncError
+
+    wave = waveform_of(2, samples=160)  # 0.01 s
+    with pytest.raises(AudioVideoDesyncError) as excinfo:
+        _recon(wave)
+    from ltx25_studio import constraints
+
+    assert constraints.is_valid_num_frames(excinfo.value.largest_fitting_num_frames)
