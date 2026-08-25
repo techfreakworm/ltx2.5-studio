@@ -1,5 +1,35 @@
 # The Space: a killed worker, a falsified ceiling, and a working generation
 
+> ## ⛔ INVALIDATED (2026-08-25, evening) — "a real video" was COLOUR STATIC
+>
+> The 39,146-byte artifact this document resolves on, and every Space artifact
+> after it up to sha `ff142d9`, was produced by a transformer whose
+> **conditioning path had been quantised away**. The blanket int8 config below
+> named no `llm_int8_skip_modules`, so bitsandbytes replaced every `nn.Linear`
+> including the eight `LTX2AdaLayerNormSingle` modulation heads and the in/out
+> projections. "Content-verified" meant non-empty and non-frozen; nobody opened
+> a frame until the operator did, on 2026-08-25.
+>
+> ✅ **Fixed at `eb1aa9f`** (316 of 1660 Linears spared, names read off the real
+> checkpoint), deployed as Space sha `e3b5333`, verified by eye. **Every
+> mechanical measurement in this document stands** — RSS, disk, packing, the
+> killed workers, the falsified ceiling, the fetch path, the fork crossing.
+> Only the output claim falls. Full record: the invalidation block at the top of
+> [`SPACE_MODE_MATRIX.md`](SPACE_MODE_MATRIX.md).
+>
+> ⛔ **§9.3's "do not let any document claim the widening fixed generation" is
+> VINDICATED** in the strongest direction available: the widening is what broke
+> it.
+>
+> ⛔ **One hypothesis was investigated and REFUTED — do not re-chase it.** That
+> `LLM.int8()` computes matmuls in **fp16** while LTX is bf16-native, evidenced
+> by bitsandbytes' own bf16→fp16 cast warning in the Space log, **is not the
+> mechanism.** `llm_int8_threshold` sits at its **6.0 default**, which is exactly
+> the gate that routes fp16-overflowing columns through the bf16 outlier path,
+> and inside fp16's range a bf16→fp16 cast is exact. ✅ The skip list alone fixed
+> it with `llm_int8_threshold` untouched — one variable, cleanly attributed. The
+> warning is real; it was a red herring.
+
 > ## ✅ RESOLVED — the Space generates. **Read §9.3 before citing why.**
 >
 > A real **39,146-byte** video, **content-verified**, at sha `8fb292d6`.

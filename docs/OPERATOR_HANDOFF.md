@@ -10,6 +10,68 @@
 ⚠️ *inferred* · ⏸️ *not yet established*.
 If a number carries no mark, treat that as a defect in this document.
 
+> ## ⛔ READ FIRST — 2026-08-25, evening: the deployed Space has NEVER produced a real image
+>
+> **Every generation result this document attributes to the Space was produced by
+> a broken transformer.** Every Space sha up to and including `ff142d9` ran
+> blanket bitsandbytes int8 with no `llm_int8_skip_modules`, so bnb quantised the
+> LTX-2.5 **conditioning path** — the eight top-level `LTX2AdaLayerNormSingle`
+> modulation heads and the in/out projections — along with everything else. The
+> denoiser stopped being steered by the timestep and the prompt, and every Space
+> artifact ever banked is **colour static or a flat field**: correctly shaped,
+> high variance, fully deterministic, and not a picture.
+>
+> ✅ **Fixed at `eb1aa9f`** (316 of 1660 Linears spared, names read off the real
+> checkpoint), **deployed as Space sha `e3b5333`**, and proven there — the same
+> seed, prompt and geometry that produced colour static now produce a
+> photographic frame. Before/after:
+> `~/.soma/leads/ltx25-studio/frames/COMPARE_before_after_skipfix.png` 📄.
+>
+> **✅ MECHANICAL claims survive, all of them**: all eleven modes execute on the
+> Space; both fork-boundary directions carry their cargo; determinism and
+> byte-reproducibility hold; tiled decode enables 1216×704×121; stage 2 runs and
+> doubles geometry with a ceiling between 25 and 49 frames; LoRA applies,
+> detaches, and both routes agree; the disk, RAM and quota arithmetic.
+>
+> **⛔ OUTPUT claims do not survive, none of them.** Every "content-verified"
+> Space artifact in this file was verified **non-empty and non-frozen, never as
+> an image**. Specifically: the conditioning-fidelity conclusion (H4b), the LoRA
+> inertness check (H12b) and the stage-2 pass were all measured on garbage — they
+> show the code paths ran, not that the output was correct.
+>
+> **⛔ `b78803cc` is byte-reproducible NOISE.** The determinism claim is intact
+> and its artifact is worthless.
+>
+> **⛔ §2 is UNAFFECTED, and this is the load-bearing distinction in this
+> document.** hinode ran **bf16, unquantised** (§2.1's `base.dtype` row records
+> it), and the operator's only visual sign-off was on **local MPS bf16**
+> artifacts served over tailscale. Every bf16 path anyone has eyeballed looked
+> right; the only path ever eyeballed on the Space was broken. §3's discipline
+> was correct all along, and the annotations that merged the two evidence bases
+> were wrong: **they merged across a dtype boundary no run ever crossed.**
+>
+> **⛔ The method failure, as policy.** Statistical gates cannot distinguish a
+> render from mush. They are a **pre-filter, never a verdict — they demote
+> artifacts, they never promote one.** No artifact is a PASS until a human or
+> model eye has seen a frame at native resolution, and every report claiming an
+> output is good carries the frame. This binds the structure detector added at
+> `e54477c` too: it FAILS the flat grey (SR 0.5298) and **PASSES colour static**
+> (SR 0.9183, against 0.9961–0.9968 for the real photograph), so even it cannot
+> promote.
+>
+> **⛔ The cheap-config lesson.** The 256×256×9 config used for most of the
+> campaign produced output too small and too blobby for anyone to judge by eye.
+> That is how three weeks of confident nonsense got manufactured. **A config too
+> small to look at is a config that cannot be verified.** §2.2's own "Structure
+> is not content" and §4.1's `verify_streams`-exit-0-on-a-silent-file had both
+> already written down why — and "content-verified" was allowed to mean
+> non-empty bytes anyway.
+>
+> Full record: the invalidation blocks at the top of
+> [`SPACE_MODE_MATRIX.md`](SPACE_MODE_MATRIX.md) and
+> [`SPACE_SESSION_2026-08-25.md`](SPACE_SESSION_2026-08-25.md). The post-fix
+> eleven-mode matrix goes in `SPACE_MODE_MATRIX.md` §10.
+
 > ## ✅ State as of 2026-08-25 — read [`SPACE_SESSION_2026-08-25.md`](SPACE_SESSION_2026-08-25.md)
 >
 > A full GPU campaign ran on the Space that day and settled most of what this
@@ -22,10 +84,22 @@ If a number carries no mark, treat that as a defect in this document.
 > answered by clip-swap), and the fork-boundary error fix **proven live in
 > both classes**. Total day ≤ ~675.5 GPU-s of 2400.
 >
+> ⛔ ***Corrected the same evening — see the block above.** Every run in that
+> campaign used the broken int8 build. The mechanical results stand exactly as
+> written (reproducibility, geometry, ceilings, error paths, cost). The two
+> OUTPUT claims in this paragraph do not: **"both LoRA directions proven with a
+> passing inertness check (H12b's claim, delivered)"** — the adapter changed one
+> garbage render into a different one, and H12b is NOT delivered — and
+> **"conditioning shown to drive the output (H4b's question, answered by
+> clip-swap)"** — both clip-swap outputs were colour static, and H4b is OPEN
+> again. H10b is not the last discriminator standing; all three are.*
+>
 > **What genuinely remains open after that session:** the stage-2 ceiling
 > (diffusion-decoder chunking — its own investigation), the `video_to_audio`
 > −19.5 dBFS observation (now consistent-with the conditioning finding, still
-> not directly probed), the 2026-08-20 SIGKILL history
+> not directly probed — ⛔ *that "consistent-with" is withdrawn: it derived from
+> the conditioning finding, which is withdrawn; and −19.5 dBFS was audio
+> generated by a broken transformer*), the 2026-08-20 SIGKILL history
 > (documented-unexplained, by operator ruling) — and, still never exercised on
 > the platform: `auto_duration` and the **H10b** audio-input discriminator.
 
@@ -42,11 +116,24 @@ Destination is a private HuggingFace ZeroGPU Space. ✅ **It runs and generates
 there** — startup, one clean GPU worker, and a content-verified video, at Space
 sha `8fb292d6`.
 
+> ⛔ ***Corrected (2026-08-25, evening): "a content-verified video" was a
+> non-empty, non-frozen file.** It was colour static — `8fb292d6` ran the
+> blanket int8 that quantised the conditioning path. What stands: the Space
+> **runs**, startup completes, a GPU worker forks cleanly, and a well-formed
+> artifact comes back. What does not: that anything it returned was a video in
+> any sense a user means. Fixed at `eb1aa9f`, deployed `e3b5333`. Banner at the
+> top of this file.*
+
 ⏸️ **That is one mode, once.** Ten of the eleven have never executed on that
 platform; §2's eleven-of-eleven is a **hinode** result and stays one. §3 is the
 section that keeps those two evidence bases apart — read it before treating
 either as the other.
 
+> ⛔ ***The annotation below is itself corrected (2026-08-25, evening):**
+> "content-verified" meant non-empty and non-frozen, and sha `287ba9c` ran the
+> broken int8. All eleven modes **execute** on the Space — that half stands and
+> is the useful half. Nothing about their output does. Banner at the top.*
+>
 > ✅ **SUPERSEDED (run 2026-08-22, annotated 2026-08-25): all eleven modes now
 > generate on the live Space**, content-verified, at sha `287ba9c` —
 > [`SPACE_MODE_MATRIX.md`](SPACE_MODE_MATRIX.md) is the record. "One mode, once"
@@ -290,6 +377,12 @@ mechanism, which is what makes the rejection trustworthy rather than lucky.
 > `text_to_video` at 256×256×9 produced a real, content-verified video on the
 > live private Space ✅. **Ten of the eleven modes have never executed there.**
 >
+> ⛔ ***Corrected (2026-08-25, evening): it was not a real video. It was colour
+> static** — the origin claim of the entire Space evidence base, and it was
+> wrong from the first run. "Content-verified" meant non-empty and non-frozen.
+> What survives: the Space runs, and one mode executed there. Banner at the
+> top.*
+>
 > A green table on a dedicated host and a working deployment are different
 > claims. **Both have now been made — about different things.** That is exactly
 > why this section still exists: the two evidence bases have diverged rather
@@ -299,7 +392,16 @@ mechanism, which is what makes the rejection trustworthy rather than lucky.
 > on the live Space and **all eleven modes generate there, content-verified**,
 > at sha `287ba9c` — [`SPACE_MODE_MATRIX.md`](SPACE_MODE_MATRIX.md). The two
 > evidence bases have **merged at exactly one configuration**: 256×256×9,
-> stage 2 off, no LoRA, no `auto_duration`. What is still hinode-only: stage 2
+> stage 2 off, no LoRA, no `auto_duration`.
+>
+> ⛔ ***THE MERGE NEVER HAPPENED (corrected 2026-08-25, evening).** hinode ran
+> **bf16, unquantised** — §2.1's `base.dtype` row records exactly that — and the
+> Space ran blanket int8. The two evidence bases were separated by a dtype
+> boundary no run ever crossed, and that difference was the whole defect. **This
+> section's original discipline was right and this annotation was the error:**
+> it merged on "the same mode name at the same geometry" when the thing that
+> differed was the quantisation of the conditioning path. Keep §3. Banner at the
+> top.* What is still hinode-only: stage 2
 > (1408×960), the duration head, LoRA in both directions, the mel round-trip at
 > full length, and every shippable resolution. This section's discipline is
 > unchanged — it now keeps *configurations* apart instead of *platforms*.
@@ -353,6 +455,14 @@ of these questions and changed the answer to one of them:**
   `SPACE_MODE_MATRIX.md`). Still true, and only these: **stage 2, LoRA and
   `auto_duration` have never run on ZeroGPU.***
 
+  — *⛔ And that annotation is corrected in turn (2026-08-25, evening): "passed"
+  meant a well-formed, non-empty, non-frozen file from a transformer whose
+  conditioning path had been quantised away. Those paths **executed** on ZeroGPU
+  — the mel front-end, the `av` loader, the 16 kHz/48 kHz asymmetry all really
+  ran, and that half stands. The ⏸️ this replaced was cautioning about something
+  real, and it should not have been retired on the strength of "passed". Banner
+  at the top.*
+
 ---
 
 ### The three findings from the first deploy
@@ -377,6 +487,15 @@ of these questions and changed the answer to one of them:**
 > This is the **same single mechanism** `ZEROGPU_DISK.md` §4.2 already used to
 > settle two other questions, now deciding a third — in the opposite direction
 > from what we predicted.
+>
+> ⛔ ***Annotation (2026-08-25, evening): this is the change that broke
+> generation, and this document records it as a RAM result and nothing else.**
+> Widening `components_to_quantize` is the blanket int8 that quantised the
+> conditioning path; from here until `eb1aa9f` the Space produced colour static
+> in every mode. The RSS measurement above is correct and unaffected. What is
+> missing — and was missing everywhere, `README.md`'s int8 tier note included —
+> is any sentence connecting quantisation to output fidelity. Nobody wrote one,
+> so nobody looked.*
 
 > #### 3. ⏸️ The `SIGKILL` is **still unexplained**
 >
@@ -393,6 +512,13 @@ of these questions and changed the answer to one of them:**
 > **"The Space now serves" is established; "the widening is why" is not** — and
 > the hypothesis that motivated the widening is itself dead. Do not let any
 > document claim the widening fixed generation.
+>
+> ✅ ***VINDICATED, in the strongest available direction (2026-08-25, evening).**
+> That last sentence was written as a caution against over-crediting the
+> widening. The widening **broke** generation: blanket int8 quantised the
+> conditioning path, and every Space artifact from here to `eb1aa9f` is colour
+> static. "The Space now serves" was established and was exactly as narrow as
+> this paragraph insisted.*
 
 **Cost so far: ≤ 243.58 GPU-seconds** of 2400/day ⚠️ *a bound, not a
 measurement* — quota endpoint 404s.
@@ -989,6 +1115,15 @@ anything**, which is the mistake worth not repeating.
 > answered by clip-swap: outputs 17.277 vs 0.864, mirroring their inputs,
 > against a byte-identical control). **H10b is the last discriminator
 > standing.** `SPACE_SESSION_2026-08-25.md` §6–§7.*
+>
+> ⛔ ***BOTH DELIVERIES ARE WITHDRAWN (2026-08-25, evening).** Every run cited
+> there used the broken int8 build. H12b's two hashes differ because one garbage
+> render differs from another; H4b's 17.277-vs-0.864 compared the motion energy
+> of two colour statics. The mechanical readings stand — the adapter injection
+> path ran, the conditioning path carries a scalar, the noise floor at a fixed
+> seed is exactly zero — and **all three discriminators are open again: H10b,
+> H12b and H4b.** They are also worth spending on now, because there is finally
+> a build whose output is a picture (`e3b5333`).*
 
 ### What is already earned, and does not need repeating
 
@@ -1002,7 +1137,17 @@ runs and generates — ⏸️ **for one of the eleven modes.** Everything in thi
 section is a **hinode** result; the Space has proven `text_to_video` at
 256×256×9 and nothing else. Those are different claims about different machines,
 and §3 is where they are kept apart.
+— *⛔ Corrected (2026-08-25, evening): the Space had proven that `text_to_video`
+**executes**; its output was colour static. **This paragraph's instinct — keep
+§2's hinode results apart from anything the Space says — was the correct one**,
+and every later annotation that softened it was wrong. Everything in this
+section is hinode, bf16, unquantised, and unaffected.*
 
+> ⛔ ***And that supersession is itself corrected (2026-08-25, evening):**
+> "content-verified" meant non-empty and non-frozen, on the broken int8 build.
+> All eleven modes **execute** on the Space; none of their output was ever
+> verified as an image. Banner at the top of this file.*
+>
 > ✅ **Superseded (annotated 2026-08-25): the Space has since proven all eleven
 > modes at 256×256×9** — content-verified, sha `287ba9c`, 2026-08-22
 > (`SPACE_MODE_MATRIX.md`). What it has still proven nothing about: stage 2,

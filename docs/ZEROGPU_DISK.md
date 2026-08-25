@@ -280,6 +280,24 @@ diffusion_decoder, vocoder, duration_head or latent_upsampler**.
 must not be conflated with it — runtime quantization is the live lever;
 pre-quantized files are unreachable.
 
+> ⛔ **CORRECTED 2026-08-25 — right verdict, wrong reason.** `from_single_file`
+> **is** implemented for LTX2 at the pinned SHA: `LTX2VideoTransformer3DModel`
+> inherits `FromOriginalModelMixin` (`models/transformers/transformer_ltx2.py:1081`)
+> and is registered in `SINGLE_FILE_LOADABLE_CLASSES` at
+> `loaders/single_file_model.py:207` 📄. The `LTX_2_0_*` names above are local
+> rename dicts inside the converter, not a version gate, so the sentence "our
+> single-file path cannot load them" is **false**. What stays true is narrower:
+> there is no single-file route for 2.5's connectors, diffusion_decoder, vocoder,
+> duration_head or latent_upsampler — but those come from the Diffusers pack
+> anyway, and only the transformer would ever be swapped.
+>
+> **The actual blockers**, 📄 verified by range-reading the real safetensors
+> headers over the Hub: `comfy-int8-convrot` carries `.comfy_quant` `U8[72]`
+> per-Linear **ComfyUI** metadata that diffusers' converter does not understand,
+> so it would **load silently as garbage rather than raise**; and `nvfp4` is
+> FP4-packed with halved inner dims and needs NVIDIA **ModelOpt**. Still blocked,
+> for these reasons. `PLAN.md` §1.4 carries the full correction.
+
 ---
 
 ## 4.1 ⚠️ Option A is almost certainly blocked at the filesystem

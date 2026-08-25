@@ -124,6 +124,43 @@ There is **no** single-file converter for 2.5's `connectors`, `diffusion_decoder
 the components that make 2.5 what it is. Settled; do not revisit without new upstream
 converters.
 
+> ### ⛔ CORRECTED 2026-08-25 — the observation is right, the conclusion is wrong
+>
+> **`from_single_file` IS implemented for LTX2 at the pinned SHA.** 📄 Verified by
+> reading `ac56fa2f`:
+>
+> * `LTX2VideoTransformer3DModel` inherits **`FromOriginalModelMixin`** —
+>   `models/transformers/transformer_ltx2.py:1081`.
+> * It is registered in `SINGLE_FILE_LOADABLE_CLASSES` at
+>   **`loaders/single_file_model.py:207`**, with `AutoencoderKLLTX2Video` (211)
+>   and `AutoencoderKLLTX2Audio` (215).
+>
+> The `LTX_2_0_*` naming above is accurate and is **not** a blocker: those are
+> local rename dicts *inside* `convert_ltx2_transformer_to_diffusers`
+> (`single_file_utils.py:4060`), not a version gate. What survives from this
+> section is the narrower half — there is no single-file route for 2.5's
+> `connectors`, `diffusion_decoder`, `vocoder`, `duration_head` or
+> `latent_upsampler`, so a whole-**pipeline** single-file load is unavailable. We
+> would never want one: the Diffusers pack supplies those, and the only thing
+> worth swapping is the transformer, which **is** loadable this way.
+>
+> **The real reason the vendor quantised weights are rejected is FORMAT, and it
+> is a worse reason than the one written here** — 📄 verified by range-reading the
+> real safetensors headers over the Hub:
+>
+> * `ltx-2.5-22b-distilled-transformer-comfy-int8-convrot.safetensors` carries
+>   **`.comfy_quant` `U8[72]` per-Linear ComfyUI metadata**. `convert_ltx2_transformer_to_diffusers`
+>   knows nothing about it, so the file would **load silently as garbage rather
+>   than raise** — the single worst failure mode available, and precisely the one
+>   this project has just spent three weeks failing to detect (see the
+>   invalidation blocks in `SPACE_MODE_MATRIX.md` / `SPACE_SESSION_2026-08-25.md`).
+> * `ltx-2.5-22b-distilled-transformer-nvfp4.safetensors` is **FP4-packed with
+>   halved inner dims** and needs NVIDIA **ModelOpt** to unpack. It is not a
+>   safetensors file diffusers can interpret.
+>
+> Still rejected — for these reasons, not the stated one. Do not re-derive the
+> rejection from the `LTX_2_0_*` naming; that argument is void.
+
 ---
 
 ## 2. Decision 2 — Disk, RAM and dtype budget
@@ -312,6 +349,16 @@ none in the Diffusers pack. And our single-file path cannot load them:
 with every converter named `LTX_2_0_*` and **nothing for 2.5's connectors, diffusion_decoder,
 vocoder, duration_head or latent_upsampler** (§1.4). So no plan should be written around the
 quantized files being reachable — they are a different repo in a format we have no converter for.
+
+> ⛔ **CORRECTED 2026-08-25:** the verdict holds; the reason given here does not.
+> `from_single_file` **is** wired for `LTX2VideoTransformer3DModel` at the pinned
+> SHA (`loaders/single_file_model.py:207`, `FromOriginalModelMixin` at
+> `transformer_ltx2.py:1081`) 📄, so "our single-file path cannot load them" is
+> false. The real blockers, verified by range-reading the Hub headers: the
+> `comfy-int8-convrot` file carries `.comfy_quant` `U8[72]` per-Linear ComfyUI
+> metadata and would **load silently as garbage rather than raise**, and `nvfp4`
+> is FP4-packed with halved inner dims and needs ModelOpt. §1.4's correction
+> carries the detail.
 
 **Why bf16 is the default and not the quantised config.** Shipping quantised by default would
 trade a *known* uncertainty for an *unverified* one:

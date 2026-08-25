@@ -219,6 +219,16 @@ Two honest caveats:
   regime — no ZeroGPU packer, different memory arithmetic — and the local path is expected
   to be capability-limited rather than identical. Real generations happen on the Space.
 
+> **Corrected 2026-08-25.** "Real generations happen on the Space" was **false for
+> the whole of this project's history until today.** Every Space sha up to and
+> including `ff142d9` quantised the transformer to int8 *including its
+> conditioning path*, and produced correctly-shaped colour static in every mode.
+> Fixed at `eb1aa9f` (`llm_int8_skip_modules`), deployed as Space sha `e3b5333`,
+> and verified by looking at a frame: the same seed and prompt that gave static
+> now give a photograph. The eleven-mode re-verification at a shippable config is
+> in flight — `docs/SPACE_MODE_MATRIX.md` §10. Until it lands, treat the Space as
+> **fixed but not yet re-verified across modes**.
+
 `spaces` is deliberately **absent** from `requirements.txt`. The platform pins its own
 version and a conflicting pin breaks resolution at build time; the import is guarded in
 code so local dev works without it.
@@ -242,6 +252,17 @@ This is metered, and the meter is the resource you will actually run out of.
 > (bitsandbytes), so it packs **~51.1 GB** — still over the 42.00 GiB
 > threshold, so `xlarge` still applies. The 67.23 GiB figure above was the
 > bf16 packing, which no longer ships.
+>
+> **Updated again, 2026-08-25 (evening) — this note was the only mention of int8
+> anywhere, and it treated a correctness change as a packing footnote.** That
+> quantisation was *blanket*: it named no `llm_int8_skip_modules`, so every
+> `nn.Linear` in the transformer was replaced, the eight `LTX2AdaLayerNormSingle`
+> modulation heads and the in/out projections included. Quantising the
+> shift/scale/gate that every block is conditioned on does not degrade an image —
+> it stops the denoiser being steered at all, and the Space returned colour static
+> in every mode. Fixed at `eb1aa9f`: 316 of 1660 Linears spared, names read off
+> the real checkpoint, `llm_int8_threshold` untouched at its 6.0 default. The
+> packing arithmetic above is unaffected — ~51.1 GB and `xlarge` still hold.
 
 Two consequences worth knowing as a user:
 
@@ -262,6 +283,12 @@ will actually run.
 decoder at 49 frames — the exact limit between those is unmeasured. Larger
 stage-2 requests will error rather than silently degrade; the UI already warns
 that stage 2 doubles the output geometry.
+
+> **Scope, added 2026-08-25 (evening):** "it works at" means *it runs and returns
+> 1408×960* — the ceiling and the geometry are real measurements and stand. That
+> run was made on the pre-`eb1aa9f` build, so it says nothing about stage-2
+> *output quality*; that is part of the re-verification in
+> `docs/SPACE_MODE_MATRIX.md` §10.
 
 ---
 

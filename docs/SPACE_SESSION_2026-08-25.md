@@ -1,5 +1,142 @@
 # The 2026-08-25 session: byte identity settled, a shippable resolution proven, and the stage-2 ceiling found
 
+> # ⛔ INVALIDATED (2026-08-25) — every generation result in this document was produced by a BROKEN TRANSFORMER
+>
+> **Read this before any number below, including all four headline results.**
+> Both of this session's deploys — `8e9f7a1` and `ff142d9`, and every Space sha up
+> to and including `ff142d9` — ran **blanket bitsandbytes int8**: a
+> `PipelineQuantizationConfig` naming no `llm_int8_skip_modules`, so bnb replaced
+> **every** `nn.Linear` in the transformer, the eight top-level
+> `LTX2AdaLayerNormSingle` modulation heads and the in/out projections included.
+> Rounding the shift/scale/gate that all 48 blocks are conditioned on does not
+> *degrade* an image; it stops the denoiser being steered by the timestep and the
+> prompt at all. **Every artifact banked under `runs_0825/` is colour static or a
+> flat field** — correctly shaped, high variance, fully deterministic, and not a
+> picture.
+>
+> ✅ **Fixed at `eb1aa9f`** — `llm_int8_skip_modules` via `quant_mapping`, **316 of
+> 1660** Linears spared, names read off the real checkpoint's 4091-entry
+> safetensors weight map at revision `871165de` rather than inferred from another
+> DiT. **Deployed as Space sha `e3b5333`**, and proven there: the same seed,
+> prompt and geometry that produced colour static now produce a **photographic**
+> frame — a red hot-air balloon over a lake at dawn with its reflection, a
+> treeline, a skyline and sunset cloud banding. Before and after, side by side:
+> `~/.soma/leads/ltx25-studio/frames/COMPARE_before_after_skipfix.png` 📄.
+>
+> ### ✅ MECHANICAL CLAIMS SURVIVE — all of them, unchanged
+>
+> A broken transformer is still a transformer. Every code path this session
+> exercised did execute, and the measurements of that execution stand:
+>
+> * **All eleven modes execute** on the live Space (§1's context,
+>   [`SPACE_MODE_MATRIX.md`](SPACE_MODE_MATRIX.md) §2/§2.1).
+> * **Both fork-boundary directions carry their cargo** — outbound (§2, R1a/R1b)
+>   and inbound (§6, `0be0014`). Both remain fully proven: an error message is
+>   not a picture and never depended on one.
+> * **Determinism and byte-reproducibility hold** (§3): `b78803cc…212d` across
+>   three containers and two code shas, `ef8571e6…` on the condition pipeline,
+>   `20a3a84b…763f` across both LoRA routes. sha256 is sha256.
+> * **Tiled decode enables 1216×704×121** (§4): the geometry, the 121 frames,
+>   the 6,258,833 bytes and `cdb3211` as the difference between the failing and
+>   passing R3 are all real. R3's first-attempt failure diagnosis — the NVML
+>   allocator assert inside `conv3d` — is unaffected.
+> * **Stage 2 runs and doubles geometry** (§5): R4a's output geometry **verified
+>   1408×960**, exactly 2×, and the ceiling sits **between 25 and 49** input
+>   frames at 704×480. R4b's failure point in `LTX2VideoDiffusionDecoderModel`
+>   stands as located.
+> * **LoRA applies, detaches, and both routes agree** (§6, §3): validation
+>   stages, the staged-adapter dispatch, `de78923`'s detach lifecycle, and the
+>   upload/Hub route equivalence.
+> * **The disk and RAM arithmetic, the cost ledger and §8's bounds** — including
+>   the carried-spend accounting working in production.
+>
+> ### ⛔ OUTPUT CLAIMS DO NOT SURVIVE — not one of them
+>
+> **Every "content-verified" artifact in this session was verified non-empty and
+> non-frozen. None was ever verified as an image.** Distinct frames, byte counts,
+> luma range, mean |Δ| and dBFS are properties **noise has in abundance**. Named
+> specifically, because each was reported here as a positive result:
+>
+> * ⛔ **Headline 4 and §7 (R7b) — "conditioning demonstrably drives the output" —
+>   is WITHDRAWN.** R7a and R7b were both colour static; the clip-swap compared
+>   one garbage render's motion energy against another's. What survives is
+>   strictly mechanical: the conditioning *path* carries a number across the
+>   fork, and the noise floor under a fixed seed is exactly zero. **The null
+>   hypothesis this section declared dead is alive again**, and so is
+>   `SPACE_MODE_MATRIX.md` §8 follow-up #8. §7's reclassification of that file's
+>   §6 falls with it, as does §9's read-across to `video_to_audio`'s −19.5 dBFS.
+> * ⛔ **§6's LoRA inertness check is WITHDRAWN as an output claim.** R6's
+>   artifact differs from the no-adapter baseline: `20a3a84b…763f` ≠
+>   `b78803cc…212d`, 39,543 B ≠ 39,146 B. That is one garbage render differing
+>   from a *different* garbage render. The injection path demonstrably ran; the
+>   adapter's effect on an image is **⏸️ unestablished**, and `TEST_PLAN.md`
+>   H12b's claim is **not** delivered.
+> * ⛔ **§5's stage-2 PASS is an execution result, not an output result.** R4a
+>   produced 1408×960 of upscaled garbage. The latent upsampler, the extra
+>   denoise and the unmitigated diffusion decoder all executed and the geometry
+>   is exactly 2× — none of that was ever looked at as a picture.
+> * ⛔ **§4's "a resolution a user would actually choose now generates on
+>   ZeroGPU"** is true about the decode path and false about what came out of it.
+>
+> They demonstrate that the code paths ran. They do not demonstrate that the
+> output was correct.
+>
+> ### ⛔ `b78803cc` is byte-reproducible NOISE
+>
+> The determinism claim is intact and its artifact is worthless. Both halves are
+> load-bearing. §3 is a **correct** result about the sampler, the seed and the
+> container — four sha256 comparisons, re-runnable by anyone, and the finest
+> piece of measurement in this campaign — and the thing it reproduced so
+> faithfully was never a picture. `SPACE_MODE_MATRIX.md` §5's long-running
+> byte-identity question is genuinely closed; the artifact that closed it is
+> genuinely garbage. Nothing about that pair is a contradiction, and the habit of
+> reading the first as implying the second is the whole failure.
+>
+> ### ⛔ The method failure, and the policy that replaces it
+>
+> **A statistical gate cannot distinguish a render from mush.** Every
+> verification in this session was statistical — sha256, distinct frames,
+> geometry, byte counts, mean |Δ|, dBFS — and colour static passes all of them.
+> Nine runs, three deploys, ≤ ~675.5 GPU-s, four headline results, and **not one
+> frame was opened.** The first person to look at one was the operator, later the
+> same day.
+>
+> **Standing policy from here (operator ruling, 2026-08-25):** statistical gates
+> are a **pre-filter, never a verdict — they demote artifacts, they never promote
+> one.** No artifact is a PASS until a human or model eye has seen a frame **at
+> native resolution**, and every report claiming an output is good carries the
+> frame.
+>
+> ⚠️ **This binds the structure detector added afterwards at `e54477c` too.** It
+> **FAILS** the operator's flat grey (SR 0.5298, HF 3.1455 — the conjunction
+> fires) and **PASSES colour static comfortably** (SR 0.9183, HF 0.2254 — 1.31×
+> clear of the 0.70 gate, 4.4× clear of the 1.0 gate). ✅ Re-measured on exported
+> mid-frames at the same 512×960 geometry: static SR 0.9228 / HF 0.2097, grey SR
+> 0.5561 / HF 3.1544, post-fix photograph **SR 0.9961–0.9968 / HF 0.075–0.133**.
+> So SR separates *flat* from *everything else*, not static from picture — and
+> the detector's "real" population was calibrated on **this session's banked
+> artifacts**, every one of which is garbage. Even the new detector cannot
+> promote. `SPACE_MODE_MATRIX.md` §8 follow-up #11 carries the recalibration.
+>
+> ### ⛔ The cheap-config lesson
+>
+> The 256×256×9 config this campaign leaned on — §3's banked configuration, and
+> the geometry of R-repro, R7a, R7b, R6, R8 and R9 — produced output **too small
+> and too blobby for anyone to judge by eye.** That is how three weeks of
+> confident nonsense got manufactured: not one number in this document is wrong,
+> and the document's conclusions were. **A config too small to look at is a
+> config that cannot be verified.** §4's ladder was the right instinct and it was
+> spent on geometry rather than on looking.
+>
+> ### ⏸️ The post-fix matrix
+>
+> A fresh eleven-mode matrix at a **shippable** config is running against
+> `e3b5333`. Its results go in [`SPACE_MODE_MATRIX.md`](SPACE_MODE_MATRIX.md)
+> **§10**, not here. Nothing below is re-run history until they land — every
+> section stays exactly as measured.
+
+---
+
 > ## ✅ Four headline results, each a measurement
 >
 > 1. **Byte-level reproducibility is now VERIFIED by sha256** — a fresh
@@ -19,6 +156,9 @@
 >    two different conditioning clips → mean |Δ| 17.277 vs **0.864**, and the
 >    output's motion statistics mirror the input's (§7). The null hypothesis —
 >    prompt-only generation ignoring the clip — is dead.
+>    ⛔ ***WITHDRAWN (2026-08-25, later the same day): both outputs were colour
+>    static from the broken int8 build. The null hypothesis is alive again. See
+>    the invalidation block at the top of this file and §7's annotation.***
 >
 > Also proven live: both halves of the fork-boundary error fix (§2), both LoRA
 > directions with a passing inertness check and route equivalence (§6), and the
@@ -185,6 +325,13 @@ extra denoise, **and the unmitigated diffusion decoder** all survived at the
 diffusers SHA** 📄, exactly as `cdb3211`'s report predicted when it could tile
 only the VAE.
 
+> ⛔ ***Annotation (2026-08-25, later the same day): "survived" is the whole
+> claim, and it is the right word.** R4a executed and its output geometry is
+> exactly 2× — both verified. What it produced was 1408×960 of upscaled colour
+> static from the broken int8 transformer, and nobody looked at it. The ceiling
+> below is a real ceiling on a real code path; the PASS is not an output result.
+> Invalidation block at the top.*
+
 > ⛔ **The stage-2 ceiling on ZeroGPU sits between 25 and 49 input frames at
 > 704×480.** One attempt per failure, by the operator's ruling — documented,
 > not chased. The follow-up is a **diffusion-decoder chunking investigation**
@@ -218,6 +365,13 @@ from the same-configuration no-adapter baseline (39,146 B, `b78803cc…212d`).
 **The adapter demonstrably changed the output.** Injection overhead ⚠️ ≈
 negligible — wall within 0.3 s of a base run.
 
+> ⛔ ***WITHDRAWN as an output claim (2026-08-25, later the same day). Both files
+> are colour static from the broken int8 build: the adapter changed one garbage
+> render into a different garbage render. The hashes differ and the injection
+> path demonstrably ran — that is mechanical and it stands. **H12b's claim is
+> NOT delivered**, and it returns to the open discriminator list alongside H10b
+> and H4b. Invalidation block at the top.***
+
 ✅ **R9 proves the repo-id direction end to end**: the bounded web-side Hub
 fetch (`b9ee967`) resolved and validated in 3.7 s at **zero GPU cost**, and its
 generation came back **byte-identical to R6's** — both LoRA routes work, they
@@ -244,6 +398,28 @@ hypothesis — that `video_to_video` ignores its clip and generates from the
 prompt — predicted ~17 from both runs. It is dead. This also **reclassifies
 `SPACE_MODE_MATRIX.md` §6's near-static observation**: a near-static output
 from a near-static input is the conditioning *working*, not a defect.
+
+> ⛔ ***THE CONCLUSION OF THIS SECTION IS WITHDRAWN (2026-08-25, later the same
+> day) — this is the sharpest casualty of the int8 finding, and it is named in
+> the invalidation block at the top.***
+>
+> *Both R7a and R7b ran on the broken build. **Both outputs were colour static.**
+> The measurement compared one garbage render's motion energy against another
+> garbage render's, and found they tracked their inputs — which is what a
+> conditioning path that carries a scalar through a destroyed modulation stack
+> would also do. It is not evidence that the model was steered by the clip.*
+>
+> *What genuinely survives, and it is not nothing: **the noise floor under a
+> fixed seed is exactly zero** (R7a reproduced its bank byte-for-byte), so the
+> difference between the two runs is attributable to the clip alone. The
+> conditioning **path** moves numbers. That the **output** follows the clip is
+> ⏸️ unestablished, the null hypothesis is alive, `SPACE_MODE_MATRIX.md` §8
+> follow-up #8 is REOPENED, the reclassification of that file's §6 is withdrawn,
+> and §9's read-across to the −19.5 dBFS observation goes with it.*
+>
+> *The ⏸️ caveat below — "motion mirroring is not full semantic fidelity" — was
+> correct and understated by one level: the gap was not between motion and
+> content, it was between **motion of a picture** and **motion of noise**.*
 
 > ⏸️ **The limit, stated as prominently as the result: motion mirroring is not
 > full semantic fidelity.** This measures that the clip's *motion energy*
@@ -290,10 +466,20 @@ and bounded here by hand — `<=` ~93.3 GPU-s of the total.
   scales with input area (§5).
 * Semantic fidelity to a conditioning clip — §7 measures motion statistics,
   not content.
+  — *⛔ Sharpened (2026-08-25, later the same day): §7 measures the motion
+  statistics **of colour static**, so the list should have read "anything at all
+  about what any mode produces." Every artifact this session banked came from
+  the broken int8 build. The invalidation block at the top is the current
+  state.*
 * Anything about `auto_duration` on the platform, or the audio-input
   discriminator (**H10b**) — both remain unexercised on ZeroGPU. With R6/R9
   having delivered H12b's claim and R7b having answered H4b's question via the
   clip-swap route, **H10b is the last discriminator standing**.
+  — *⛔ Corrected (2026-08-25, later the same day): **H10b is not the last
+  discriminator standing — all three are.** H12b's delivery and H4b's answer
+  are both withdrawn above; every run behind them used the broken int8 build.
+  All three are now cheap and worth spending, because `e3b5333` is the first
+  build whose output is a picture.*
 * Why the 2026-08-20 workers were SIGKILLed. **Documented-unexplained, by
   operator ruling** — route C (instrument the worker) stands designed and
   un-run, and no run today touched that question.
