@@ -140,3 +140,33 @@ def test_building_the_blocks_twice_is_safe():
     from ltx25_studio.ui import blocks
 
     assert blocks.build_ui() is not blocks.build_ui()
+
+
+def test_launching_bounds_the_upload_size(monkeypatch):
+    """Uploads land on gradio's tmp disk BEFORE any check of ours can run, and
+    the retention sweep covers outputs/ only -- so an unbounded launch lets one
+    request fill the disk with a file nothing ever reclaims. The bound must
+    cover the LoRA validator's own ceiling (the largest upload the app has a
+    use for) so a ceiling-sized adapter is refused by stage 1's message naming
+    the limit, not by gradio's blunter transport error -- and it must still BE
+    a bound, not a shrug."""
+    gradio = pytest.importorskip("gradio")
+    captured = {}
+    monkeypatch.setattr(
+        gradio.Blocks,
+        "launch",
+        lambda self, *a, **k: captured.update(k) or None,
+        raising=False,
+    )
+    sys.modules.pop("app", None)
+    module = importlib.import_module("app")
+    module.main()
+
+    from ltx25_studio.config import load_config
+
+    ceiling = load_config().lora_max_bytes
+    assert captured.get("max_file_size") is not None, (
+        "demo.launch() must pass max_file_size -- without it any-size uploads reach tmp disk"
+    )
+    assert captured["max_file_size"] >= ceiling
+    assert captured["max_file_size"] <= ceiling * 2

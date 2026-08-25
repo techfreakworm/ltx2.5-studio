@@ -141,9 +141,21 @@ generate_module.set_gpu_dispatch(run_generation)
 
 demo = build_ui()
 
+# The largest upload the app has any use for is a LoRA at the validator's own
+# ceiling (config.lora_max_bytes; stage 1 refuses anything bigger BEFORE
+# reading it) -- conditioning media is orders of magnitude smaller. Without a
+# launch bound, any-size uploads land on gradio's tmp disk before any check of
+# ours can run, and the retention sweep covers outputs/ only, so nothing ever
+# reclaims that space. Reads the CONFIG, not the constant, so the
+# LTX25_LORA_MAX_GB lever bounds both the validator and the transport. The
+# 5% margin covers multipart framing so a ceiling-sized adapter is refused by
+# the validator's stage 1 -- which names the limit and the actual size --
+# rather than by gradio's blunter transport error.
+MAX_UPLOAD_BYTES = int(CONFIG.lora_max_bytes * 1.05)
+
 
 def main() -> None:
-    demo.launch()
+    demo.launch(max_file_size=MAX_UPLOAD_BYTES)
 
 
 if __name__ == "__main__":
