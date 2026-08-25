@@ -44,6 +44,17 @@ expensive -- a synthetic two-tone fixture once produced a *false* defect report
 content thresholds sit far below the one real measurement we have (pixel std
 72.657, mean frame delta 18.894) rather than near it.
 
+**4. A decoded artifact that is moving, distinct, full-range -- and static.** The
+three checks above are all satisfied by NOISE, and one artifact proved it: 121 of
+121 distinct frames, correct geometry, non-zero bytes, full luma range, and it
+was colour static. This tool scored it a PASS. So every video is also measured
+for *spatial structure* -- ``ltx25_studio.outputs.measure_structure``, the same
+code the app runs, so the two cannot disagree -- and an artifact with no
+structure at the 8x8 scale AND a pixel-to-pixel residual larger than the picture
+is refused. Two weaker findings (low block std, narrow luma band) only WARN,
+because a real murky render trips them. **Statistical measures demote artifacts
+here; they never promote one, and only that one two-term conjunction condemns.**
+
 **Dry run is the default; ``--live`` is the flag.** Reversing that -- spend by
 default, opt out -- puts a metered resource one forgotten flag away from being
 consumed, and the default-safe path is the one that gets typed at 3am.
@@ -93,7 +104,7 @@ for _path in (REPO, REPO / "tests"):
 
 import verify_streams  # noqa: E402
 
-from ltx25_studio import constraints, modes, zerogpu  # noqa: E402
+from ltx25_studio import constraints, modes, outputs, zerogpu  # noqa: E402
 from ltx25_studio.ui import fields  # noqa: E402
 
 __all__ = [
@@ -103,6 +114,10 @@ __all__ = [
     "DEFAULT_MODE_ORDER",
     "DEFAULT_QUOTA_CEILING_SECONDS",
     "ENDPOINT",
+    "LOW_BLOCK_STD",
+    "LOW_LUMA_BAND",
+    "MAX_HIGH_FREQUENCY_RATIO",
+    "MIN_STRUCTURE_RATIO",
     "ArtifactContentError",
     "AudioContent",
     "FixtureStore",
@@ -238,7 +253,9 @@ PINNED_VOCODER_SAMPLING_RATE = 48000
 # a day. These separate "degenerate" from "anything at all", nothing finer.
 # ---------------------------------------------------------------------------
 
-#: Below this the frame is flat -- a blank or single-colour render.
+#: Below this the frame is flat -- a blank or single-colour render. Compared
+#: against the MEDIAN PER-FRAME std, not the whole stack's: see
+#: :class:`VideoContent`.
 MIN_PIXEL_STD = 1.0
 
 #: Mean absolute inter-frame difference, on the 0..255 scale. A frozen video is
@@ -258,6 +275,33 @@ MIN_DISTINCT_FRAMES = 2
 #: Silence raises; quiet warns.
 SILENT_DBFS = -70.0
 VERY_QUIET_DBFS = -40.0
+
+# ---------------------------------------------------------------------------
+# structure thresholds -- ALIASES, not copies
+#
+# Every number above is a property of NOISE as much as of a picture: a stack of
+# colour static has a full pixel std, a full brightness range, N distinct frames
+# and non-zero bytes, and it passes all of them. One did. It came back from the
+# Space, it was scored a PASS by this very tool, and it was static.
+#
+# ``ltx25_studio.outputs`` holds the detector that separates the two, because
+# the app has to run exactly the same measurement on exactly the same frames --
+# a laptop-side gate the deployed app does not share is a gate that only ever
+# catches the failures nobody is looking at. These names are bound to that
+# module's values rather than re-typed here, so the two cannot drift.
+#
+# One accident worth recording, because it is the reason temporal difference is
+# NOT the signal: ``MIN_MEAN_FRAME_DELTA`` above does reject the operator's
+# static artifact (0.403 < 0.5) -- and the banked ``r7b``, a legitimate 9-frame
+# near-static render, sits at 0.824, a factor of 2.0 away. That gate was right
+# by luck. The structure ratio puts 1.31x on one side and 1.32x on the other of
+# the same two artifacts, and it is right on purpose.
+# ---------------------------------------------------------------------------
+
+MIN_STRUCTURE_RATIO = outputs.MIN_STRUCTURE_RATIO
+MAX_HIGH_FREQUENCY_RATIO = outputs.MAX_HIGH_FREQUENCY_RATIO
+LOW_BLOCK_STD = outputs.LOW_BLOCK_STD
+LOW_LUMA_BAND = outputs.LOW_LUMA_BAND
 
 # ---------------------------------------------------------------------------
 # the plan
@@ -741,21 +785,43 @@ class Ledger:
 
 @dataclass
 class VideoContent:
-    """Decoded video, as numbers. A stream table cannot see any of this."""
+    """Decoded video, as numbers. A stream table cannot see any of this.
+
+    Two std figures, and the distinction is the whole point of having both:
+
+    * ``spatial_std`` -- the MEDIAN of each frame's own std. "How much is there
+      to look at inside one frame." This is the one the flatness gate reads.
+    * ``stack_std`` -- the std of the whole ``[F, H, W, 3]`` block, reported and
+      never asserted on. It was called ``pixel_std`` and was documented as a
+      per-frame flatness measure, which it is not: it folds TEMPORAL brightness
+      drift into a supposedly spatial number, so a stack of individually flat
+      frames that merely fade from dark to light scores high and passes a gate
+      that exists to catch exactly that.
+    """
 
     frames: int
     distinct_frames: int
-    pixel_std: float
+    spatial_std: float
+    stack_std: float
     mean_abs_delta: float
     min_abs_delta: float
     max_abs_delta: float
+    structure: object | None = None
+    warnings: tuple = ()
 
-    def render(self) -> str:
-        return (
+    def render(self, indent: int = 15) -> str:
+        pad = "\n" + " " * indent
+        line = (
             f"{self.frames} frames · {self.distinct_frames} distinct · "
-            f"pixel std {self.pixel_std:.3f} · mean |Δ| {self.mean_abs_delta:.3f} "
+            f"spatial std {self.spatial_std:.3f} · stack std {self.stack_std:.3f} "
+            f"(reported, never asserted) · mean |Δ| {self.mean_abs_delta:.3f} "
             f"(per-pair {self.min_abs_delta:.2f}..{self.max_abs_delta:.2f})"
         )
+        if self.structure is not None:
+            line += f"{pad}{self.structure.render()}"
+        for note in self.warnings:
+            line += f"{pad}*** WARNING: {note} ***"
+        return line
 
 
 @dataclass
@@ -856,12 +922,23 @@ def verify_video_content(path, *, expected_frames=None) -> VideoContent:
     about: a file of nine identical grey frames satisfies all of it. So this
     measures what is actually IN the frames.
 
-    Three separate degeneracies, because they fail differently:
+    Four separate degeneracies, because they fail differently:
 
     * **no frames at all** -- a header with no packets behind it;
-    * **flat frames** (pixel std ~0) -- a blank or single-colour render;
+    * **flat frames** (per-frame std ~0) -- a blank or single-colour render;
     * **no motion** (frame-to-frame delta 0) -- the same frame N times, which is
-      what a stuck decode or a discarded temporal axis looks like.
+      what a stuck decode or a discarded temporal axis looks like;
+    * **no structure** -- moving, distinct, full-range, and still nothing but
+      colour static. This is the one every check above scores as a PASS, and one
+      such artifact really did come back from the Space and really was scored a
+      pass by this tool. See :func:`ltx25_studio.outputs.structure_failure`.
+
+    Two tiers, and they are not interchangeable. The refusals above raise. The
+    ``block std`` / ``luma band`` findings only WARN, because a legitimately
+    murky low-contrast render trips them (the banked ``r4a`` measures 5.33 and
+    24.76) and destroying a real artifact on a statistic is the more expensive
+    mistake. **A statistical measure may demote an artifact; it may not promote
+    one, and it may not condemn one on its own.**
     """
     import numpy as np
 
@@ -875,18 +952,25 @@ def verify_video_content(path, *, expected_frames=None) -> VideoContent:
 
     stack = np.stack(frames).astype("float32")
     distinct = len({frame.tobytes() for frame in frames})
-    pixel_std = float(stack.std())
     if len(frames) > 1:
         deltas = [float(np.abs(stack[i + 1] - stack[i]).mean()) for i in range(len(frames) - 1)]
     else:
         deltas = [0.0]
+    # Every frame, not a sample: this runs once per Space call, against a call
+    # that already cost tens of GPU-seconds and tens of seconds of wall clock.
+    # Measured 2.46s for 121 frames of 1216x704 -- invisible next to the run it
+    # is checking, and there is no reason to estimate what can be measured.
+    structure = outputs.measure_structure(frames)
     content = VideoContent(
         frames=len(frames),
         distinct_frames=distinct,
-        pixel_std=pixel_std,
+        spatial_std=float(np.median([frame.std() for frame in stack])),
+        stack_std=float(stack.std()),
         mean_abs_delta=float(sum(deltas) / len(deltas)),
         min_abs_delta=min(deltas),
         max_abs_delta=max(deltas),
+        structure=structure,
+        warnings=outputs.structure_warnings(structure),
     )
 
     problems = []
@@ -895,10 +979,10 @@ def verify_video_content(path, *, expected_frames=None) -> VideoContent:
             f"decoded {content.frames} frames, asked for {expected_frames} -- upstream floors "
             f"an illegal num_frames silently, so a short video is a real signal, not rounding"
         )
-    if content.pixel_std < MIN_PIXEL_STD:
+    if content.spatial_std < MIN_PIXEL_STD:
         problems.append(
-            f"global pixel std {content.pixel_std:.4f} < {MIN_PIXEL_STD} -- the frames are flat. "
-            f"A blank render passes every structural check there is"
+            f"median per-frame std {content.spatial_std:.4f} < {MIN_PIXEL_STD} -- the frames are "
+            f"flat. A blank render passes every structural check there is"
         )
     if content.distinct_frames < MIN_DISTINCT_FRAMES:
         problems.append(
@@ -909,6 +993,12 @@ def verify_video_content(path, *, expected_frames=None) -> VideoContent:
         problems.append(
             f"mean frame-to-frame |Δ| {content.mean_abs_delta:.4f} < {MIN_MEAN_FRAME_DELTA} -- "
             f"the video is frozen. The one healthy run measured 18.894 here"
+        )
+    structureless = outputs.structure_failure(structure)
+    if structureless is not None:
+        problems.append(
+            f"{structureless}. Distinct frames, full luma range, non-zero bytes and correct "
+            f"geometry are all properties of NOISE, and this artifact has every one of them"
         )
     if problems:
         raise ArtifactContentError(
@@ -1408,6 +1498,12 @@ def run_one(
             expected_frames=None if config.auto_duration else config.num_frames,
         )
         log(f"  video        {record.video.render()}")
+        for note in record.video.warnings:
+            # Repeated on its own line, prefixed, after the block it is already
+            # inside. A warning folded into a paragraph of numbers is a warning
+            # nobody reads, and this tier exists precisely for the artifacts a
+            # human is supposed to go and look at.
+            log(f"  ⚠️  video     {note}")
     if "audio" in spec.exports:
         record.audio = verify_audio_content(
             record.artifacts["audio"][0],
@@ -1532,7 +1628,7 @@ def render_summary(outcome: MatrixOutcome) -> str:
             f"<= {record.gpu_seconds_upper_bound:>7.1f} GPU-s  {artifacts}"
         )
         if record.video:
-            lines.append(f"  {'':<26} video: {record.video.render()}")
+            lines.append(f"  {'':<26} video: {record.video.render(indent=35)}")
         if record.audio:
             lines.append(f"  {'':<26} audio: {record.audio.render()}")
     if outcome.stopped:

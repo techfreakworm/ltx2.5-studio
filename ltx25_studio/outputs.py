@@ -40,6 +40,17 @@ already lives somewhere else -- and a container written at the wrong rate is a
 video that plays at the wrong speed, which again reports as nothing. Absent,
 they raise.
 
+**The frames are measured on the way out, and never refused.** A file can be
+well-formed, the right length, the right size, full of distinct frames -- and be
+colour static. One was, and every content check this project had scored it a
+PASS, because distinctness, byte count, geometry and brightness range are all
+properties of noise. :func:`measure_structure` asks the one question they cannot:
+is there anything at a scale above one pixel? The answer rides back on the
+result's warnings channel and **nothing here raises on it**, because by the time
+these frames exist the user has already paid 35+ GPU-seconds for them and this
+is a heuristic that is wrong about real murky output by design. Emit the file,
+attach the note, let a human look.
+
 ``av`` is the one media stack: it is already a pinned dependency for the §5.7 #7
 image-conditioning CRF path, and using it here means the audio-only export needs
 no second library. It is imported lazily so this module -- and the retention
@@ -70,6 +81,7 @@ stops the predecessor's "newest video in the output dir" fallback growing back
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from fractions import Fraction
 from pathlib import Path
 
@@ -80,15 +92,25 @@ _log = logging.getLogger(__name__)
 __all__ = [
     "AUDIO_FILENAME",
     "AUDIO_ONLY_CODEC",
+    "LOW_BLOCK_STD",
+    "LOW_LUMA_BAND",
     "MAX_AUDIO_CHANNELS",
+    "MAX_HIGH_FREQUENCY_RATIO",
+    "MIN_STRUCTURE_RATIO",
     "MUXED_AUDIO_CODEC",
+    "STRUCTURE_SAMPLE_FRAMES",
     "VIDEO_CODEC",
     "VIDEO_FILENAME",
     "VIDEO_PIXEL_FORMAT",
+    "FrameStructure",
     "directory_size",
     "dropped_audio_warning",
     "enforce_retention",
+    "measure_structure",
     "run_age",
+    "structure_failure",
+    "structure_notes",
+    "structure_warnings",
     "write_output",
 ]
 
@@ -385,6 +407,312 @@ def _encode_audio(container, stream, planes, *, sampling_rate: int) -> None:
         container.mux(packet)
 
 
+# ---------------------------------------------------------------------------
+# structure -- is there a picture in there, or only colour?
+# ---------------------------------------------------------------------------
+#
+# Every content check this project had could be passed by structureless
+# garbage. The artifact that proved it had 121 of 121 distinct frames, the
+# geometry the request asked for, non-zero bytes and a full luma range -- and
+# was colour static. Distinctness, byte count, geometry and brightness range
+# are all properties of *noise*, so a checker built from them scores noise as a
+# pass and always will.
+#
+# What separates a picture from static is that a picture has structure at a
+# scale ABOVE one pixel and static does not. Two ratios say that, and both are
+# divided by the frame's own luma standard deviation so that they measure shape
+# rather than contrast -- a dim shot and a bright shot of the same scene land in
+# the same place:
+#
+# * ``structure_ratio`` (SR) = std of the 8x8 box means / std of the pixels.
+#   Averaging 8x8 blocks of a real picture keeps most of its variation, because
+#   neighbouring pixels agree; averaging 8x8 blocks of noise cancels it. Measured
+#   0.918..0.994 across every banked real artifact, 0.530 on the failure.
+# * ``high_frequency_ratio`` (HF) = std of the 4-neighbour Laplacian / std of the
+#   pixels. The Laplacian is what is left after the picture is subtracted, so it
+#   is small on a picture and larger than the signal itself on noise. Measured
+#   0.147..0.386 across the banked set, 3.146 on the failure.
+#
+# **Temporal difference is deliberately NOT the signal here.** The pre-existing
+# ``mean |Δ|`` gate does reject the operator's failure (0.403 < 0.5), but by
+# accident and with no usable margin: the banked ``r7b`` artifact is a
+# legitimate near-static 9-frame render measuring 0.824, only 2.0x above the
+# thing being rejected. A gate whose true and false cases are a factor of two
+# apart is a coin toss waiting to happen. SR's are 1.31x and 1.32x either side
+# of 0.70, which is the geometric middle of the two populations, and HF's are
+# 2.6x and 3.1x either side of 1.0.
+#
+# **Saturation is measured and never asserted on.** A deliberately monochrome
+# render measures 0.00 and is not a defect; making colour a requirement would
+# refuse a legitimate black-and-white shot, which is the false-defect direction
+# that has already cost this build days.
+
+#: Below this the 8x8 box means have cancelled out -- there is nothing at the
+#: block scale. On its own it is not enough (a legitimately soft, defocused shot
+#: could sit low), which is why the refusal needs the noise term too.
+MIN_STRUCTURE_RATIO = 0.70
+
+#: Above this the residual after removing the picture is bigger than the picture.
+#: Real footage cannot do that; per-pixel noise does it by definition.
+MAX_HIGH_FREQUENCY_RATIO = 1.0
+
+#: Absolute, not a ratio: the 8x8 box means barely move at all. WARN only --
+#: ``r4a`` in the banked set measures 5.33 and is a real (if murky) render.
+LOW_BLOCK_STD = 8.0
+
+#: p99 - p1 of luma. Below this the whole frame lives in a narrow brightness
+#: band. WARN only, for the same reason.
+LOW_LUMA_BAND = 32.0
+
+#: Frames to measure on the app path. Evenly spaced, median-aggregated; on the
+#: banked set the 16-frame estimate tracks the full decode to within 1.6% on
+#: every metric, for a twentieth of the work.
+STRUCTURE_SAMPLE_FRAMES = 16
+
+#: The side of the box filter. 8 because that is the scale at which "adjacent
+#: pixels agree" starts to mean something and still well below any real subject.
+_BLOCK = 8
+
+#: A frame whose luma std is below this has no contrast to normalise by, so SR
+#: and HF are 0/0. Such frames are counted and EXCLUDED from the ratios rather
+#: than folded in as zeros -- "could not measure" must not read as "measured and
+#: bad", and the flatness itself is what :data:`LOW_BLOCK_STD` and the runner's
+#: own flat-frame check are for.
+_MIN_CONTRAST = 1e-3
+
+
+@dataclass(frozen=True)
+class FrameStructure:
+    """What the frames contain, as numbers. Medians over the sampled frames.
+
+    ``structure_ratio`` and ``high_frequency_ratio`` are ``None`` when no
+    sampled frame had enough contrast (or enough pixels) to measure them. That
+    is a third state on purpose: it is neither a pass nor a fail, and every
+    caller here treats it as "not checked" rather than "checked and fine".
+    """
+
+    frames: int
+    sampled: int
+    structure_ratio: float | None
+    high_frequency_ratio: float | None
+    block_std: float | None
+    luma_band: float | None
+    luma_std: float | None
+    saturation: float | None
+    flat_frames: int
+
+    def render(self) -> str:
+        def number(value, spec=".4f"):
+            return "n/a" if value is None else format(value, spec)
+
+        line = (
+            f"structure {number(self.structure_ratio)} (>= {MIN_STRUCTURE_RATIO}) · "
+            f"high-freq {number(self.high_frequency_ratio)} "
+            f"(<= {MAX_HIGH_FREQUENCY_RATIO}) · "
+            f"block std {number(self.block_std, '.3f')} · "
+            f"luma band {number(self.luma_band, '.2f')} · "
+            f"luma std {number(self.luma_std, '.3f')} · "
+            f"saturation {number(self.saturation, '.4f')} (reported, never asserted)"
+        )
+        if self.flat_frames:
+            line += f" · {self.flat_frames}/{self.sampled} frame(s) too flat to measure a ratio"
+        return f"{line}  [median of {self.sampled} of {self.frames} frames]"
+
+
+def _luma(frame):
+    """0.299R + 0.587G + 0.114B, float32, on one ``[H, W, 3]`` uint8 frame."""
+    import numpy as np
+
+    values = np.asarray(frame, dtype=np.float32)
+    return values[..., 0] * 0.299 + values[..., 1] * 0.587 + values[..., 2] * 0.114
+
+
+def _block_means(luma):
+    """The 8x8 box means. Ragged right/bottom edges are dropped, not padded.
+
+    Padding would invent pixels and give the edge blocks an artificial variance
+    of their own; dropping costs at most seven rows and columns.
+    """
+    height, width = luma.shape
+    rows, columns = height // _BLOCK, width // _BLOCK
+    if rows == 0 or columns == 0:
+        return None
+    trimmed = luma[: rows * _BLOCK, : columns * _BLOCK]
+    return trimmed.reshape(rows, _BLOCK, columns, _BLOCK).mean(axis=(1, 3))
+
+
+def _laplacian4(luma):
+    """``4c - up - down - left - right``, on the interior only."""
+    if luma.shape[0] < 3 or luma.shape[1] < 3:
+        return None
+    middle = luma[1:-1, 1:-1]
+    return 4.0 * middle - luma[:-2, 1:-1] - luma[2:, 1:-1] - luma[1:-1, :-2] - luma[1:-1, 2:]
+
+
+def _saturation(frame):
+    """Mean ``(max - min) / max`` over the pixels. Reported, never asserted on."""
+    import numpy as np
+
+    values = np.asarray(frame, dtype=np.float32)
+    high = values.max(axis=-1)
+    low = values.min(axis=-1)
+    return float(np.mean(np.where(high > 0.0, (high - low) / np.maximum(high, 1.0), 0.0)))
+
+
+def _sampled_indices(count: int, sample):
+    """``sample`` evenly-spaced frame indices, endpoints included."""
+    import numpy as np
+
+    if sample is None or sample >= count:
+        return list(range(count))
+    return [int(index) for index in np.unique(np.linspace(0, count - 1, sample).round())]
+
+
+def measure_structure(frames, *, sample=None) -> FrameStructure:
+    """Measure spatial structure over ``frames`` (``[F, H, W, 3]`` uint8 RGB).
+
+    ``sample=None`` measures every frame -- 380 ms for 121 frames of 1216x704,
+    which is what the offline runner does. ``sample=16`` is the app path.
+
+    Aggregation is the MEDIAN, not the mean: one legitimately flat frame (a fade
+    to black, a cut) must not drag a whole healthy shot toward a warning, and one
+    accidentally structured frame must not rescue a stack of static.
+    """
+    import numpy as np
+
+    count = len(frames)
+    if count == 0:
+        return FrameStructure(
+            frames=0,
+            sampled=0,
+            structure_ratio=None,
+            high_frequency_ratio=None,
+            block_std=None,
+            luma_band=None,
+            luma_std=None,
+            saturation=None,
+            flat_frames=0,
+        )
+
+    indices = _sampled_indices(count, sample)
+    ratios: list[float] = []
+    high_frequencies: list[float] = []
+    block_stds: list[float] = []
+    bands: list[float] = []
+    luma_stds: list[float] = []
+    saturations: list[float] = []
+    flat = 0
+
+    for index in indices:
+        frame = frames[index]
+        luma = _luma(frame)
+        luma_std = float(luma.std())
+        luma_stds.append(luma_std)
+        low, high = (float(value) for value in np.percentile(luma, (1.0, 99.0)))
+        bands.append(high - low)
+        saturations.append(_saturation(frame))
+
+        blocks = _block_means(luma)
+        block_std = None if blocks is None else float(blocks.std())
+        if block_std is not None:
+            block_stds.append(block_std)
+
+        if luma_std < _MIN_CONTRAST:
+            flat += 1
+            continue
+        if block_std is not None:
+            ratios.append(block_std / luma_std)
+        laplacian = _laplacian4(luma)
+        if laplacian is not None:
+            high_frequencies.append(float(laplacian.std()) / luma_std)
+
+    def median(values):
+        return float(np.median(values)) if values else None
+
+    return FrameStructure(
+        frames=count,
+        sampled=len(indices),
+        structure_ratio=median(ratios),
+        high_frequency_ratio=median(high_frequencies),
+        block_std=median(block_stds),
+        luma_band=median(bands),
+        luma_std=median(luma_stds),
+        saturation=median(saturations),
+        flat_frames=flat,
+    )
+
+
+def structure_failure(structure: FrameStructure) -> str | None:
+    """The one diagnosis strong enough to condemn an artifact, or ``None``.
+
+    **Both** conditions, never either alone. Low SR by itself is a soft or
+    defocused shot; high HF by itself is a sharp, grainy one. Only together do
+    they say "there is nothing at the block scale AND the pixel-to-pixel
+    residual is larger than the signal", which is what structureless colour
+    static measures like and what no real render in the banked set comes close
+    to.
+
+    Returns a neutral statement of what was measured. The offline runner raises
+    on it; the app attaches it to the result as a warning and emits the file
+    anyway -- see :func:`structure_notes`.
+    """
+    ratio = structure.structure_ratio
+    high_frequency = structure.high_frequency_ratio
+    if ratio is None or high_frequency is None:
+        return None
+    if ratio >= MIN_STRUCTURE_RATIO or high_frequency <= MAX_HIGH_FREQUENCY_RATIO:
+        return None
+    return (
+        f"structure ratio {ratio:.4f} < {MIN_STRUCTURE_RATIO} AND high-frequency ratio "
+        f"{high_frequency:.4f} > {MAX_HIGH_FREQUENCY_RATIO}: the 8x8 box means have cancelled "
+        f"out and the pixel-to-pixel residual is larger than the picture. These frames carry no "
+        f"spatial structure -- that is colour static, not a scene. Real renders in the banked "
+        f"set measure 0.918..0.994 structure and 0.147..0.386 high-frequency"
+    )
+
+
+def structure_warnings(structure: FrameStructure) -> tuple[str, ...]:
+    """Things worth a human's attention that must never fail a run.
+
+    Both are absolute measures of how much there is to look at, and a real,
+    murky, low-contrast render trips them: the banked ``r4a`` measures 5.33 and
+    24.76 here. Refusing on either would destroy a legitimate artifact, so they
+    annotate and nothing more.
+    """
+    notes: list[str] = []
+    if structure.block_std is not None and structure.block_std < LOW_BLOCK_STD:
+        notes.append(
+            f"low detail: 8x8 block std {structure.block_std:.3f} < {LOW_BLOCK_STD}. The frames "
+            f"vary very little at the block scale -- worth looking at, not proof of a defect"
+        )
+    if structure.luma_band is not None and structure.luma_band < LOW_LUMA_BAND:
+        notes.append(
+            f"low contrast: luma p99-p1 {structure.luma_band:.2f} < {LOW_LUMA_BAND} on a 0..255 "
+            f"scale. The whole frame sits in a narrow brightness band -- worth looking at, not "
+            f"proof of a defect"
+        )
+    return tuple(notes)
+
+
+def structure_notes(structure: FrameStructure) -> tuple[str, ...]:
+    """Every finding as a WARNING, refusing nothing. The app's entry point.
+
+    The app must never raise on any of this. By the time these frames exist the
+    user has already paid 35+ GPU-seconds for them, and the detector is a
+    statistical pre-filter that is wrong about ``r4a``-class output by design.
+    A pre-filter may demote an artifact; it may not destroy one. So the file is
+    written, the note rides along on the result, and a human decides.
+    """
+    failure = structure_failure(structure)
+    if failure is None:
+        return structure_warnings(structure)
+    return (
+        f"this output may be structureless -- {failure}. The file was written anyway: "
+        f"this is a statistical check and it is not a verdict. Please look at it",
+        *structure_warnings(structure),
+    )
+
+
 def dropped_audio_warning(mode: str) -> str:
     """Why a video-only mode's file has no sound.
 
@@ -451,6 +779,13 @@ def _write_video(
 
     array = _as_video_frames(frames, target=target)
     _, height, width, _ = array.shape
+
+    # Measured HERE because this is the one place the normalised rgb24 stack
+    # already exists: no second decode, no second conversion, ~50 ms for 16
+    # frames of 1216x704. WARN only, never a refusal -- see `structure_notes`.
+    for note in structure_notes(measure_structure(array, sample=STRUCTURE_SAMPLE_FRAMES)):
+        notes.append(note)
+        _log.warning("%s", note)
 
     container = av.open(str(target), mode="w")
     try:
@@ -545,8 +880,15 @@ def write_output(
     ``exports`` decides the container's contents, not just its name: a mode that
     does not export ``audio`` gets a file with no audio stream. ``warnings`` is
     an optional list the caller may pass to collect anything worth telling the
-    user -- currently the dropped-audio note. It is also logged unconditionally,
-    so the information survives a caller that does not pass a sink.
+    user -- the dropped-audio note, and whatever :func:`structure_notes` found
+    in the frames. Everything in it is also logged unconditionally, so the
+    information survives a caller that does not pass a sink.
+
+    **Nothing measured about the frames can stop this write.** The structure
+    detector is a statistical pre-filter and it is wrong about real, murky
+    output by design; by the time it runs the user has already spent 35+
+    GPU-seconds on these frames. It annotates the result and the file is
+    emitted regardless -- a human decides, not a heuristic.
     """
     run_dir = Path(run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -569,7 +911,15 @@ def write_output(
             )
             if warnings is not None:
                 warnings.extend(notes)
-            written = ("video", "audio") if not notes and audio is not None else ("video",)
+            # Derived from the same two facts `_write_video` muxes on, NOT from
+            # "notes is empty". It used to be the latter, which was correct only
+            # while the dropped-audio note was the sole thing that could ever be
+            # in there -- the moment a second, unrelated note appeared (the
+            # structure warnings), a muxed audio track would have been reported
+            # as absent and every audio-exporting mode would have raised
+            # EmptyOutputError on a file that was perfectly fine.
+            muxed_audio = audio is not None and "audio" in exports
+            written = ("video", "audio") if muxed_audio else ("video",)
         else:
             _write_audio(audio, target, sampling_rate=sampling_rate)
             written = ("audio",)

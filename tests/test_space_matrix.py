@@ -106,6 +106,69 @@ def write_video(path, *, frames=9, moving=True, blank=False, with_audio=False, s
     return Path(path)
 
 
+def write_frames(path, stack, *, rate=FIXTURE_RATE):
+    """A real h264 mp4 carrying exactly the ``[F, H, W, 3]`` uint8 stack given.
+
+    ``write_video`` renders one shape of picture; the structure checks need
+    several, including one that is deliberately not a picture at all. h264 at
+    64x64 preserves per-pixel noise well enough that a static fixture decodes
+    back static — verified by the measurements the tests below assert on, which
+    are taken from the DECODED file rather than the array that went in.
+    """
+    stack = np.ascontiguousarray(stack.astype(np.uint8))
+    with av.open(str(path), "w") as container:
+        video = container.add_stream("h264", rate=rate)
+        video.height, video.width = int(stack.shape[1]), int(stack.shape[2])
+        video.pix_fmt = "yuv420p"
+        for index, frame in enumerate(stack):
+            picture = av.VideoFrame.from_ndarray(np.ascontiguousarray(frame), format="rgb24")
+            picture.pts, picture.time_base = index, Fraction(1, rate)
+            for packet in video.encode(picture):
+                container.mux(packet)
+        for packet in video.encode():
+            container.mux(packet)
+    return Path(path)
+
+
+def structureless_stack(frames=9, seed=11):
+    """Colour static: distinct, full-range, moving, and empty of any picture."""
+    return np.random.default_rng(seed).integers(
+        0, 256, (frames, FIXTURE_SIZE, FIXTURE_SIZE, 3), dtype=np.uint8
+    )
+
+
+def _smooth_base():
+    rows, columns = np.mgrid[0:FIXTURE_SIZE, 0:FIXTURE_SIZE].astype(np.float32)
+    return 40 + 90 * np.sin(columns / 11.0) * np.cos(rows / 17.0) + 60 * (rows / FIXTURE_SIZE)
+
+
+def near_static_stack(frames=9):
+    """``r7b``-class: structured, barely moving. The artifact that disqualifies
+    temporal difference as the signal — the banked one sits at mean |Δ| 0.824
+    against a 0.5 threshold, a factor of 2.0 from the thing being rejected."""
+    base = _smooth_base()
+    planes = np.stack([base + index * 1.4 for index in range(frames)])
+    return np.repeat(np.clip(planes, 0, 255)[..., None], 3, axis=-1).astype(np.uint8)
+
+
+def murky_stack(frames=9):
+    """``r4a``-class: a real render with almost no contrast. WARN, never FAIL."""
+    rows, columns = np.mgrid[0:FIXTURE_SIZE, 0:FIXTURE_SIZE].astype(np.float32)
+    base = 120 + 6 * np.sin(columns / 9.0) * np.cos(rows / 13.0)
+    planes = np.stack([base + 3 * np.sin((columns + index * 5) / 9.0) for index in range(frames)])
+    return np.repeat(np.clip(planes, 0, 255)[..., None], 3, axis=-1).astype(np.uint8)
+
+
+def drifting_flat_stack(frames=9):
+    """Each frame one flat colour, brightness ramping across the stack."""
+    return np.stack(
+        [
+            np.full((FIXTURE_SIZE, FIXTURE_SIZE, 3), 20 + index * 24, dtype=np.uint8)
+            for index in range(frames)
+        ]
+    )
+
+
 def _audio_frame(index: int, *, silent: bool, rate: int, channels: int = 2):
     samples = 1024
     layout = "stereo" if channels == 2 else "mono"
@@ -589,7 +652,7 @@ def test_a_moving_video_passes_and_reports_its_numbers(tmp_path):
     )
     assert content.frames == 9
     assert content.distinct_frames >= space_matrix.MIN_DISTINCT_FRAMES
-    assert content.pixel_std > space_matrix.MIN_PIXEL_STD
+    assert content.spatial_std > space_matrix.MIN_PIXEL_STD
     assert content.mean_abs_delta > space_matrix.MIN_MEAN_FRAME_DELTA
     assert "distinct" in content.render()
 
@@ -629,6 +692,182 @@ def test_a_file_with_no_video_frames_behind_it_is_rejected(tmp_path):
         space_matrix.verify_video_content(write_wav(tmp_path / "audio-only.wav"))
     assert "ZERO video frames" in str(caught.value)
     assert "not a pass" in str(caught.value)
+
+
+# ---------------------------------------------------------------------------
+# content, not existence — STRUCTURE
+#
+# The three checks above are all satisfied by NOISE. One artifact proved it:
+# 121 of 121 distinct frames, the geometry the request asked for, non-zero
+# bytes, a full luma range — colour static, scored PASS by this very tool.
+# ---------------------------------------------------------------------------
+
+
+def test_a_structureless_video_is_rejected(tmp_path):
+    """Distinct, moving, full-range, correct geometry — and nothing is in it."""
+    static = write_frames(tmp_path / "static.mp4", structureless_stack())
+    with pytest.raises(space_matrix.ArtifactContentError) as caught:
+        space_matrix.verify_video_content(static, expected_frames=9)
+    message = str(caught.value)
+    assert "colour static" in message
+    assert "properties of NOISE" in message
+
+
+def test_every_other_content_check_passes_on_that_same_static(tmp_path):
+    """The reason the structure check had to be added at all.
+
+    If any pre-existing check could catch this file, the operator's failure
+    would have been caught. None of them can: each one measures something noise
+    has in abundance. Asserted here directly, so nobody can later delete the
+    structure check believing the older ones cover it.
+    """
+    static = write_frames(tmp_path / "static.mp4", structureless_stack())
+    assert verify_streams_ok("text_to_video", static), "the structural check passes on this file"
+
+    frames = space_matrix._decode_video_frames(static)
+    stack = np.stack(frames).astype("float32")
+    distinct = len({frame.tobytes() for frame in frames})
+    spatial = float(np.median([frame.std() for frame in stack]))
+    delta = float(np.mean([np.abs(stack[i + 1] - stack[i]).mean() for i in range(len(frames) - 1)]))
+
+    assert len(frames) == 9, "the frame-count check passes"
+    assert distinct >= space_matrix.MIN_DISTINCT_FRAMES, "the distinctness check passes"
+    assert spatial > space_matrix.MIN_PIXEL_STD, "the flatness check passes"
+    assert delta > space_matrix.MIN_MEAN_FRAME_DELTA, "and the motion check passes, by 100x"
+
+
+def test_the_refusal_names_both_halves_of_the_conjunction(tmp_path):
+    """One number alone never condemns, so the message must show both."""
+    static = write_frames(tmp_path / "static.mp4", structureless_stack())
+    with pytest.raises(space_matrix.ArtifactContentError) as caught:
+        space_matrix.verify_video_content(static)
+    message = str(caught.value)
+    assert f"< {space_matrix.MIN_STRUCTURE_RATIO}" in message
+    assert f"> {space_matrix.MAX_HIGH_FREQUENCY_RATIO}" in message
+
+
+def test_a_near_static_but_structured_video_is_accepted(tmp_path):
+    """``r7b`` must not fail. It is a legitimate near-still render sitting only
+    2.0x above the operator's static on the *temporal* gate, which is exactly
+    why the structure ratio — 1.31x and 1.32x either side — is the one that
+    carries the refusal."""
+    content = space_matrix.verify_video_content(
+        write_frames(tmp_path / "near-static.mp4", near_static_stack()), expected_frames=9
+    )
+    assert content.structure.structure_ratio > space_matrix.MIN_STRUCTURE_RATIO
+    assert content.structure.high_frequency_ratio < space_matrix.MAX_HIGH_FREQUENCY_RATIO
+    assert content.warnings == (), content.render()
+
+
+def test_a_monochrome_video_is_accepted(tmp_path):
+    """Saturation 0.00 is an artistic choice. Half the banked set is nearly
+    monochrome and a deliberately black-and-white render measures exactly zero,
+    so colour is measured and never gated on."""
+    content = space_matrix.verify_video_content(
+        write_frames(tmp_path / "mono.mp4", near_static_stack()), expected_frames=9
+    )
+    assert content.structure.saturation == pytest.approx(0.0, abs=0.01)
+    assert "never asserted" in content.render()
+
+
+# ---------------------------------------------------------------------------
+# the WARN tier annotates and never raises
+# ---------------------------------------------------------------------------
+
+
+def test_a_low_contrast_video_warns_and_is_not_rejected(tmp_path):
+    """``r4a`` measures block std 5.33 and luma band 24.76 and is real output.
+    Refusing on those numbers destroys work a user paid GPU-seconds for; saying
+    them out loud costs nothing. **A statistical measure demotes an artifact
+    here; it never condemns one on its own.**"""
+    content = space_matrix.verify_video_content(
+        write_frames(tmp_path / "murky.mp4", murky_stack()), expected_frames=9
+    )
+    assert content.structure.block_std < space_matrix.LOW_BLOCK_STD
+    assert content.structure.luma_band < space_matrix.LOW_LUMA_BAND
+    assert any("low detail" in note for note in content.warnings)
+    assert any("low contrast" in note for note in content.warnings)
+
+
+def test_the_warning_is_visible_in_what_the_runner_prints(tmp_path):
+    """A warning folded into a paragraph of numbers is a warning nobody reads."""
+    content = space_matrix.verify_video_content(
+        write_frames(tmp_path / "murky.mp4", murky_stack()), expected_frames=9
+    )
+    rendered = content.render()
+    assert "*** WARNING:" in rendered
+    assert "structure" in rendered and "high-freq" in rendered
+
+
+def test_a_healthy_video_carries_no_warnings(tmp_path):
+    """The other direction. A warner that always warns gets ignored."""
+    content = space_matrix.verify_video_content(
+        write_frames(tmp_path / "good.mp4", near_static_stack()), expected_frames=9
+    )
+    assert content.warnings == ()
+    assert "WARNING" not in content.render()
+
+
+def test_the_run_records_the_structure_it_measured(tmp_path, quiet_log):
+    """Reported on every run, not only on the failing ones — a number that only
+    ever appears next to a refusal cannot be sanity-checked against a good run."""
+    log, lines = quiet_log
+    video = write_video(tmp_path / "out.mp4")
+    record = space_matrix.run_one(
+        FakeClient([str(video), None, "✅ Text to video complete. seed `1234`"]),
+        space_matrix.RunConfig(mode_id="text_to_video"),
+        log=log,
+    )
+    assert record.video.structure is not None
+    assert "structure" in "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# spatial std is not stack std — the mislabelled `pixel_std`, fixed
+# ---------------------------------------------------------------------------
+
+
+def test_a_stack_of_flat_frames_that_merely_changes_brightness_is_rejected(tmp_path):
+    """The bug in the old ``pixel_std``: it was ``stack.std()`` over the whole
+    ``[F, H, W, 3]`` block, documented as a per-frame flatness measure. It is
+    not one. It folds TEMPORAL brightness drift into a supposedly spatial
+    number, so nine individually blank frames fading from dark to light score
+    62 against a threshold of 1.0 and sail through the check written to catch
+    exactly them."""
+    drifting = write_frames(tmp_path / "drift.mp4", drifting_flat_stack())
+    frames = space_matrix._decode_video_frames(drifting)
+    stack = np.stack(frames).astype("float32")
+
+    assert float(stack.std()) > 50.0, "the OLD pixel_std passes this file comfortably"
+
+    with pytest.raises(space_matrix.ArtifactContentError) as caught:
+        space_matrix.verify_video_content(drifting, expected_frames=9)
+    assert "median per-frame std" in str(caught.value)
+    assert "flat" in str(caught.value)
+
+
+def test_both_std_figures_are_reported_and_only_one_is_asserted_on(tmp_path):
+    """``stack_std`` keeps its place in the record — it is a real number and
+    losing it would lose continuity with every earlier run — but it is labelled
+    for what it is and nothing gates on it."""
+    content = space_matrix.verify_video_content(
+        write_frames(tmp_path / "good.mp4", near_static_stack()), expected_frames=9
+    )
+    rendered = content.render()
+    assert "spatial std" in rendered
+    assert "stack std" in rendered and "never asserted" in rendered
+
+
+def test_the_structure_thresholds_are_the_apps_own(tmp_path):
+    """Bound, not copied. A laptop-side gate the deployed app does not share is
+    a gate that only ever catches the failures nobody is looking at, and two
+    hand-maintained copies of a threshold drift the moment one is retuned."""
+    from ltx25_studio import outputs
+
+    assert space_matrix.MIN_STRUCTURE_RATIO is outputs.MIN_STRUCTURE_RATIO
+    assert space_matrix.MAX_HIGH_FREQUENCY_RATIO is outputs.MAX_HIGH_FREQUENCY_RATIO
+    assert space_matrix.LOW_BLOCK_STD is outputs.LOW_BLOCK_STD
+    assert space_matrix.LOW_LUMA_BAND is outputs.LOW_LUMA_BAND
 
 
 def verify_streams_ok(mode_id, path) -> bool:
