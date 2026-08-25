@@ -698,6 +698,25 @@ class FakePipeline:
     def set_adapters(self, *args, **kwargs):
         self.calls.append({"set_adapters": (args, kwargs)})
 
+    def delete_adapters(self, adapter_names):
+        """Mirrors ``LoraBaseMixin.delete_adapters``: drop the named adapters
+        from every loadable component. Added when ``generate()`` grew its
+        unload step -- the real pipeline has this, and a fake without it turns
+        the lifecycle's cannot-detach refusal into a false alarm."""
+        names = [adapter_names] if isinstance(adapter_names, str) else list(adapter_names)
+        self.calls.append({"delete_adapters": names})
+        for name in names:
+            for component_name in self._lora_loadable_modules:
+                component = getattr(self, component_name, None)
+                if component is None:
+                    continue
+                component.peft_config.pop(name, None)
+                for _, module in component.named_modules():
+                    lora_a = getattr(module, "lora_A", None)
+                    if lora_a is not None:
+                        lora_a.pop(name, None)
+                        module.lora_B.pop(name, None)
+
     def fuse_lora(self, *args, **kwargs):
         self.fuse_calls.append({"args": args, "kwargs": kwargs})
 
