@@ -300,6 +300,14 @@ def on_validate_lora(
     actionable (which prefixes were found, which keys are unpaired, which two
     frame counts are legal); flattening one to "invalid file" would throw away
     the only part a user can act on.
+
+    The Hub route resolves through ``lora.fetch_lora`` via ``validate_lora``'s
+    ``fetcher`` seam -- HERE, in the web process, never in the GPU worker: the
+    staged entry carries the fetched LOCAL path (``"path"``), so by the time a
+    generation is billed the adapter is a file read, and a Hub download can
+    never land inside the metered ``@spaces.GPU`` window. The size cap is
+    enforced from Hub metadata before any bytes move. The displayed ``source``
+    stays whatever the user typed.
     """
     staged = list(applied or [])
     source = (upload or "") or (repo_id or "").strip()
@@ -312,13 +320,13 @@ def on_validate_lora(
     source = str(source)
 
     try:
-        from ..lora import validate_lora
+        from ..lora import fetch_lora, validate_lora
 
-        report = validate_lora(source)
+        report = validate_lora(source, fetcher=fetch_lora)
     except Exception as exc:  # noqa: BLE001 -- every failure must reach the user
         return (render.lora_rejected(source, exc), staged, render.applied_loras(staged))
 
-    staged.append({"source": source, "report": report})
+    staged.append({"source": source, "path": str(report.path), "report": report})
     return (render.lora_accepted(source, report), staged, render.applied_loras(staged))
 
 

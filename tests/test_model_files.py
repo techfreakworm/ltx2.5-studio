@@ -252,10 +252,20 @@ def _is_a_hardcoded_filename(value):
     * prose that mentions the extension ("upload a `.safetensors` adapter") — the
       UI is the layer whose whole job is sentences;
     * the bare extension used as an upload filter (``file_types=[".safetensors"]``)
-      — that describes what a *user* may upload, and no Lightricks rename touches it.
+      — that describes what a *user* may upload, and no Lightricks rename touches it;
+    * the diffusers ecosystem's LoRA weight-name convention
+      (``pytorch_lora_weights.safetensors``, ``lora_base.py``'s
+      ``LORA_WEIGHT_NAME_SAFE``) — the name a *community* repo gives its
+      adapter, which the Hub fetch route honours when a multi-file repo is
+      otherwise ambiguous. It is a contract with the ecosystem, like the
+      upload filter, not a coordinate of ours: no Lightricks rename touches
+      it, and moving it into ``model_files.py`` would misfile a diffusers
+      convention among our checkpoint pins.
     """
     stripped = value.strip()
     if stripped == ".safetensors":
+        return False
+    if stripped == "pytorch_lora_weights.safetensors":
         return False
     return stripped.endswith(".safetensors") and not any(c.isspace() for c in stripped)
 

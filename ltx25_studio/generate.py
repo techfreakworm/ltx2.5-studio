@@ -481,7 +481,12 @@ def _apply_loras(pipe, request: GenerationRequest):
     try:
         for position, entry in enumerate(staged):
             if isinstance(entry, dict):
-                source = entry.get("source")
+                # "path" is the fetched LOCAL file for Hub-sourced adapters --
+                # the UI resolves repo ids in the web process precisely so this
+                # loop, which runs inside the billed GPU window, only ever
+                # reads a file. "source" (what the user typed) is the display
+                # name and the local-upload case, where the two coincide.
+                source = entry.get("path") or entry.get("source")
                 weight = float(entry.get("weight", 1.0))
                 validated = entry.get("report") is not None
             else:

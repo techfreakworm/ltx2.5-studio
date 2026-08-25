@@ -56,6 +56,7 @@ __all__ = [
     "LoRAConventionError",
     "LoRAError",
     "LoRADimensionError",
+    "LoRAFetchError",
     "LoRAFormatError",
     "LoRAHeaderError",
     "LoRAInContextError",
@@ -324,6 +325,24 @@ class UnknownComponentError(ModelFileError):
 # ---------------------------------------------------------------------------
 # LoRA -- PLAN §4.3
 # ---------------------------------------------------------------------------
+
+
+class LoRAFetchError(LoRAError):
+    """Stage 0 -- a Hub reference could not be resolved to a downloadable file.
+
+    Everything that can go wrong BEFORE any bytes exist locally: a repo that
+    does not exist (or is private, which the Hub deliberately reports the same
+    way), a gated repo, a repo with no ``.safetensors`` file, an ambiguous
+    repo where no convention picks one file, or the network dying mid-fetch.
+    Distinct from :class:`LoRAFormatError` on purpose: "could not be read.
+    Only safetensors adapters are accepted" is actionable advice about a
+    *file*, and every one of these failures happens while there is no file.
+    """
+
+    def __init__(self, *, source, reason):
+        self.source = source
+        self.reason = reason
+        super().__init__(f"LoRA {source} could not be fetched from the Hub: {reason}")
 
 
 class LoRATooLargeError(LoRAError):

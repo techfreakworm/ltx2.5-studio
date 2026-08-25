@@ -1013,3 +1013,36 @@ def test_auto_duration_leaves_the_upload_length_alone(monkeypatch, tmp_path):
     )
     assert pipe.audio_vae.mels[-1].shape[-1] == 96000, "auto_duration must not trim"
     assert not any("trimmed" in w for w in result.warnings)
+
+
+def test_a_hub_staged_adapter_is_loaded_from_its_fetched_local_path(tmp_path):
+    """The web process resolves repo ids to local files precisely so this
+    loop — inside the billed GPU window — only ever reads a file. 'path'
+    (the fetched local file) must win over 'source' (what the user typed);
+    an upload has no 'path' and falls back to 'source', which IS local."""
+
+    class RecordingPipe(LoRAFakePipe):
+        def __init__(self):
+            super().__init__()
+            self.loaded_from = []
+
+        def load_lora_weights(self, path, adapter_name=None):
+            self.loaded_from.append(str(path))
+            return super().load_lora_weights(path, adapter_name=adapter_name)
+
+    local = tmp_path / "fetched.safetensors"
+    pipe = RecordingPipe()
+    generate(
+        a_request(
+            loras=(
+                {"source": "org/my-lora", "path": str(local), "report": object()},
+                _staged(tmp_path / "uploaded.safetensors"),
+            )
+        ),
+        pipeline_factory=factory_for(pipe),
+        encoder=good_encoder,
+        output_root=tmp_path,
+    )
+    assert pipe.loaded_from == [str(local), str(tmp_path / "uploaded.safetensors")], (
+        "a repo id must never reach load_lora_weights — the GPU window reads files only"
+    )

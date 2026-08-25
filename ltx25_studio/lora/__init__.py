@@ -22,6 +22,7 @@ from ..errors import (
     LoRAConventionError,
     LoRADimensionError,
     LoRAError,
+    LoRAFetchError,
     LoRAFormatError,
     LoRAHeaderError,
     LoRAInContextError,
@@ -32,6 +33,7 @@ from ..errors import (
     LoRATruncatedError,
     LoRAVersionError,
 )
+from .fetch import DIFFUSERS_LORA_WEIGHT_NAME, fetch_lora
 from .inspect import LoRAInspection, inspect_lora, read_safetensors_header
 from .validate import (
     DEFAULT_MAX_LORA_BYTES,
@@ -46,11 +48,13 @@ from .validate import (
 #: these are aliases, not duplicates.
 __all__ = [
     "DEFAULT_MAX_LORA_BYTES",
+    "DIFFUSERS_LORA_WEIGHT_NAME",
     "MIN_RESOLVED_FRACTION",
     "WARN_RESOLVED_FRACTION",
     "LoRAConventionError",
     "LoRADimensionError",
     "LoRAError",
+    "LoRAFetchError",
     "LoRAFormatError",
     "LoRAHeaderError",
     "LoRAInContextError",
@@ -62,6 +66,7 @@ __all__ = [
     "LoRATruncatedError",
     "LoRAValidation",
     "LoRAVersionError",
+    "fetch_lora",
     "inspect_lora",
     "read_safetensors_header",
     "validate_lora",

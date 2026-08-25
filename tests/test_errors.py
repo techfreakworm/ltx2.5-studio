@@ -65,7 +65,14 @@ ERROR_SPECS = {
         {"name": "prompt_enhancer", "known": ("transformer", "vae", "vocoder")},
         ["prompt_enhancer", "transformer"],
     ),
-    # -- LoRA (PLAN §4.3) ------------------------------------------------
+    # -- LoRA (PLAN §4.3, §4.6) ------------------------------------------
+    "LoRAFetchError": (
+        {
+            "source": "nobody/no-such-repo",
+            "reason": "'nobody/no-such-repo' was not found on the Hub",
+        },
+        ["nobody/no-such-repo", "not found"],
+    ),
     "LoRATooLargeError": (
         {
             "source": "/tmp/huge.safetensors",
@@ -179,6 +186,7 @@ BASE_OF = {
     "AudioVideoDesyncError": "ConstraintError",
     "MissingModelFileError": "ModelFileError",
     "UnknownComponentError": "ModelFileError",
+    "LoRAFetchError": "LoRAError",
     "LoRATooLargeError": "LoRAError",
     "LoRAFormatError": "LoRAError",
     "LoRAHeaderError": "LoRAError",

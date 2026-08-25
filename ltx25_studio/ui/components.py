@@ -167,8 +167,15 @@ def lora_panel() -> dict[str, Any]:
     with gr.Row():
         widgets["repo_id"] = gr.Textbox(
             label="Hub repo id",
-            placeholder="joyfox/LTX-2.3-Transition-LORA",
-            info="A repo id, or a repo id plus a filename.",
+            # Not a real repo on purpose: the previous placeholder named a
+            # 2.3-era adapter that this 2.5 validator would reject -- a
+            # placeholder that fails its own demo teaches the wrong lesson.
+            placeholder="org/my-ltx25-lora",
+            info=(
+                "`org/name`, or `org/name/file.safetensors` for multi-file repos. "
+                "Size-checked against the cap before anything downloads; fetched once, "
+                "cached after."
+            ),
             scale=3,
         )
         widgets["upload"] = gr.File(
