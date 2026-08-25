@@ -66,6 +66,7 @@ __all__ = [
     "clear_cache",
     "derive_pipeline",
     "get_pipeline",
+    "mmap_backing_report",
     "stage_1_kwargs",
     "stage_2_size_note",
     "STAGE_2_SPATIAL_SCALE",
@@ -375,6 +376,67 @@ def _snapshot_path():
     return path
 
 
+def _parameter_bearing_components(pipeline_object):
+    """``(name, module)`` for every component that actually holds parameters.
+
+    Reads ``.components`` where the pipeline offers one (diffusers does) and
+    falls back to the names this stack is known to carry, so the report works
+    against a duck-typed pipeline in the offline suite as well as the real
+    object on the Space.
+    """
+    components = getattr(pipeline_object, "components", None)
+    if isinstance(components, dict):
+        items = list(components.items())
+    else:
+        names = ("transformer", "connectors", "vae", "audio_vae", "text_encoder", "vocoder")
+        items = [(name, getattr(pipeline_object, name, None)) for name in names]
+    return [
+        (name, module)
+        for name, module in items
+        if callable(getattr(module, "named_parameters", None))
+    ]
+
+
+#: Sentinel for "read the live maps now": ``None`` is a real value here -- it
+#: is what a platform without ``/proc/self/maps`` returns -- so it cannot
+#: double as the default.
+_READ_MAPS = object()
+
+
+def mmap_backing_report(
+    pipeline_object, *, maps_text=_READ_MAPS
+) -> tuple[tuple[bool, bool, str], ...]:
+    """``(checked, offending, message)`` per component, for the startup log.
+
+    This is the wiring for ``zerogpu.check_mmap_backed`` -- previously exported,
+    tested, documented as the detector for the silent 72 GB leak, and called by
+    nothing (the §8 shape: an advertised guard reporting safety it never
+    checked). The three-way verdict is the point of the tuple: "checked and
+    fine", "checked and OFFENDING", and "could not check" must all be
+    distinguishable in the log, because collapsing the third into the first is
+    exactly the defect ``check_mmap_backed`` refuses internally.
+
+    The maps snapshot is read once and shared: every component is judged
+    against the same instant, and where the platform offers no maps at all the
+    report short-circuits to that single line rather than repeating the same
+    non-answer per component.
+    """
+    from . import zerogpu
+
+    if maps_text is _READ_MAPS:
+        maps_text = zerogpu.read_process_maps()
+    report = []
+    for name, module in _parameter_bearing_components(pipeline_object):
+        checked, message = zerogpu.check_mmap_backed(module, name=name, maps_text=maps_text)
+        # The substring is pinned by test_zerogpu's own assertions on
+        # check_mmap_backed's offender message, so drift there fails tests
+        # before it can misclassify here.
+        report.append((checked, checked and "not mmap'd" in message, message))
+        if not checked:
+            break
+    return tuple(report)
+
+
 def _base_pipeline(*, dtype=None, device: str | None = None, quantization: str | None = None):
     """Load the model ONCE. Every workflow is derived from this."""
     if _BASE_CACHE_KEY in _CACHE:
@@ -451,11 +513,22 @@ def _base_pipeline(*, dtype=None, device: str | None = None, quantization: str |
     except Exception as exc:
         raise ModelLoadError(component=BASE_KIND, reason=str(exc)) from exc
 
-    # NOTE: the mmap-backing guard (`zerogpu.check_mmap_backed`) is deliberately
-    # NOT wired in here. It is ZeroGPU-only -- it cannot fire anywhere else --
-    # and ZeroGPU is parked pending the app being proven on a dedicated host.
-    # The helpers stay tested and ready; re-enabling is this call plus a raise.
-    # See docs/ZEROGPU_DISK.md.
+    # The mmap-backing report -- the check that detects the silent 72 GB leak:
+    # ZeroGPU reclaims the HF snapshot after packing only for tensors still
+    # mmap'd from prunable blobs, and anything that materialised them into
+    # anonymous memory leaves the Space dying at steady state with 72 GB it
+    # cannot account for and no error explaining why. It sat parked here
+    # citing "ZeroGPU is parked" -- but ZeroGPU is the live deployment, so the
+    # one place the check can fire was the one place it did not run.
+    #
+    # LOG-ONLY this deploy, deliberately. ZEROGPU_DISK.md §6 designed it as a
+    # raise, but a wrong raise here bricks a working Space at startup;
+    # promotion to ModelLoadError is a separate decision, to be taken after
+    # reading these lines from a live boot -- not a default smuggled in with
+    # the wiring. Runs BEFORE the device move because packing happens inside
+    # `.to(device)`: this is the last moment the precondition can be seen.
+    for checked, offending, message in mmap_backing_report(built):
+        (_log().warning if offending else _log().info)("%s%s", "" if checked else "⚠️ ", message)
 
     if device:
         # ZeroGPU intercepts this, rewrites it to .to("cpu") and packs every

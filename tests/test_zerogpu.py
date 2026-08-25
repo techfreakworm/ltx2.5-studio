@@ -465,3 +465,94 @@ def test_an_explicit_duration_is_still_scaled_and_padded():
         request=_fake_request(enable_stage_2=True, loras=({"source": "a"},)),
     )
     assert got == 150 + zerogpu.LORA_DURATION_SECONDS
+
+
+# --------------------------------------------------------------------------
+# the mmap report is WIRED -- pipelines reads it at load, before the pack
+# --------------------------------------------------------------------------
+#
+# check_mmap_backed sat exported, tested and called by NOTHING, parked on a
+# note that said "ZeroGPU is parked" while ZeroGPU became the live
+# deployment -- the §8 shape, third instance. These tests pin the wiring:
+# pipelines.mmap_backing_report walks the pipeline's parameter-bearing
+# components through the same check the tests above specify, and
+# _base_pipeline calls it before the device move, which is the last moment
+# the pack's precondition can be seen.
+
+
+class _FakePipelineObject:
+    def __init__(self, **components):
+        self.components = components
+
+
+def test_the_report_covers_every_parameter_bearing_component():
+    from ltx25_studio import pipelines
+
+    pipe = _FakePipelineObject(
+        transformer=_Module(**{"blk.0.weight": _Tensor(MAPPED)}),
+        vae=_Module(**{"decoder.weight": _Tensor(MAPPED)}),
+        scheduler=object(),  # no parameters, nothing to check
+    )
+    report = pipelines.mmap_backing_report(pipe, maps_text=MAPS)
+    assert len(report) == 2
+    assert all(checked and not offending for checked, offending, _ in report)
+    named = "".join(message for _, _, message in report)
+    assert "transformer" in named and "vae" in named
+
+
+def test_an_offending_component_is_marked_offending():
+    from ltx25_studio import pipelines
+
+    pipe = _FakePipelineObject(
+        transformer=_Module(**{"blk.7.weight": _Tensor(ANONYMOUS)}),
+        vae=_Module(**{"decoder.weight": _Tensor(MAPPED)}),
+    )
+    report = pipelines.mmap_backing_report(pipe, maps_text=MAPS)
+    assert len(report) == 2, "the clean component must still be reported, not eclipsed"
+    offending_rows = [message for _, offending, message in report if offending]
+    assert len(offending_rows) == 1
+    assert "blk.7.weight" in offending_rows[0], "the offender must be named, not counted"
+
+
+def test_no_maps_yields_one_could_not_check_row_not_a_quiet_pass():
+    """'Could not check' must neither look like 'checked and fine' nor be
+    repeated per component: the answer is the platform's, once."""
+    from ltx25_studio import pipelines
+
+    pipe = _FakePipelineObject(
+        transformer=_Module(**{"a": _Tensor(MAPPED)}),
+        vae=_Module(**{"b": _Tensor(MAPPED)}),
+        audio_vae=_Module(**{"c": _Tensor(MAPPED)}),
+    )
+    report = pipelines.mmap_backing_report(pipe, maps_text=None)
+    assert len(report) == 1
+    checked, offending, message = report[0]
+    assert checked is False and offending is False
+    assert "NOT checked" in message
+
+
+def test_a_pipeline_without_a_components_dict_is_walked_by_known_names():
+    from ltx25_studio import pipelines
+
+    class _BarePipe:
+        transformer = _Module(**{"blk.0.weight": _Tensor(MAPPED)})
+
+    report = pipelines.mmap_backing_report(_BarePipe(), maps_text=MAPS)
+    assert len(report) == 1
+    assert "transformer" in report[0][2]
+
+
+def test_base_pipeline_runs_the_report_before_the_device_move():
+    """The wiring claim itself, and its placement: packing happens inside
+    .to(device), so a report AFTER the move reads the post-pack world and can
+    no longer see the precondition it exists to check."""
+    import inspect
+
+    from ltx25_studio import pipelines
+
+    source = inspect.getsource(pipelines._base_pipeline)
+    called_at = source.find("mmap_backing_report(")
+    moved_at = source.find("built.to(device)")
+    assert called_at != -1, "check_mmap_backed's wiring point -- do not re-park it silently"
+    assert moved_at != -1
+    assert called_at < moved_at
