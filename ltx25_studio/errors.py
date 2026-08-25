@@ -19,10 +19,28 @@ and the UI rendered the empty path as a silent form reset. So:
 Concrete errors also keep their inputs as attributes, so the UI can render a
 structured message without re-parsing prose.
 
+The root inherits ``gradio.exceptions.Error`` and defines ``__reduce__``, as a
+pair, so these errors survive the ZeroGPU fork boundary with their messages
+intact -- docs/SPACE_MODE_MATRIX.md §4 measured what happens otherwise: every
+``reason=`` this module so carefully attaches was reduced to the bare class
+name in transit, and "fail loudly" quietly degraded to "fail by name only"
+inside every ``@spaces.GPU`` call. See :class:`LTXStudioError` for why both
+halves are needed and why neither works alone.
+
 Imports nothing else from this package (PLAN §7.2).
 """
 
 from __future__ import annotations
+
+# The ONE gradio import allowed outside ui/ (test_architecture.py pins it to
+# exactly this name). It is unconditional and at module level on purpose:
+# gradio is a pinned runtime dependency (requirements.txt, ==6.24.0), and the
+# fork-boundary property below has to hold wherever an error is *constructed*
+# -- a fallback base for gradio-less environments would make that property
+# silently vary by environment, which is the inert-guard shape this build
+# keeps finding (SPACE_MODE_MATRIX §8). If gradio is absent, this package
+# should fail to import, loudly, right here.
+from gradio.exceptions import Error as _GradioError
 
 __all__ = [
     "AudioVideoDesyncError",
@@ -65,18 +83,94 @@ def _gb(num_bytes: int) -> str:
     return f"{num_bytes / 1e9:.1f} GB"
 
 
+def _rebuild(cls, args, state):
+    """Reconstruct an error for pickle without calling its ``__init__``.
+
+    Every concrete class in this module takes **keyword-only** arguments while
+    ``self.args`` holds the one formatted sentence, so pickle's default path --
+    ``cls(*self.args)`` -- feeds the sentence back positionally and the
+    constructor refuses it. That is not hypothetical: 22 of the 27 classes
+    here were measured unpicklable through exactly that mismatch
+    (SPACE_MODE_MATRIX §4). Rebuilding via ``__new__`` restores what an
+    instance actually *is* -- its class, its ``args``, its attributes --
+    without re-running construction logic that already ran once.
+    """
+    exc = cls.__new__(cls)
+    exc.args = args
+    exc.__dict__.update(state)
+    return exc
+
+
 # ---------------------------------------------------------------------------
 # roots
 # ---------------------------------------------------------------------------
 
 
-class LTXStudioError(Exception):
+class LTXStudioError(_GradioError):
     """Root of every error this package raises.
 
     The UI catches this to decide what to show a human; nothing else in the
     package is allowed to signal failure by returning a falsy value instead
     (PLAN §5.3).
+
+    **Why the base is ``gradio.exceptions.Error``** (SPACE_MODE_MATRIX §4): on
+    ZeroGPU every ``@spaces.GPU`` call runs in a forked worker, and ``spaces``
+    transmits the raised exception *object* back to the parent only when
+    ``isinstance(exc, gr.Error)`` -- anything else is reduced to its class
+    name, which is how ``DecodeError(reason=...)`` reached a live user as the
+    eleven characters ``'DecodeError'``. The inheritance must be real and must
+    sit here at the root: the worker *constructs* the exception, so the
+    property has to hold at creation time, in library code -- it cannot be
+    grafted on from ``ui/`` afterwards.
+
+    Inheriting alone would be **worse than nothing**: an eligible-but-
+    unpicklable error dies crossing the result queue, the spaces worker
+    catches the ``PicklingError`` and ships *that*, and the user sees
+    ``'PicklingError'`` -- losing even the class name that survives today.
+    ``__reduce__`` below is the other half of the pair; neither works alone.
+
+    Eligibility to travel must not change what these errors *say*, so two
+    inherited behaviours are deliberately reversed:
+
+    * ``__str__`` -- gr.Error renders ``repr(self.message)``; the single
+      quotes around ``'DecodeError'`` on the Space were exactly that.
+      ``ui/render.py`` quotes ``str(exc)`` verbatim into markdown, so we
+      restore ``BaseException.__str__``.
+    * ``__init__`` -- gr.Error would absorb a second positional argument into
+      ``duration`` and turn zero arguments into its ``"Error raised."``
+      default. We keep ``BaseException`` arity semantics exactly.
+
+    ``print_exception`` is left at gr.Error's default (``True``) on purpose:
+    the spaces parent prints the worker's full traceback to the Space log only
+    when the transmitted error's ``print_exception`` is truthy, and that log
+    line is how the one real generation defect this Space has had was actually
+    diagnosed. Suppressing it would re-hide the channel §4 exists to keep open.
+
+    Inheriting gr.Error also makes every error here a ``ValueError`` (via
+    gradio's ``AppError``). Audited: no ``except ValueError`` in this package
+    sits on a path our errors travel -- the five catch sites guard stdlib
+    parsing and ``inspect.signature`` only, and ``lora/apply.py`` re-raises
+    ``LoRAError`` before its ``ValueError`` arm.
     """
+
+    def __init__(self, *args):
+        # Concrete subclasses pass exactly one formatted sentence; tests may
+        # construct bases bare. Hand gr.Error the message (it stores it and
+        # its modal defaults -- title, duration, visible, print_exception),
+        # then restore ``args`` so str/repr semantics match plain Exception
+        # for every arity, including () and (a, b).
+        super().__init__(str(args[0]) if args else "")
+        self.args = args
+
+    def __str__(self):
+        # Not gr.Error's repr(self.message) -- see the class docstring.
+        return BaseException.__str__(self)
+
+    def __reduce__(self):
+        # ``args`` is a C-level slot, absent from __dict__, so it is carried
+        # explicitly; the dict carries everything else -- mode, reason,
+        # message, print_exception, all of it. ``_rebuild`` skips __init__.
+        return (_rebuild, (self.__class__, self.args, dict(vars(self))))
 
 
 class ConstraintError(LTXStudioError):

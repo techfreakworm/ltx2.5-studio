@@ -80,12 +80,44 @@ def test_generate_does_not_import_the_ui():
 
 @pytest.mark.parametrize(
     "path",
-    [p for p in package_python_files() if "ui" not in p.parts],
+    [p for p in package_python_files() if "ui" not in p.parts and p.name != "errors.py"],
     ids=lambda p: str(p.relative_to(PACKAGE_ROOT)),
 )
 def test_nothing_outside_the_ui_layer_imports_gradio(path):
+    """``errors.py`` is deliberately absent from this sweep — it holds the one
+    non-ui gradio licence, and the test below pins that licence to exactly one
+    imported name rather than exempting the file wholesale."""
     assert "gradio" not in _third_party_imports(path), (
         f"{path.name} imports gradio — that is what makes the app untestable without it (§7.2)"
+    )
+
+
+def test_errors_gradio_licence_is_exactly_the_exception_base():
+    """The ZeroGPU fork boundary transmits an exception *object* back to the
+    parent only when it is a ``gr.Error`` (docs/SPACE_MODE_MATRIX.md §4);
+    everything else is reduced to its class name, which is how a fully
+    diagnosed ``DecodeError(reason=...)`` reached a live user as the string
+    ``'DecodeError'``. The exception is constructed in the worker, in library
+    code, so the isinstance property must hold at the root of the hierarchy —
+    it cannot be granted from ``ui/`` after the fact. That makes ``errors.py``
+    the one module outside ``ui/`` with a reason to touch gradio, and this
+    test keeps the licence exactly that narrow: ``gradio.exceptions.Error``,
+    nothing more. A second gradio name appearing here re-fails the layering
+    rule rather than widening the exemption silently."""
+    tree = ast.parse((PACKAGE_ROOT / "errors.py").read_text())
+    gradio_imports = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            gradio_imports += [a.name for a in node.names if a.name.split(".")[0] == "gradio"]
+        elif (
+            isinstance(node, ast.ImportFrom)
+            and node.module
+            and not node.level
+            and node.module.split(".")[0] == "gradio"
+        ):
+            gradio_imports += [f"{node.module}.{a.name}" for a in node.names]
+    assert gradio_imports == ["gradio.exceptions.Error"], (
+        f"errors.py's gradio licence covers exactly the exception base; found {gradio_imports}"
     )
 
 

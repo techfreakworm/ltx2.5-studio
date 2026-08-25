@@ -109,7 +109,13 @@ def test_the_not_attached_error_is_not_a_bare_exception(fake_pipeline, wrong_arc
     with pytest.raises(LoRAError) as excinfo:
         lora_apply.apply_lora(fake_pipeline, wrong_architecture_lora)
     assert type(excinfo.value) is not Exception
-    assert not isinstance(excinfo.value, (ValueError, RuntimeError, KeyError))
+    # Type identity, not isinstance, on purpose: what this test forbids is the
+    # raise site throwing a *naked builtin* and losing the typed contract.
+    # Since the fork-boundary fix the whole hierarchy inherits ValueError via
+    # gr.Error (errors.LTXStudioError explains the audit), so isinstance
+    # against ValueError is now true of every properly typed error and no
+    # longer distinguishes bare from typed.
+    assert type(excinfo.value) not in (ValueError, RuntimeError, KeyError)
 
 
 def test_apply_lora_never_returns_a_report_when_nothing_attached(
