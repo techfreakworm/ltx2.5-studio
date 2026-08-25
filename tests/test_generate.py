@@ -40,6 +40,7 @@ from ltx25_studio.errors import (
     EmptyOutputError,
     FrameCountError,
     GenerationError,
+    LoRANotAttachedError,
     LTXStudioError,
     ModelLoadError,
     UnknownModeError,
@@ -575,3 +576,232 @@ def test_the_result_is_not_a_bare_tuple(tmp_path):
         "an unnamed tuple is how a path and an error message get swapped at a call site"
     )
     assert not isinstance(result, SimpleNamespace) or hasattr(result, "output_path")
+
+
+# --------------------------------------------------------------------------
+# the LoRA lifecycle on a warm worker -- attach, activate together, detach
+# --------------------------------------------------------------------------
+#
+# The pipeline is a cached singleton (pipelines._CACHE), so a ZeroGPU worker
+# that survives between requests hands every generation the SAME object.
+# Anything a run leaves attached outlives the run: the next run with the same
+# staged adapter dies on diffusers' duplicate-name ValueError, and a run with
+# no staged adapters silently generates through the previous user's LoRA --
+# the silent-garbage shape stage 7 exists to prevent, arriving through the
+# lifecycle instead of the load.
+#
+# The fake below mirrors the two real diffusers behaviours these tests exist
+# to pin, because a fake that cannot express the bug makes the test theatre
+# (conftest's own rule): `load_lora_weights` refuses a duplicate adapter name
+# exactly as peft does, and `set_adapters` REPLACES the active set rather
+# than adding to it.
+
+
+class _LoRAModule:
+    def __init__(self):
+        self.lora_A = {}
+
+
+class _LoRAComponent:
+    def __init__(self):
+        self._modules = {"blocks.0.attn": _LoRAModule()}
+
+    def named_modules(self):
+        return iter(self._modules.items())
+
+
+class LoRAFakePipe(FakePipe):
+    def __init__(self, output=None, raises=None, zero_attach_sources=()):
+        super().__init__(output=output, raises=raises)
+        self.transformer = _LoRAComponent()
+        self.adapters = []
+        self.active = []
+        self.active_weights = None
+        self.deleted = []
+        self.adapters_at_call = None
+        self.active_at_call = None
+        self.weights_at_call = None
+        self._zero_attach_sources = tuple(str(s) for s in zero_attach_sources)
+
+    def __call__(self, *args, **kwargs):
+        # Snapshot what the pipeline would actually run with: assertions made
+        # after generate() returns cannot tell "active during the run" from
+        # "activated and then detached".
+        self.adapters_at_call = list(self.adapters)
+        self.active_at_call = list(self.active)
+        self.weights_at_call = (
+            list(self.active_weights) if self.active_weights is not None else None
+        )
+        return super().__call__(*args, **kwargs)
+
+    def load_lora_weights(self, path, adapter_name=None):
+        if adapter_name in self.adapters:
+            # Verbatim shape of diffusers/loaders/peft.py -- a bare ValueError.
+            raise ValueError(
+                f"Adapter name {adapter_name} already in use in the model - "
+                f"please select a new adapter name."
+            )
+        self.adapters.append(adapter_name)
+        if str(path) in self._zero_attach_sources:
+            return  # registered, attached to nothing -- the stage-7 shape
+        for _, module in self.transformer.named_modules():
+            module.lora_A[adapter_name] = object()
+
+    def set_adapters(self, names, weights=None):
+        names = [names] if isinstance(names, str) else list(names)
+        if weights is None or isinstance(weights, (int, float)):
+            # diffusers expands a scalar (or None) into one entry per adapter.
+            weights = [1.0 if weights is None else float(weights)] * len(names)
+        self.active = names  # REPLACE, not extend -- the real semantics
+        self.active_weights = list(weights)
+
+    def delete_adapters(self, names):
+        for name in [names] if isinstance(names, str) else list(names):
+            self.adapters.remove(name)
+            for _, module in self.transformer.named_modules():
+                module.lora_A.pop(name, None)
+            self.active = [n for n in self.active if n != name]
+            self.deleted.append(name)
+
+
+def _staged(source, weight=1.0):
+    # The UI stages validated adapters as dicts carrying their report; the
+    # report's presence is what lets _apply_loras skip stages 1-6.5, which
+    # would otherwise want a real safetensors file.
+    return {"source": str(source), "weight": weight, "report": object()}
+
+
+def test_a_second_run_with_the_same_staged_lora_works_on_a_warm_worker(tmp_path):
+    """The fix for the duplicate-name death: run N+1 must not inherit run N's
+    registration. Before the unload existed this raised 'Adapter name
+    user_lora_0 already in use' out of the second load."""
+    pipe = LoRAFakePipe()
+    for _ in range(2):
+        result = generate(
+            a_request(loras=(_staged(tmp_path / "a.safetensors"),)),
+            pipeline_factory=factory_for(pipe),
+            encoder=good_encoder,
+            output_root=tmp_path,
+        )
+        assert Path(result.output_path).exists()
+    assert pipe.deleted == ["user_lora_0", "user_lora_0"]
+
+
+def test_adapters_are_attached_during_the_run_and_gone_after_it(tmp_path):
+    pipe = LoRAFakePipe()
+    generate(
+        a_request(loras=(_staged(tmp_path / "a.safetensors"),)),
+        pipeline_factory=factory_for(pipe),
+        encoder=good_encoder,
+        output_root=tmp_path,
+    )
+    assert pipe.adapters_at_call == ["user_lora_0"], "the adapter must be live during the call"
+    assert pipe.adapters == [], "and detached after it -- the singleton outlives the request"
+    assert pipe.active == []
+
+
+def test_a_run_without_loras_does_not_inherit_the_previous_runs_adapters(tmp_path):
+    """The silent half, and the worse one: a leaked adapter does not raise, it
+    quietly styles the NEXT user's generation."""
+    pipe = LoRAFakePipe()
+    generate(
+        a_request(loras=(_staged(tmp_path / "a.safetensors"),)),
+        pipeline_factory=factory_for(pipe),
+        encoder=good_encoder,
+        output_root=tmp_path,
+    )
+    generate(
+        a_request(),
+        pipeline_factory=factory_for(pipe),
+        encoder=good_encoder,
+        output_root=tmp_path,
+    )
+    assert pipe.adapters_at_call == [], (
+        "a run with no staged adapters generated through the previous run's LoRA -- "
+        "base-model output was promised and something else was delivered"
+    )
+
+
+def test_two_staged_loras_are_both_active_during_the_run(tmp_path):
+    """set_adapters REPLACES the active set, so per-adapter activation leaves
+    only the last adapter live while every attach report claims success. The
+    collective call in _apply_loras is what makes this pass."""
+    pipe = LoRAFakePipe()
+    generate(
+        a_request(
+            loras=(
+                _staged(tmp_path / "a.safetensors", weight=0.25),
+                _staged(tmp_path / "b.safetensors", weight=0.75),
+            )
+        ),
+        pipeline_factory=factory_for(pipe),
+        encoder=good_encoder,
+        output_root=tmp_path,
+    )
+    assert pipe.active_at_call == ["user_lora_0", "user_lora_1"]
+    assert pipe.weights_at_call == [0.25, 0.75]
+    assert pipe.adapters == [], "both must still be detached afterwards"
+
+
+def test_a_failed_generation_still_detaches_its_adapters(tmp_path):
+    pipe = LoRAFakePipe(raises=RuntimeError("CUDA out of memory"))
+    with pytest.raises(DecodeError):
+        generate(
+            a_request(loras=(_staged(tmp_path / "a.safetensors"),)),
+            pipeline_factory=factory_for(pipe),
+            encoder=good_encoder,
+            output_root=tmp_path,
+        )
+    assert pipe.adapters == [], "a failed run must not poison the next one"
+
+
+def test_a_mid_staging_failure_detaches_what_was_already_attached(tmp_path):
+    """Adapter 2 of 2 failing stage 7 must not leave adapter 1 -- or its own
+    dead registration -- on the singleton; otherwise the RETRY dies on a
+    duplicate name instead of the real error."""
+    good, bad = tmp_path / "a.safetensors", tmp_path / "b.safetensors"
+    pipe = LoRAFakePipe(zero_attach_sources=(bad,))
+    with pytest.raises(LoRANotAttachedError):
+        generate(
+            a_request(loras=(_staged(good), _staged(bad))),
+            pipeline_factory=factory_for(pipe),
+            encoder=good_encoder,
+            output_root=tmp_path,
+        )
+    assert pipe.adapters == [], "both the attached and the half-registered adapter must go"
+
+
+def test_an_adapter_that_cannot_be_detached_fails_loudly(tmp_path):
+    """A stuck adapter corrupts every later run on the worker, which is louder
+    than any single run's outcome -- so the unload raises, never warns."""
+
+    class StuckPipe(LoRAFakePipe):
+        def delete_adapters(self, names):
+            raise RuntimeError("peft refused")
+
+    with pytest.raises(GenerationError) as excinfo:
+        generate(
+            a_request(loras=(_staged(tmp_path / "a.safetensors"),)),
+            pipeline_factory=factory_for(StuckPipe()),
+            encoder=good_encoder,
+            output_root=tmp_path,
+        )
+    assert "user_lora_0" in str(excinfo.value)
+    assert "singleton" in str(excinfo.value)
+
+
+def test_a_pipeline_that_cannot_delete_adapters_is_refused(tmp_path):
+    """No delete_adapters at all: the base state cannot be restored, so the
+    run must say so rather than quietly leaving the adapter attached."""
+
+    class NoDeletePipe(LoRAFakePipe):
+        delete_adapters = None
+
+    with pytest.raises(GenerationError) as excinfo:
+        generate(
+            a_request(loras=(_staged(tmp_path / "a.safetensors"),)),
+            pipeline_factory=factory_for(NoDeletePipe()),
+            encoder=good_encoder,
+            output_root=tmp_path,
+        )
+    assert "delete_adapters" in str(excinfo.value)

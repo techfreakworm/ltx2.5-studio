@@ -364,6 +364,27 @@ def _apply_loras(pipe, request: GenerationRequest):
     could upload an adapter, watch it validate, generate, and receive
     base-model output -- the precise silent garbage the whole validator exists
     to prevent, arriving because the last step was never called.
+
+    Two lifecycle facts govern the shape of this function, both consequences of
+    the pipeline being a cached singleton (``pipelines._CACHE``) on a warm
+    ZeroGPU worker:
+
+    * **A partial attach must not outlive its failure.** If adapter 2 of 2
+      fails validation, adapter 1 is already on the singleton; without cleanup
+      the *retry* dies on diffusers' duplicate-name check instead of the real
+      error. The ``except`` arm below deletes whatever this call attached --
+      including the failing name, which ``LoRANotAttachedError`` leaves
+      registered-but-useless -- before re-raising.
+    * **Activation is collective, not per-adapter.** ``apply_lora`` activates
+      the one adapter it just attached, which is correct for its single-adapter
+      contract -- but diffusers' ``set_adapters`` REPLACES the active set, so
+      after a loop of per-adapter calls only the *last* staged adapter is
+      active while every attach report claims success. The one collective call
+      below is what makes two staged adapters both apply; it lives here and not
+      in ``apply_lora`` because this is the only place the full name/weight
+      lists exist.
+
+    The matching detach after generation is :func:`_unload_loras`.
     """
     staged = getattr(request, "loras", ()) or ()
     if not staged:
@@ -373,38 +394,116 @@ def _apply_loras(pipe, request: GenerationRequest):
 
     target = getattr(pipe, "pipeline", pipe)
     reports = []
-    for position, entry in enumerate(staged):
-        if isinstance(entry, dict):
-            source = entry.get("source")
-            weight = float(entry.get("weight", 1.0))
-            validated = entry.get("report") is not None
-        else:
-            source = entry
-            weight = 1.0
-            validated = False
-        if not validated:
-            max_bytes = None
-            try:
-                from .config import load_config
+    weights = []
+    try:
+        for position, entry in enumerate(staged):
+            if isinstance(entry, dict):
+                source = entry.get("source")
+                weight = float(entry.get("weight", 1.0))
+                validated = entry.get("report") is not None
+            else:
+                source = entry
+                weight = 1.0
+                validated = False
+            if not validated:
+                max_bytes = None
+                try:
+                    from .config import load_config
 
-                max_bytes = load_config().lora_max_bytes
-            except Exception:
-                max_bytes = None  # fall back to the validator's own default
-            # Stages 1-6.5 run here for anything the UI did not already screen.
-            # The UI validates what it stages, but a programmatic caller -- or a
-            # future UI that forgets -- would otherwise reach stage 7 with no
-            # header check, no version check and no dimension check at all.
-            validate_lora(
-                source,
-                max_bytes=max_bytes,
-                transformer=getattr(target, "transformer", None),
+                    max_bytes = load_config().lora_max_bytes
+                except Exception:
+                    max_bytes = None  # fall back to the validator's own default
+                # Stages 1-6.5 run here for anything the UI did not already screen.
+                # The UI validates what it stages, but a programmatic caller -- or a
+                # future UI that forgets -- would otherwise reach stage 7 with no
+                # header check, no version check and no dimension check at all.
+                validate_lora(
+                    source,
+                    max_bytes=max_bytes,
+                    transformer=getattr(target, "transformer", None),
+                )
+            reports.append(
+                lora_apply.apply_lora(
+                    target, source, adapter_name=f"user_lora_{position}", weight=weight
+                )
             )
-        reports.append(
-            lora_apply.apply_lora(
-                target, source, adapter_name=f"user_lora_{position}", weight=weight
-            )
+            weights.append(weight)
+    except BaseException:
+        # Damage control on an error path: the real failure is already
+        # propagating, so per-name deletion is tolerant -- a name that never
+        # registered must not replace the actual error with a cleanup error.
+        _delete_adapters(
+            target,
+            [report.adapter_name for report in reports] + [f"user_lora_{len(reports)}"],
+            tolerant=True,
         )
+        raise
+    if len(reports) > 1:
+        set_adapters = getattr(target, "set_adapters", None)
+        if callable(set_adapters):
+            set_adapters([report.adapter_name for report in reports], weights)
     return tuple(reports)
+
+
+def _delete_adapters(target, names, *, tolerant: bool = False) -> None:
+    """Delete adapters by name, per name so one failure cannot strand the rest.
+
+    ``tolerant=True`` is for error paths only: cleanup there is best-effort
+    because the original exception must keep propagating. On the success path
+    a failed delete raises -- see :func:`_unload_loras` for why that is not
+    optional.
+    """
+    delete = getattr(target, "delete_adapters", None)
+    if not callable(delete):
+        if tolerant:
+            return
+        raise GenerationError(
+            f"the pipeline attached LoRA adapters but exposes no delete_adapters to remove "
+            f"them with ({', '.join(names)}). The pipeline is a cached singleton, so an "
+            f"adapter that cannot be detached poisons every later run on this worker: the "
+            f"same staged adapter dies on a duplicate name, and a run with no adapters "
+            f"silently generates through this one. Refusing to leave it attached."
+        )
+    for name in names:
+        try:
+            delete(name)
+        except Exception as exc:
+            if tolerant:
+                continue
+            raise GenerationError(
+                f"failed to detach LoRA adapter {name!r} after generation: {exc}. The "
+                f"pipeline is a cached singleton, so a stuck adapter corrupts every later "
+                f"run on this worker rather than only this one."
+            ) from exc
+
+
+def _unload_loras(pipe, reports) -> None:
+    """Detach everything :func:`_apply_loras` attached, success or failure.
+
+    The pipeline is a cached singleton, so anything left attached outlives the
+    request. Without this, the second warm-worker run with the same staged
+    adapter dies on diffusers' duplicate-name ValueError ("Adapter name
+    user_lora_0 already in use") -- and, strictly worse, a following run with
+    **no** staged adapters silently generates through the previous user's LoRA:
+    the exact silent-garbage shape stage 7 exists to prevent, arriving through
+    the lifecycle instead of the load.
+
+    Runs in a ``finally`` so a failed generation cannot poison the next one.
+    A delete failure raises rather than warns -- an adapter we cannot remove
+    means every later run on this worker is wrong, which is louder than any
+    single run's failure. (If that happens while a generation error is already
+    propagating, this error supersedes it with the original chained as
+    context; the poisoned worker *is* the bigger problem.)
+
+    Deletion is sufficient only because :func:`_apply_loras` attaches without
+    fusing. If fusing is ever added there, the weights merge into the base and
+    must be unfused before deletion -- ``lora/apply.py::unfuse_lora`` exists
+    for exactly that.
+    """
+    if not reports:
+        return
+    target = getattr(pipe, "pipeline", pipe)
+    _delete_adapters(target, [report.adapter_name for report in reports])
 
 
 def _decoded(output, mode: str):
@@ -577,80 +676,88 @@ def generate(
         progress(0.2, "generating")
     kwargs = _pipeline_kwargs(spec, request)
     _prepared_conditions(kwargs, request)
-    _apply_loras(pipe, request)
-    # Before `_prepared_audio`, because the audio encode samples from a
-    # distribution and must draw from the same seeded stream as the pipeline.
-    generator = _seeded_generator(pipe, seed)
-    if generator is not None:
-        kwargs["generator"] = generator
-
-    # After the pipeline exists, because encoding needs its `audio_vae`.
-    audio_notes = _prepared_audio(kwargs, request, pipe)
-    size_notes = ()
-    if stage_2_enabled(spec, request):
-        from . import pipelines
-
-        size_notes = (pipelines.stage_2_size_note(request.width, request.height),)
+    lora_reports = _apply_loras(pipe, request)
     try:
-        output = pipe(**kwargs)
-    except Exception as exc:
-        raise DecodeError(mode=request.mode, reason=f"the pipeline raised {exc!r}") from exc
+        # Before `_prepared_audio`, because the audio encode samples from a
+        # distribution and must draw from the same seeded stream as the pipeline.
+        generator = _seeded_generator(pipe, seed)
+        if generator is not None:
+            kwargs["generator"] = generator
 
-    output = _decoded(output, request.mode)
+        # After the pipeline exists, because encoding needs its `audio_vae`.
+        audio_notes = _prepared_audio(kwargs, request, pipe)
+        size_notes = ()
+        if stage_2_enabled(spec, request):
+            from . import pipelines
 
-    if progress is not None:
-        progress(0.9, "encoding")
-    try:
-        # The sink is additive: an encoder that ignores it behaves identically.
-        # Without it the dropped-audio note reaches the Space logs only, and the
-        # user gets a silent video with no on-screen explanation -- which is most
-        # of what the warning was for.
-        encoder_warnings: list[str] = []
-        encoder_kwargs = {
-            "run_dir": run_dir,
-            "mode": request.mode,
-            "exports": spec.exports,
-            "seed": seed,
-            "frame_rate": request.frame_rate,
-            "warnings": encoder_warnings,
-            "counterpart_label": modes.counterpart_label_for(request.mode),
-        }
-        sampling_rate = _export_sampling_rate(pipe)
-        if sampling_rate is not None:
-            encoder_kwargs["sampling_rate"] = sampling_rate
-        elif "audio" in spec.exports and encoder is None:
-            # Only fatal on the production path: an injected encoder in a test
-            # has no vocoder to read and does not need one.
-            raise EncodeError(
-                path=str(run_dir),
-                reason=(
-                    f"mode {request.mode!r} exports audio but the pipeline exposes no vocoder "
-                    f"to read output_sampling_rate from. Refusing to assume a rate, which would "
-                    f"silently resample every export."
-                ),
-            )
-        written = write(output, **encoder_kwargs)
-    except EncodeError:
-        # Already one of ours and already names its target; re-wrapping would
-        # read "failed to write output <run_dir>: failed to write output
-        # <target>: <reason>" and bury the reason a layer deeper.
-        raise
-    except Exception as exc:
-        raise EncodeError(path=str(run_dir), reason=str(exc)) from exc
+            size_notes = (pipelines.stage_2_size_note(request.width, request.height),)
+        try:
+            output = pipe(**kwargs)
+        except Exception as exc:
+            raise DecodeError(mode=request.mode, reason=f"the pipeline raised {exc!r}") from exc
 
-    artifacts = _artifacts_for(
-        written, spec=spec, mode=request.mode, run_dir=run_dir, notes=encoder_warnings
-    )
+        output = _decoded(output, request.mode)
 
-    warnings = _sweep(root, retention_bytes) + tuple(encoder_warnings) + audio_notes + size_notes
+        if progress is not None:
+            progress(0.9, "encoding")
+        try:
+            # The sink is additive: an encoder that ignores it behaves identically.
+            # Without it the dropped-audio note reaches the Space logs only, and the
+            # user gets a silent video with no on-screen explanation -- which is most
+            # of what the warning was for.
+            encoder_warnings: list[str] = []
+            encoder_kwargs = {
+                "run_dir": run_dir,
+                "mode": request.mode,
+                "exports": spec.exports,
+                "seed": seed,
+                "frame_rate": request.frame_rate,
+                "warnings": encoder_warnings,
+                "counterpart_label": modes.counterpart_label_for(request.mode),
+            }
+            sampling_rate = _export_sampling_rate(pipe)
+            if sampling_rate is not None:
+                encoder_kwargs["sampling_rate"] = sampling_rate
+            elif "audio" in spec.exports and encoder is None:
+                # Only fatal on the production path: an injected encoder in a test
+                # has no vocoder to read and does not need one.
+                raise EncodeError(
+                    path=str(run_dir),
+                    reason=(
+                        f"mode {request.mode!r} exports audio but the pipeline exposes no vocoder "
+                        f"to read output_sampling_rate from. Refusing to assume a rate, which would "
+                        f"silently resample every export."
+                    ),
+                )
+            written = write(output, **encoder_kwargs)
+        except EncodeError:
+            # Already one of ours and already names its target; re-wrapping would
+            # read "failed to write output <run_dir>: failed to write output
+            # <target>: <reason>" and bury the reason a layer deeper.
+            raise
+        except Exception as exc:
+            raise EncodeError(path=str(run_dir), reason=str(exc)) from exc
 
-    return GenerationResult(
-        output_path=artifacts["primary"],
-        run_id=run_id,
-        run_dir=run_dir,
-        mode=request.mode,
-        seed=seed,
-        video_path=artifacts.get("video"),
-        audio_path=artifacts.get("audio"),
-        warnings=warnings,
-    )
+        artifacts = _artifacts_for(
+            written, spec=spec, mode=request.mode, run_dir=run_dir, notes=encoder_warnings
+        )
+
+        warnings = (
+            _sweep(root, retention_bytes) + tuple(encoder_warnings) + audio_notes + size_notes
+        )
+
+        return GenerationResult(
+            output_path=artifacts["primary"],
+            run_id=run_id,
+            run_dir=run_dir,
+            mode=request.mode,
+            seed=seed,
+            video_path=artifacts.get("video"),
+            audio_path=artifacts.get("audio"),
+            warnings=warnings,
+        )
+    finally:
+        # Success or failure, the singleton goes back to base state. See
+        # _unload_loras for why this is a raise-on-failure cleanup, not a
+        # best-effort one.
+        _unload_loras(pipe, lora_reports)

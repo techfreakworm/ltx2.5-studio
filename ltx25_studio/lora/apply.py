@@ -126,6 +126,12 @@ def apply_lora(
             source=str(path), adapter_name=adapter_name, components=components
         )
 
+    # Correct for THIS function's single-adapter contract only: diffusers'
+    # `set_adapters` REPLACES the active set, so a caller attaching several
+    # adapters through repeated apply_lora calls ends with only the last one
+    # active while every report claims success. The collective activation for
+    # multi-adapter staging lives in `generate._apply_loras`, the only place
+    # the full name/weight lists exist.
     set_adapters = getattr(pipeline, "set_adapters", None)
     if callable(set_adapters):
         set_adapters(adapter_name, weight)
