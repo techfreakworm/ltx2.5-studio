@@ -43,9 +43,9 @@ from ..errors import (
 )
 
 __all__ = [
-    "AUDIO_VISUAL_BANNER",
-    "ZEROGPU_BANNER",
+    "STANDING_FACTS",
     "applied_loras",
+    "cost_readout",
     "dimension_hint",
     "empty_output_bug",
     "failure",
@@ -67,22 +67,29 @@ def _join(values) -> str:
 
 
 # ---------------------------------------------------------------------------
-# standing banners -- the honest cost of the model, always on screen
+# standing facts -- the honest cost of the model, always on screen
 # ---------------------------------------------------------------------------
 
-#: PLAN §3.1(b). Stated where the user picks a mode, not buried in a README.
-AUDIO_VISUAL_BANNER = (
-    "**LTX-2.5 is jointly audio-visual and has no video-off switch.** Every run renders "
-    "*both* tracks and spends full video compute, whichever one you export. The four audio "
-    "modes below are honest about this rather than pretending to be cheap."
-)
-
-#: PLAN §8.6. Quota is the resource users actually run out of.
-ZEROGPU_BANNER = (
-    "Running on **ZeroGPU**: each generation reserves a GPU slot and is **metered against a "
-    "daily quota**, charged at 2× because this model needs the `xlarge` tier. Failed runs cost "
-    "quota too. A timeout is never retried automatically — retrying reuses an expired proxy "
-    "token and reports the wrong cause (PLAN §5.8 #5)."
+#: The two truths a first-time user must meet before choosing anything, as
+#: ``(lamp label, sentence)`` pairs for the masthead's fact rail. The first is
+#: PLAN §3.1(b), stated where the user starts rather than buried in a README;
+#: the second is PLAN §8.6 — quota is the resource users actually run out of.
+#: ``chrome.masthead_html`` gives these their form; the words live here with
+#: every other string a user reads.
+STANDING_FACTS: tuple[tuple[str, str], ...] = (
+    (
+        "Joint A/V",
+        "Every run renders both video and audio and spends full video compute, whichever "
+        "track you export — the model has no video-off switch. The four modes marked ⚠ are "
+        "honest about this rather than pretending to be cheap.",
+    ),
+    (
+        "Metered",
+        "Runs on ZeroGPU: each generation reserves a GPU slot against your daily quota, "
+        "charged at 2× because this model needs the xlarge tier. Failed runs cost quota "
+        "too, and a timeout is never retried automatically — a retry would reuse an "
+        "expired proxy token and report the wrong cause.",
+    ),
 )
 
 
@@ -224,6 +231,81 @@ def shot_anchor_readout(anchors: list[dict], *, out_of_range: list[int]) -> str:
 
 
 # ---------------------------------------------------------------------------
+# the annunciator -- what this run will actually cost and return
+# ---------------------------------------------------------------------------
+
+
+def cost_readout(
+    mode: Any,
+    *,
+    render_width: Any,
+    render_height: Any,
+    num_frames: Any,
+    auto_duration: bool,
+    min_seconds: Any,
+    max_seconds: Any,
+    frame_rate: float,
+    stage_2_on: bool,
+    stage_2_scale: int,
+    reserve_seconds: int,
+) -> str:
+    """The strip above Generate: the run's true size, length and cost, live.
+
+    Exists because two truths reached the user only after the money was spent:
+
+    * **stage 2 doubles the output.** Requesting 704×480 with stage 2 on returns
+      a 1408×960 file — correct behaviour, and nothing said so at request time.
+      The lamp below states the returned size next to the requested one *before*
+      the button is pressed.
+    * **the audio-only modes pay full video compute.** The briefing quotes the
+      registry's cost note where the mode is chosen; this restates it at the
+      moment of commitment, where a user who scrolled past the briefing is
+      about to spend quota anyway.
+
+    Every number is passed in by the handler from the module that owns it
+    (``modes``, ``pipelines``, ``zerogpu``, ``constraints``) — this renderer
+    does no arithmetic beyond wording, so it cannot disagree with what runs.
+    """
+    size = f"{int(render_width)}×{int(render_height)}" if render_width and render_height else "?×?"
+    if auto_duration:
+        length = f"length chosen by the model ({min_seconds or '?'}–{max_seconds or '?'} s)"
+    elif num_frames:
+        length = (
+            f"{int(num_frames)} frames ≈ {int(num_frames) / frame_rate:.1f} s @ {frame_rate:g} fps"
+        )
+    else:
+        length = "? frames"
+    lines = [f"`{mode.id}` · renders {size} · {length} · reserves ≈{reserve_seconds} GPU-seconds"]
+
+    if mode.cost_note and mode.min_resolution:
+        mitigations = "resolution pinned to the minimum"
+        if mode.skip_stage_2:
+            mitigations += ", stage 2 skipped"
+        lines.append(
+            f"**FULL VIDEO COMPUTE** — audio-only export, but the video is still rendered "
+            f"at {size} and discarded. Mitigations applied: {mitigations}."
+        )
+    elif mode.cost_note:
+        lines.append(
+            "**AUDIO ENCODE ON TOP** — the input audio is encoded to latents before a "
+            "normal, full-cost video render."
+        )
+
+    if stage_2_on:
+        if render_width and render_height:
+            doubled = f"{int(render_width) * stage_2_scale}×{int(render_height) * stage_2_scale}"
+            returned = f"returns **{doubled}**, not the {size} requested"
+        else:
+            returned = f"returns **{stage_2_scale}× the requested size**"
+        lines.append(
+            f"**STAGE 2 ×{stage_2_scale}** — {returned}: it renders at the size above, "
+            f"then upsamples and refines. GPU reservation ×1.5, included in the figure above."
+        )
+
+    return "\n\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
 # LoRA -- PLAN §4.3
 # ---------------------------------------------------------------------------
 
@@ -325,9 +407,15 @@ def lora_rejected(source: str, exc: BaseException) -> str:
 
 
 def applied_loras(applied: list[Any]) -> str:
-    """The running list of adapters that will be used by the next generation."""
+    """The running list of adapters that will be used by the next generation.
+
+    The empty state is one line, distinct from :func:`lora_idle`: the verdict
+    panel above it already carries the full how-to, and repeating it verbatim
+    here rendered the same paragraph twice in a row — which reads as a broken
+    template, not as reassurance. Still stated positively, never as blankness.
+    """
     if not applied:
-        return lora_idle()
+        return "**Staged for the next run:** none — base LTX-2.5 weights."
     names = "\n".join(f"- `{a.get('source', a)}`" for a in applied)
     return f"**{len(applied)} adapter(s) will be applied to the next run:**\n{names}"
 
@@ -355,15 +443,20 @@ def success(result: Any, mode: Any) -> str:
     details = []
     seed = getattr(result, "seed", None)
     if seed is not None:
-        details.append(f"seed `{seed}`")
+        details.append(f"seed `{seed}` — rerun with it and the same settings to reproduce")
     run_dir = getattr(result, "run_dir", None)
     if run_dir:
         details.append(f"run directory `{run_dir}`")
     if details:
         lines.append(" · ".join(details))
+    # The run's own notes — the stage-2 size note, the mono-widening note. They
+    # exist precisely so the user learns what changed *on screen*; leaving them
+    # in the sidecar would mean only the Space logs ever saw them.
+    for note in getattr(result, "warnings", ()) or ():
+        lines.append(f"> ⚠️ {note}")
     cost_note = getattr(mode, "cost_note", None)
     if cost_note:
-        lines += ["", f"> ⚠️ Reminder: {cost_note}"]
+        lines.append(f"> ⚠️ Reminder: {cost_note}")
     return "\n\n".join(lines)
 
 

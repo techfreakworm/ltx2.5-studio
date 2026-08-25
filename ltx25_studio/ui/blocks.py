@@ -14,6 +14,12 @@ this module only places widgets and converts booleans into ``gr.update`` calls.
 value for every output it declares. That is the direct lesson of §5.3: the
 predecessor's outage was a handler returning ``gr.update()`` for an empty path,
 which on screen is indistinguishable from a form resetting itself.
+
+**The look is "the machine room"** -- slate console panels, a mode board,
+tungsten cost lamps and a live annunciator strip above Generate. The design
+system (tokens, stylesheet, masthead) lives in ``chrome.py``; the full design
+rationale in ``docs/UI_DESIGN.md``. This module only assigns the ``elem_id`` /
+``elem_classes`` hooks the stylesheet targets.
 """
 
 from __future__ import annotations
@@ -23,30 +29,39 @@ from typing import Any
 import gradio as gr
 
 from .. import modes
-from . import components, handlers, render
-from .fields import FIELD_KEYS, TOGGLEABLE_FIELDS
+from . import chrome, components, handlers, render
+from .fields import FIELD_KEYS, FIELDS, TOGGLEABLE_FIELDS
 
 __all__ = ["build_ui"]
 
 _TITLE = "LTX-2.5 Studio"
 
-_INTRO = """
-# 🎬 LTX-2.5 Studio
-
-Every mode LTX-2.5 supports, with **user-uploadable LoRA** at inference time.
-"""
-
 _MULTISHOT_NOTE = """
 **Multishot is prompt-structure driven and unverified.** LTX-2.5 has no scene or
-multishot API, and the 2.5 prompt enhancer is explicitly instructed *not* to describe scene
-cuts — so a shot list works with the model's phrasing, not with a supported feature. It is
-offered as a documented technique, not as a button that implies backing we do not have.
+multishot API — a shot list works with the model's phrasing, not with a supported
+feature. It is offered as a documented technique, not as a button that implies backing
+we do not have.
 
-**The anchor is a LATENT index, not a pixel frame number.** The pipeline converts it with
-`pixel ≈ max((latent − 1) × 8 + 1, 0)`, so anchor `2` lands near pixel frame 9 — not frame 2.
-Typing a pixel frame number here is an off-by-8 every time. The conversion itself happens in
-`conditioning.py`; this table takes the latent index that layer expects.
+**The anchor column takes a frame number.** It is converted to the model's latent grid
+exactly once, in `conditioning.py`. That grid is 8:1, so anchors snap: frames 25–32 all
+land on the same latent. The readout below shows where each anchor really lands, and
+flags anchors past the end of the clip — upstream skips those with only a log line and
+generates anyway.
 """
+
+#: PLAN §3.5: the enhancer needs ``google/gemma-4-E2B-it``, which the model pack
+#: does not ship, so ``enable_prompt_enhancement=True`` cannot work here. It is
+#: documented instead of toggled: an inert control is a lie with a checkbox.
+_ENHANCER_NOTE = (
+    "Prompt enhancement is unavailable in this build — it needs `google/gemma-4-E2B-it`, "
+    "which the model pack does not ship, so no toggle is offered. Write the full shot "
+    "yourself; the model responds well to camera, lighting and motion language."
+)
+
+_READY = (
+    "**Ready.** Pick a mode, set the run up, and press Generate — the output and the "
+    "run report appear here. Nothing is spent until the button is pressed."
+)
 
 
 def _mode_choices() -> list[tuple[str, str]]:
@@ -55,78 +70,118 @@ def _mode_choices() -> list[tuple[str, str]]:
     PLAN §3.2 requires the UI to say *where the user selects them* that modes
     8-11 still render video. Deriving the marker from ``cost_note`` means a new
     warned mode is marked by adding a registry entry, never by editing this
-    file.
+    file. The zero-padded number is the same one PLAN §3.2 and the mode matrix
+    docs use, so a mode can be named across a bug report without ambiguity.
     """
     choices = []
     for number, mode_id in enumerate(modes.MODES, start=1):
         mode = modes.get_mode(mode_id)
         marker = " ⚠️" if getattr(mode, "cost_note", None) else ""
-        choices.append((f"{number}. {mode.label}{marker}", mode_id))
+        choices.append((f"{number:02d} · {mode.label}{marker}", mode_id))
     return choices
+
+
+def _field_defaults() -> dict[str, Any]:
+    """Every field's declared default, for computing first-paint readouts."""
+    return {spec.key: spec.default for spec in FIELDS}
 
 
 def build_ui() -> gr.Blocks:
     """Assemble the Studio. Returns an unlaunched :class:`gradio.Blocks`."""
     pool: dict[str, Any] = {}
+    captions: dict[str, Any] = {}
     default_mode = next(iter(modes.MODES))
+    defaults = _field_defaults()
 
     with gr.Blocks(title=_TITLE, fill_width=True) as demo:
-        gr.Markdown(_INTRO)
-        gr.Markdown(render.ZEROGPU_BANNER)
+        # The masthead carries the stylesheet and fonts in its `head=` -- the
+        # Gradio 6 injection point that keeps `app.py`'s bare `launch()` intact.
+        gr.HTML(
+            value=chrome.masthead_html(render.STANDING_FACTS),
+            head=chrome.head_html(),
+            container=False,
+            padding=False,
+        )
 
         with gr.Row():
             # ---------------------------------------------------------------
-            # controls
+            # the commission column: mode board -> inputs -> shape -> LoRA
             # ---------------------------------------------------------------
             with gr.Column(scale=5):
-                gr.Markdown(render.AUDIO_VISUAL_BANNER)
                 mode_selector = gr.Radio(
                     choices=_mode_choices(),
                     value=default_mode,
                     label="Mode",
-                    info="⚠️ marks a mode that costs more than its name suggests — see below.",
+                    info="⚠️ marks a mode that costs more than its name suggests — the briefing below says exactly what.",
+                    elem_id="mode-board",
                 )
-                briefing = gr.Markdown(render.mode_briefing(modes.get_mode(default_mode)))
+                briefing = gr.Markdown(
+                    render.mode_briefing(modes.get_mode(default_mode)),
+                    elem_classes=["mr-briefing"],
+                )
 
                 with gr.Group():
-                    components.render_fields(pool, "prompt", "negative_prompt")
-                    components.render_fields(pool, "image", "video", "audio")
+                    components.render_fields(pool, "prompt", "negative_prompt", captions=captions)
+                    gr.Markdown(_ENHANCER_NOTE, elem_classes=["mr-caption"])
+                    components.render_fields(pool, "image", "video", "audio", captions=captions)
 
-                with gr.Accordion("Shot list / multishot", open=False):
+                with gr.Accordion("Shot list / multishot", open=False, elem_classes=["mr-panel"]):
                     gr.Markdown(_MULTISHOT_NOTE)
-                    components.render_fields(pool, "conditions")
-                    shot_readout = gr.Markdown()
+                    components.render_fields(pool, "conditions", captions=captions)
+                    shot_readout = gr.Markdown(elem_classes=["mr-hint"])
 
-                with gr.Accordion("Size and length", open=True):
+                with gr.Accordion("Size & length", open=True, elem_classes=["mr-panel"]):
                     with gr.Row():
-                        components.render_fields(pool, "width", "height")
-                    components.render_fields(pool, "auto_duration")
+                        components.render_fields(pool, "width", "height", captions=captions)
+                    components.render_fields(pool, "auto_duration", captions=captions)
                     with gr.Row():
-                        components.render_fields(pool, "num_frames")
-                        components.render_fields(pool, "min_seconds", "max_seconds")
+                        components.render_fields(pool, "num_frames", captions=captions)
+                        components.render_fields(
+                            pool, "min_seconds", "max_seconds", captions=captions
+                        )
                     snap_button = gr.Button("Snap to legal values", size="sm")
-                    dimension_hint = gr.Markdown()
-                    frame_hint = gr.Markdown()
+                    dimension_hint = gr.Markdown(elem_classes=["mr-hint"])
+                    frame_hint = gr.Markdown(elem_classes=["mr-hint"])
 
-                with gr.Accordion("Sampling", open=False):
+                with gr.Accordion("Sampling", open=True, elem_classes=["mr-panel"]):
                     # No guidance or step controls: the distilled recipe fixes
                     # both, and `pipelines.distilled_kwargs()` is the one place
                     # that sets them. See the note in `ui/fields.py`.
-                    components.render_fields(pool, "seed")
-                    components.render_fields(pool, "strength", "noise_scale")
-                    components.render_fields(pool, "enable_stage_2")
+                    components.render_fields(pool, "seed", captions=captions)
+                    components.render_fields(pool, "strength", "noise_scale", captions=captions)
+                    components.render_fields(pool, "enable_stage_2", captions=captions)
 
-                with gr.Accordion("LoRA", open=True):
+                # The headline feature gets a bay, not an accordion: always
+                # open, framed, first-class. PLAN §4.
+                with gr.Group(elem_id="lora-bay"):
                     lora = components.lora_panel()
                     components.render_fields(pool, "loras")
 
-                generate_button = gr.Button("Generate", variant="primary", size="lg")
+                # The annunciator: the run's true size, length and cost, kept
+                # live at the point of commitment. See handlers.on_cost_change.
+                annunciator = gr.Markdown(
+                    handlers.on_cost_change(
+                        default_mode,
+                        defaults["width"],
+                        defaults["height"],
+                        defaults["num_frames"],
+                        defaults["auto_duration"],
+                        defaults["min_seconds"],
+                        defaults["max_seconds"],
+                        defaults["enable_stage_2"],
+                    ),
+                    elem_id="annunciator",
+                )
+                generate_button = gr.Button(
+                    "Generate", variant="primary", size="lg", elem_id="generate-btn"
+                )
 
             # ---------------------------------------------------------------
-            # outputs
+            # the returns column: status first, then the players
             # ---------------------------------------------------------------
             with gr.Column(scale=4):
-                status = gr.Markdown("Ready.")
+                gr.Markdown("Output", elem_classes=["mr-eyebrow"])
+                status = gr.Markdown(_READY, elem_id="run-status")
                 video_out = gr.Video(
                     label="Video",
                     interactive=False,
@@ -146,6 +201,22 @@ def build_ui() -> gr.Blocks:
         # wiring
         # -------------------------------------------------------------------
         toggleable = [pool[spec.key] for spec in TOGGLEABLE_FIELDS]
+        # Captions follow their field's visibility. `captions` is keyed by field
+        # key; each pairs with the index of that field's update in the tuple
+        # `handlers.on_mode_change` returns, so a caption can never outlive its
+        # field on screen. Media fields always carry `visible_when`, hence are
+        # always toggleable -- `strict` guards that assumption.
+        caption_bindings = [
+            (captions[spec.key], index)
+            for index, spec in enumerate(TOGGLEABLE_FIELDS)
+            if spec.key in captions
+        ]
+        assert len(caption_bindings) == len(captions), (
+            "a caption belongs to a field the mode selector never toggles; "
+            "it would linger on screen for modes without that field"
+        )
+        caption_components = [component for component, _ in caption_bindings]
+
         shape_inputs = [pool["width"], pool["height"], pool["num_frames"]]
         hint_outputs = [dimension_hint, frame_hint]
 
@@ -162,14 +233,20 @@ def build_ui() -> gr.Blocks:
                     else gr.update(visible=u.visible, interactive=u.interactive, value=u.value)
                     for u in updates
                 ),
+                *(gr.update(visible=updates[index].visible) for _, index in caption_bindings),
                 gr.update(visible=shows_video),
                 gr.update(visible=shows_audio),
             ]
 
+        mode_change_outputs = [
+            briefing,
+            *toggleable,
+            *caption_components,
+            video_out,
+            audio_out,
+        ]
         mode_selector.change(
-            fn=_on_mode_change,
-            inputs=[mode_selector],
-            outputs=[briefing, *toggleable, video_out, audio_out],
+            fn=_on_mode_change, inputs=[mode_selector], outputs=mode_change_outputs
         )
 
         for control in shape_inputs:
@@ -190,6 +267,22 @@ def build_ui() -> gr.Blocks:
             inputs=[pool["auto_duration"]],
             outputs=[pool["num_frames"], pool["min_seconds"], pool["max_seconds"]],
         )
+
+        # Everything that moves a cost fact refreshes the annunciator: the mode
+        # (audio-only pinning), the shape (stage 2 doubles it), and the stage-2
+        # box itself (the ×1.5 reservation).
+        cost_inputs = [
+            mode_selector,
+            pool["width"],
+            pool["height"],
+            pool["num_frames"],
+            pool["auto_duration"],
+            pool["min_seconds"],
+            pool["max_seconds"],
+            pool["enable_stage_2"],
+        ]
+        for control in cost_inputs:
+            control.change(fn=handlers.on_cost_change, inputs=cost_inputs, outputs=[annunciator])
 
         lora_outputs = [lora["verdict"], pool["loras"], lora["applied_summary"]]
         lora["validate"].click(
@@ -214,13 +307,10 @@ def build_ui() -> gr.Blocks:
         # Put the form in the selected mode's state before the first interaction,
         # and show the constraint guidance immediately rather than only after a
         # value changes.
-        demo.load(
-            fn=_on_mode_change,
-            inputs=[mode_selector],
-            outputs=[briefing, *toggleable, video_out, audio_out],
-        )
+        demo.load(fn=_on_mode_change, inputs=[mode_selector], outputs=mode_change_outputs)
         demo.load(fn=handlers.on_shape_change, inputs=shape_inputs, outputs=hint_outputs)
         demo.load(fn=handlers.on_shots_change, inputs=shot_inputs, outputs=[shot_readout])
+        demo.load(fn=handlers.on_cost_change, inputs=cost_inputs, outputs=[annunciator])
         demo.load(
             fn=lambda chosen: [
                 gr.update(visible=flag) for flag in handlers.on_auto_duration_toggle(chosen)

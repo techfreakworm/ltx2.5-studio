@@ -81,34 +81,40 @@ def _build(spec: Field) -> gr.components.Component:
 
 
 def build_field(spec: Field) -> gr.components.Component:
-    """Build one field where the caller currently is in the layout.
-
-    A media field's ``info`` becomes a caption below it, because Gradio 6's
-    media components have no ``info=``. Captions are intentionally *not* part of
-    the component pool: they are never read back and never toggled, so keeping
-    them out of the pool keeps the pool exactly the set of marshalled inputs.
-    """
-    component = _build(spec)
-    if spec.kind in MEDIA_KINDS and spec.info:
-        gr.Markdown(f"<sub>{spec.info}</sub>")
-    return component
+    """Build one field where the caller currently is in the layout."""
+    return _build(spec)
 
 
-def render_fields(pool: dict[str, Any], *keys: str) -> list[Any]:
+def render_fields(
+    pool: dict[str, Any], *keys: str, captions: dict[str, Any] | None = None
+) -> list[Any]:
     """Build several fields in order and register them in ``pool``.
 
     Components attach to whichever Blocks context is open when they are
     constructed, so layout decides *where* a field is built. The pool exists so
     that ordering for *marshalling* stays governed by ``FIELD_KEYS`` alone --
     layout order and marshalling order are deliberately independent.
+
+    A media field's ``info`` becomes a caption below it, because Gradio 6's
+    media components have no ``info=``. Captions are registered in ``captions``
+    -- a separate dict, never the pool, which stays exactly the set of
+    marshalled inputs -- so that ``blocks.py`` can show and hide a caption with
+    its field. The previous shape built captions as write-only components, and
+    a hidden image input left its caption floating on screen for modes with no
+    image at all.
     """
     built = []
     for key in keys:
         if key in pool:
             raise RuntimeError(f"field {key!r} was rendered twice")
-        component = build_field(field_by_key(key))
+        spec = field_by_key(key)
+        component = build_field(spec)
         pool[key] = component
         built.append(component)
+        if spec.kind in MEDIA_KINDS and spec.info and captions is not None:
+            # Styled by the stylesheet in `chrome.py` rather than with an inline
+            # <sub> hack, so caption size and tone are one decision made once.
+            captions[key] = gr.Markdown(spec.info, elem_classes=["mr-caption"])
     return built
 
 
@@ -143,15 +149,20 @@ def lora_panel() -> dict[str, Any]:
     first-class part of the panel and starts populated with "no adapter
     applied": PLAN §4.2's silent-garbage failure looks exactly like a blank
     panel, so blankness is never used to mean "nothing is loaded".
+
+    This is the headline feature, and the layout says so: an always-open bay
+    with its own header band (``blocks.py`` supplies the ``#lora-bay`` frame),
+    never an accordion a first-time user has to discover.
     """
     from . import render
 
     widgets: dict[str, Any] = {}
     gr.Markdown(
-        "### LoRA\n"
-        "Adapters are validated **before** any weights are touched — only the safetensors "
-        "header is read, so a multi-gigabyte file never gets materialised just to discover it "
-        "is for the wrong architecture."
+        "### LoRA adapters\n"
+        "Load an adapter from the Hub or upload one directly. It is validated **before any "
+        "weights are touched** — only the safetensors header is read, so a multi-gigabyte "
+        "file for the wrong architecture is rejected in milliseconds, with the exact reason.",
+        elem_classes=["mr-bay-head"],
     )
     with gr.Row():
         widgets["repo_id"] = gr.Textbox(
@@ -161,7 +172,7 @@ def lora_panel() -> dict[str, Any]:
             scale=3,
         )
         widgets["upload"] = gr.File(
-            label="…or upload an adapter",
+            label="…or upload an adapter (.safetensors)",
             file_types=[".safetensors"],
             type="filepath",
             scale=2,

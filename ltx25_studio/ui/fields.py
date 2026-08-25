@@ -248,7 +248,12 @@ FIELDS: tuple[Field, ...] = (
     Field(
         key="conditions",
         kind="dataframe",
-        label="Shot list — prompt segment · anchor (latent index) · strength",
+        # The anchor is a FRAME, per the ruled convention in
+        # tests/test_shot_anchor_convention.py: the user types a pixel frame and
+        # `conditioning.py` converts it to a latent index exactly once. This
+        # label used to say "latent index", which instructed users to type the
+        # one thing that would land their anchor in the wrong place.
+        label="Shot list — prompt segment · anchor (frame) · strength",
         info="",
         group="media",
         default=[],
@@ -339,7 +344,10 @@ FIELDS: tuple[Field, ...] = (
         key="seed",
         kind="number",
         label="Seed",
-        info="-1 draws a fresh seed per run. The seed actually used is reported after the run.",
+        info=(
+            "-1 draws a fresh seed per run; the seed actually used is reported after the run. "
+            "Same seed + same settings reproduces a run exactly."
+        ),
         group="sampling",
         default=-1,
         options={"minimum": -1, "step": 1, "precision": 0},
@@ -358,7 +366,10 @@ FIELDS: tuple[Field, ...] = (
         key="noise_scale",
         kind="slider",
         label="Audio noise scale",
-        info="img2img-style strength over your audio: 0.0 keeps it, 1.0 discards it entirely.",
+        info=(
+            "img2img-style strength over your audio: 0.0 keeps it as-is. At 1.0 your upload "
+            "contributes NOTHING — the run is a full-price generation of fresh audio."
+        ),
         group="sampling",
         default=0.5,
         options={"minimum": 0.0, "maximum": 1.0, "step": 0.01},

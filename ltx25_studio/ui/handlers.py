@@ -38,6 +38,7 @@ __all__ = [
     "export_flags",
     "on_auto_duration_toggle",
     "on_clear_loras",
+    "on_cost_change",
     "on_generate",
     "on_generate_start",
     "on_mode_change",
@@ -191,6 +192,62 @@ def on_auto_duration_toggle(auto: Any) -> tuple[bool, bool, bool]:
     """
     chosen = bool(auto)
     return (not chosen, chosen, chosen)
+
+
+def on_cost_change(
+    mode_id: str,
+    width: Any,
+    height: Any,
+    num_frames: Any,
+    auto_duration: Any,
+    min_seconds: Any,
+    max_seconds: Any,
+    enable_stage_2: Any,
+) -> str:
+    """The annunciator strip: what this run will actually render, return and cost.
+
+    Fires on every change to the mode or to a cost-relevant control, so the two
+    facts a user cannot otherwise see at request time are on screen before they
+    press Generate: stage 2 returning **double** the requested size, and the
+    audio-only modes paying full video compute.
+
+    Marshalling only, as ever: the true render size comes from the registry
+    (``min_resolution`` pins it to :data:`modes.MIN_RESOLUTION`), the doubling
+    factor from ``pipelines`` — the module that told the same truth after the
+    run — and the reservation from ``zerogpu.estimate_duration``, the actual
+    function the platform bills on. Nothing here is a second copy of a number.
+    """
+    try:
+        mode = modes.get_mode(mode_id)
+    except Exception as exc:  # noqa: BLE001 -- an unknown mode must still render
+        return render.failure(exc)
+
+    # Light modules, imported lazily for the same reason `generate` and `lora`
+    # are: this module stays importable on a bare interpreter either way, but
+    # the dependency belongs to the one handler that reads it.
+    from .. import pipelines, zerogpu
+
+    # `stage_2_enabled` semantics, restated from data: the registry wins over
+    # the checkbox, so the strip prices the run the backend will actually do.
+    stage_2_on = bool(enable_stage_2) and not mode.skip_stage_2
+    if mode.min_resolution:
+        render_width = render_height = modes.MIN_RESOLUTION
+    else:
+        render_width, render_height = _as_int(width), _as_int(height)
+
+    return render.cost_readout(
+        mode,
+        render_width=render_width,
+        render_height=render_height,
+        num_frames=_as_int(num_frames),
+        auto_duration=bool(auto_duration),
+        min_seconds=min_seconds,
+        max_seconds=max_seconds,
+        frame_rate=constraints.DEFAULT_FRAME_RATE,
+        stage_2_on=stage_2_on,
+        stage_2_scale=pipelines.STAGE_2_SPATIAL_SCALE,
+        reserve_seconds=zerogpu.estimate_duration(enable_stage_2=stage_2_on),
+    )
 
 
 def on_shots_change(rows: Any, num_frames: Any) -> str:
