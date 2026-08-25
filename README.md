@@ -237,6 +237,12 @@ This is metered, and the meter is the resource you will actually run out of.
 | Multiplier | **2×**. A 75-second run costs ~150 GPU-seconds |
 | PRO quota | 2400 GPU-seconds/day → **~16 runs/day** |
 
+> **Updated 2026-08-25:** the tier is unchanged; its basis is not. The live
+> Space quantises the transformer and text encoder to **int8** at load
+> (bitsandbytes), so it packs **~51.1 GB** — still over the 42.00 GiB
+> threshold, so `xlarge` still applies. The 67.23 GiB figure above was the
+> bf16 packing, which no longer ships.
+
 Two consequences worth knowing as a user:
 
 - **A failed run still costs quota.** So does a timeout.

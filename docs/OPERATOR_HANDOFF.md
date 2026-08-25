@@ -28,6 +28,15 @@ platform; §2's eleven-of-eleven is a **hinode** result and stays one. §3 is th
 section that keeps those two evidence bases apart — read it before treating
 either as the other.
 
+> ✅ **SUPERSEDED (run 2026-08-22, annotated 2026-08-25): all eleven modes now
+> generate on the live Space**, content-verified, at sha `287ba9c` —
+> [`SPACE_MODE_MATRIX.md`](SPACE_MODE_MATRIX.md) is the record. "One mode, once"
+> was true when written and is no longer the state: eleven-of-eleven is now
+> **also** a Space claim, ⏸️ at one configuration only (256×256×9, stage 2 off,
+> no LoRA, no `auto_duration`). Stage 2, LoRA, and every shippable resolution
+> remain hinode-only. §3's separation of the two evidence bases is what made
+> the merge legible — its annotation carries the detail.
+
 ---
 
 ## 2. HOST-PROVEN
@@ -177,6 +186,15 @@ Three things a reader needs:
 > different container at the same seed — but ⏸️ **evidenced is not proven**: no
 > two-run frame-hash comparison exists. See `docs/SPACE_MODE_MATRIX.md` §5. The
 > gallery that was to close this is dropped with the host it lived on.
+>
+> ⛔ *Correction (2026-08-25) on "returned bytes identical": that overstates
+> what was measured. The cross-day match was **file size** (39,146 B) plus
+> **every decoded statistic to three decimals** — no hash of the day-1 artifact
+> was ever recorded, and that file is gone, so byte identity against it is
+> permanently unverifiable. The "evidenced is not proven" hedge above was
+> right, and even understated: no byte comparison existed either. The planned
+> close is a same-seed re-run sha256-compared against the surviving 2026-08-22
+> artifact — `SPACE_MODE_MATRIX.md` §5's correction carries the hash.*
 
 > ### ✅ Sizes differed between the two code paths — almost certainly just the seed
 >
@@ -254,6 +272,15 @@ mechanism, which is what makes the rejection trustworthy rather than lucky.
 > why this section still exists: the two evidence bases have diverged rather
 > than merged, and §2's eleven-of-eleven remains a **hinode** claim.
 
+> ✅ **SUPERSEDED (run 2026-08-22, annotated 2026-08-25).** The mode matrix ran
+> on the live Space and **all eleven modes generate there, content-verified**,
+> at sha `287ba9c` — [`SPACE_MODE_MATRIX.md`](SPACE_MODE_MATRIX.md). The two
+> evidence bases have **merged at exactly one configuration**: 256×256×9,
+> stage 2 off, no LoRA, no `auto_duration`. What is still hinode-only: stage 2
+> (1408×960), the duration head, LoRA in both directions, the mel round-trip at
+> full length, and every shippable resolution. This section's discipline is
+> unchanged — it now keeps *configurations* apart instead of *platforms*.
+
 **Detailed record: [`SPACE_GENERATION_FINDING.md`](SPACE_GENERATION_FINDING.md)**
 — the first deploy, the killed workers, the falsified ceiling, and the run that
 generated. Not restated here on purpose.
@@ -289,6 +316,13 @@ of these questions and changed the answer to one of them:**
   audio path** has run on ZeroGPU. The audio modes exercise the mel front-end,
   the `av` loader and the 16 kHz/48 kHz asymmetry; none of that has executed
   there once.
+
+  — *Annotation (2026-08-25): mostly falsified by the 2026-08-22 mode matrix.
+  Image, audio and video conditioning **have** run on ZeroGPU; both audio-input
+  modes passed; the mel front-end and the 16 kHz/48 kHz asymmetry were
+  exercised there and passed (`SPACE_GENERATION_FINDING.md` §11 item 10,
+  `SPACE_MODE_MATRIX.md`). Still true, and only these: **stage 2, LoRA and
+  `auto_duration` have never run on ZeroGPU.***
 
 ---
 
@@ -334,6 +368,13 @@ of these questions and changed the answer to one of them:**
 **Cost so far: ≤ 243.58 GPU-seconds** of 2400/day ⚠️ *a bound, not a
 measurement* — quota endpoint 404s.
 
+> **Superseded (annotated 2026-08-25).** That figure covered the
+> first-generation session only. The mode-matrix day — UTC quota day
+> **2026-08-21** — closed at **≤ ~413 GPU-s** of 2400 (`SPACE_MODE_MATRIX.md`
+> §7, matrix plus re-run; still a bound, never a measurement). Quota days are
+> per-UTC-date, so as of 2026-08-25 the day is fresh and neither number
+> describes current consumption.
+
 **One hinode number with a direct ZeroGPU consequence.** Stage 2 peaked at
 **83.897 GiB** ✅, against 70.497 GiB for a single-stage run. So **stage 2 cannot
 run on a `large` 48 GB MIG slice at all**, and on `xlarge` (96 GB) it leaves
@@ -366,6 +407,14 @@ caches per image or per cold worker is ⏸️ unknown and decides its severity.
    model*, whatever the stream check says — because `noise_scale=1.0` discards
    the input by design, so a bug that drops it entirely is indistinguishable
    from correct operation.
+
+   — *Annotation (2026-08-25): the first sentence was overtaken twice and this
+   paragraph was never updated. Both modes then passed on the card — §2.2's own
+   rows record H10 ✅ (961,998 B at −10.4 dBFS) and H11 ✅ (193,825 B) — and
+   both passed again on the live Space (2026-08-22, `SPACE_MODE_MATRIX.md`).
+   What stands is the acceptance-test framing: **H10b has still never run**, so
+   "the user's audio reaches the model" remains ⏸️ unestablished; everything
+   that has passed is consistent with the input being silently discarded.*
 
 2. **Stage 2 works; its NATTEN fetch is characterised.** ✅ **Resolved once per
    process, not per generation** — two stage-2 generations in one process, one
@@ -512,6 +561,14 @@ caches per image or per cold worker is ⏸️ unknown and decides its severity.
    seed, plus `text_to_audio_video` matching `text_to_video`'s video statistics
    to three decimals) and no two-run frame-hash comparison has ever been made.
    `docs/SPACE_MODE_MATRIX.md` §5 states that limit explicitly.
+
+   — *Correction (2026-08-25): "byte-identical output across two days" is too
+   strong — the cross-day evidence is **size-identical plus
+   statistics-identical**; no day-1 hash exists and the day-1 file is gone, so
+   byte identity was never checked and now cannot be. The conclusion of this
+   passage — not shown to be bitwise reproducible — is unchanged and was the
+   correct one. `SPACE_MODE_MATRIX.md` §5's correction records the planned
+   sha256-compared re-run against the surviving 2026-08-22 artifact.*
 
    ⛔ **The twelve-mode pixel-diff gallery that depended on it is DROPPED** — the
    host it ran on is gone. **So the consequence is permanent rather than
@@ -888,6 +945,15 @@ differ" into evidence rather than a coin toss. An earlier control measured 1.8%
 and was read as a bound on the variance; **an unseeded control cannot bound
 anything**, which is the mistake worth not repeating.
 
+> ⛔ **The first row of that table is dead (annotated 2026-08-25), and this
+> file already said so elsewhere.** The §2.5 before/after pairs cannot be
+> re-run: the seeded gallery is dropped with its host, and §2.5/§4 gap 8 record
+> that as *permanent* — the table is unattributable forever, not pending. The
+> live content of this instruction is the other three rows: **H10b, H12b and
+> H4b are still runnable** — on the Space (none needs stage 2; each is one
+> same-seed pair at 256×256×9-class cost) or on a future host — and each still
+> establishes exactly what the table says.
+
 ### What is already earned, and does not need repeating
 
 **Eleven of eleven modes produce artifacts with the expected stream layout on
@@ -900,4 +966,10 @@ runs and generates — ⏸️ **for one of the eleven modes.** Everything in thi
 section is a **hinode** result; the Space has proven `text_to_video` at
 256×256×9 and nothing else. Those are different claims about different machines,
 and §3 is where they are kept apart.
+
+> ✅ **Superseded (annotated 2026-08-25): the Space has since proven all eleven
+> modes at 256×256×9** — content-verified, sha `287ba9c`, 2026-08-22
+> (`SPACE_MODE_MATRIX.md`). What it has still proven nothing about: stage 2,
+> LoRA, `auto_duration`, and any resolution anyone would ship. §3's annotation
+> carries the merged state.
 

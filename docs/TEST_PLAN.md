@@ -10,6 +10,16 @@ Two matrices, for two different questions. **Neither answers the other's.**
 | budget | **wall-clock only** | 2400 GPU-s/day |
 | status | **ACTIVE — the whole objective** | ⏸️ **PARKED** |
 
+> ✅ **UNPARKED — annotated 2026-08-25.** The status column aged in both rows.
+> Part A ran to completion (see A.6's annotation). Part B is no longer parked
+> in any meaningful sense: **ZeroGPU is the live deployment** — all eleven
+> modes generate on the Space, content-verified, at sha `287ba9c`
+> ([`SPACE_MODE_MATRIX.md`](SPACE_MODE_MATRIX.md)). Part B's R-matrix *as
+> designed was never run*; its questions were answered by
+> `scripts/space_matrix.py` runs instead. And this table's **~68 GB** RAM
+> figure is ⛔ **FALSIFIED** — the platform ceiling is above **93.56 GB**
+> (`SPACE_GENERATION_FINDING.md` §6).
+
 **Label every claim.** A mode that works here is **HOST-PROVEN**. Whether it fits
 ZeroGPU is **ZEROGPU-PENDING**, and nothing in Part A can speak to it.
 
@@ -297,6 +307,16 @@ well-formed audio with a wrong mel — that is what "reported as nothing" means.
 
 ## A.6 Run log
 
+> ⚠️ **This log was never filled in — and the runs happened (annotated
+> 2026-08-25).** All of H1–H17 ran on hinode with recorded results; they were
+> recorded in [`OPERATOR_HANDOFF.md`](OPERATOR_HANDOFF.md) §2.2–2.4 instead of
+> here — 11/11 modes at 704×480×121, stage 2 at 1408×960, duration head f=97,
+> LoRA accepted and rejected-at-6.5 both, mel round-trip 4/4 tones. The rows
+> below are left as written: back-filling them now, from another document,
+> would manufacture a log. The rows that are still truthfully "not run" are
+> the same-seed comparison pairs — **H10b, H12b, H4b** — whose unseeded
+> §2.5-era stand-ins are permanently unattributable (handoff §7).
+
 | Run | Mode | Result | Wall clock | **Streams observed** | **Output looks right?** | Notes |
 |---|---|---|---|---|---|---|
 | **S0** | **smoke_t2v.py — GATE** | — | — | — | — | **run this first** |
@@ -332,6 +352,16 @@ So a green Part A is not mistaken for a shippable Space: **no tensor packing, no
 150 GB ceiling, 124 GB RAM against ~68, and the `spaces` integration is
 first-contact.** All of Part A is **HOST-PROVEN / ZEROGPU-PENDING**.
 
+> ✅ **Every clause of that sentence has since been answered on the platform
+> (annotated 2026-08-25).** Packing was exercised (the post-pack prune freed
+> 65.25 GB); the 150 GB ceiling was never binding (82.2/150 [OK]); the **~68**
+> figure is ⛔ falsified (ceiling above 93.56 GB); and the `spaces` integration
+> is long past first contact — the Space generates **all eleven modes** at
+> 256×256×9, sha `287ba9c`. The HOST-PROVEN / ZEROGPU-PENDING dichotomy is
+> resolved for the eleven modes *at that configuration*; still genuinely
+> ZEROGPU-PENDING: stage 2, LoRA, `auto_duration`, and every shippable
+> resolution.
+
 ---
 
 # Part B — ZeroGPU: does it fit the platform?
@@ -341,12 +371,22 @@ first-contact.** All of Part A is **HOST-PROVEN / ZEROGPU-PENDING**.
 > must not leak into Part A**. Findings to date are in
 > [`docs/ZEROGPU_DISK.md`](ZEROGPU_DISK.md).
 
+> ✅ **Unparked by events (annotated 2026-08-25).** ZeroGPU is the live
+> deployment and its question — *does it fit the platform?* — is answered yes
+> for eleven modes at 256×256×9 (sha `287ba9c`,
+> [`SPACE_MODE_MATRIX.md`](SPACE_MODE_MATRIX.md)). The R-matrix below **was
+> never run as designed**: `scripts/space_matrix.py` covered R1/R2/R4/R5's
+> ground; R3 (LoRA), R6 (stage 2) and R7 (auto-duration) remain unexercised on
+> the platform. The economics and rules of engagement below still govern any
+> future Space run — with B.1's bf16-era packed-weight figure corrected where
+> marked.
+
 ## B.1 The economics
 
 | | |
 |---|---|
 | PRO quota | **2400 GPU-seconds/day** — **verified**: `pro_quota_minutes = 40` at `spaces/zero/client.py:190`. Fixed 24 h window from first use |
-| Our tier | **`xlarge`** — forced, because packed weights are 67.23 GiB and `xlarge_threshold` is **42.00 GiB exactly** (`45097156608` bytes, **verified in the platform's own `spaces/zero/configs.json`**) |
+| Our tier | **`xlarge`** — forced, because packed weights are 67.23 GiB and `xlarge_threshold` is **42.00 GiB exactly** (`45097156608` bytes, **verified in the platform's own `spaces/zero/configs.json`**). *Annotation (2026-08-25): the live Space packs **~51.1 GB of int8** weights, not 67.23 GiB of bf16 — still over the threshold, so the tier conclusion stands on the new number* |
 | Multiplier | **assumed 2×** — ⚠️ **UNVERIFIED.** A 75 s run is budgeted at 150 GPU-seconds |
 | Practical ceiling | **~16 runs/day** |
 | **HARD STOP** | **1920 GPU-seconds (80%)** |
@@ -597,3 +637,12 @@ Filled in after each run. Running total maintained here.
 | R7 | — | — | — | — | — | not run | |
 
 **Budgeted: 930 · Spent: 0 · Stop line: 1920 · Remaining to stop line: 1920**
+
+> ⚠️ **"Spent: 0" was true of this matrix and false of the Space (annotated
+> 2026-08-25).** Real metered spend happened outside this log, in
+> `scripts/space_matrix.py` runs the R-rows above never tracked: the
+> first-generation session bounded at **≤ ~243.58 GPU-s**, and the mode-matrix
+> day (UTC 2026-08-21) at **≤ ~413 GPU-s** — both `wall × 2` bounds, never
+> billed readings (`SPACE_MODE_MATRIX.md` §7). The R-rows stay "not run"
+> truthfully; the reconciliation this line promised simply never had a place to
+> land. Quota days are per-UTC-date — as of 2026-08-25 the day is fresh.

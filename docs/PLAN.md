@@ -5,6 +5,17 @@
 **Branch:** `soma/ltx25-studio` · **Remote:** `git@github.com:techfreakworm/ltx2.5-studio.git`
 **Target:** private Hugging Face Space `techfreakworm/LTX2.5-Studio` (gradio SDK, ZeroGPU).
 
+> ✅ **Status superseded by events (annotated 2026-08-25).** "Not yet run on a
+> GPU" was true when written. Since then: **all eleven modes ran on hinode**
+> (704×480×121 baseline, stage 2 at 1408×960, duration head f=97, LoRA both
+> directions, mel round-trip — [`OPERATOR_HANDOFF.md`](OPERATOR_HANDOFF.md) §2)
+> and **all eleven generate on the live ZeroGPU Space** at sha `287ba9c`,
+> 256×256×9 ([`SPACE_MODE_MATRIX.md`](SPACE_MODE_MATRIX.md)). The line above is
+> kept because this document records how the build was *decided*; where the
+> project *stands* is the handoff's job. Where a decision below was overtaken —
+> the bf16 default (§2.6), the ~68 GB ceiling (§2), the explicit `size=`
+> (§8.6), the disk routes (§7.4, §10 risk 1) — a dated annotation sits on it.
+
 > ### ⚠️ Read this before you trust the test suite
 >
 > **This suite was green at 1102 passing tests while five blockers were live in the tree.**
@@ -127,6 +138,14 @@ Three separate resource ceilings, and the tightest one is not the obvious one.
 
 **VRAM was never the problem.** The problems are CPU RAM and the startup disk peak — and the
 second is now settled rather than uncertain: it does not fit (§2.5).
+
+> ⛔ **The CPU RAM row is FALSIFIED (annotated 2026-08-25).** The ~68 GB figure
+> was inherited — a community cgroup observation, never ours — and the platform
+> measured past it: a load peaked at **87.13 GiB = 93.56 GB** RSS on ZeroGPU and
+> was not killed, so the ceiling is **above 93.56 GB** and "marginal — risk #1"
+> died with the number (`SPACE_GENERATION_FINDING.md` §6). The disk row's
+> verdict stood for bf16 — and was then routed around: the deployed Space ships
+> **int8** (`ZEROGPU_DISK.md` Option B) and fits at **82.2 GB of 150 [OK]**.
 
 ### 2.1 Trap A — duplicate shard sets
 
@@ -310,6 +329,22 @@ trade a *known* uncertainty for an *unverified* one:
 
 So bf16 ships and `size="xlarge"` is **declared explicitly** rather than being silently promoted
 (§8.5).
+
+> ⛔ **Both halves of that sentence were overtaken (annotated 2026-08-25), and
+> the section's default inverted with them.** The deployed Space ships **int8**,
+> not bf16 — `components_to_quantize=["transformer", "text_encoder"]` via
+> `PipelineQuantizationConfig` + bitsandbytes (text encoder widened at
+> `02fe943`) — landed as the fix for the eviction this section's bf16 default
+> ran into, and it is what makes the Space fit disk (82.2/150 [OK]). And
+> `size=` was **never declared**: every deploy has run `LTX25_ZEROGPU_SIZE=auto`
+> → `size=None`, so ZeroGPU promoted to `xlarge` by inference (packed ~51.1 GB
+> int8 > 42.00 GiB) — see §8.6's annotation and `OPERATOR_HANDOFF.md` §4
+> gap 0. Quantization is therefore no longer "a documented fallback" — it is
+> **the configured, deployed route**; the reasoning above stands as the record
+> of why bf16 was chosen first, and its load-bearing premise (the ~68 GB
+> ceiling, "uncertain but documented") is falsified besides
+> (`SPACE_GENERATION_FINDING.md` §6). The §6.2.1-class route list at the end of
+> this section omitted the route actually taken.
 
 **⚠️ There is no precision switch, and the reason is a correction rather than a decision.**
 `LTX25_TRANSFORMER_PRECISION` and `LTX25_TEXT_ENCODER_PRECISION` existed, resolved cleanly, and
@@ -898,6 +933,14 @@ LTX-2.5 Studio starting
   first missing   : vae/config.json
 ```
 
+> **Stale example (annotated 2026-08-25).** The `transformer=bf16
+> text_encoder=bf16` config fields shown above were removed with the precision
+> variables (§2.6). The live Space prints, instead:
+> `dtype : bf16 (fixed; no precision switch)` and
+> `quantised transformer, text_encoder as int8 | peak RSS 0.91 -> 87.13 GiB`
+> — captured in `SPACE_GENERATION_FINDING.md` §5 and `OPERATOR_HANDOFF.md` §5.
+> The load-bearing line survives unchanged: the live Space reads `37/37 files`.
+
 The **cache count is the load-bearing line**: `36/37`, with the first missing file named, makes
 "preload worked" and "preload silently did nothing" two different sentences. When a GPU run fails
 on a metered Space behind a 72 GB build, these lines are the difference between diagnosing it in
@@ -954,6 +997,10 @@ Recorded for completeness — **but see §8.4: we do not use accelerate's offloa
 | **Weights** | README frontmatter `preload_from_hub:` |
 | **Secret** | `HF_TOKEN` — required; `Lightricks/LTX-2.5-Diffusers` is gated |
 | **Git** | GitHub `git@github.com:techfreakworm/ltx2.5-studio.git`; Space and GitHub stay in sync |
+
+> **On the Size row (annotated 2026-08-25):** never declared in practice —
+> every deploy has run `auto`, and the live Space was promoted to `xlarge` by
+> inference. §8.6's annotation carries the detail.
 
 Naming precedent: `techfreakworm/LTX2.3-Studio`, `wan-studio` (private), `SAM3-cutout-studio`
 (private).
@@ -1251,6 +1298,14 @@ structurally infeasible for this checkpoint set**, and the routes are persistent
 public Space with `preload_from_hub` (§6.2), or smaller checkpoints. All three are operator
 decisions; none is a knob we can turn.
 
+> **The route list was incomplete, and the missing entry is the one that shipped
+> (annotated 2026-08-25).** Int8 runtime quantization (`ZEROGPU_DISK.md` Option
+> B) **was** a knob we could turn: it shrinks the packed copy while the snapshot
+> stays bf16, it was turned, and the deployed Space fits — disk **82.2 GB of
+> 150 [OK]**, prune freed 65.25 GB, all eleven modes generating at sha
+> `287ba9c`. The finding itself stands: bf16 on `storage: None` remains
+> structurally infeasible — which is exactly why the live Space is not bf16.
+
 **The base is always the superset class**, `LTX2ConditionPipeline`. Deriving
 superset → subset can only drop `audio_scheduler`, which the subset does not
 take. The reverse would silently drop it from the pipeline that *does* use it,
@@ -1419,6 +1474,15 @@ We declare `size="xlarge"` **explicitly** rather than being silently promoted.
 Packed bf16 weights (67.2 GiB) exceed `xlarge_threshold = 42.00 GiB`, so **ZeroGPU auto-promotes
 us to `xlarge` and doubles quota cost with no code change** (§2.6). Declaring it explicitly means
 the cost is visible in the source rather than being a surprise in the quota dashboard.
+
+> ⛔ **Neither premise survived deployment (annotated 2026-08-25).** We have
+> **never** declared a size: every deploy has run `LTX25_ZEROGPU_SIZE=auto`, so
+> `app.py` sends `size=None` and the explicit-`xlarge` branch has executed zero
+> times on the platform (`OPERATOR_HANDOFF.md` §4 gap 0). And the live Space no
+> longer packs bf16 — it packs **~51.1 GB of int8** weights. The conclusion
+> holds on the new number (51.1 GB > 42.00 GiB → `xlarge`), ⚠️ by inference:
+> the promotion is deduced from the threshold, not read back, because the
+> endpoint that would confirm it is the same one that 404s for quota.
 
 **Quota arithmetic:** PRO gives 2400 s/day. At `duration=75` on `xlarge` (2×), each run is
 charged ~150 s → **~16 runs/day**. Dropping under 42.00 GiB via quantization would return us to
@@ -1901,6 +1965,16 @@ register.
 | **7** | ~~The diffusion decoder fetches NATTEN from the Hub at generation time~~ — **ANSWERED: once per process.** | ✅ **Measured on hinode**: two stage-2 generations in one process, **exactly one** kernel fetch. So a worker needs outbound network at its **first** stage-2 use, not on every press of Generate. | **Still a real dependency** — each cold worker pays it once, and `get_kernel("shi-labs/natten", version=1)` is hardcoded inside diffusers so we cannot pin it by revision. Lazy construction keeps it off the startup path for the eight modes that never reach stage 2. |
 | 6 | An LTX-**2.3** LoRA attaches cleanly to the **2.5 distilled** transformer | the model card says most 2.3 LoRAs run on 2.5 unchanged, but our R3 fixture is a 2.3 LoRA and our transformer is 2.5-distilled; the official 2.5 LoRA targets the **DEV** transformer, so it is not a valid control | **TEST_PLAN R3** — stage 7 asserts attachment count > 0 against real weights |
 | **8** | **`temporal_latent_upsampler` has no documented role** — we download 0.2619 GB and `preflight` carries a dedicated error path for it | It is the **same class** as the spatial one (`LTX2LatentUpsamplerModel`), differing only by `spatial_upsample`/`temporal_upsample` and `use_rational_resampler`. But upstream's component table lists **only** `latent_upsampler/` as belonging to the two-stage recipe, and neither documented recipe nor `LTX25AutoBlocks` mentions the temporal one. *Read off the model card at revision `871165de…` and the configs themselves, not inferred* | **Deliberately not wired.** Inventing a role for it in a graph upstream does not describe is worse than 0.26 GB of unused download. If it proves to be dead weight the allow-list can drop it — but on evidence, not on tidiness |
+
+> **Risk 1, re-read on 2026-08-25 — three of its clauses aged, differently.**
+> (a) The disk finding stands: bf16 does not fit, and that is now demonstrated
+> as well as derived. (b) *"The ~68 GB RAM ceiling remains … still open"* — no
+> longer open: **falsified** by measurement, the ceiling is above 93.56 GB
+> (`SPACE_GENERATION_FINDING.md` §6). (c) *"ZeroGPU is parked; hinode is the
+> critical path"* — inverted: **ZeroGPU is the live deployment**, generating
+> all eleven modes at sha `287ba9c` via the route the "how it gets settled"
+> column did not list — int8 runtime quantization (`ZEROGPU_DISK.md` Option B),
+> fitting at 82.2/150 [OK].
 
 ### ✅ Blocker cleared
 

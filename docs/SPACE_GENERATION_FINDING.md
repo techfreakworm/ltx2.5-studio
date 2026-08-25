@@ -87,6 +87,18 @@ this run or ever. They are recorded here because they were genuinely set on the
 Space at the time, not because they did anything. **Both have since been deleted
 from the Space.** See §9.1.
 
+> ⛔ **[On "Both have since been deleted"] — half-false when read back from the
+> platform (2026-08-25).** The live Space variables show
+> `LTX25_TRANSFORMER_PRECISION=bf16` still **PRESENT**; only
+> `LTX25_TEXT_ENCODER_PRECISION` is gone. The deletion was asserted, not read
+> back — this document's own organising rule, violated by this document. (§9.1's
+> "both precision variables were **removed**" remains true: that sentence is
+> about the code-side removal recorded in `PLAN.md` §2.6, which did happen.)
+> The survivor is doubly wrong-shaped: inert as ever, **and** it now advertises
+> bf16 on a Space whose transformer actually loads in bitsandbytes int8 — a live
+> instance of exactly the advertised-lever class §9.1 warns about. Its deletion
+> is being requested with the next deploy.
+
 ---
 
 ## 3. The failure
@@ -669,8 +681,8 @@ fabricated to accompany it.
 | | item | status |
 |---|---|---|
 | 1 | **Our error text tells users to read a traceback that does not exist** (§3). In a kill, there is nothing to read, and that is the most informative fact — the copy should say so instead. | ⏸️ open |
-| 2 | **`ZEROGPU_DISK.md` §4.2**: upgrade the RSS prediction and the prune branch ⏸️ → ✅ from this run. | ⏸️ gated, docs-last |
-| 3 | **`OPERATOR_HANDOFF.md` §3 and §5 are stale in *both* directions** — §3 says the Space *"has never run"*, §5 says a deploy is *"not currently possible"*. **Startup demonstrably works and generation demonstrably does not**, and the document currently cannot express that distinction. | ⏸️ gated, docs-last |
+| 2 | **`ZEROGPU_DISK.md` §4.2**: upgrade the RSS prediction and the prune branch ⏸️ → ✅ from this run. **→ Applied in the 2026-08-25 docs pass** — §4.2 now carries the dated upgrade annotation. | ✅ resolved (2026-08-25) |
+| 3 | **`OPERATOR_HANDOFF.md` §3 and §5 are stale in *both* directions** — §3 says the Space *"has never run"*, §5 says a deploy is *"not currently possible"*. **Startup demonstrably works and generation demonstrably does not**, and the document currently cannot express that distinction. **→ Doubly stale itself by 2026-08-25: generation now demonstrably works (item 10 — 11 of 11), and the handoff was reworked to "one mode, once", which the mode matrix then superseded in turn. The handoff now carries dated annotations for both; this row is kept as the record of the gap as it stood after the first run.** | ✅ resolved (2026-08-25) |
 | 4 | ⏸️ **No readable ZeroGPU quota endpoint** — all three candidate URLs 404, so billed seconds cannot be measured, only bounded. Worst case ~200 GPU-s of 2400/day for this run (`xlarge` bills at 2×; packed 51.1 GB is over the 42.00 GiB threshold 📄). | ⏸️ open |
 | 5 | **Bus defect**: `lead-gate.mjs:1709` computes `isLead = (session_id === SOMA_LEAD_SESSION_UUID)`. A `/clear` rotates the session id while the env var stays baked in from launch, so every soma bus tool is denied and the lead cannot file a report. **Side effect: it also disarms the lead-only `git push` / `git merge` guard.** | ⏸️ open, infrastructure |
 | 6 | ⏸️ **No steady-state RSS measurement exists.** `peak_rss_gib()` reports the load peak; the RAM question is about what remains resident when the load settles. Every RSS number in this document is a peak. **This is the measurement that would have prevented the wrong prediction in §7** and it is still not taken. | ⏸️ open |
@@ -692,3 +704,12 @@ fabricated to accompany it.
 - PR **#1** is OPEN and draft:
   <https://github.com/techfreakworm/ltx2.5-studio/pull/1>
 - Offline gate at that tip: **2053 passed, 13 skipped, 0 failed.**
+
+> **Superseded as repo state (annotated 2026-08-25).** `origin/soma/ltx25-studio`
+> advanced to `17b589c` — everything through the 11-of-11 findings is pushed
+> (`git rev-list --count` = 0, verified in the 2026-08-25 audit). Commits since
+> are local and queued for the next push: the fork-boundary pair `6bb211a`
+> (SPACE_MODE_MATRIX §4), five hardening fixes through `f0daa75` (LoRA
+> lifecycle, duration estimator, upload bound, desync guard `59cfa6e`, mmap
+> startup report), and this docs pass. PR #1 remains OPEN and draft. The lines
+> above stand as the record of the state when this file was written.

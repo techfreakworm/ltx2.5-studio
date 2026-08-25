@@ -462,6 +462,18 @@ ownership, the change touches 22 classes and their specs, and it has not been
 authorised. This is a follow-up with a complete design attached, which is a
 better thing to hand over than a half-diagnosed one.
 
+> ✅ **LANDED (2026-08-25) at `6bb211a` — both halves, exactly as designed
+> here.** `LTXStudioError` now inherits `gradio.exceptions.Error` **and**
+> defines `__reduce__` (rebuild via `__new__` + `args` + `__dict__`, skipping
+> `__init__`); all 22 keyword-only subclasses round-trip; `__str__` keeps
+> BaseException semantics so the repr-quoting stays gradio's, not ours; and
+> `print_exception` stays true so the parent keeps printing the worker traceback
+> — the channel §3's root cause was recovered through. Offline gate green at the
+> landing tree (2245 passed / 13 skipped). ⏸️ **Not yet exercised on the
+> platform**: the live Space sha `287ba9c` predates the fix, so the pair is
+> offline-verified against the `spaces` marshalling contract, not yet observed
+> in a live failure.
+
 ⚠️ **Version caveat, stated exactly.** Everything above is read off `spaces`
 **0.48.3**, the locally readable copy; the Space runs **0.51.1** 📄. This is
 read-off-source, **not** measured on the Space. What *was* reproduced against
@@ -478,6 +490,24 @@ Two independent signals, from this matrix:
 `text_to_video` returned **39,146 bytes** — byte-identical to the result banked
 the previous day, on a **different container**, in a **different session**, at
 the same seed.
+
+> ⛔ **CORRECTED (2026-08-25): "byte-identical" was never verified, and cannot
+> now be verified against that file.** No hash of the previous day's artifact was
+> ever recorded. What was actually compared: **file size** (39,146 B on both
+> days) and **every decoded statistic to three decimals** (pixel std 72.657,
+> mean |Δ| 18.894, per-pair range 8.35 – 57.17). That is *size- and
+> statistics-identical* — strong evidence, and **not the same claim as identical
+> bytes**. The day-1 file is gone with its host, so byte identity against it is
+> now ⏸️ permanently unverifiable.
+>
+> **The caveat below was right, and the error ran in the other direction:** this
+> headline (and reports quoting it) upgraded past the doc's own "Do NOT upgrade
+> this" instruction. The measurement that closes it is scheduled: a same-seed
+> re-run **sha256-compared against the surviving 2026-08-22 artifact**
+> (`sha256 b78803cc998645dde06007c70cfa13d30af0ed37dd87e31dcc1d068da4aa212d`),
+> planned 2026-08-25, which will settle byte-level reproducibility across the
+> sampled containers. Until that runs, the supportable claim is: **identical in
+> size and in all decoded statistics; byte identity UNVERIFIED.**
 
 **2. Enabling audio did not perturb the video stream.** ✅
 `text_to_audio_video` produced video statistics identical to `text_to_video` **to
@@ -556,6 +586,13 @@ budget   2400 GPU-seconds/day (PRO) 📄   ->  <= ~17.2% consumed
 ceiling  1920 GPU-seconds (80%)          ->  never approached
 ```
 
+> **[On "today"] (annotated 2026-08-25)** — written on the day, and the day has
+> a date: the UTC quota day **2026-08-21** (the matrix ran late 2026-08-21 UTC;
+> the §2.1 re-run landed the same UTC day, early 2026-08-22 IST — ZeroGPU quota
+> days are per-UTC-date). That day closed at **≤ ~413 GPU-s** and the ceiling
+> was never approached. This block is history, not a running total: as of
+> 2026-08-25 the quota day is fresh and none of it is current consumption.
+
 > ### ⚠️ The ledger says `67.252`, and that is not today's total
 >
 > `scripts/space_matrix.py`'s quota ledger — the cross-invocation one added at
@@ -590,11 +627,11 @@ upload, download and client overhead, none of which is GPU time.
 | | item | status |
 |---|---|---|
 | 1 | ✅ **CLOSED.** A filepath `str` reached `LTX2VideoCondition(frames=…)`; `preprocess_conditions` dispatches that field over four types and raises for anything else (§3). Confirmed from the worker traceback, reproduced offline, fixed at **`d2eb6f2`**, and **verified on the live Space at sha `287ba9c`** — both modes returned real content-verified artifacts (§2.1). 11 of 11 modes now generate. | ✅ closed |
-| 2 | ⛔ **22 of 27 error classes cannot survive the ZeroGPU fork** (§4), measured. The fix is a **PAIR** — `__reduce__` on `LTXStudioError` **and** deriving it from `gr.Error` — and neither half works alone: `__reduce__` alone is never consulted, and `gr.Error` alone fails to pickle onto `res_queue` and surfaces as `'PicklingError'`, **destroying the class name that survives today**. Design complete, unapplied, `errors.py` unowned and unauthorised. | ⏸️ open, cheap, offline |
+| 2 | ⛔ **22 of 27 error classes cannot survive the ZeroGPU fork** (§4), measured. The fix is a **PAIR** — `__reduce__` on `LTXStudioError` **and** deriving it from `gr.Error` — and neither half works alone: `__reduce__` alone is never consulted, and `gr.Error` alone fails to pickle onto `res_queue` and surfaces as `'PicklingError'`, **destroying the class name that survives today**. Design complete, unapplied, `errors.py` unowned and unauthorised. **→ LANDED at `6bb211a` (2026-08-25), both halves, all 22 classes round-tripping; see the annotation in §4. ⏸️ Not yet exercised on the platform — the live Space sha `287ba9c` predates it.** | ✅ landed `6bb211a` · ⏸️ on-Space unexercised |
 | 3 | ✅ **Settled from source: picklability alone would NOT restore the message.** `ExceptionResult` carries only `traceback`, `error_cls` and `gradio_error`, and the exception object travels only when it is a `gr.Error` 📄 (`types.py:28-31`, `wrappers.py:453`). Read at `spaces` 0.48.3 against a Space on 0.51.1; read-off-source, not measured on-Space. **No live run is needed to know this** — one would still confirm it end to end. | ✅ resolved |
-| 4 | ⏸️ **Reproducibility is evidenced, not proven** (§5). No two-run frame-hash comparison exists. Cheap to close. | ⏸️ open |
+| 4 | ⏸️ **Reproducibility is evidenced, not proven** (§5). No two-run frame-hash comparison exists. Cheap to close. **→ Sharpened (2026-08-25): §5's "byte-identical" headline itself overstated the evidence — the cross-day match was size + decoded statistics, no day-1 hash was ever recorded, and the day-1 file is gone. The close is now a same-seed re-run sha256-compared against the surviving 2026-08-22 artifact (`b78803cc…`), planned 2026-08-25 — it settles byte-level reproducibility across the sampled containers.** | ⏸️ open, re-run planned |
 | 5 | ⚠️ **`audio_to_video` and `image_text_to_audio_video` are near-static** (§6). May be expected at this geometry; nothing establishes it either way. | ⏸️ open, observation |
-| 6 | ⛔ **`audio.validate_audio_latents_against_video` has ZERO callers.** Found by inspection, not by this matrix. It is exported, documented as *"the check that stops a desynced file being emitted rather than refused"*, and nothing calls it — so supplied `audio_latents` set the audio length while `num_frames` sets the video length, with nothing comparing them. Both audio-input modes passed here **only because their fixture came from a same-geometry run**, which is a property of the runner's chaining and not a defect anyone would notice. | ⏸️ open |
+| 6 | ⛔ **`audio.validate_audio_latents_against_video` has ZERO callers.** Found by inspection, not by this matrix. It is exported, documented as *"the check that stops a desynced file being emitted rather than refused"*, and nothing calls it — so supplied `audio_latents` set the audio length while `num_frames` sets the video length, with nothing comparing them. Both audio-input modes passed here **only because their fixture came from a same-geometry run**, which is a property of the runner's chaining and not a defect anyone would notice. **→ WIRED at `59cfa6e` (2026-08-25): `generate._prepared_audio`'s supplied-latents branch now calls it, a mismatch raises with both lengths named, `auto_duration` skips, and could-not-check shapes surface as warnings.** | ✅ wired `59cfa6e` |
 | 7 | ⏸️ **Only one configuration has been exercised** — 256×256×9, stage 2 off, no LoRA, no `auto_duration`. Nothing here says what any mode does at a shippable resolution, and stage 2 has never run on the Space at all. | ⏸️ open |
 | 8 | ⏸️ **No mode has been shown to FOLLOW its conditioning input.** Every check in this document is a property of the output alone — motion, level, distinctness. `video_to_video` returning mean \|Δ\| 17.277 from an 18.894 input is equally consistent with faithful conditioning and with ignoring the clip entirely (§2.1). Settling it needs a comparison the runner does not currently make: same seed, two different conditioning clips, and a difference in the output. | ⏸️ open |
 | 9 | ⚠️ **`video_to_audio` is 8–12 dB quieter than every other audio mode** (§6.1) — −19.5 dBFS against −7.6 to −11.1. Passes the level checks, is nowhere near the −40 dBFS flag, and is the only audio mode conditioned on video. Recorded because H9 was a level anomaly that passed every structural check. | ⏸️ open, observation |
@@ -610,6 +647,15 @@ build, by three unrelated routes:
 | 1 | `LTX25_TEXT_ENCODER_PRECISION` / `LTX25_TRANSFORMER_PRECISION` | not a `RuntimeConfig` field at all — never resolved, validated or logged | mutation test, after the value had already been written into a findings doc as a live lever 📄 |
 | 2 | `--quota-ceiling` | per-invocation; five invocations each announced **FITS** knowing nothing of the other four | reading the runner's own output across runs |
 | 3 | `audio.validate_audio_latents_against_video` | exported, documented, **zero callers** | inspection, not by this matrix |
+
+> **Status of the three, read back 2026-08-25.** Instance 3 is **closed** —
+> wired at `59cfa6e` (follow-up #6). Instance 2 was closed at `62d612f` (the
+> cross-invocation ledger, §7). Instance 1's cleanup is **half-done on the
+> platform**: the live Space variables still carry `LTX25_TRANSFORMER_PRECISION=bf16`
+> — inert as ever, and now advertising bf16 on a Space whose transformer loads
+> in int8. Its deletion is being requested with the next deploy. See
+> `SPACE_GENERATION_FINDING.md` §2's annotation; the row above stands as the
+> record of how each was found.
 
 **The class is not "a bug that was missed". It is a mechanism that reports
 safety it never checked** — which is strictly worse than its absence, because an
@@ -641,6 +687,10 @@ says it is the last one, and two of these three were invisible to a green gate.
 * It does **not** say the fork-boundary fix has been applied or tried. §4's
   design is complete and read off `spaces` **0.48.3** while the Space runs
   **0.51.1**; nothing in it has been exercised against the platform.
+  — *Annotation (2026-08-25): the first half is stale — the pair **is** applied,
+  at `6bb211a`, offline gate green. The second half stands unchanged: the live
+  Space sha `287ba9c` predates the fix, so nothing has been exercised against
+  the platform.*
 * It does **not** say any figure here is billed GPU-seconds. All of them are
   wall-clock-derived bounds.
 * It does **not** say the passing modes are *good*. They generate, and their

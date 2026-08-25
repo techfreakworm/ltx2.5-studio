@@ -18,6 +18,24 @@ The app does not fit ZeroGPU's ephemeral disk. Four routes out are recorded belo
 with what each costs. **Nothing here is implemented, and the choice is the
 operator's.**
 
+> ## ✅ UNPARKED — overtaken by deployment (annotated 2026-08-25)
+>
+> Everything above and below was written while ZeroGPU was parked, and events
+> then took this file's own **Option B**: int8 runtime quantization via
+> bitsandbytes **is implemented and deployed** — transformer at the deploy,
+> text encoder widened at `02fe943` — and with it the app **fits**: the running
+> Space reads **82.2 GB of 150 [OK]**, the post-pack prune freed **65.25 GB**,
+> and **all eleven modes generate** at sha `287ba9c`
+> ([`SPACE_MODE_MATRIX.md`](SPACE_MODE_MATRIX.md)). The app is also proven —
+> 11/11 on hinode and 11/11 on the Space — so the "until the app is proven"
+> gate above is discharged.
+>
+> Read the file accordingly: *"the app does not fit"* describes **bf16**, which
+> no longer ships; *"nothing here is implemented"* is stale for exactly one
+> row — B. The arithmetic, the option comparison, and §1's packing-peak
+> derivation stand as written; dated annotations sit on the passages events
+> overtook (§1.1, §4.2, §5, §6, §7).
+
 **Every claim is labelled.** ✅ *verified against source* · ⚠️ *inferred* ·
 ❓ *assumed, and the assumption decides the answer*. This document exists because
 several earlier confident numbers turned out to have nothing behind them.
@@ -47,6 +65,11 @@ above happens first regardless.
 ### 1.1 A different mechanism, which fits the timing the peak does not
 
 ⚠️ **Candidate cause, not settled — the Space has not been re-run.**
+
+> ✅ *Annotation (2026-08-25): the Space has since been rebuilt and re-run
+> repeatedly, and the fix held on the platform — 37/37 files fetched at the
+> pinned revision, disk line healthy (82.2/150 [OK]) on every observed boot.
+> The refetch never recurred.*
 
 `from_pretrained` was resolving against the Hub and starting a naive snapshot of
 **48 files** even with a verified-complete 37/37 cache, pulling the dead 8-shard
@@ -353,6 +376,18 @@ from ⚠️ *a number someone mentioned* into **the binding constraint, and the
 first thing to measure.** `_base_pipeline` logs peak RSS across the load for
 exactly this reason.
 
+> ✅ **MEASURED — the ⏸️ → ✅ upgrade ordered by `SPACE_GENERATION_FINDING.md`
+> §7 and §11 item 2, applied 2026-08-25.** Both predictions of this section
+> landed on the platform: the transformer-only (route-B) load peaked at
+> **60.0 GB** RSS against the order-53 GB predicted — not 20 GiB — and the
+> prune **fired**, freeing **65.25 GB** (the favourable branch this section
+> declined to assume). One correction inside the same quote, recorded there
+> and repeated here: *"the binding constraint"* pointed at the right axis and
+> the wrong number — **the ~68 GB figure itself is FALSIFIED**. The widened
+> (A-direction) load then peaked at **87.13 GiB = 93.56 GB and was not
+> killed**, so the ceiling is above that. The instruction was right; the
+> inherited value was wrong.
+
 The other open one is whether `spaces` packs quantised tensor subclasses at all — 📄 `bitsandbytes ≥ 0.46.0` is explicitly
 no-op'd by `spaces/zero/torch/bitsandbytes.py` (`patching.py:328/355/445`),
 which is what makes bnb the supported path and **torchao not one**.
@@ -371,6 +406,14 @@ a floor **and** a ceiling.
 > corrected bf16 matrix first, signed off; **then** int8 against that baseline —
 > which turns "what does int8 cost us in quality?" from a guess into a
 > same-seed pair anyone can look at once and answer.
+>
+> ⛔ *Overtaken (annotated 2026-08-25): int8 landed **out of that sequence**, as
+> a fix — the transformer at the deploy, the text encoder at `02fe943` — and
+> the attributability the sequencing protected was consciously spent
+> (`SPACE_GENERATION_FINDING.md` §9.2). "What does int8 cost in quality?"
+> therefore cannot be answered in one look anymore; recovering it means
+> re-running both halves. The paragraph stands as the record of what the
+> sequencing was for.*
 
 ---
 
@@ -392,6 +435,14 @@ A and C are both cheap to test and neither costs GPU quota. **Test A's two
 assumptions before choosing** — the answer to "are mounted volumes counted
 separately?" decides this document.
 
+> **This recommendation is history, not guidance (annotated 2026-08-25).**
+> **B was chosen and deployed** — without testing A's assumptions, as the fix
+> for a RAM hypothesis its own measurement then killed
+> (`SPACE_GENERATION_FINDING.md` §6, §9.2) — and the Space runs on it: 82.2/150
+> [OK], eleven modes generating. A's assumptions and C's `O_DIRECT` risk remain
+> **unexplored, not refuted**; they are what to revisit if int8 quality is ever
+> judged unacceptable, which is itself the still-unmeasured cost B carries.
+
 ---
 
 ## 6. The mmap guard — BUILT and PARKED
@@ -400,6 +451,15 @@ separately?" decides this document.
 written after ZeroGPU was parked — crossed messages — and kept rather than
 reverted because it is provably inert off-Space and re-enabling costs one line.
 **Do not extend or maintain it until ZeroGPU is unparked.**
+
+> ✅ **Unparked, and wired (annotated 2026-08-25).** ZeroGPU is the live
+> deployment, and the guard's precondition demonstrably held on-platform: the
+> prune freed 65.25 GB, so the packed tensors were mmap-backed as required.
+> `check_mmap_backed` was wired at `f0daa75` — as a **log-only startup report**
+> with its three-way verdict preserved, *not* the raising `ModelLoadError` call
+> described below. The raising form remains the one-line escalation this
+> section designs, still deliberately not taken: on a Space that demonstrably
+> works, a report teaches and a raise gambles.
 
 `zerogpu.check_mmap_backed()` and its helpers are ZeroGPU-only and cannot fire
 elsewhere.
@@ -425,3 +485,12 @@ The app itself is being proven on a dedicated GPU host, which answers *is the
 application correct?* and **cannot** answer *does it fit ZeroGPU?* — there is no
 tensor packing there, no 150 GB ceiling, and 124 GB of RAM against ZeroGPU's
 ~68. A green result there is **HOST-PROVEN** and remains **ZEROGPU-PENDING**.
+
+> ✅ **Both questions have since been answered on the platform itself (annotated
+> 2026-08-25).** The app is correct enough to generate all eleven modes on
+> ZeroGPU (256×256×9, sha `287ba9c`), and it fits — 82.2/150 [OK], prune fired.
+> The **~68** figure in the sentence above is ⛔ falsified: the measured ceiling
+> is above **93.56 GB** (`SPACE_GENERATION_FINDING.md` §6). The
+> HOST-PROVEN / ZEROGPU-PENDING dichotomy is resolved for the eleven modes at
+> that one configuration; stage 2, LoRA, `auto_duration` and shippable
+> resolutions are still pending on the platform.
