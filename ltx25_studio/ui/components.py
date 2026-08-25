@@ -160,8 +160,10 @@ def lora_panel() -> dict[str, Any]:
     gr.Markdown(
         "### LoRA adapters\n"
         "Load an adapter from the Hub or upload one directly. It is validated **before any "
-        "weights are touched** — only the safetensors header is read, so a multi-gigabyte "
-        "file for the wrong architecture is rejected in milliseconds, with the exact reason.",
+        "weights are touched** — only the safetensors header is inspected: instantly for an "
+        "upload, and for a Hub repo id after a size check against the cap and one bounded, "
+        "cached download. A wrong-architecture file is rejected with the exact stage and "
+        "reason.",
         elem_classes=["mr-bay-head"],
     )
     with gr.Row():

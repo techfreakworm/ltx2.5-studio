@@ -46,6 +46,7 @@ __all__ = [
     "on_shots_change",
     "on_snap",
     "on_validate_lora",
+    "on_validate_start",
 ]
 
 
@@ -286,6 +287,26 @@ def on_shots_change(rows: Any, num_frames: Any) -> str:
 # ---------------------------------------------------------------------------
 
 
+def on_validate_start(repo_id: str | None, upload: Any) -> str:
+    """Fires the instant Validate is pressed, so the panel is never silent.
+
+    The Hub route now downloads in the web process during validation — tens of
+    seconds on a first fetch — and this is the same rule ``on_generate_start``
+    already enforces for Generate: anything that can take real time announces
+    itself the moment it starts. Source precedence matches ``on_validate_lora``
+    exactly (the upload wins), so the state message and the verdict can never
+    be about two different adapters.
+    """
+    source = (upload or "") or (repo_id or "").strip()
+    if not source:
+        return render.lora_nothing_to_validate()
+    if upload:
+        import os
+
+        return render.lora_validating(os.path.basename(str(source)), hub=False)
+    return render.lora_validating(str(source), hub=True)
+
+
 def on_validate_lora(
     repo_id: str | None, upload: Any, applied: list[dict[str, Any]] | None
 ) -> tuple[str, list[dict[str, Any]], str]:
@@ -312,11 +333,7 @@ def on_validate_lora(
     staged = list(applied or [])
     source = (upload or "") or (repo_id or "").strip()
     if not source:
-        return (
-            "⚠️ Give me either a Hub repo id or an uploaded `.safetensors` file first.",
-            staged,
-            render.applied_loras(staged),
-        )
+        return (render.lora_nothing_to_validate(), staged, render.applied_loras(staged))
     source = str(source)
 
     try:

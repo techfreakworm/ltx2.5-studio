@@ -30,6 +30,7 @@ from ..errors import (
     LoRAConventionError,
     LoRADimensionError,
     LoRAError,
+    LoRAFetchError,
     LoRAFormatError,
     LoRAHeaderError,
     LoRAInContextError,
@@ -52,8 +53,10 @@ __all__ = [
     "frame_hint",
     "lora_accepted",
     "lora_idle",
+    "lora_nothing_to_validate",
     "lora_rejected",
     "lora_stage_of",
+    "lora_validating",
     "shot_anchor_readout",
     "mode_briefing",
     "running",
@@ -313,8 +316,11 @@ def cost_readout(
 #: number turns "it was rejected" into "it was rejected *here*, for *this*".
 #: The half-numbered stages are the gates ``validate.py`` added between the
 #: planned ones -- they are named as they are so the mapping stays legible
-#: against §4.3's table rather than silently renumbering it.
+#: against §4.3's table rather than silently renumbering it. Stage 0 is the
+#: Hub fetch (PLAN §4.6): everything that fails while no file exists locally
+#: yet, which is why it sits before the numbered table rather than inside it.
 _LORA_STAGES: tuple[tuple[type, str, str], ...] = (
+    (LoRAFetchError, "0", "fetch"),
     (LoRATooLargeError, "1", "size bound"),
     (LoRAFormatError, "3", "format"),
     (LoRAHeaderError, "3", "header parse"),
@@ -335,6 +341,32 @@ def lora_stage_of(exc: BaseException) -> tuple[str, str] | None:
         if isinstance(exc, error_type):
             return number, name
     return None
+
+
+def lora_nothing_to_validate() -> str:
+    """Pressing Validate with both routes empty. One string, used by the
+    instant state *and* the final verdict, so the two can never disagree."""
+    return "⚠️ Give me either a Hub repo id or an uploaded `.safetensors` file first."
+
+
+def lora_validating(source: str, *, hub: bool) -> str:
+    """Shown the instant Validate is pressed, so the panel is never silent.
+
+    The same rule as :func:`running`: the moment a press can take real time,
+    something on screen must say so. The Hub route is the one that earns it —
+    the fetch runs in the web process and a first download of a multi-GB
+    adapter is tens of seconds — and its message says what is happening in
+    fetch order: cap check first, then a bounded, cached download.
+    ``blocks.py`` mirrors the downloader's own progress bars onto the verdict
+    surface while this message stands.
+    """
+    if hub:
+        return (
+            f"⏳ **Fetching `{source}` from the Hub.** The size cap is checked against the "
+            f"repo's file listing before anything downloads; then the adapter is fetched "
+            f"once — bounded and cached, so re-validating it later is instant."
+        )
+    return f"⏳ **Reading the header of `{source}`…**"
 
 
 def lora_idle() -> str:

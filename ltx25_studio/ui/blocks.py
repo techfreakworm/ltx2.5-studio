@@ -285,10 +285,40 @@ def build_ui() -> gr.Blocks:
             control.change(fn=handlers.on_cost_change, inputs=cost_inputs, outputs=[annunciator])
 
         lora_outputs = [lora["verdict"], pool["loras"], lora["applied_summary"]]
+
+        def _on_validate_lora(
+            repo_id: str | None,
+            upload: Any,
+            applied: list,
+            progress: Any = gr.Progress(track_tqdm=True),  # noqa: B008 -- gradio's injection contract
+        ):
+            """The handler, with the blocks-level progress channel attached.
+
+            The Hub route downloads in the web process during validation, so the
+            press can take tens of seconds. ``gr.Progress`` must appear in the
+            *wired* function's signature, and ``handlers.py`` deliberately does
+            not import gradio -- so the channel is attached here, at the one
+            layer allowed to know about it. ``track_tqdm=True`` mirrors
+            ``hf_hub_download``'s own tqdm bars onto the verdict surface, so a
+            first fetch shows the real download progress rather than a spinner.
+            (The patch it installs is contextvar-gated: outside an active event,
+            tqdm behaves exactly as before.)
+            """
+            return handlers.on_validate_lora(repo_id, upload, applied)
+
+        # Two steps, exactly like Generate: an instant state message, then the
+        # work. `api_name` pins the published endpoint to the name it has always
+        # had, so the wrapper's leading underscore never leaks into the API.
         lora["validate"].click(
-            fn=handlers.on_validate_lora,
+            fn=handlers.on_validate_start,
+            inputs=[lora["repo_id"], lora["upload"]],
+            outputs=[lora["verdict"]],
+        ).then(
+            fn=_on_validate_lora,
             inputs=[lora["repo_id"], lora["upload"], pool["loras"]],
             outputs=lora_outputs,
+            api_name="on_validate_lora",
+            show_progress_on=lora["verdict"],
         )
         lora["clear"].click(fn=handlers.on_clear_loras, inputs=None, outputs=lora_outputs)
 
