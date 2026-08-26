@@ -371,7 +371,7 @@ def on_generate_start(mode_id: str, enhance_prompt: Any = False) -> str:
         return render.failure(exc)
 
 
-def on_generate(mode_id: str, *values: Any) -> tuple[Any, Any, str]:
+def on_generate(mode_id: str, *values: Any, progress: Any = None) -> tuple[Any, Any, str]:
     """Run one generation and marshal the result.
 
     Returns ``(video, audio, status)``. **Every** path returns a concrete value
@@ -383,6 +383,18 @@ def on_generate(mode_id: str, *values: Any) -> tuple[Any, Any, str]:
     ``inputs=`` list this tuple arrives from, so a mismatch is impossible by
     construction -- and if that ever stops being true, this raises instead of
     handing the wrong value to the wrong parameter.
+
+    ``progress`` is KEYWORD-ONLY and deliberately so. ``mode_id`` plus the
+    ``FIELD_KEYS`` positional block is the endpoint's published signature and
+    ``scripts/space_matrix.py`` calls against it; a progress handle that took a
+    positional slot would shift every field one place to the left, which
+    generates something plausible and wrong with no error anywhere. It also
+    stays defaulted, so every direct caller -- the whole seam suite -- is
+    unchanged and a run with no UI attached simply reports to nobody.
+
+    This module still does not import Gradio: the handle arrives as a plain
+    callable and is passed straight down. ``blocks.py`` is the one layer allowed
+    to know it is a ``gr.Progress``.
     """
     params = dict(zip(FIELD_KEYS, values, strict=True))
 
@@ -394,7 +406,7 @@ def on_generate(mode_id: str, *values: Any) -> tuple[Any, Any, str]:
     try:
         from .. import generate as generate_module
 
-        result = generate_module.generate(mode=mode_id, **params)
+        result = generate_module.generate(mode=mode_id, progress=progress, **params)
     except Exception as exc:  # noqa: BLE001 -- typed or not, the user sees it
         return (None, None, render.failure(exc))
 

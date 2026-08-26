@@ -1199,21 +1199,44 @@ class StageRunner:
                 ),
             )
 
-    def __call__(self, *, enable_stage_2: bool = False, **kwargs):
+    def __call__(self, *, enable_stage_2: bool = False, progress=None, **kwargs):
+        """Run the graph. ``progress`` is consumed here and never reaches diffusers.
+
+        **This is the only layer that knows how many sampling passes a run has**,
+        which is why the progress reporting is wired here rather than in
+        ``generate.py``. Stage 2 is a second denoise over the same schedule
+        machinery: its bar genuinely starts again at zero, and a bar that
+        silently restarts reads as a crash. So each pass is announced as "pass N
+        of M" before it begins, and the two non-sampling stage-2 steps -- the
+        latent upsample and the diffusion decode -- get their own labels rather
+        than leaving the user on a finished stage-1 bar for the length of both.
+
+        ``progress`` is a ``generate.ProgressReporter``; it is duck-typed here so
+        this module keeps importing nothing from the orchestration layer above
+        it, and it is optional so every direct caller (the offline gate, the
+        ``scripts/`` harnesses) is unaffected.
+        """
         kwargs = _with_real_conditions(kwargs)
         if not enable_stage_2:
             # The distilled recipe applies here too. It used to apply ONLY on
             # the stage-2 path, which is how eleven of twelve host runs were
             # generated with a linear schedule and SFT guidance.
-            return self.pipeline(**kwargs, **distilled_kwargs())
+            return self.pipeline(**kwargs, **distilled_kwargs(), **_sampling_kwargs(progress))
         self._stage_2_ready()
 
-        stage_1 = self.pipeline(**kwargs, **stage_1_kwargs())
+        stage_1 = self.pipeline(
+            **kwargs, **stage_1_kwargs(), **_sampling_kwargs(progress, index=1, passes=2)
+        )
+        if progress is not None:
+            progress.upscaling()
         upsampled = self.upsampler(**upsample_kwargs(_latents_of(stage_1)))
         stage_2 = self.pipeline(
             **{k: v for k, v in kwargs.items() if k not in STAGE_2_STRIPPED_KEYS},
             **stage_2_kwargs(_latents_of(upsampled), audio_latents=_audio_of(stage_1)),
+            **_sampling_kwargs(progress, index=2, passes=2),
         )
+        if progress is not None:
+            progress.decoding()
         decoded = self.decoder(
             **decode_kwargs(_latents_of(stage_2), generator=kwargs.get("generator"))
         )
@@ -1262,6 +1285,28 @@ class StageRunner:
         # default local gate. A branch that cannot be exercised offline is how
         # the audio came to be dropped in the first place.
         return type(stage_2)(frames=_latents_of(decoded), audio=audio)
+
+
+def _sampling_kwargs(progress, *, index: int = 1, passes: int = 1) -> dict:
+    """``callback_on_step_end`` for one denoise pass, or nothing at all.
+
+    A dict rather than a value so the kwarg is **absent** when there is nobody
+    to report to, rather than present and ``None``. Upstream defaults it to
+    ``None`` and would behave identically either way, but the house rule holds:
+    a ``None`` in the kwargs is how an unset value becomes a confusing TypeError
+    several layers away, and a fake pipeline in the gate should be handed exactly
+    what it was handed before this existed.
+
+    ✅ The kwarg is real, not hopeful: ``pipeline_ltx2_condition.py`` and
+    ``pipeline_ltx2.py`` at the pinned ``ac56fa2f`` both accept
+    ``callback_on_step_end`` and call it as ``callback_on_step_end(self, i, t,
+    callback_kwargs)`` inside the denoise loop, popping ``latents`` off the dict
+    it returns 📄.
+    """
+    if progress is None:
+        return {}
+    callback = progress.sampling(index=index, passes=passes)
+    return {"callback_on_step_end": callback} if callback is not None else {}
 
 
 def _with_real_conditions(kwargs: dict) -> dict:

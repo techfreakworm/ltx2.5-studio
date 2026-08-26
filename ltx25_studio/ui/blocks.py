@@ -77,6 +77,40 @@ def _field_defaults() -> dict[str, Any]:
     return {spec.key: spec.default for spec in FIELDS}
 
 
+def _on_generate(progress: Any = gr.Progress(), *values: Any):  # noqa: B008 - see below
+    """``handlers.on_generate`` with the blocks-level progress channel attached.
+
+    ⚠️ **The parameter order looks wrong and is load-bearing.** Gradio finds a
+    progress handle by walking the signature and *stopping at the first
+    non-positional parameter* (``helpers.special_args``: it collects
+    ``POSITIONAL_ONLY``/``POSITIONAL_OR_KEYWORD`` params and ``break``s on
+    anything else 📄). ``*values`` is ``VAR_POSITIONAL``, so anything after it is
+    never seen -- the natural spelling, ``(mode_id, *values, progress=...)``,
+    silently gets **no handle** and the whole feature becomes a tenth inert
+    lever. Putting it first is what makes the injection happen, and
+    ``tests/test_progress.py`` drives Gradio's own ``special_args`` against this
+    function to assert it really finds the handle, rather than trusting this
+    comment.
+    ``gr.Progress()`` as a default is Gradio's injection contract, hence the
+    ``B008``: it is a sentinel that gets *replaced* per event with a tracker
+    bound to that event (``blocks.py`` swaps ``processed_input[progress_index]``
+    📄), so the shared instance is never the one a handler actually calls.
+
+    ``track_tqdm`` is deliberately **off**. Turning it on patches ``tqdm``
+    process-wide and mirrors every bar in reach onto this event -- diffusers' own
+    ``self.progress_bar`` over the denoise loop included -- which would report
+    the same steps twice, once unlabelled, alongside the labelled callback
+    ``generate.ProgressReporter`` installs. One reporting channel, fully ours,
+    fully testable offline.
+
+    ``handlers.py`` does not import Gradio, so the handle is attached here, at
+    the one layer allowed to know what it is, and travels onward as a plain
+    callable.
+    """
+    mode_id, *field_values = values
+    return handlers.on_generate(mode_id, *field_values, progress=progress)
+
+
 def build_ui() -> gr.Blocks:
     """Assemble the Studio. Returns an unlaunched :class:`gradio.Blocks`."""
     pool: dict[str, Any] = {}
@@ -325,9 +359,15 @@ def build_ui() -> gr.Blocks:
             inputs=[mode_selector, pool["enhance_prompt"]],
             outputs=[status],
         ).then(
-            fn=handlers.on_generate,
+            fn=_on_generate,
             inputs=[mode_selector, *(pool[key] for key in FIELD_KEYS)],
             outputs=[video_out, audio_out, status],
+            # Gradio names an endpoint after the wired function, and the wired
+            # function is now a wrapper. `api_name` pins `/on_generate` to the
+            # name it has always had -- `scripts/space_matrix.py` calls it, and
+            # the wrapper's leading underscore must never leak into the API.
+            # Same treatment as the Validate button above, for the same reason.
+            api_name="on_generate",
         )
 
         # Put the form in the selected mode's state before the first interaction,

@@ -241,6 +241,13 @@ def test_the_players_the_ui_shows_match_the_tracks_the_run_populates(mode_id, wi
     )
 
 
+#: What ``on_generate`` sends ``generate()`` besides the request fields.
+#: ``progress`` is a SEAM, like ``pipeline_factory`` and ``encoder`` -- a channel
+#: the handler is handed and passes on, not something the user typed. Named here
+#: so the equality below stays an equality: a genuinely new field still fails.
+HANDLER_SEAMS = {"progress"}
+
+
 @pytest.mark.parametrize("mode_id", MODE_IDS)
 def test_the_handler_marshals_every_declared_field_into_the_request(mode_id, wired):
     """The ``strict=True`` zip is only a guarantee if something drives it."""
@@ -248,9 +255,13 @@ def test_the_handler_marshals_every_declared_field_into_the_request(mode_id, wir
     params = wired.params[-1]
 
     assert params["mode"] == mode_id
-    assert set(params) == {"mode", *FIELD_KEYS}, (
+    assert set(params) == {"mode", *HANDLER_SEAMS, *FIELD_KEYS}, (
         f"the handler forwarded {sorted(set(params) - {'mode'})} but FIELD_KEYS declares "
-        f"{sorted(FIELD_KEYS)}"
+        f"{sorted(FIELD_KEYS)} plus the seams {sorted(HANDLER_SEAMS)}"
+    )
+    assert not HANDLER_SEAMS & set(FIELD_KEYS), (
+        f"a seam has become a declared field: {sorted(HANDLER_SEAMS & set(FIELD_KEYS))}. It "
+        f"would take a positional slot on the endpoint and shift every value after it."
     )
 
 

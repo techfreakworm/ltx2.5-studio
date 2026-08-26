@@ -33,6 +33,7 @@ import pickle
 from pathlib import Path
 from types import MappingProxyType
 
+import pytest
 from conftest import (
     NATIVE_PREFIX,
     OFFICIAL_METADATA,
@@ -201,10 +202,37 @@ def test_the_dispatch_payload_matches_what_generate_actually_sends(tmp_path, mon
         "enhancer",
         "output_root",
         "retention_bytes",
+        "progress",
     }, (
         f"the live dispatch payload is {sorted(sent)}; the pickle test above covers a "
         f"different shape and is no longer testing the real call"
     )
+
+
+def test_the_progress_handle_pickles_into_the_worker():
+    """The one argument that can kill a run before any GPU work is done.
+
+    ``arg_queue.put`` raises ``PicklingError`` on an argument that will not
+    cross, and the dispatch dies at that point — 2.05 s in, quota spent on
+    nothing, which is exactly how the staged-LoRA ``mappingproxy`` defect
+    presented. ``gr.Progress`` now rides in the payload, so it is checked here
+    rather than discovered on the Space.
+
+    It is a small object by construction and this pins that it stays one:
+    ``__call__`` builds its ``TrackedIterable`` inline and never appends, so with
+    ``track_tqdm`` off ``iterables`` is empty and the whole payload is a bool and
+    a list. ``spaces`` also carries a ``Progress`` inside ``GradioPartialContext``
+    on the same ``put``, so this is the class it already transports, not a new
+    one.
+    """
+    gr = pytest.importorskip("gradio", reason="gradio is a declared dev dependency")
+
+    handle = gr.Progress()
+    back = pickle.loads(pickle.dumps(handle))
+
+    assert isinstance(back, gr.Progress)
+    assert back.track_tqdm is handle.track_tqdm
+    assert list(back.iterables) == []
 
 
 def test_the_prompt_enhancement_note_crosses_back_inside_the_result():

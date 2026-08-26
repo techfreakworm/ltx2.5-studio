@@ -93,6 +93,7 @@ __all__ = [
     "RANDOM_SEED",
     "GenerationRequest",
     "GenerationResult",
+    "ProgressReporter",
     "configured_output_root",
     "generate",
     "gpu_dispatch",
@@ -1067,6 +1068,177 @@ class _VramProbe:
         return tuple(lines)
 
 
+# --------------------------------------------------------------------------
+# progress -- the third of the operator's original defects
+# --------------------------------------------------------------------------
+#
+# There was none. A 66 s render looked exactly like a hung one, and the only
+# signal the user had was a status line written before the run started.
+#
+# **The channel is Gradio's, and it survives the fork -- which is not obvious
+# and is the reason this works at all.** `callback_on_step_end` fires INSIDE the
+# `@spaces.GPU` worker, a forked child process, and a naive reading says a
+# handle captured in the parent is useless there. It is not, and the mechanism is
+# in `spaces` 0.51.1 rather than in anything we wrote 📄:
+#
+#   * `gr.Progress` reaches the queue through `Progress._progress_callback()`,
+#     which needs `LocalContext.blocks` and `LocalContext.event_id`. The worker
+#     is a FORK, taken inside the request thread where gradio's
+#     `get_function_with_locals` has already set both, so the child inherits
+#     `blocks`; `spaces` then re-applies `event_id` per call via
+#     `GradioPartialContext` (`zero/gradio.py`), which is what makes a REUSED
+#     warm worker report against the right event rather than the first one;
+#   * `worker_init` calls `patch_gradio_queue(res_queue)`, which REPLACES
+#     `gradio.queueing.Queue.set_progress` on the CLASS with an RPC that puts a
+#     `GradioQueueEvent` on the result queue;
+#   * both the regular and the generator wrapper drain that queue and replay the
+#     event on the parent's real (unpatched) `Queue` (`wrappers.py:243` and
+#     `:374`), so a `gr.Progress` call in the worker reaches the browser.
+#
+# ZeroGPU's own "ZeroGPU init" bar is the same mechanism, which is the strongest
+# evidence available offline that it works: `worker_init` drives a tqdm from
+# inside the fork and users see it.
+#
+# So this needs no generator handler and no change to `/on_generate`'s frozen
+# `(video, audio, markdown)` contract. `spaces` does the crossing; we only have
+# to hand the handle down, which is why `generate(progress=...)` -- a parameter
+# that has existed and been wired to NOTHING since it was written -- is the
+# thing that finally gets connected.
+
+#: Where each phase sits on the 0..1 bar, as ``(start, end)``.
+#:
+#: ⚠️ **A phase ORDERING, not a time estimate.** Nothing here measures anything:
+#: the numbers say which phase comes before which and that sampling is the long
+#: one, and they would be a fabrication if they claimed more than that. What IS
+#: measured is the position *within* the sampling bands -- step k of n, with n
+#: read off the pipeline's own ``num_timesteps`` -- and that is the part a user
+#: watching a 66 s render is actually reading.
+#:
+#: The single-stage ``sampling`` band deliberately OVERLAPS the two-pass pair: a
+#: run takes one or the other, never both, so they are alternatives rather than
+#: a sequence.
+_PHASE_BANDS = {
+    "enhancing the prompt": (0.00, 0.06),
+    "loading the model": (0.06, 0.10),
+    "preparing the inputs": (0.10, 0.12),
+    "sampling": (0.12, 0.88),
+    "sampling — pass 1 of 2": (0.12, 0.55),
+    "upscaling the latents": (0.55, 0.60),
+    "sampling — pass 2 of 2": (0.60, 0.82),
+    "decoding the frames": (0.82, 0.88),
+    "writing the file": (0.88, 1.00),
+}
+
+#: Fallback step counts, by pass, when a pipeline does not report its own.
+#: Read off the distilled schedules rather than written down here, so a change
+#: to the recipe cannot leave the bar counting to the wrong number.
+_DECLARED_STEPS = {
+    1: len(constraints.DISTILLED_SIGMA_VALUES),
+    2: len(constraints.STAGE_2_DISTILLED_SIGMA_VALUES),
+}
+
+
+class ProgressReporter:
+    """Every progress signal the app emits goes through here, or nowhere at all.
+
+    **One object, so there is one place the rules live**, and they are the rules
+    a progress bar has to obey to be worth having:
+
+    * **It never raises and never gates.** A generation that cannot be reported
+      on still runs. Every method swallows its own failure and disables the
+      reporter, exactly as ``_VramProbe`` does -- a diagnostic that can kill a
+      metered run is a worse defect than the one it was added for.
+    * **It never invents a step count.** ``callback_on_step_end`` is handed the
+      pipeline, so the total comes from ``pipeline.num_timesteps`` (upstream
+      sets ``self._num_timesteps = len(timesteps)`` 📄 before the loop). Only if
+      that is absent does it fall back to the declared schedule length, and if
+      *that* is unavailable it reports the step index against ``None`` -- which
+      Gradio renders as an unknown total. A made-up denominator is how a bar
+      starts lying.
+    * **It labels every phase, and the label is not decoration.** Stage 2 is a
+      second sampling pass whose steps genuinely restart at one; a bar that
+      silently restarts at 0% reads as a crash. :meth:`sampling` therefore
+      derives "pass N of M" itself rather than accepting a caller's string, so
+      there is no way to emit an unlabelled -- or a wrongly labelled -- pass.
+
+    ``handle`` is a ``gr.Progress``-shaped callable -- ``handle(fraction, desc)``
+    or ``handle((index, total), desc)``. ``None`` everywhere there is no UI: the
+    offline gate, ``scripts/``, and any direct caller. The reporter is still
+    constructed in that case, so the call sites stay unconditional and this class
+    cannot decay into a branch that only one code path takes.
+    """
+
+    def __init__(self, handle: Callable | None = None) -> None:
+        self._handle = handle
+
+    def __bool__(self) -> bool:
+        """True when there is somebody listening."""
+        return self._handle is not None
+
+    def _emit(self, position, label: str) -> None:
+        handle = self._handle
+        if handle is None:
+            return
+        try:
+            handle(position, label)
+        except Exception as exc:  # noqa: BLE001 - see the class docstring
+            logger.debug("progress reporting disabled after %r", exc)
+            self._handle = None
+
+    def phase(self, label: str) -> None:
+        """Announce a phase at the start of its band."""
+        start, _end = _PHASE_BANDS[label]
+        self._emit(start, label)
+
+    def upscaling(self) -> None:
+        """The stage-2 latent upsample.
+
+        A named method rather than ``phase("...")`` at the call site because the
+        call site is ``pipelines.StageRunner``, and the phase vocabulary belongs
+        to exactly one module. A string literal there is a second copy of a label
+        that the bands table would silently stop containing.
+        """
+        self.phase("upscaling the latents")
+
+    def decoding(self) -> None:
+        """The stage-2 diffusion decode. See :meth:`upscaling` for the shape."""
+        self.phase("decoding the frames")
+
+    def sampling(self, *, index: int = 1, passes: int = 1) -> Callable | None:
+        """A ``callback_on_step_end`` for one denoise pass, or None when idle.
+
+        ``index``/``passes`` name the pass rather than counting it internally,
+        because ``StageRunner`` is the only layer that knows whether this run has
+        one sampling pass or two -- and the label has to say so.
+
+        The returned callable matches upstream's signature exactly:
+        ``callback_on_step_end(pipeline, i, t, callback_kwargs)`` returning a
+        dict, because the pipeline does ``callback_outputs.pop("latents",
+        latents)`` on the result 📄. Returning ``None`` there would be an
+        ``AttributeError`` inside diffusers on every step.
+        """
+        label = "sampling" if passes == 1 else f"sampling — pass {index} of {passes}"
+        self.phase(label)
+        if self._handle is None:
+            return None
+        start, end = _PHASE_BANDS[label]
+        declared = _DECLARED_STEPS.get(index)
+
+        def callback_on_step_end(pipeline, step: int, timestep, callback_kwargs):
+            total = getattr(pipeline, "num_timesteps", None) or declared
+            done = int(step) + 1
+            if total:
+                self._emit(start + (end - start) * min(done / total, 1.0), label)
+            else:
+                # No denominator anywhere: report the step we are on and say
+                # nothing about how many there are. Gradio renders an unknown
+                # total; a guessed one would render a lie.
+                self._emit((done, None), label)
+            return {}
+
+        return callback_on_step_end
+
+
 def generate(
     request: GenerationRequest | None = None,
     *,
@@ -1088,6 +1260,15 @@ def generate(
     rewritten prompt. It is consulted only when the request asks for
     enhancement, and only on the side of the fork that does the work -- which is
     the GPU worker wherever there is one.
+
+    ``progress`` is a ``gr.Progress``-shaped callable and it is now LIVE. It was
+    accepted, documented and called at three sites here from the day this module
+    was written, and **no caller ever passed one** -- ``ui/handlers.py`` did not
+    take it, ``blocks.py`` did not wire it, and the GPU dispatch below dropped it
+    on the floor. That is the inert-lever shape this build has found nine times.
+    It is threaded through the dispatch with the other seams now, so the calls
+    reach the browser from inside the worker; see :class:`ProgressReporter` for
+    why that crossing works.
     """
     if request is None:
         request = GenerationRequest(**params)
@@ -1114,6 +1295,14 @@ def generate(
             enhancer=enhancer,
             output_root=output_root,
             retention_bytes=retention_bytes,
+            # `progress` joins the seams here for the same reason `enhancer`
+            # did: the work it reports on happens on the FAR side of this
+            # branch, so a handle dropped here is a handle that only ever
+            # reports the two lines above it. It pickles -- a fresh
+            # `gr.Progress` is `{"track_tqdm": bool, "iterables": []}` and
+            # `spaces` already carries one in `GradioPartialContext` -- and
+            # `tests/test_request_fork_boundary.py` holds that.
+            progress=progress,
         )
 
     # --- everything cheap first: unknown mode and illegal geometry must not
@@ -1133,6 +1322,12 @@ def generate(
     # as the run's.
     probe = _VramProbe()
     probe.start()
+
+    # Constructed unconditionally, exactly like the probe above and for the same
+    # reason: a reporter built only when a UI is attached is a code path the
+    # offline gate never walks. With no handle every method is a no-op, so the
+    # call sites below stay branch-free.
+    reporter = ProgressReporter(progress)
 
     # --- prompt enhancement, HERE and nowhere else -------------------------
     # BELOW the dispatch branch, so on a Space this executes inside the
@@ -1160,6 +1355,14 @@ def generate(
     # cannot become a module that only a non-default checkbox reaches.
     from . import enhance as enhance_module
 
+    # ~21 s of dead air before sampling even starts, and until now the only
+    # thing on screen said "Running". Announced BEFORE the call rather than
+    # after it, which is the whole point -- a label that appears once the phase
+    # is over reports history, not progress. Gated on the toggle so a run that
+    # does no enhancement does not claim to be doing some; `enhance_if_requested`
+    # itself stays unconditional.
+    if request.enhance_prompt:
+        reporter.phase("enhancing the prompt")
     enhanced, enhancement_notes = enhance_module.enhance_if_requested(request, enhancer=enhancer)
     if enhanced is not None:
         request = replace(request, prompt=enhanced)
@@ -1188,15 +1391,18 @@ def generate(
     factory = pipeline_factory or _default_pipeline_factory
     write = encoder or _default_encoder
 
-    if progress is not None:
-        progress(0.0, "loading model")
+    reporter.phase("loading the model")
     try:
         pipe = factory(pipeline=spec.pipeline)
     except Exception as exc:
         raise ModelLoadError(component=spec.pipeline, reason=str(exc)) from exc
 
-    if progress is not None:
-        progress(0.2, "generating")
+    # Everything between the load and the first denoise step: the pixel-to-latent
+    # condition conversion, the peft walk over ~3320 transformer modules for a
+    # staged adapter, and the audio encode. None of it is instantaneous and
+    # leaving "loading the model" on screen through it would be a label that is
+    # simply wrong rather than merely coarse.
+    reporter.phase("preparing the inputs")
     kwargs = _pipeline_kwargs(spec, request)
     _prepared_conditions(kwargs, request)
     lora_reports = _apply_loras(pipe, request)
@@ -1214,6 +1420,13 @@ def generate(
         audio_notes, supplied_audio = _prepared_audio(
             kwargs, request, pipe, exports=spec.exports
         )
+        # Consumed by `StageRunner`, never forwarded to diffusers -- the same
+        # treatment `enable_stage_2` gets, and for the same reason: it is ours.
+        # Only when somebody is listening, so an injected fake in the offline
+        # gate is handed exactly the kwargs it was handed before.
+        if reporter:
+            kwargs["progress"] = reporter
+
         size_notes = ()
         if stage_2_enabled(spec, request):
             from . import pipelines
@@ -1226,8 +1439,7 @@ def generate(
 
         output = _decoded(output, request.mode)
 
-        if progress is not None:
-            progress(0.9, "encoding")
+        reporter.phase("writing the file")
         try:
             # The sink is additive: an encoder that ignores it behaves identically.
             # Without it the dropped-audio note reaches the Space logs only, and the
