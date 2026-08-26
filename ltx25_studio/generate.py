@@ -148,6 +148,12 @@ class GenerationRequest:
     auto_duration: bool = False
     min_seconds: float = 1.0
     max_seconds: float = 5.0
+    #: Rewrite ``prompt`` with the Gemma enhancer before generating (PLAN §3.5).
+    #: Off by default. Handled entirely in the WEB process, before dispatch, so
+    #: it costs no GPU-seconds -- see ``enhance.py`` and the call site below.
+    #: No companion seed field: LTX-2.5 enhancement decodes greedily, so a seed
+    #: for it would be an inert lever, and this build has found seven of those.
+    enhance_prompt: bool = False
     extras: dict = field(default_factory=dict)
 
 
@@ -758,11 +764,28 @@ def _require_artifact(candidate, *, mode: str, run_dir: Path, track: str = "") -
     return path
 
 
+def _with_notes(result: GenerationResult, notes: tuple[str, ...]) -> GenerationResult:
+    """Carry the web process's notes onto a result the GPU worker built.
+
+    Prompt enhancement happens before dispatch, so its note is known on this
+    side of the fork while the result that has to carry it is built on the
+    other. Rather than teach the worker about a decision it played no part in,
+    the note is grafted on when the worker's result comes back.
+
+    A no-op when there is nothing to add -- which is every run with the toggle
+    off, i.e. the default -- so the un-enhanced path is untouched by this.
+    """
+    if not notes:
+        return result
+    return replace(result, warnings=tuple(result.warnings) + notes)
+
+
 def generate(
     request: GenerationRequest | None = None,
     *,
     pipeline_factory: Callable | None = None,
     encoder: Callable | None = None,
+    enhancer: Callable | None = None,
     output_root: str | Path | None = None,
     progress: Callable | None = None,
     retention_bytes: int | None = None,
@@ -772,23 +795,66 @@ def generate(
 
     Accepts a :class:`GenerationRequest`, or the request fields as keywords so
     the UI can call ``generate(mode=..., prompt=..., ...)`` directly.
+
+    ``enhancer`` is the third injected seam, alongside ``pipeline_factory`` and
+    ``encoder``: a callable taking ``(prompt, image=...)`` and returning the
+    rewritten prompt. It is consulted only when the request asks for
+    enhancement, and only outside the GPU worker.
     """
     if request is None:
         request = GenerationRequest(**params)
     elif params:
         request = replace(request, **params)
 
+    # --- prompt enhancement, HERE and nowhere else -------------------------
+    # Above the dispatch branch on purpose, and guarded on the worker flag
+    # rather than on whether a dispatch is registered, which gives one placement
+    # three properties at once:
+    #
+    #   * on a Space it runs in the WEB process, so an enhanced run reserves and
+    #     bills exactly the same GPU-seconds as an unenhanced one;
+    #   * the request that crosses the fork already carries the rewritten
+    #     prompt, so the worker needs to know nothing about any of this;
+    #   * a direct caller with no dispatch registered (local dev, the tests, the
+    #     reachability probe) gets identical behaviour in-process.
+    #
+    # Called unconditionally -- `enhance_if_requested` returns immediately when
+    # the toggle is off -- so `enhance.py` is executed on every generation and
+    # cannot become a module that only a non-default checkbox reaches.
+    enhancement_notes: tuple[str, ...] = ()
+    if not _IN_GPU_WORKER.get():
+        if request.enhance_prompt:
+            # "Everything cheap first" -- the rule the block below states, which
+            # has to be restated HERE because enhancement now runs above it. A
+            # 2.5 GB load plus a CPU decode is a model load by any reading, and
+            # an unknown mode or an illegal frame count must not pay for one
+            # before failing. `_validated` is pure, so running it again below
+            # costs nothing and cannot disagree with itself.
+            modes.get_mode(request.mode)
+            _validated(request)
+
+        from . import enhance as enhance_module
+
+        enhanced, enhancement_notes = enhance_module.enhance_if_requested(
+            request, enhancer=enhancer
+        )
+        if enhanced is not None:
+            request = replace(request, prompt=enhanced)
+
     # Route through the ZeroGPU entrypoint when one is registered and we are not
     # already inside the worker. Without this the UI calls straight through and
     # no generation ever reserves a GPU slot.
     dispatch = _GPU_DISPATCH
     if dispatch is not None and not _IN_GPU_WORKER.get():
-        return dispatch(
-            request=request,
-            pipeline_factory=pipeline_factory,
-            encoder=encoder,
-            output_root=output_root,
-            retention_bytes=retention_bytes,
+        return _with_notes(
+            dispatch(
+                request=request,
+                pipeline_factory=pipeline_factory,
+                encoder=encoder,
+                output_root=output_root,
+                retention_bytes=retention_bytes,
+            ),
+            enhancement_notes,
         )
 
     # --- everything cheap first: unknown mode and illegal geometry must not
@@ -882,7 +948,11 @@ def generate(
         )
 
         warnings = (
-            _sweep(root, retention_bytes) + tuple(encoder_warnings) + audio_notes + size_notes
+            enhancement_notes
+            + _sweep(root, retention_bytes)
+            + tuple(encoder_warnings)
+            + audio_notes
+            + size_notes
         )
 
         return GenerationResult(

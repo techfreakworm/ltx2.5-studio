@@ -180,13 +180,33 @@ The `8` is not a magic number: it is `vae.temporal_compression_ratio`, used as a
 pre-load default so the UI can validate before any VAE exists, with a load-time tripwire
 that raises if upstream ever changes it.
 
+### Prompt enhancement
+
+**A real toggle, off by default.** Ticking *Enhance my prompt* rewrites your line into a
+full LTX-2.5 caption with the model's own system prompt — the image-conditioned one when
+you supply a reference frame — and then generates from the rewrite. The prompt actually
+sent is printed in the run report, because an enhancer that silently swaps your prompt is
+worse than none.
+
+**It costs no GPU quota.** The enhancer is `google/gemma-4-E2B-it-qat-mobile-transformers`
+(2.49 GB, public, ungated), loaded on the CPU in the **web process** — before the run
+reserves its ZeroGPU slot — and freed again in the same call, so it never coexists with the
+22B transformer. What it costs is your wall-clock: a 600-token greedy decode on CPU is not
+instant. Point `LTX25_PROMPT_ENHANCER_REPO` at `google/gemma-4-E2B-it` for the 10.28 GB
+bf16 build instead.
+
+There is deliberately **no seed control** for it. LTX-2.5 enhancement decodes greedily, so
+`prompt_enhancement_seed` changes nothing — an advertised lever attached to nothing is a
+defect this project has already found seven of.
+
 ### Multishot
 
 Offered as a shot list — a prompt segment, an anchor and a strength per shot — and labelled
 honestly: **there is no multishot or scene API in LTX-2.5.** It is prompt-structure driven
 and unverified, and the 2.5 prompt enhancer's system prompts explicitly instruct the model
-*not* to describe scene cuts, so it works against the enhancer rather than with it. It is a
-documented technique here, not a button implying support that does not exist.
+*not* to describe scene cuts — so leave prompt enhancement **off** for a multishot run, or
+the enhancer will flatten your cuts back into one continuous take. It is a documented
+technique here, not a button implying support that does not exist.
 
 The anchor is a **latent** index, not a pixel frame number — the conversion is
 `pixel ≈ max((latent − 1) × 8 + 1, 0)`, so typing a pixel frame number there is an off-by-8

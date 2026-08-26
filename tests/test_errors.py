@@ -150,6 +150,13 @@ ERROR_SPECS = {
         {"component": "transformer", "reason": "connection reset by peer"},
         ["transformer", "connection reset by peer"],
     ),
+    "PromptEnhancementError": (
+        {
+            "repo_id": "google/gemma-4-E2B-it-qat-mobile-transformers",
+            "reason": "it returned an empty prompt",
+        },
+        ["google/gemma-4-E2B-it-qat-mobile-transformers", "empty prompt"],
+    ),
     "DecodeError": (
         {"mode": "text_to_video", "reason": "pipeline returned no frames"},
         ["text_to_video", "no frames"],
@@ -199,6 +206,7 @@ BASE_OF = {
     "LoRAModuleNotFoundError": "LoRAError",
     "LoRANotAttachedError": "LoRAError",
     "ModelLoadError": "GenerationError",
+    "PromptEnhancementError": "GenerationError",
     "DecodeError": "GenerationError",
     "EncodeError": "GenerationError",
     "EmptyOutputError": "GenerationError",

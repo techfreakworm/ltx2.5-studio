@@ -457,8 +457,24 @@ def applied_loras(applied: list[Any]) -> str:
 # ---------------------------------------------------------------------------
 
 
-def running(mode: Any) -> str:
-    """Shown the moment the button is pressed, so the UI is never silent."""
+def running(mode: Any, *, enhancing: bool = False) -> str:
+    """Shown the moment the button is pressed, so the UI is never silent.
+
+    ``enhancing`` changes the message because it changes what happens **first**.
+    With the toggle on, the run begins with a CPU prompt rewrite in the web
+    process -- before any slot is reserved -- and that can take a while. A
+    message saying "reserving a ZeroGPU slot" while the app is actually
+    downloading Gemma is the same class of small lie as a hidden control: it
+    describes something other than what is happening, right where the user is
+    waiting for it.
+    """
+    if enhancing:
+        return (
+            f"⏳ **Enhancing your prompt — {mode.label}.** Rewriting it with Gemma on the CPU "
+            f"first; this happens **before** a ZeroGPU slot is reserved, so it costs no quota "
+            f"— only time. The generation starts after it, and the prompt that was actually "
+            f"sent is reported with the result."
+        )
     return (
         f"⏳ **Running — {mode.label}.** Reserving a ZeroGPU slot, then loading, denoising and "
         f"decoding. This is metered against your daily quota."

@@ -509,20 +509,59 @@ button that implies support we cannot back.
 
 (Superseding an earlier draft of this plan that called it a first-class affordance. It is not.)
 
-### 3.5 Prompt enhancement: **unavailable by default; we ship no dead toggle**
+### 3.5 Prompt enhancement: **ships, as a real toggle, default off**
 
-**`model_index.json` ships it as explicitly absent:** `prompt_enhancer: [None, None]` (and
-`processor: [None, None]`). `LTX25AutoBlocks` declares the component and it appears in
-`_optional_components`, but the pack has no `prompt_enhancer/` folder — all 56 files enumerated,
-and the index itself declares the slot empty. It would come from `google/gemma-4-E2B-it`, a separate model. So
-`enable_prompt_enhancement=True` fails on our subset.
+> ⚠️ **This section is a correction.** It read "unavailable by default; we ship no dead
+> toggle", and the *policy* was right — an inert control is a lie with a checkbox. Both
+> **reasons** given for it were wrong, and the second one was wrong in the expensive
+> direction, because it priced a feature out on a number nobody had measured.
 
-Shipping a toggle that cannot work is exactly the silent lie §5 exists to prevent. No UI
-control until the component is fetchable and wired.
+**⛔ Wrong reason #1: "the pack ships it as absent, so `enable_prompt_enhancement=True`
+fails on our subset."** It is true that `model_index.json` carries
+`prompt_enhancer: [None, None]` and that there is no `prompt_enhancer/` folder in the 56
+files. It does **not** follow that the enhancer is unavailable. Upstream types the component
+`prompt_enhancer: Gemma4ForConditionalGeneration | None` (`pipeline_ltx2.py:249`) and lists
+it in `_optional_components` (`:235`) — a plain **transformers** class, nothing
+diffusers-specific. The `[None, None]` entry is there precisely because the component is
+expected to be *constructed*, not resolved from the snapshot. So it is an ordinary
+`from_pretrained` into the HF cache, and none of `model_files.py` / `preflight.py` /
+`preload_from_hub` needs to know it exists — all of which are single-repo by construction.
 
-Recorded for whoever enables it later: `prompt_max_new_tokens=600`, greedy decoding,
-`prompt_enhancement_seed` is **inert under LTX-2.5's greedy decoding**, and the system prompt is
-auto-selected between `LTX2_5_T2V_DEFAULT_SYSTEM_PROMPT` and `LTX2_5_I2V_DEFAULT_SYSTEM_PROMPT`.
+**⛔ Wrong reason #2: "ZeroGPU charges it twice at the packing peak, ~20.6 GB."** A
+*placement* artefact, not a property of the model. `torch.pack()` runs exactly once per
+container, at `demo.launch()` (`spaces/zero/__init__.py:32`), over tensors registered in
+`cuda_aliases` during the module-scope import phase. Inside a `@spaces.GPU` call the forked
+worker has already run `torch.unpatch()` (`wrappers.py:147`). A model loaded lazily inside a
+request handler is in neither window. **Load it lazily and it is charged once**, as a
+download — and if it never goes to CUDA, it is never packed at all.
+
+**✅ And the download is 2.49 GB.** `google/gemma-4-E2B-it-qat-mobile-transformers` is the
+quantisation-aware-trained build: public, ungated, one `model.safetensors`, **2.490 GB**
+against **10.279 GB** for the bf16 `google/gemma-4-E2B-it`. Its `config.json` carries
+`quantization_config.quant_method == "gemma"`, which `transformers >= 5.15.1` — already the
+floor in `requirements.txt` — registers as `GemmaQuantizer`; the unpacking layers it installs
+are plain torch with no CUDA or kernel dependency, which is what lets it run on the CPU.
+⚠️ It has **no** top-level `architectures` key, so `AutoModel*` cannot dispatch on it and
+`Gemma4ForConditionalGeneration` must be named explicitly. `LTX25_PROMPT_ENHANCER_REPO`
+selects the repo; the bf16 build is one environment variable away.
+
+**What ships.** `ltx25_studio/enhance.py`, called from `generate()` **before the dispatch
+branch** — i.e. in the web process, on the CPU, outside the metered window — so an enhanced
+run reserves and bills exactly the same GPU-seconds as an unenhanced one. It is loaded and
+freed inside one call, so it never coexists with the 22B transformer. What it costs is
+**wall-clock**, and the UI caption says so rather than implying the feature is free. Failure
+raises `PromptEnhancementError` naming the repository and the reason; it never falls through
+to the original prompt while the UI implies enhancement happened, and the prompt that was
+actually sent is quoted in the run report.
+
+The settings, unchanged from what this section banked in advance and now imported from
+upstream rather than restated: `prompt_max_new_tokens=600`, **greedy decoding**
+(`do_sample=False, no_repeat_ngram_size=5`), `prompt_enhancement_seed` **inert under greedy
+decoding — so no seed control is offered**, and the system prompt auto-selected between
+`LTX2_5_T2V_DEFAULT_SYSTEM_PROMPT` and `LTX2_5_I2V_DEFAULT_SYSTEM_PROMPT` on whether a
+reference frame is present. `enhance.py` deliberately omits upstream's `torch.manual_seed`
+call for the same reason: under greedy decoding it changes no output, and it would reseed the
+global RNG that this app's own seeded generator is drawn from.
 
 ### 3.6 Duration prediction: ships
 

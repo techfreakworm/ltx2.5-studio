@@ -563,6 +563,13 @@ class RunConfig:
     max_seconds: float = 5.0
     strength: float = 0.8
     noise_scale: float = 0.5
+    #: Off, and it stays off for the matrix. Enhancement rewrites the prompt in
+    #: the web process, so a matrix run with it on would exercise a different
+    #: prompt on every mode and none of the fixtures would be comparable. It is
+    #: here because `predict_args` must send a value for every declared field,
+    #: and because leaving it out of the dataclass would mean the tool could
+    #: never exercise the path at all.
+    enhance_prompt: bool = False
 
     @property
     def spec(self):
@@ -1504,6 +1511,7 @@ def predict_args(config: RunConfig, *, fixtures: FixtureStore | None = None) -> 
         "seed": config.seed,
         "strength": config.strength,
         "noise_scale": config.noise_scale,
+        "enhance_prompt": config.enhance_prompt,
     }
     for kind in config.needs:
         if fixtures is None:

@@ -30,6 +30,7 @@ __all__ = [
     "QUANTIZATION_CHOICES",
     "ENV_OUTPUT_DIR",
     "ENV_OUTPUT_RETENTION_GB",
+    "ENV_PROMPT_ENHANCER_REPO",
     "ENV_ZEROGPU_SIZE",
     "RuntimeConfig",
     "load_config",
@@ -42,6 +43,7 @@ ENV_OUTPUT_RETENTION_GB = "LTX25_OUTPUT_RETENTION_GB"
 ENV_OUTPUT_DIR = "LTX25_OUTPUT_DIR"
 ENV_LORA_MAX_GB = "LTX25_LORA_MAX_GB"
 ENV_QUANTIZATION = "LTX25_QUANTIZATION"
+ENV_PROMPT_ENHANCER_REPO = "LTX25_PROMPT_ENHANCER_REPO"
 
 #: ``auto`` means "do not pass ``size`` at all". ZeroGPU promotes us to xlarge
 #: by itself once packed weights exceed its 42.00 GiB threshold, and passing the
@@ -83,6 +85,32 @@ DEFAULT_LORA_MAX_GB = 12.0
 DEFAULT_QUANTIZATION = "bf16"
 QUANTIZATION_CHOICES = ("bf16", "int8")
 
+#: The prompt enhancer (PLAN §3.5), loaded lazily by ``enhance.py`` and freed
+#: again in the same call. A variable rather than a constant because it is the
+#: one model this app resolves OUTSIDE the pinned pack -- ``model_index.json``
+#: ships ``prompt_enhancer: [None, None]`` and there is no ``prompt_enhancer/``
+#: folder in ``Lightricks/LTX-2.5-Diffusers``, so it is an ordinary
+#: ``transformers`` load into the HF cache and nothing in ``model_files.py`` or
+#: ``preflight.py`` knows or needs to know about it.
+#:
+#: ✅ **The default is the QAT build, checked against the Hub rather than
+#: assumed**: ``google/gemma-4-E2B-it-qat-mobile-transformers`` is public, not
+#: gated, one ``model.safetensors``, **2.490 GB total** -- against **10.279 GB**
+#: for the bf16 ``google/gemma-4-E2B-it``. Its ``config.json`` carries
+#: ``quantization_config.quant_method == "gemma"``, which ``transformers``
+#: >= 5.15.1 (already the floor in requirements.txt) registers as
+#: ``GemmaQuantizer``; the unpacking layers it installs are plain torch, with no
+#: CUDA or kernel dependency, which is what lets the enhancer run on the CPU in
+#: the web process.
+#:
+#: ⚠️ Its ``config.json`` has **no** ``architectures`` key, so ``AutoModel*``
+#: cannot dispatch on it. ``enhance.py`` therefore names
+#: ``Gemma4ForConditionalGeneration`` explicitly, which is the class the LTX-2.5
+#: pipeline types the component as anyway.
+#:
+#: Set this to ``google/gemma-4-E2B-it`` for the bf16 build.
+DEFAULT_PROMPT_ENHANCER_REPO = "google/gemma-4-E2B-it-qat-mobile-transformers"
+
 
 def _choice(name: str, default: str, allowed: tuple[str, ...]) -> str:
     raw = os.environ.get(name)
@@ -121,6 +149,7 @@ class RuntimeConfig:
     output_dir: str
     lora_max_gb: float
     quantization: str = DEFAULT_QUANTIZATION
+    prompt_enhancer_repo: str = DEFAULT_PROMPT_ENHANCER_REPO
 
     @property
     def lora_max_bytes(self) -> int:
@@ -159,4 +188,11 @@ def load_config() -> RuntimeConfig:
         output_dir=os.environ.get(ENV_OUTPUT_DIR) or DEFAULT_OUTPUT_DIR,
         lora_max_gb=_number(ENV_LORA_MAX_GB, DEFAULT_LORA_MAX_GB, minimum=0.01),
         quantization=_choice(ENV_QUANTIZATION, DEFAULT_QUANTIZATION, QUANTIZATION_CHOICES),
+        # Free text, not a `_choice`: any `org/name` on the Hub is legal here and
+        # an allow-list would have to be edited before a smaller enhancer could
+        # ever be tried. `enhance.py` raises `PromptEnhancementError` naming this
+        # value if it does not resolve, which is a better error than a startup
+        # refusal that cannot see whether the repo exists either.
+        prompt_enhancer_repo=(os.environ.get(ENV_PROMPT_ENHANCER_REPO) or "").strip()
+        or DEFAULT_PROMPT_ENHANCER_REPO,
     )

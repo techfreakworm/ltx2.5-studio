@@ -39,6 +39,16 @@ torchaudio==2.11.0
 diffusers @ git+https://github.com/huggingface/diffusers@ac56fa2f25c1c15b4cbaa1e0b3255e9bc38c06dc
 
 # --- model stack --------------------------------------------------------------
+# NOTE: 5.15.1 is now load-bearing for a SECOND reason, so do not lower it.
+# `ltx25_studio/enhance.py` loads the prompt enhancer as a plain transformers
+# model -- `Gemma4ForConditionalGeneration` -- and the default repo
+# (`google/gemma-4-E2B-it-qat-mobile-transformers`) is a pre-quantised checkpoint
+# whose config declares `quantization_config.quant_method = "gemma"`. That
+# quantizer is registered in `transformers/quantizers/auto.py` from 5.15.1
+# ("gemma": GemmaQuantizer) and is pure torch -- `integrations/gemma_quant.py`
+# imports nothing but torch/nn/functional -- which is what lets the enhancer run
+# on the CPU in the web process. No NEW dependency was added for the enhancer;
+# this pin already covered it.
 transformers>=5.15.1,<6
 accelerate>=1.14.0,<2
 peft>=0.20.0,<0.21          # LoRA backend; USE_PEFT_BACKEND gates load_lora_weights

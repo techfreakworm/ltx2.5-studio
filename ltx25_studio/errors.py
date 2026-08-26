@@ -69,6 +69,7 @@ __all__ = [
     "MissingModelFileError",
     "ModelFileError",
     "ModelLoadError",
+    "PromptEnhancementError",
     "UnknownComponentError",
     "UnknownModeError",
 ]
@@ -544,6 +545,34 @@ class ModelLoadError(GenerationError):
         self.component = component
         self.reason = reason
         super().__init__(f"failed to load pipeline component {component!r}: {reason}.")
+
+
+class PromptEnhancementError(GenerationError):
+    """The prompt enhancer could not be fetched, loaded or run.
+
+    A :class:`GenerationError` rather than a :class:`ModelFileError` because of
+    what it means for the run: enhancement happens on the way into a generation
+    the user asked for, and when it fails **nothing is generated**. The
+    alternative -- carrying on with the prompt the user typed while the UI says
+    enhancement is on -- is precisely the silent substitution PLAN §5.3 exists
+    to forbid, so this raises instead.
+
+    Names the repository, because the enhancer is the one model this app loads
+    that is NOT part of the pinned pack: it is resolved at runtime from
+    ``LTX25_PROMPT_ENHANCER_REPO`` (default
+    ``google/gemma-4-E2B-it-qat-mobile-transformers``), so "which model?" is a
+    real question with a configurable answer, and an error that omits it sends
+    the operator to the wrong Hub page.
+    """
+
+    def __init__(self, *, repo_id, reason):
+        self.repo_id = repo_id
+        self.reason = reason
+        super().__init__(
+            f"prompt enhancement failed and nothing was generated. The enhancer {repo_id!r} "
+            f"could not be used: {reason}. Turn the enhance-prompt toggle off to run with the "
+            f"prompt you typed."
+        )
 
 
 class DecodeError(GenerationError):

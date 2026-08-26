@@ -49,52 +49,6 @@ flags anchors past the end of the clip — upstream skips those with only a log 
 generates anyway.
 """
 
-#: PLAN §3.5's policy — no dead toggle — with its **input corrected**. The policy
-#: stands; the reason under it was wrong in the flattering direction.
-#:
-#: ⛔ **"The model pack does not ship it" is not why.** ✅ Checked against the Hub
-#: rather than assumed: ``google/gemma-4-E2B-it`` is **public, not gated,
-#: apache-2.0, nine files, one weight file, 10.279 GB total.** It is one
-#: ``hf download`` away. Availability was never the constraint, and saying it was
-#: made a budget decision read as someone else's omission.
-#:
-#: ✅ **Disk budget is why**, and specifically the ZeroGPU **packing peak** —
-#: ``snapshot + packed + image`` against ``pipelines.ZEROGPU_DISK_CAP_GB`` — not
-#: steady state. The enhancer is charged **twice** there: ~10.28 GB in the bf16
-#: snapshot, which is unconditional, and ~10.28 GB again in the packed copy,
-#: because ZeroGPU intercepts ``.to(device)`` and packs whatever is moved to
-#: CUDA. ~20.6 GB. ``docs/ZEROGPU_DISK.md`` §4.2 derives this build's peak at
-#: **121.4 – 137.4 GB** depending on how much of the Linear-heavy weight int8
-#: actually reaches (the skip list at ``pipelines.TRANSFORMER_INT8_SKIP_MODULES``
-#: spares 316 Linears, which stay bf16 and push packed above the 41.237 GB the
-#: blanket derivation assumes). Adding 20.6 GB clears 150 outright at the
-#: conservative bound and eats most of the margin at the optimistic one.
-#:
-#: ⚠️ **The peak itself has never been measured.** ⛔ The ``82.2 GB of 150 [OK]``
-#: line in several docs is the **pre-pack startup reading** — literally
-#: ``snapshot 72.2 + packed 0.0 + image ~10`` — and is neither headroom nor
-#: steady state. It must not be cited as room to spend.
-#:
-#: **What would have to give**, if anyone wants this: a smaller or quantised
-#: enhancer, or CPU residency — never moved to CUDA, therefore never packed, so
-#: charged once at ~10.28 GB. That lands inside the cap on a margin nobody has
-#: tested, which is why it is written down here and not shipped.
-#:
-#: Documented rather than toggled, unchanged: an inert control is a lie with a
-#: checkbox.
-_ENHANCER_NOTE = (
-    "Prompt enhancement is off here on **disk budget**, not availability — "
-    "`google/gemma-4-E2B-it` is public, ungated and one `hf download` away. It is "
-    "~10.3 GB, and ZeroGPU charges that **twice** at the packing peak: once in the bf16 "
-    "snapshot, again in the packed copy, because anything moved to CUDA gets packed. "
-    "~20.6 GB is more than the margin this build leaves under the 150 GB cap at its "
-    "conservative bound — and that peak has never been measured, so the friendlier "
-    "startup reading is not headroom either. Enabling it needs something to give: a "
-    "smaller or quantised enhancer, or CPU residency so it is charged once. Until then "
-    "write the full shot yourself; the model responds well to camera, lighting and "
-    "motion language."
-)
-
 _READY = (
     "**Ready.** Pick a mode, set the run up, and press Generate — the output and the "
     "run report appear here. Nothing is spent until the button is pressed."
@@ -159,7 +113,10 @@ def build_ui() -> gr.Blocks:
 
                 with gr.Group():
                     components.render_fields(pool, "prompt", "negative_prompt", captions=captions)
-                    gr.Markdown(_ENHANCER_NOTE, elem_classes=["mr-caption"])
+                    # Laid out here, declared last in `fields.py`. The two
+                    # orderings are independent by design (see `components.py`):
+                    # the endpoint's signature is append-only, the screen is not.
+                    components.render_fields(pool, "enhance_prompt", captions=captions)
                     components.render_fields(pool, "image", "video", "audio", captions=captions)
 
                 with gr.Accordion("Shot list / multishot", open=False, elem_classes=["mr-panel"]):
@@ -364,7 +321,9 @@ def build_ui() -> gr.Blocks:
         # jobs -- the two cannot drift, and if they ever did it would raise
         # rather than silently pass arguments to the wrong parameters.
         generate_button.click(
-            fn=handlers.on_generate_start, inputs=[mode_selector], outputs=[status]
+            fn=handlers.on_generate_start,
+            inputs=[mode_selector, pool["enhance_prompt"]],
+            outputs=[status],
         ).then(
             fn=handlers.on_generate,
             inputs=[mode_selector, *(pool[key] for key in FIELD_KEYS)],

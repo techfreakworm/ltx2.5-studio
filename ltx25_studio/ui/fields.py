@@ -393,6 +393,33 @@ FIELDS: tuple[Field, ...] = (
         # No visible_when: gr.State has no `visible` property and sending it one
         # raises. See the Field docstring.
     ),
+    # -- APPENDED, and it belongs here rather than next to the prompt ---------
+    # This tuple is the endpoint's positional signature: `blocks.py` builds
+    # `inputs=` from it, `scripts/space_matrix.py` builds its `predict` args
+    # from it, and any external client that has ever called `/on_generate` was
+    # handed today's order. Inserting a field in the middle shifts every value
+    # after it one slot to the left for those callers -- prompt into
+    # negative_prompt, width into height -- which generates something plausible
+    # and wrong with no error anywhere. Appending cannot do that. The layout
+    # position is decided separately, in `blocks.py`, which renders this control
+    # directly under the prompt where it belongs on screen.
+    Field(
+        key="enhance_prompt",
+        kind="checkbox",
+        label="Enhance my prompt (Gemma)",
+        info=(
+            "Rewrites your line into a full LTX-2.5 caption first, using the model's own "
+            "system prompt — image-aware when you supply a conditioning frame. It runs on the "
+            "CPU before the GPU is reserved, so it costs NO extra GPU quota; it costs a wait. "
+            "The prompt actually sent is reported with the run."
+        ),
+        group="prompt",
+        default=False,
+        # Same predicate as the prompt box itself: a mode that discards the
+        # prompt has nothing to enhance, and a checkbox offering to improve a
+        # field that is not on screen is the inert-lever shape again.
+        visible_when=_takes_a_prompt,
+    ),
 )
 
 #: The ordering contract. Built once, read everywhere -- see the module docstring.

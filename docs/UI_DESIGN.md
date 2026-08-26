@@ -182,40 +182,48 @@ sidecar file and the Space log only. The seed line now says what the seed is for
   `conditioning.py` converts exactly once. A user following the old note got a
   mis-anchored shot every time. Both places now say *frame*, and the note explains
   the 8:1 snap and points at the readout.
-* **Prompt enhancement is documented-as-unaffordable, no dead toggle** (PLAN §3.5).
-  The **policy is unchanged** — an inert control is a lie with a checkbox — but the
-  **stated reason was wrong, in the flattering direction, and is corrected.**
+* **Prompt enhancement is a real toggle now, default off** (PLAN §3.5). The
+  caption that used to sit under the prompt box — first "the model pack does not
+  ship it", then "disk budget, ~20.6 GB at the packing peak" — is **deleted**,
+  and so is the policy it defended. Both readings of the cost were wrong, and
+  the second one was wrong in a way worth writing down.
 
-  The caption used to say the enhancer "needs `google/gemma-4-E2B-it`, which the
-  model pack does not ship, so no toggle is offered." That framed a budget decision
-  of ours as an omission of someone else's. ✅ Checked against the Hub rather than
-  assumed: **`google/gemma-4-E2B-it` is public, not gated, apache-2.0, nine files,
-  one weight file, 10.279 GB total.** It is one `hf download` away. Availability was
-  never the constraint.
+  ⛔ **"It is charged twice, so ~20.6 GB."** That was a *placement* artefact, not
+  a property of the model. ZeroGPU packs exactly once per container, at
+  `demo.launch()`, over tensors registered while the module scope ran. A model
+  loaded lazily inside a request handler — after launch, and never moved to CUDA
+  — is not in the packing window at all. It is charged once, as a download.
 
-  ✅ **The constraint is disk budget, and specifically the ZeroGPU packing peak** —
-  `snapshot + packed + image` against the 150 GB cap — **not steady state.** The
-  enhancer is charged **twice** at that peak: ~10.28 GB in the bf16 snapshot, which
-  is unconditional, and ~10.28 GB again in the packed copy, because ZeroGPU
-  intercepts `.to(device)` and packs whatever is moved to CUDA. **~20.6 GB.**
-  [`ZEROGPU_DISK.md`](ZEROGPU_DISK.md) §4.2 derives this build's peak at
-  **121.4 – 137.4 GB** — the spread is how much of the Linear-heavy weight int8
-  actually reaches, since `TRANSFORMER_INT8_SKIP_MODULES` spares 316 Linears that
-  stay bf16 and push the packed copy above the 41.237 GB the blanket derivation
-  assumes. Adding 20.6 GB **clears 150 outright at the conservative bound** and eats
-  most of the margin at the optimistic one.
+  ✅ **And the download is 2.49 GB, not 10.28.**
+  `google/gemma-4-E2B-it-qat-mobile-transformers` is the quantisation-aware-trained
+  build: public, ungated, one `model.safetensors`, **2.490 GB** against **10.279 GB**
+  for the bf16 `google/gemma-4-E2B-it`. Checked against the Hub, not assumed. The
+  bf16 build is still one environment variable away for anyone who wants it.
 
-  ⚠️ **The peak itself has never been measured**, which is the honest end of the
-  sentence. ⛔ **The `82.2 GB of 150 [OK]` figure that appears in several docs is the
-  pre-pack startup reading** — literally `snapshot 72.2 + packed 0.0 + image ~10` —
-  and is **neither headroom nor steady state.** It has been mistaken for available
-  space more than once in this project; it is not, and it must not be spent.
+  ✅ **It runs in the WEB process, before dispatch, so it costs ZERO GPU-seconds.**
+  That is the whole design and it is asserted, not asserted-about: the request
+  that crosses the ZeroGPU fork already carries the rewritten prompt, and the
+  worker never enhances. What it costs instead is **wall-clock on the CPU**, and
+  the field caption says exactly that rather than implying the feature is free.
 
-  **What would have to give**, for whoever wants this later: a smaller or quantised
-  enhancer, or **CPU residency** — never moved to CUDA, therefore never packed, so
-  charged once at ~10.28 GB. That lands inside the cap on a margin nobody has
-  tested. The caption says exactly this, and still tells the user what to do instead
-  (write the full shot; camera/lighting/motion language works).
+  ⚠️ **What the user must be able to see is the prompt that was actually sent.**
+  The box still shows what they typed; without the run report quoting the
+  rewrite, the video would be the only evidence that something else was
+  generated. It goes through the same `GenerationResult.warnings` channel as the
+  stage-2 size note, so there is one surface for "here is what actually
+  happened", not two.
+
+  ⛔ **No seed control for it**, and that is a design decision rather than an
+  omission: LTX-2.5 enhancement decodes greedily (`do_sample=False`), so
+  `prompt_enhancement_seed` changes no output. This build has found seven inert
+  levers; an eighth would be a choice. For the same reason `enhance.py`
+  deliberately does **not** copy upstream's `torch.manual_seed` call — reseeding
+  the global RNG would make an enhanced run irreproducible and buy nothing.
+
+  The toggle is hidden for modes that discard the prompt, on the same predicate
+  as the prompt box itself — a checkbox offering to improve a field that is not
+  on screen is the inert-lever shape again.
+
 * **`noise_scale=1.0` trap named**: the slider info now says that at 1.0 the upload
   contributes *nothing* and the run is a full-price generation of fresh audio.
 * **Seed reproducibility stated** on the field and in the run report.
