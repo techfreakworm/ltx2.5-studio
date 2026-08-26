@@ -501,12 +501,32 @@ def test_a_mono_upload_is_reported_to_the_user_not_only_the_log(monkeypatch, tmp
 # to "use the matching audio+video mode to keep it" when mode 11's
 # `audio_counterpart` is None and no such mode exists.
 #
-# The registry now declares `exports=("audio", "video")` for it, and the track
-# it muxes is the one the model GENERATED. `modes.py` carries the ruling and its
-# six reasons at the spec; these tests pin the two halves that can regress
-# silently -- that a file comes back with sound, and that the user is told whose
-# sound it is.
+# The registry declares `exports=("audio", "video")` for it, so a file comes
+# back with sound. WHICH sound has been answered twice:
+#
+#   * `4683a57` muxed the model's OWN generated track, on six reasons recorded
+#     at the mode-11 spec in `modes.py`;
+#   * a controlled discriminator on the live Space then measured that track.
+#     Same pipeline, same 512x960x121 geometry, same seed, one variable --
+#     whether audio was supplied. Audio in: -88.3 dBFS, digital silence. No
+#     audio in: -24.2 dBFS, real content. **Supplying audio suppresses the
+#     model's own audio generation**, 64 dB of separation, so `4683a57` was
+#     muxing an empty stream -- which is worse than no stream, because it looks
+#     like a track until you play it.
+#
+# ✅ RULED, for the video-exporting case only: mux the user's SUPPLIED audio.
+# The audio-only export modes are untouched -- their artifact IS the model's
+# track. These tests pin the three halves that can regress silently: that a
+# file comes back with sound, that it is the RIGHT sound for the mode, and that
+# the user is told which one it is and why.
 # --------------------------------------------------------------------------
+
+#: The modes whose container carries the user's own upload back.
+MUXES_UPLOAD = [m for m in AUDIO_INPUT_MODES if generate_module._muxes_supplied_audio(
+    modes.get_mode(m).exports
+)]
+#: The audio-input modes that still hand back what the model rendered.
+KEEPS_MODEL_TRACK = [m for m in AUDIO_INPUT_MODES if m not in MUXES_UPLOAD]
 
 
 @pytest.mark.parametrize("mode_id", AUDIO_INPUT_MODES)
@@ -527,17 +547,8 @@ def test_a_mode_that_conditions_on_audio_also_exports_audio(mode_id):
     )
 
 
-@pytest.mark.parametrize("mode_id", AUDIO_INPUT_MODES)
-def test_the_user_is_told_the_audio_is_the_models_and_not_their_upload(
-    mode_id, tmp_path, monkeypatch
-):
-    """Muxing the right track silently is still a surprise.
-
-    A user who uploads a song to ``audio_to_video`` will assume the sound in the
-    result is that song. It is not: it is the model's own jointly-rendered
-    track. Choosing correctly and saying nothing is the same shape as the defect
-    being fixed, one step quieter, so the choice is stated every run.
-    """
+def _uploaded(mode_id, tmp_path, monkeypatch, *, encoder=one_muxed_file_encoder, **overrides):
+    """One generation for ``mode_id`` with a real audio upload behind it."""
     from conftest import STUB_SAMPLING_RATE, STUB_WAVEFORM
 
     from ltx25_studio import audio as audio_module
@@ -545,20 +556,137 @@ def test_the_user_is_told_the_audio_is_the_models_and_not_their_upload(
     monkeypatch.setattr(
         audio_module, "load_waveform", lambda source: (STUB_WAVEFORM, STUB_SAMPLING_RATE)
     )
-
-    result = generate_module.generate(
+    return generate_module.generate(
         mode=mode_id,
         seed=7,
         audio="a-song-the-user-cares-about.wav",
         pipeline_factory=factory_returning(FakePipe()),
-        encoder=one_muxed_file_encoder,
+        encoder=encoder,
         output_root=tmp_path,
         retention_bytes=10**9,
+        **overrides,
     )
+
+
+@pytest.mark.parametrize("mode_id", KEEPS_MODEL_TRACK)
+def test_an_audio_export_mode_still_says_the_track_is_the_models(mode_id, tmp_path, monkeypatch):
+    """Muxing the right track silently is still a surprise.
+
+    The audio-only export modes are deliberately outside the mode-11 ruling:
+    their artifact IS the model's track, and handing back the upload would
+    answer a different question than the one the mode asks. So the original
+    sentence survives here unchanged -- a user who uploads a song still needs
+    telling that the file does not contain it.
+    """
+    result = _uploaded(mode_id, tmp_path, monkeypatch)
 
     assert any("model's OWN track" in note for note in result.warnings), (
         f"{mode_id!r} returned the model's audio and never said so, so a user who uploaded "
         f"audio has no way to learn the file does not contain it: {result.warnings}"
+    )
+
+
+@pytest.mark.parametrize("mode_id", MUXES_UPLOAD)
+def test_a_video_exporting_mode_hands_back_the_users_own_audio(mode_id, tmp_path, monkeypatch):
+    """The flip, at the seam a user actually meets.
+
+    ``4683a57`` muxed the model's track here. The live discriminator then
+    measured that track at -88.3 dBFS against -24.2 dBFS for the same pipeline
+    with no audio supplied: supplying audio suppresses the model's own audio
+    generation, so what shipped was a well-formed AAC stream containing silence.
+    The upload is what the user has, what he expects back, and the only one of
+    the two that is not empty.
+    """
+    result = _uploaded(mode_id, tmp_path, monkeypatch)
+
+    assert any("audio YOU supplied" in note for note in result.warnings), (
+        f"{mode_id!r} muxes the user's own audio and never says so, which is the same "
+        f"silence the mode-11 defect was: {result.warnings}"
+    )
+    assert not any("model's OWN track" in note for note in result.warnings), (
+        f"{mode_id!r} claims to be handing back the model's track, which is both wrong and "
+        f"(per the measurement) a claim about digital silence: {result.warnings}"
+    )
+
+
+@pytest.mark.parametrize("mode_id", MUXES_UPLOAD)
+def test_the_note_says_WHY_the_upload_is_the_one_that_comes_back(
+    mode_id, tmp_path, monkeypatch
+):
+    """Honest and useful, where the previous behaviour was honest and useless.
+
+    "here is your audio back" invites the reading that we simply preferred it.
+    The reason is the whole finding -- the model's generation is *suppressed* by
+    the audio input -- and it is what stops the next person re-deriving
+    ``4683a57``'s six reasons and flipping this back.
+    """
+    result = _uploaded(mode_id, tmp_path, monkeypatch)
+    provenance = [note for note in result.warnings if "audio YOU supplied" in note]
+
+    assert provenance, result.warnings
+    note = provenance[0]
+    assert "SUPPRESSES" in note, f"the note states no reason: {note!r}"
+    assert "-88.3 dBFS" in note and "-24.2 dBFS" in note, (
+        f"the measurement that overturned the previous ruling is not quoted: {note!r}"
+    )
+
+
+@pytest.mark.parametrize("mode_id", MUXES_UPLOAD)
+def test_the_encoder_is_handed_the_supplied_waveform_and_its_own_rate(
+    mode_id, tmp_path, monkeypatch
+):
+    """The note is not the behaviour. This is the behaviour.
+
+    A note claiming the file carries the user's audio, over a writer that muxed
+    the model's, is the ninth inert lever with a sentence attached. So the seam
+    is asserted directly: the encoder receives an ``outputs.SuppliedAudio``, and
+    the rate on it is the UPLOAD's, never ``vocoder.config.output_sampling_rate``
+    -- 16 kHz against 48 kHz on this stack, and muxing one at the other
+    pitch-shifts the track with no error anywhere.
+    """
+    from conftest import STUB_SAMPLING_RATE
+
+    from ltx25_studio import outputs
+
+    seen: dict = {}
+
+    def spy_encoder(output, **kwargs):
+        seen.update(kwargs)
+        return one_muxed_file_encoder(output, **kwargs)
+
+    _uploaded(mode_id, tmp_path, monkeypatch, encoder=spy_encoder)
+
+    supplied = seen.get("supplied_audio")
+    assert isinstance(supplied, outputs.SuppliedAudio), (
+        f"{mode_id!r} told the user it muxed their audio and handed the writer "
+        f"supplied_audio={supplied!r}. The writer would have muxed the model's silent track."
+    )
+    assert supplied.sampling_rate == STUB_SAMPLING_RATE, (
+        f"the muxed track was handed the wrong rate: {supplied.sampling_rate} rather than the "
+        f"upload's {STUB_SAMPLING_RATE}. The vocoder's rate here would pitch-shift it silently."
+    )
+
+
+@pytest.mark.parametrize("mode_id", KEEPS_MODEL_TRACK)
+def test_an_audio_export_mode_is_not_handed_a_substitute_track(mode_id, tmp_path, monkeypatch):
+    """The ruling is scoped, and the scope is enforced where it acts.
+
+    ``outputs.write_output`` REFUSES a ``supplied_audio`` for a mode that writes
+    no video container, so a generalisation here would not merely widen the
+    ruling -- it would break every audio-only mode at the last step of an
+    already-paid-for run.
+    """
+    seen: dict = {}
+
+    def spy_encoder(output, **kwargs):
+        seen.update(kwargs)
+        return one_muxed_file_encoder(output, **kwargs)
+
+    _uploaded(mode_id, tmp_path, monkeypatch, encoder=spy_encoder)
+
+    assert "supplied_audio" not in seen, (
+        f"{mode_id!r} is an audio-export mode and was handed a substitute track: "
+        f"{seen.get('supplied_audio')!r}"
     )
 
 
@@ -568,16 +696,26 @@ def test_the_programmatic_latents_route_is_told_which_track_too(tmp_path):
     ``_prepared_audio`` returns early down the supplied-``audio_latents`` branch
     without ever touching ``request.audio``, so a note appended alongside the
     file-encode path only would miss this caller entirely.
+
+    And this route CANNOT hand the upload back: the waveform those latents came
+    from never entered this process. "Could not" and "chose not to" must not
+    read the same, so the note names the one thing the caller can change.
     """
     # Shapeless on purpose: that route's own sync check reports "could not
     # check" and returns, which is the shortest path through the branch and the
     # one a note appended further down would never reach.
+    seen: dict = {}
+
+    def spy_encoder(output, **kwargs):
+        seen.update(kwargs)
+        return one_muxed_file_encoder(output, **kwargs)
+
     result = generate_module.generate(
         mode="audio_to_video",
         seed=7,
         audio_latents=object(),
         pipeline_factory=factory_returning(FakePipe()),
-        encoder=one_muxed_file_encoder,
+        encoder=spy_encoder,
         output_root=tmp_path,
         retention_bytes=10**9,
     )
@@ -585,6 +723,14 @@ def test_the_programmatic_latents_route_is_told_which_track_too(tmp_path):
     assert any("model's OWN track" in note for note in result.warnings), (
         f"audio was supplied as latents and the result never says which track came back: "
         f"{result.warnings}"
+    )
+    assert any("audio FILE" in note for note in result.warnings), (
+        f"the latents route cannot mux the upload and must say what to change instead: "
+        f"{result.warnings}"
+    )
+    assert "supplied_audio" not in seen, (
+        f"there is no waveform on this route, so nothing may be handed to the writer as one: "
+        f"{seen.get('supplied_audio')!r}"
     )
 
 
@@ -594,20 +740,73 @@ def test_the_track_note_is_gated_on_exports_not_on_the_mode_id():
     Every audio-input mode exports audio today, so the gate inside
     ``_supplied_audio_note`` is unexercised end-to-end: deleting it leaves the
     whole suite green. It is not decoration. The note asserts a fact about a
-    file the run produced -- "the audio in this file is the model's" -- and a
-    future audio-input mode that exports video only would make that sentence
-    describe a track the user never receives.
+    file the run produced -- "the audio in this file is X" -- and a future
+    audio-input mode that exports video only would make that sentence describe a
+    track the user never receives.
 
     Deriving it from ``exports`` rather than from the mode id is what keeps the
     note from outliving the behaviour it describes, and this is the only thing
     that holds the derivation in place.
     """
-    assert generate_module._supplied_audio_note("audio_to_video", ("audio", "video"))
-    assert generate_module._supplied_audio_note("audio_to_audio", ("audio",))
-    assert generate_module._supplied_audio_note("some_future_mode", ("video",)) == (), (
-        "a mode that exports no audio would be told its file contains the model's audio"
+    for muxed in (True, False):
+        assert generate_module._supplied_audio_note(
+            "audio_to_video", ("audio", "video"), muxed=muxed
+        )
+        assert generate_module._supplied_audio_note(
+            "some_future_mode", ("video",), muxed=muxed
+        ) == (), "a mode that exports no audio would be told its file contains audio"
+        assert generate_module._supplied_audio_note("some_future_mode", (), muxed=muxed) == ()
+    assert generate_module._supplied_audio_note("audio_to_audio", ("audio",), muxed=False)
+
+
+def test_which_track_a_mode_gets_is_derived_from_exports_not_from_a_registry_flag():
+    """The scope of the mode-11 ruling, pinned as a predicate.
+
+    A boolean on ``ModeSpec`` would be forgotten by whoever adds the next
+    audio-input mode, and the failure would be silent: the new mode would ship
+    an empty AAC stream exactly as mode 11 did. Derived from ``exports``, it
+    cannot be forgotten -- a mode that writes a video container declared to
+    carry sound gets the substitution because that is the situation the
+    measurement covers.
+    """
+    muxes = generate_module._muxes_supplied_audio
+
+    assert muxes(("audio", "video")) and muxes(("video", "audio"))
+    assert not muxes(("audio",)), (
+        "an audio-only export has no container to mux into and is outside the ruling"
     )
-    assert generate_module._supplied_audio_note("some_future_mode", ()) == ()
+    assert not muxes(("video",)), "a video-only mode carries no audio track at all"
+    assert not muxes(()) and not muxes(None)
+    assert [m for m in MODE_IDS if muxes(modes.get_mode(m).exports)] == [
+        "text_to_audio_video",
+        "image_to_audio_video",
+        "image_text_to_audio_video",
+        "audio_to_video",
+    ], "the joint modes are the predicate's whole reach; only mode 11 ever supplies audio"
+
+
+def test_the_writer_refuses_a_substitute_track_for_a_mode_with_no_container(tmp_path):
+    """The scope, enforced at the layer that would otherwise drop it silently.
+
+    ``write_output`` is handed ``supplied_audio`` by exactly one caller today.
+    If a future one hands it for an audio-only export, ignoring it would return
+    the model's track under a note promising the user's -- the same
+    honest-and-useless shape this whole change is against.
+    """
+    from ltx25_studio import outputs
+    from ltx25_studio.errors import EncodeError
+
+    with pytest.raises(EncodeError) as caught:
+        outputs.write_output(
+            FakePipe()(),
+            run_dir=tmp_path / "run",
+            mode="audio_to_audio",
+            exports=("audio",),
+            sampling_rate=48000,
+            supplied_audio=outputs.SuppliedAudio(waveform=STUB_WAVEFORM, sampling_rate=16000),
+        )
+
+    assert "supplied audio" in str(caught.value)
 
 
 @pytest.mark.parametrize(

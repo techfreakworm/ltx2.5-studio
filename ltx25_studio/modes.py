@@ -123,8 +123,10 @@ _AUDIO_ONLY_NOTE = (
 _AUDIO_TO_VIDEO_NOTE = (
     "This mode encodes your audio into latents before generating, so it pays the audio "
     "encode on top of a normal video render. The file comes back with sound, and that "
-    "sound is the model's own track — generated jointly with the frames, not your upload "
-    "muxed back in. Your audio steered the render; it is not what you get back."
+    "sound is YOUR audio, muxed back in — because supplying audio suppresses the model's "
+    "own audio generation, so the track it would otherwise contribute is silent. Your "
+    "upload is length-matched to the video first, so what you get back is the same "
+    "waveform that steered the render."
 )
 
 
@@ -328,9 +330,51 @@ _SPECS = (
     # audio+video mode to keep it". **There is no such mode.** `audio_counterpart`
     # is None here, so the one mitigation the drop had pointed at nothing.
     #
-    # ✅ **RULED: the muxed track is the audio the model GENERATED, not the audio
+    # ⛔ **RULED, THEN OVERTURNED BY MEASUREMENT.** The six reasons below chose
+    # the model's generated track, and they are kept verbatim because five of
+    # them are still true and the sixth is the cost the new ruling accepts. What
+    # they could not weigh is a fact that did not exist when they were written.
+    #
+    # ✅ **A controlled discriminator on the live Space: supplying audio
+    # SUPPRESSES the model's own audio generation.** Same pipeline, same
+    # 512x960x121 geometry, same seed, one variable -- whether an audio input
+    # was given. Both files carried a well-formed 48 kHz stereo AAC track:
+    #
+    #     audio_to_video       (audio IN)   video+aac ✓   -88.3 dBFS   silence
+    #     text_to_audio_video  (no audio)   video+aac ✓   -24.2 dBFS   content
+    #
+    # 64 dB of separation. So on exactly the runs reason 1-6 govern, "the track
+    # that cannot silently mislead" is digital silence -- the same emptiness the
+    # original defect had, now wearing a stream header, which is arguably worse
+    # because it looks like a track until you play it.
+    #
+    # ✅ **RULED (this mode ONLY): mux the audio the user SUPPLIED.** He provided
+    # it, he expects it back, and the model's track is empty anyway. Reason 3 was
+    # a true statement about the code -- the reconciled waveform was a local in
+    # `generate._prepared_audio` and did not survive to export time -- and it is
+    # now false by construction: `_prepared_audio` returns it as an
+    # `outputs.SuppliedAudio`, captured after the reconcile and before the
+    # encode, carrying the UPLOAD's sample rate so reason 4 cannot bite either.
+    # Reason 5 is the price and it is paid knowingly: the file will look
+    # synchronised whether or not the render followed the audio. Reasons 1, 2 and
+    # 6 are unchanged and simply lost to a bigger fact.
+    #
+    # ⚠️ **Scope.** `audio_to_audio` (mode 10) and `video_to_audio` (mode 9) are
+    # NOT changed: they are audio-export modes whose artifact IS the model's
+    # track, and they are outside the ruling. Whether the same suppression makes
+    # mode 10's export silent is a real question that nothing has measured; it is
+    # recorded as open rather than answered by extension.
+    #
+    # The scope is enforced by `generate._muxes_supplied_audio`, which derives it
+    # from `exports` -- a video container declared to carry sound -- rather than
+    # from a flag on this spec, because a flag is the thing whoever adds the next
+    # audio-input mode forgets.
+    #
+    # ⛔ The superseded ruling, kept in full:
+    #
+    # ~~**RULED: the muxed track is the audio the model GENERATED, not the audio
     # the user supplied.** Both were defensible; the generated one is the one
-    # that cannot silently mislead. Six reasons, in the order that decided it:
+    # that cannot silently mislead.~~ Six reasons, in the order that decided it:
     #
     # 1. **`audio_to_audio` already answers this question.** Mode 10 takes the
     #    same audio input, through the same `_condition_builder(audio=True)`, on
@@ -373,7 +417,10 @@ _SPECS = (
     #    always said, while pointing at a sibling mode that does not exist.
     #
     # The user is TOLD which track they got, every run, through the warnings
-    # channel -- `generate._prepared_audio`. Silence is what the defect was.
+    # channel -- `generate._prepared_audio`. Silence is what the defect was, and
+    # that has not changed: the note now says the audio is his own AND says why,
+    # because "here is your audio back" without the suppression finding invites
+    # the next person to re-derive the six reasons and flip it again.
     ModeSpec(
         id="audio_to_video",
         label="Audio to video",

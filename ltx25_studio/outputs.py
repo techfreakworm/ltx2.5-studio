@@ -26,6 +26,19 @@ because the model is jointly audio-visual and has no video-off switch. So the
 audio is rendered either way, and when we discard it we say so: see
 :func:`dropped_audio_warning`.
 
+**One track in this module does not come from the model, and it is a caller's
+decision, not this module's.** :class:`SuppliedAudio` lets ``generate.py`` name
+the waveform the container must carry instead of the pipeline's own. It exists
+because the model's audio generation is *suppressed* when audio is supplied as
+input -- measured on the live Space at identical geometry and seed:
+``audio_to_video`` with audio in wrote a well-formed 48 kHz stereo AAC track at
+**-88.3 dBFS** (digital silence) while ``text_to_audio_video`` with no audio in
+wrote **-24.2 dBFS** of real content. 64 dB of separation, one variable. Muxing
+that empty track is the same emptiness wearing a stream header. This module
+still refuses to *invent* anything: the substitute waveform and its own sample
+rate both arrive from the caller, exactly like ``frame_rate`` and
+``sampling_rate`` do.
+
 **Audio is stereo and stays stereo.** The vocoder reports two output channels.
 Nothing here may mono-downmix: the channel count is read off the array that
 arrives and the container layout is *derived* from it (FFmpeg's ``"{n}c"``
@@ -103,6 +116,7 @@ __all__ = [
     "VIDEO_FILENAME",
     "VIDEO_PIXEL_FORMAT",
     "FrameStructure",
+    "SuppliedAudio",
     "directory_size",
     "dropped_audio_warning",
     "enforce_retention",
@@ -128,6 +142,37 @@ VIDEO_PIXEL_FORMAT = "yuv420p"
 #: vocoder produced rather than a re-compressed approximation of it.
 MUXED_AUDIO_CODEC = "aac"
 AUDIO_ONLY_CODEC = "pcm_s16le"
+
+
+@dataclass(frozen=True)
+class SuppliedAudio:
+    """The user's OWN waveform, to be muxed in place of the model's track.
+
+    **A pair, not two arguments, because the two must not drift.** The rate here
+    is the *upload's* rate, and it is emphatically not
+    ``vocoder.config.output_sampling_rate`` -- on this stack those are 16 kHz and
+    48 kHz respectively, and muxing a 16 kHz waveform at 48 kHz pitch-shifts it
+    silently, which is precisely the defect class :func:`_required` exists to
+    refuse. Carrying the waveform and its rate as one frozen record means the
+    writer cannot be handed one without the other.
+
+    **What it must contain: the RECONCILED waveform, never the raw upload.**
+    ``generate._prepared_audio`` reconciles a supplied file against the video
+    length before encoding it (untouched inside a +/-0.05 s tolerance, trimmed to
+    upstream's own latent grid when long, refused when short), and that same
+    reconciled waveform is what conditioned the render. Muxing the original file
+    instead would reintroduce at the output end exactly the desync ``2eaeb2c``
+    fixed at the input end -- a 10 s upload against a 5 s video conditions on 5 s
+    and would ship with 10 s of sound.
+
+    ``waveform`` is whatever ``audio.load_waveform`` returns (a torch tensor
+    shaped ``[channels, samples]``); it is typed loosely because this module is
+    importable with no torch present and :func:`_as_audio_planes` already owns
+    the conversion.
+    """
+
+    waveform: object
+    sampling_rate: int
 
 #: An audio array's channel axis is the short one. Above this, neither axis is
 #: plausibly channels and we refuse to guess rather than transpose a waveform
@@ -740,7 +785,15 @@ def dropped_audio_warning(mode: str) -> str:
 
 
 def _write_video(
-    frames, audio, target: Path, *, frame_rate, sampling_rate, include_audio: bool, mode: str = ""
+    frames,
+    audio,
+    target: Path,
+    *,
+    frame_rate,
+    sampling_rate,
+    include_audio: bool,
+    mode: str = "",
+    supplied_audio: SuppliedAudio | None = None,
 ) -> tuple[str, ...]:
     """Encode the frames, muxing the audio track only if the mode exports it.
 
@@ -749,6 +802,14 @@ def _write_video(
     dropping the audio track from a *joint* generation is the exact defect this
     module is written against. Dropping it from a **video-only** mode is the
     opposite case -- declared, intended, and reported rather than silent.
+
+    ``supplied_audio`` REPLACES the model's track, waveform and rate together
+    (:class:`SuppliedAudio`). It applies only where the container is going to
+    carry audio at all -- a video-only mode still drops what the model rendered
+    and still says so, because substituting there would put sound into a file
+    whose mode declares it has none. The substitution happens before the
+    contract check below, so a mode that exports audio is satisfied by the
+    supplied track even where the model returned nothing.
     """
     import av
 
@@ -762,6 +823,11 @@ def _write_video(
     )
     notes: list[str] = []
     planes = None
+    if supplied_audio is not None and include_audio:
+        # Both values, together, from the same record: see SuppliedAudio for why
+        # the rate cannot be left as the vocoder's.
+        audio = supplied_audio.waveform
+        sampling_rate = supplied_audio.sampling_rate
     if include_audio and audio is None:
         raise EncodeError(
             path=str(target),
@@ -875,6 +941,7 @@ def write_output(
     frame_rate=None,
     sampling_rate=None,
     warnings=None,
+    supplied_audio: SuppliedAudio | None = None,
     **extra,
 ) -> Path:
     """Encode the pipeline output into ``run_dir`` and return the artifact path.
@@ -894,6 +961,13 @@ def write_output(
     in the frames. Everything in it is also logged unconditionally, so the
     information survives a caller that does not pass a sink.
 
+    ``supplied_audio`` is the caller naming a waveform to carry INSTEAD of the
+    model's -- see :class:`SuppliedAudio`. It is a muxing instruction and
+    therefore only meaningful for a mode that writes a video container; handed
+    one for an audio-only export this raises rather than ignoring it, because a
+    caller that asked for the user's own track and silently received the model's
+    would have no way to find out.
+
     **Nothing measured about the frames can stop this write.** The structure
     detector is a statistical pre-filter and it is wrong about real, murky
     output by design; by the time it runs the user has already spent 35+
@@ -908,6 +982,17 @@ def write_output(
     wants_video = "video" in exports
     target = run_dir / (VIDEO_FILENAME if wants_video else AUDIO_FILENAME)
 
+    if supplied_audio is not None and not wants_video:
+        raise EncodeError(
+            path=str(target),
+            reason=(
+                f"mode {mode!r} declares exports={list(exports)} and writes no video container, "
+                f"so there is nothing to mux the supplied audio into. Refusing to drop it "
+                f"quietly: the caller asked for the user's own waveform and would otherwise "
+                f"receive the model's with nothing to say so"
+            ),
+        )
+
     try:
         if wants_video:
             notes = _write_video(
@@ -918,6 +1003,7 @@ def write_output(
                 sampling_rate=sampling_rate,
                 include_audio="audio" in exports,
                 mode=mode,
+                supplied_audio=supplied_audio,
             )
             if warnings is not None:
                 warnings.extend(notes)
@@ -928,7 +1014,12 @@ def write_output(
             # structure warnings), a muxed audio track would have been reported
             # as absent and every audio-exporting mode would have raised
             # EmptyOutputError on a file that was perfectly fine.
-            muxed_audio = audio is not None and "audio" in exports
+            # `supplied_audio` counts here for the same reason the model's track
+            # does: it is a track that ends up IN the container. Reading only
+            # `audio` would report the audio export as absent on exactly the runs
+            # this substitution exists for, and `generate._artifacts_for` would
+            # raise EmptyOutputError on a file that carries both streams.
+            muxed_audio = "audio" in exports and (audio is not None or supplied_audio is not None)
             written = ("video", "audio") if muxed_audio else ("video",)
         else:
             _write_audio(audio, target, sampling_rate=sampling_rate)

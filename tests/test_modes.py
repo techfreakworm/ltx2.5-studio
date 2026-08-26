@@ -282,6 +282,36 @@ def test_audio_to_video_is_not_treated_as_an_audio_only_mode():
     assert spec.skip_stage_2 is False
 
 
+def test_the_cost_note_agrees_with_which_track_the_run_will_actually_return():
+    """The annunciator is where the old ruling survived longest, so pin it here.
+
+    ``cost_note`` is shown before the button is pressed and ``generate``'s
+    warnings after -- two surfaces describing one fact, which is exactly the
+    shape that drifts. This asserts them against the same predicate rather than
+    against each other's wording: if ``_muxes_supplied_audio`` says the container
+    carries the user's own upload, the sentence the user reads beforehand has to
+    say so too. Before the flip it said the precise opposite.
+    """
+    from ltx25_studio import generate as generate_module
+
+    spec = modes.get_mode("audio_to_video")
+    assert generate_module._muxes_supplied_audio(spec.exports), (
+        "mode 11 is the mode the supplied-audio ruling is about; if this is False the "
+        "ruling has been disconnected from the mode it was made for"
+    )
+    note = spec.cost_note.lower()
+    assert "your audio" in note, (
+        f"the annunciator does not tell the user the sound will be his own: {spec.cost_note!r}"
+    )
+    assert "suppress" in note, (
+        f"the annunciator states the behaviour and not the reason for it, which is how "
+        f"`4683a57`'s six reasons get re-derived and this gets flipped back: {spec.cost_note!r}"
+    )
+    assert "model's own track" not in note, (
+        f"the annunciator still carries the superseded ruling's promise: {spec.cost_note!r}"
+    )
+
+
 # --------------------------------------------------------------------------
 # what the builders actually build
 # --------------------------------------------------------------------------

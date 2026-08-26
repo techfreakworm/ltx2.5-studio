@@ -283,6 +283,50 @@ def test_the_muxed_audio_keeps_every_channel(mode_id, tmp_path):
     )
 
 
+def test_a_supplied_upload_reaches_the_container_at_its_OWN_rate(tmp_path, monkeypatch):
+    """The mode-11 flip, end to end through the real ``av`` writer.
+
+    Every other test of this substitution stops at the injected-encoder seam,
+    and a fake accepts whatever it is handed -- which is the exact blind spot
+    this file exists for. So this one drives ``outputs.write_output`` for real
+    and opens the file back up.
+
+    The rate is the assertion that matters. The upload is 16 kHz and the
+    vocoder reports 48 kHz; those are the real numbers on this stack, they are
+    not interchangeable, and a container written at the wrong one is
+    pitch-shifted with no error anywhere. ``SuppliedAudio`` carries the waveform
+    and its rate as one record precisely so the writer cannot pick up the other.
+    """
+    from conftest import STUB_SAMPLING_RATE, STUB_WAVEFORM, FakeAudioVae
+
+    from ltx25_studio import audio as audio_module
+
+    monkeypatch.setattr(
+        audio_module, "load_waveform", lambda source: (STUB_WAVEFORM, STUB_SAMPLING_RATE)
+    )
+    pipe = VocoderPipe()
+    pipe.audio_vae = FakeAudioVae()
+
+    result = run_production(
+        "audio_to_video", tmp_path, pipe=pipe, audio="a-song-the-user-cares-about.wav"
+    )
+
+    with av.open(str(result.video_path)) as container:
+        stream = next(s for s in container.streams if s.type == "audio")
+        rate = stream.codec_context.sample_rate
+        samples = sum(frame.samples for frame in container.decode(stream))
+
+    assert rate == STUB_SAMPLING_RATE, (
+        f"the upload was muxed at {rate} Hz rather than its own {STUB_SAMPLING_RATE} Hz. "
+        f"{VOCODER_SAMPLING_RATE} Hz here is the vocoder's rate applied to somebody else's "
+        f"waveform -- a pitch-shifted track that reports no error."
+    )
+    assert samples > 0, (
+        f"mode 11 wrote an audio stream to {result.video_path} that decodes to zero samples. "
+        f"That is the defect this change exists to fix, reproduced by the fix itself."
+    )
+
+
 @pytest.mark.parametrize("mode_id", [m for m in MODE_IDS if modes.MODES[m].exports == ("audio",)])
 def test_an_audio_only_mode_writes_a_real_track_at_the_vocoders_rate(mode_id, tmp_path):
     """The audio-only export, demuxed: right rate, right channel count, real samples."""

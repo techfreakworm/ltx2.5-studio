@@ -970,6 +970,47 @@ def test_a_long_upload_is_trimmed_and_the_user_is_told(monkeypatch, tmp_path):
     assert pipe.audio_vae.mels[-1].shape[-1] == 77440
 
 
+def test_the_muxed_track_is_the_RECONCILED_waveform_not_the_raw_upload(monkeypatch, tmp_path):
+    """The half of the mode-11 flip that can be wrong without looking wrong.
+
+    Mode 11 now hands the user's own audio back, because the model's track is
+    suppressed whenever audio is supplied (-88.3 dBFS against -24.2 dBFS on the
+    live discriminator). The waveform that goes into the container must be the
+    one ``reconcile_waveform_with_video`` produced, not ``request.audio``: a 6 s
+    upload against a 4.84 s video conditions the render on 4.84 s, so muxing the
+    original would ship 6 s of sound over 4.84 s of picture -- reintroducing at
+    the output end precisely the desync ``2eaeb2c`` fixed at the input end.
+
+    The two are one line apart in ``_prepared_audio`` and both are in scope, so
+    nothing but this assertion distinguishes them.
+    """
+    pipe = _file_audio_pipe()
+    _patched_upload(monkeypatch, samples=96000)  # 6.0 s against a 4.84 s video
+    seen = {}
+
+    def spy_encoder(*args, **kwargs):
+        seen.update(kwargs)
+        return good_encoder(*args, **kwargs)
+
+    generate(
+        _audio_request(),
+        pipeline_factory=factory_for(pipe),
+        encoder=spy_encoder,
+        output_root=tmp_path,
+    )
+
+    supplied = seen.get("supplied_audio")
+    assert supplied is not None, "mode 11 muxes the user's audio and handed the writer none"
+    assert supplied.waveform.shape[-1] == 77440, (
+        f"the writer was handed a {supplied.waveform.shape[-1]}-sample waveform. 96000 is the "
+        f"RAW upload and would ship 6.00s of sound over a 4.84s video; 77440 is the reconciled "
+        f"one, which is what actually conditioned the render."
+    )
+    assert supplied.sampling_rate == 16000, (
+        f"the muxed rate must be the upload's, not the vocoder's: {supplied.sampling_rate}"
+    )
+
+
 def test_a_matching_upload_is_encoded_whole_with_no_note(monkeypatch, tmp_path):
     pipe = _file_audio_pipe()
     _patched_upload(monkeypatch, samples=77440)
@@ -1013,6 +1054,29 @@ def test_auto_duration_leaves_the_upload_length_alone(monkeypatch, tmp_path):
     )
     assert pipe.audio_vae.mels[-1].shape[-1] == 96000, "auto_duration must not trim"
     assert not any("trimmed" in w for w in result.warnings)
+
+
+def test_auto_duration_says_the_muxed_upload_could_not_be_reconciled(monkeypatch, tmp_path):
+    """"Could not check" must never travel as silence -- the check_mmap_backed rule.
+
+    Under automatic duration there is no ``num_frames`` to reconcile against, so
+    the waveform muxed into the container is the upload at its full length and
+    may run longer or shorter than the picture. It is still the better of the
+    two tracks -- the model's is suppressed -- but the user has to be able to
+    learn that this one run was not length-matched, and what to change.
+    """
+    pipe = _file_audio_pipe()
+    _patched_upload(monkeypatch, samples=96000)
+    result = generate(
+        _audio_request(auto_duration=True),
+        pipeline_factory=factory_for(pipe),
+        encoder=good_encoder,
+        output_root=tmp_path,
+    )
+
+    assert any("could NOT be reconciled" in w for w in result.warnings), (
+        f"the upload was muxed unreconciled and the result says nothing: {result.warnings}"
+    )
 
 
 def test_a_hub_staged_adapter_is_loaded_from_its_fetched_local_path(tmp_path):
