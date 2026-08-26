@@ -361,9 +361,9 @@ def on_generate_start(mode_id: str, enhance_prompt: Any = False) -> str:
     """Fires the instant the button is pressed, so the UI is never silent.
 
     Takes the enhance toggle as well as the mode because the two produce
-    genuinely different first steps: with enhancement on, the run starts with a
-    CPU prompt rewrite in the web process, before any GPU slot is reserved.
-    Defaulted so a caller that only knows the mode still gets a correct message.
+    genuinely different first steps: with enhancement on, the reservation opens
+    on a Gemma prompt rewrite rather than on denoising. Defaulted so a caller
+    that only knows the mode still gets a correct message.
     """
     try:
         return render.running(modes.get_mode(mode_id), enhancing=bool(enhance_prompt))

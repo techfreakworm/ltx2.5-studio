@@ -79,6 +79,7 @@ __all__ = [
     "check_mmap_backed",
     "backing_file",
     "estimate_duration",
+    "ENHANCE_DURATION_SECONDS",
     "LORA_DURATION_SECONDS",
     "gpu_decorator_kwargs",
     "host_has_cuda",
@@ -295,6 +296,23 @@ def will_use_gpu(spaces_module) -> bool:
 #: share one injection walk.
 LORA_DURATION_SECONDS = 60
 
+#: Reservation headroom for a run with prompt enhancement on, in seconds.
+#:
+#: **Sized for the DEGRADED case, not the happy one.** The enhancement itself is
+#: a 600-token greedy decode, ~1-2 s on the GPU. What this number is really
+#: covering is the first enhanced call in a container whose startup prefetch did
+#: not finish or did not succeed: that call pays the measured **88 s** Hub fetch
+#: inside its own reservation. ``enhance.prefetch`` is explicitly best-effort --
+#: it must never block readiness or fail startup -- so "the prefetch worked" is
+#: not something the estimator is allowed to assume.
+#:
+#: 120 covers 88 s of download, a sub-second load and the decode, with headroom.
+#: The asymmetry in the module docstring decides the rounding: reservation and
+#: billing are different meters, so an over-generous request costs
+#: schedulability and nothing at all in billing, while an under-generous one
+#: kills the run at the boundary after the user has already waited through it.
+ENHANCE_DURATION_SECONDS = 120
+
 
 def _request_field(params, name):
     """Read a field from the call as the LIVE dispatch actually shapes it.
@@ -346,6 +364,15 @@ def estimate_duration(**params) -> int:
         # injection walk happen once, before any denoising, so their cost is
         # additive -- it does not scale with the refinement chain.
         seconds = int(seconds) + LORA_DURATION_SECONDS
+    if _request_field(params, "enhance_prompt"):
+        # Additive for the same reason, and it genuinely has to be here: prompt
+        # enhancement used to run in the WEB process, outside the reservation
+        # entirely, and this estimator had nothing to say about it. It now runs
+        # INSIDE the worker (see `enhance.py`), so the time it takes is billed
+        # time -- and a reservation that does not know that gets the run killed
+        # at the boundary, which is a self-inflicted wound rather than a
+        # platform limit.
+        seconds = int(seconds) + ENHANCE_DURATION_SECONDS
     return int(seconds)
 
 

@@ -545,14 +545,72 @@ are plain torch with no CUDA or kernel dependency, which is what lets it run on 
 `Gemma4ForConditionalGeneration` must be named explicitly. `LTX25_PROMPT_ENHANCER_REPO`
 selects the repo; the bf16 build is one environment variable away.
 
-**What ships.** `ltx25_studio/enhance.py`, called from `generate()` **before the dispatch
-branch** — i.e. in the web process, on the CPU, outside the metered window — so an enhanced
-run reserves and bills exactly the same GPU-seconds as an unenhanced one. It is loaded and
-freed inside one call, so it never coexists with the 22B transformer. What it costs is
-**wall-clock**, and the UI caption says so rather than implying the feature is free. Failure
+**What ships.** `ltx25_studio/enhance.py`, called from `generate()` **below the dispatch
+branch** — i.e. inside the `@spaces.GPU` worker, on the GPU, within the metered window. It is
+loaded and freed inside one call, so it never coexists with the 22B transformer. Failure
 raises `PromptEnhancementError` naming the repository and the reason; it never falls through
 to the original prompt while the UI implies enhancement happened, and the prompt that was
 actually sent is quoted in the run report.
+
+> ⚠️ **That placement is itself a correction, and the reason is the transferable part.**
+> Enhancement first shipped **in the web process, on the CPU**, and the argument for it was
+> the disk argument above: run it outside the module-scope import phase and never move it to
+> CUDA, and ZeroGPU can never pack it. That argument was researched, checked against the
+> packer's source, and is **correct** — it is restated intact below, because it survives.
+>
+> What it was not was complete. Measured on the live Space, `text_to_video` at 256x256x9 —
+> the cheapest configuration that exists here:
+>
+> | run | wall |
+> |---|---|
+> | enhance OFF | 15.38 s |
+> | enhance ON, cold | 654.15 s (+638.8) |
+> | enhance ON, warm | 553.45 s (+538.1) |
+>
+> The cold/warm split isolates it. The 2.46 GB fetch takes 88 s and the weights load in under
+> a second, so the download is **not** the cost: ~538 s is the CPU decode of 600 greedy
+> tokens, about **0.9 s/token**. The number that justified the CPU placement was "1-2 s" — a
+> *GPU* figure applied to a *CPU* placement. 600 tokens in 2 s is 300 tok/s, which no CPU
+> does on a 5B-parameter model.
+>
+> **"Where does it run" has two axes — disk and latency — and only one of them was
+> optimised.** The disk axis was reasoned about carefully and got the right answer. The
+> latency axis was never measured at all, so a nine-minute wall shipped priced at two
+> seconds. A placement decision that answers one axis and is silent on the other is half a
+> decision, and the missing half is the one the user experiences. **This is the lesson that
+> should outlive the feature**: when a component moves for a resource reason, state what it
+> costs on *every* axis, and measure the ones you did not choose it for.
+
+**✅ The disk argument survives the move, and that is why the move is affordable.** Packing
+fires once per container at `demo.launch()`, over `cuda_aliases` registered during the
+module-scope import phase. Inside a `@spaces.GPU` call the forked worker has already run
+`torch.unpatch()` (`wrappers.py:147`), so a `.to("cuda")` there is a real H2D copy that is
+**never packed** — the in-repo precedent is `pipelines.py`, which moves the stage-2 upsampler
+and diffusion decoder to CUDA inside the worker for exactly this reason. The enhancer stays
+~2.5 GB in the HF cache, out of the snapshot and out of `preload_from_hub`, and gets CUDA
+speed: ~1-2 s of billed wall against ~85 s for a real generation, **under 5% overhead** where
+the CPU placement was +3500%.
+
+**What that costs, and what now pays for it.** Enhancement is inside the reservation, so
+`zerogpu.estimate_duration` adds `ENHANCE_DURATION_SECONDS` when the toggle is set — an
+enhanced run killed at the reservation boundary would be a self-inflicted wound — and the UI
+caption gives up "costs no quota" to be honest about "no longer costs nine minutes".
+
+**And the download is prefetched, because it would otherwise be billed.** Without it the
+first enhanced call in each container spends the 88 s Hub fetch *inside* the metered window:
+~176 GPU-seconds to move a file. `enhance.prefetch` pulls the weights into the HF cache at
+startup via `huggingface_hub.snapshot_download` — a **download only**, constructing no torch
+tensors, so there is nothing registered in `cuda_aliases` for `torch.pack()` to capture and
+the disk argument is untouched. `snapshot_download` rather than a per-file allow-list because
+`LTX25_PROMPT_ENHANCER_REPO` is a real lever: any filename list we hardcoded would be wrong
+the moment an operator pointed it at the bf16 build. It runs on a **daemon thread** and is
+**best-effort by contract** — it may never block `demo.launch()` and may never fail startup.
+A Space whose prefetch failed still starts, still serves un-enhanced generations, and merely
+pays the download on its first enhanced run: degraded, not broken. Which is also why the
+reservation increment is sized for the download rather than for the decode.
+`LTX25_PREFETCH_ENHANCER=0` declines the ~2.5 GB for a deploy that will never enable
+enhancement — it lands while `demo.launch()` is packing, which is the window
+`ZEROGPU_DISK_CAP_GB` is measured against.
 
 The settings, unchanged from what this section banked in advance and now imported from
 upstream rather than restated: `prompt_max_new_tokens=600`, **greedy decoding**
@@ -1261,6 +1319,8 @@ ltx25_studio/
   modes.py                   # §3.3 registry: 11 UI modes as data over the 4 real workflows
   generate.py                # §7.4 stage graph. OWNS the never-empty invariant (§5.3) and the
                              #   per-run output directory
+  enhance.py                 # §3.5 — the Gemma prompt rewrite. Loaded and freed inside one
+                             #   call, INSIDE the @spaces.GPU worker; startup weight prefetch
   outputs.py                 # mux video+audio, single-track export, 20 GB oldest-first eviction
   lora/
     inspect.py               # header-only safetensors parse; metadata + convention detection

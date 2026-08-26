@@ -27,6 +27,7 @@ except ImportError:  # local development, where ZeroGPU does not exist
 
     spaces = _zerogpu_bootstrap.local_spaces_stub()
 
+from ltx25_studio import enhance as enhance_module
 from ltx25_studio import generate as generate_module
 from ltx25_studio import outputs, pipelines, preflight, zerogpu
 from ltx25_studio.config import load_config
@@ -97,6 +98,32 @@ except Exception as _exc:  # noqa: BLE001 - a bad sweep must not stop startup
 if WILL_USE_GPU:
     pipelines.get_pipeline(pipeline="condition", device="cuda")
     pipelines.get_pipeline(pipeline="text2video", device="cuda")
+
+# The prompt enhancer's WEIGHTS, into the HF cache, on a daemon thread.
+#
+# Enhancement runs inside the `@spaces.GPU` worker now (see enhance.py for the
+# measurement that moved it there), which means the 88 s Hub fetch would be
+# BILLED on the first enhanced call in every container -- ~176 GPU-seconds spent
+# downloading a file. Pulling it here spends that on wall-clock nobody is
+# waiting on instead.
+#
+# ⚠️ It must not be in the packing window, and it is not: `snapshot_download`
+# writes blobs and constructs no torch tensors, so there is nothing registered
+# in `cuda_aliases` for the `torch.pack()` at `demo.launch()` to capture. Files
+# on disk are not packable state. This is what lets the weights be resident
+# before the first request without the enhancer re-entering the disk budget the
+# original web-process placement was chosen to protect.
+#
+# ⚠️ It must not delay readiness, and it does not: the thread is a daemon, so a
+# fetch still in flight blocks neither `demo.launch()` below nor process exit. A
+# failure is logged and swallowed -- the Space still starts, un-enhanced
+# generations are untouched, and the first enhanced run merely pays the download
+# itself. Degraded, not broken.
+#
+# CONFIG.prefetch_enhancer exists for the deploy that will never turn
+# enhancement on and would rather keep the ~2.5 GB of disk; see config.py.
+if WILL_USE_GPU and CONFIG.prefetch_enhancer:
+    enhance_module.start_prefetch(token=os.environ.get("HF_TOKEN"))
 
 # `size` is filtered against the installed spaces signature: the platform pins
 # its own version and lags PyPI, and passing an unknown kwarg raises TypeError

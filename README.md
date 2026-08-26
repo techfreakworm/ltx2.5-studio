@@ -188,12 +188,24 @@ you supply a reference frame — and then generates from the rewrite. The prompt
 sent is printed in the run report, because an enhancer that silently swaps your prompt is
 worse than none.
 
-**It costs no GPU quota.** The enhancer is `google/gemma-4-E2B-it-qat-mobile-transformers`
-(2.49 GB, public, ungated), loaded on the CPU in the **web process** — before the run
-reserves its ZeroGPU slot — and freed again in the same call, so it never coexists with the
-22B transformer. What it costs is your wall-clock: a 600-token greedy decode on CPU is not
-instant. Point `LTX25_PROMPT_ENHANCER_REPO` at `google/gemma-4-E2B-it` for the 10.28 GB
-bf16 build instead.
+**It costs a second or two of quota.** The enhancer is
+`google/gemma-4-E2B-it-qat-mobile-transformers` (2.49 GB, public, ungated), loaded on the
+**GPU inside the run's own reservation** and freed again in the same call, so it never
+coexists with the 22B transformer. Point `LTX25_PROMPT_ENHANCER_REPO` at
+`google/gemma-4-E2B-it` for the 10.28 GB bf16 build instead.
+
+> ⚠️ **It used to cost no quota at all, and that was the problem.** The rewrite first ran on
+> the CPU in the web process, outside the metered window, which made it genuinely free of
+> GPU-seconds — and took **+538 s of wall-clock**, measured, for a 600-token greedy decode at
+> ~0.9 s/token. On the GPU the same decode is ~1-2 s against ~85 s for a real generation:
+> under 5% overhead instead of a nine-minute wait. The full accounting, including why moving
+> it to CUDA does *not* put it back into ZeroGPU's disk budget, is in PLAN §3.5.
+
+The weights are prefetched into the Hub cache at startup on a background thread, so the first
+enhanced run in a container does not pay the 88 s download inside its reservation. It is
+best-effort: if the prefetch fails the Space still starts, un-enhanced runs are unaffected,
+and the first enhanced run is merely slow. Set `LTX25_PREFETCH_ENHANCER=0` to decline the
+~2.5 GB of startup download on a deploy that will never turn enhancement on.
 
 There is deliberately **no seed control** for it. LTX-2.5 enhancement decodes greedily, so
 `prompt_enhancement_seed` changes nothing — an advertised lever attached to nothing is a

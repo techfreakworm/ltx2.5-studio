@@ -461,19 +461,23 @@ def running(mode: Any, *, enhancing: bool = False) -> str:
     """Shown the moment the button is pressed, so the UI is never silent.
 
     ``enhancing`` changes the message because it changes what happens **first**.
-    With the toggle on, the run begins with a CPU prompt rewrite in the web
-    process -- before any slot is reserved -- and that can take a while. A
-    message saying "reserving a ZeroGPU slot" while the app is actually
-    downloading Gemma is the same class of small lie as a hidden control: it
-    describes something other than what is happening, right where the user is
-    waiting for it.
+    With the toggle on, the run reserves its slot and then spends the first
+    couple of seconds of it rewriting the prompt rather than denoising. A
+    message describing something other than what is happening, right where the
+    user is waiting for it, is the same class of small lie as a hidden control.
+
+    ⚠️ This copy said "on the CPU ... costs no quota — only time" until the
+    placement it described was measured: the CPU rewrite took ~538 s, so the
+    "only time" it cost was nine minutes. Enhancement now runs on the GPU inside
+    the reservation. It is no longer free, and it is no longer slow, and the
+    caption has to give up the first claim to be honest about the second.
     """
     if enhancing:
         return (
-            f"⏳ **Enhancing your prompt — {mode.label}.** Rewriting it with Gemma on the CPU "
-            f"first; this happens **before** a ZeroGPU slot is reserved, so it costs no quota "
-            f"— only time. The generation starts after it, and the prompt that was actually "
-            f"sent is reported with the result."
+            f"⏳ **Enhancing your prompt — {mode.label}.** Rewriting it with Gemma on the GPU "
+            f"first, inside this run's own reservation — a second or two of quota, not a "
+            f"separate wait. The generation starts straight after it, and the prompt that was "
+            f"actually sent is reported with the result."
         )
     return (
         f"⏳ **Running — {mode.label}.** Reserving a ZeroGPU slot, then loading, denoising and "

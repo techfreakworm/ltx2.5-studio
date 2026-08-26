@@ -200,11 +200,22 @@ sidecar file and the Space log only. The seed line now says what the seed is for
   for the bf16 `google/gemma-4-E2B-it`. Checked against the Hub, not assumed. The
   bf16 build is still one environment variable away for anyone who wants it.
 
-  ✅ **It runs in the WEB process, before dispatch, so it costs ZERO GPU-seconds.**
-  That is the whole design and it is asserted, not asserted-about: the request
-  that crosses the ZeroGPU fork already carries the rewritten prompt, and the
-  worker never enhances. What it costs instead is **wall-clock on the CPU**, and
-  the field caption says exactly that rather than implying the feature is free.
+  ⚠️ **It ran in the WEB process for zero GPU-seconds, and that was wrong.**
+  The caption said so, the tests asserted it, and the claim was true: the
+  request crossing the ZeroGPU fork already carried the rewritten prompt and the
+  worker never enhanced. What nobody measured was what the user waited through.
+  On the live Space, `text_to_video` 256x256x9 went from **15.38 s** to
+  **553.45 s warm** — the 88 s download is not the cost, the CPU decode of 600
+  greedy tokens at ~0.9 s/token is. "Costs no quota — only time" turned out to
+  mean nine minutes.
+
+  ✅ **It now runs on the GPU, inside the reservation**, at ~1-2 s against ~85 s
+  for a real generation. The caption gives up "free" to stop implying "fast",
+  and the running message no longer says the wait happens before a slot is
+  reserved, because it does not. **The lesson is the one worth keeping: "where
+  does it run" has two axes, disk and latency, and this build optimised one and
+  never measured the other.** A control whose cost is stated on one axis only is
+  the same shape as an inert lever — it speaks, and what it says is incomplete.
 
   ⚠️ **What the user must be able to see is the prompt that was actually sent.**
   The box still shows what they typed; without the run report quoting the

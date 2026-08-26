@@ -30,6 +30,7 @@ __all__ = [
     "QUANTIZATION_CHOICES",
     "ENV_OUTPUT_DIR",
     "ENV_OUTPUT_RETENTION_GB",
+    "ENV_PREFETCH_ENHANCER",
     "ENV_PROMPT_ENHANCER_REPO",
     "ENV_ZEROGPU_SIZE",
     "RuntimeConfig",
@@ -44,6 +45,7 @@ ENV_OUTPUT_DIR = "LTX25_OUTPUT_DIR"
 ENV_LORA_MAX_GB = "LTX25_LORA_MAX_GB"
 ENV_QUANTIZATION = "LTX25_QUANTIZATION"
 ENV_PROMPT_ENHANCER_REPO = "LTX25_PROMPT_ENHANCER_REPO"
+ENV_PREFETCH_ENHANCER = "LTX25_PREFETCH_ENHANCER"
 
 #: ``auto`` means "do not pass ``size`` at all". ZeroGPU promotes us to xlarge
 #: by itself once packed weights exceed its 42.00 GiB threshold, and passing the
@@ -100,8 +102,8 @@ QUANTIZATION_CHOICES = ("bf16", "int8")
 #: ``quantization_config.quant_method == "gemma"``, which ``transformers``
 #: >= 5.15.1 (already the floor in requirements.txt) registers as
 #: ``GemmaQuantizer``; the unpacking layers it installs are plain torch, with no
-#: CUDA or kernel dependency, which is what lets the enhancer run on the CPU in
-#: the web process.
+#: CUDA or kernel dependency, so the checkpoint runs on either device -- which is
+#: what let the enhancer start on the CPU and what lets it run on the GPU now.
 #:
 #: ⚠️ Its ``config.json`` has **no** ``architectures`` key, so ``AutoModel*``
 #: cannot dispatch on it. ``enhance.py`` therefore names
@@ -110,6 +112,28 @@ QUANTIZATION_CHOICES = ("bf16", "int8")
 #:
 #: Set this to ``google/gemma-4-E2B-it`` for the bf16 build.
 DEFAULT_PROMPT_ENHANCER_REPO = "google/gemma-4-E2B-it-qat-mobile-transformers"
+
+#: Fetch the enhancer's weights into the HF cache **at startup**, so the first
+#: enhanced generation in a container does not pay the download.
+#:
+#: **On by default, because the alternative is billed.** Enhancement now runs
+#: inside the ``@spaces.GPU`` worker (§3.5), so without a prefetch the first
+#: enhanced call in each container spends the measured **88 s** Hub fetch inside
+#: the metered reservation -- roughly 176 GPU-seconds, at the xlarge multiplier,
+#: to download a file. Defaulting this off would make the prefetch a feature
+#: nobody gets, which is the inert-lever shape pointed the other way.
+#:
+#: ⚠️ **Why it is switchable at all: disk.** The prefetch is ~2.5 GB for the QAT
+#: default, and it lands while ``demo.launch()`` is packing -- the exact window
+#: ``pipelines.ZEROGPU_DISK_CAP_GB`` is measured against, where the int8 packing
+#: peak already sits at 133.4-137.4 GB. An operator who knows this deploy will
+#: never enable enhancement can decline to spend that headroom, and gets the
+#: un-prefetched behaviour back: still working, just slower on first use.
+DEFAULT_PREFETCH_ENHANCER = True
+
+
+_TRUE = frozenset({"1", "true", "yes", "on"})
+_FALSE = frozenset({"0", "false", "no", "off"})
 
 
 def _choice(name: str, default: str, allowed: tuple[str, ...]) -> str:
@@ -120,6 +144,25 @@ def _choice(name: str, default: str, allowed: tuple[str, ...]) -> str:
     if value not in allowed:
         raise ConfigError(variable=name, value=raw, legal=allowed)
     return value
+
+
+def _flag(name: str, default: bool) -> bool:
+    """A boolean environment variable, validated as loudly as every other one.
+
+    ``bool(os.environ.get(name))`` would read ``"0"``, ``"false"`` and ``"no"``
+    as **true** -- an operator who set the variable to turn something off would
+    turn it on and get no complaint. So the accepted spellings are enumerated
+    and anything else raises, naming them.
+    """
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    value = raw.strip().lower()
+    if value in _TRUE:
+        return True
+    if value in _FALSE:
+        return False
+    raise ConfigError(variable=name, value=raw, legal=tuple(sorted(_TRUE | _FALSE)))
 
 
 def _number(name: str, default: float, *, minimum: float, integer: bool = False):
@@ -150,6 +193,7 @@ class RuntimeConfig:
     lora_max_gb: float
     quantization: str = DEFAULT_QUANTIZATION
     prompt_enhancer_repo: str = DEFAULT_PROMPT_ENHANCER_REPO
+    prefetch_enhancer: bool = DEFAULT_PREFETCH_ENHANCER
 
     @property
     def lora_max_bytes(self) -> int:
@@ -195,4 +239,5 @@ def load_config() -> RuntimeConfig:
         # refusal that cannot see whether the repo exists either.
         prompt_enhancer_repo=(os.environ.get(ENV_PROMPT_ENHANCER_REPO) or "").strip()
         or DEFAULT_PROMPT_ENHANCER_REPO,
+        prefetch_enhancer=_flag(ENV_PREFETCH_ENHANCER, DEFAULT_PREFETCH_ENHANCER),
     )

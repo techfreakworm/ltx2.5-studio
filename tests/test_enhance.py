@@ -25,6 +25,7 @@ and it moves **no weights** — repository metadata only.
 
 from __future__ import annotations
 
+import builtins
 import os
 import sys
 import types
@@ -271,18 +272,30 @@ def test_an_illegal_request_is_refused_before_the_enhancer_is_loaded():
 
 
 # --------------------------------------------------------------------------
-# the placement: web process, before dispatch, zero GPU-seconds
+# the placement: INSIDE the GPU worker, past the fork, on the GPU
 # --------------------------------------------------------------------------
+#
+# ⚠️ These two tests are inversions of the pair that shipped here, and the pair
+# they replace was not wrong about its own subject. It asserted that the request
+# crossing the fork already carried the rewritten prompt, because enhancement
+# ran in the WEB process where it cost no GPU-seconds. That was true, it was
+# tested, and it was measured at +538 s of user-visible wall-clock: a 600-token
+# greedy decode on a CPU. The cost argument was sound on the axis it considered
+# (disk, quota) and silent on the one that reached the user (latency).
+#
+# So the property being pinned flips: what must be true now is that the enhancer
+# runs on the far side of the dispatch, exactly once, and that its note still
+# reaches the user -- which is a harder guarantee than before, because the note
+# now has to cross the fork inside GenerationResult.warnings rather than being
+# grafted on afterwards.
 
 
-def test_enhancement_happens_before_the_gpu_entrypoint_is_dispatched_to(tmp_path, monkeypatch):
-    """The whole cost argument, as an assertion.
+def test_enhancement_happens_inside_the_gpu_worker(tmp_path, monkeypatch):
+    """The placement, as an assertion, pointed at where it now lives.
 
-    Enhancement inside the ``@spaces.GPU`` window would bill 2.49 GB of Gemma
-    against the same metered reservation as the video. Above the dispatch branch
-    it is web-process CPU work and the reservation is unchanged -- so what must
-    be true is that the request crossing the fork ALREADY carries the rewritten
-    prompt, and that the worker is never asked to enhance anything.
+    Enhancement is GPU work in the metered window, so the request crossing the
+    fork must still carry the ORIGINAL prompt -- the rewrite happens on the
+    other side -- and the enhancer must run exactly once, inside.
     """
     seen: list = []
 
@@ -307,30 +320,35 @@ def test_enhancement_happens_before_the_gpu_entrypoint_is_dispatched_to(tmp_path
     )
 
     assert len(seam.calls) == 1, (
-        f"the enhancer ran {len(seam.calls)} times; twice means the GPU worker enhanced again "
-        f"and the rewrite was billed"
+        f"the enhancer ran {len(seam.calls)} times; the call is unconditional but must still "
+        f"rewrite exactly once per generation"
     )
-    assert seen and seen[0].prompt == REWRITTEN, (
-        "the request that crossed the dispatch boundary still carried the original prompt"
+    assert seen and seen[0].prompt == ORIGINAL, (
+        "the request that crossed the dispatch boundary already carried the rewrite, so "
+        "enhancement is still happening in the web process -- which is the ~538 s CPU decode "
+        "this move exists to end"
     )
     assert any(REWRITTEN in note for note in result.warnings), (
-        "the note is computed in the web process and the result is built in the worker; "
-        "without _with_notes the user never sees which prompt ran"
+        "the note is now computed INSIDE the worker, so it has to survive the return leg in "
+        "GenerationResult.warnings; without that the user never sees which prompt ran"
     )
 
 
-def test_the_gpu_worker_never_enhances(tmp_path, monkeypatch):
-    """Belt and braces for the same property, from the other side.
+def test_the_gpu_worker_is_where_enhancement_actually_runs(tmp_path, monkeypatch):
+    """The same property from the other side: a request arriving inside the
+    worker with the toggle set IS enhanced there.
 
-    A request arriving inside the worker with the toggle still set must not be
-    re-enhanced -- it has already been rewritten once, and doing it again would
-    both cost GPU time and rewrite a caption that was never a user prompt.
+    This is the exact inverse of ``test_the_gpu_worker_never_enhances``, which
+    stood here and asserted ``seam.calls == []``. Keeping a worker-side guard at
+    all is the point -- without one, a future re-hoist of the call above the
+    dispatch branch would silently restore the CPU placement and nothing would
+    fail.
     """
     seam = Recorder()
     monkeypatch.setattr(enhance_module, "enhance", seam)
     token = generate_module._IN_GPU_WORKER.set(True)
     try:
-        generate_module.generate(
+        result = generate_module.generate(
             a_request(enhance_prompt=True),
             pipeline_factory=factory_for(FakePipe()),
             encoder=good_encoder,
@@ -339,7 +357,44 @@ def test_the_gpu_worker_never_enhances(tmp_path, monkeypatch):
         )
     finally:
         generate_module._IN_GPU_WORKER.reset(token)
-    assert seam.calls == []
+    assert [call["prompt"] for call in seam.calls] == [ORIGINAL]
+    assert any(REWRITTEN in note for note in result.warnings)
+
+
+def test_the_injected_enhancer_survives_the_dispatch(tmp_path, monkeypatch):
+    """The seam has to cross the branch, or it stops being a seam.
+
+    ``generate()`` forwards ``pipeline_factory`` and ``encoder`` to the
+    entrypoint; ``enhancer`` did not need forwarding while enhancement happened
+    before the branch. It does now, and the failure mode of forgetting is quiet
+    and expensive: the caller passes a fake, the worker ignores it, and reaches
+    for 2.5 GB of real Gemma over the network instead. Caught exactly this way.
+    """
+    forwarded: list = []
+
+    def dispatch(**kwargs):
+        forwarded.append(kwargs)
+        token = generate_module._IN_GPU_WORKER.set(True)
+        try:
+            return generate_module.generate(**kwargs)
+        finally:
+            generate_module._IN_GPU_WORKER.reset(token)
+
+    monkeypatch.setattr(generate_module, "_GPU_DISPATCH", dispatch)
+    seam = Recorder()
+    generate_module.generate(
+        a_request(enhance_prompt=True),
+        pipeline_factory=factory_for(FakePipe()),
+        encoder=good_encoder,
+        enhancer=seam,
+        output_root=tmp_path,
+        retention_bytes=10**9,
+    )
+    assert forwarded and forwarded[0]["enhancer"] is seam, (
+        "the dispatch payload dropped `enhancer`, so the injected seam is unused on any host "
+        "with an entrypoint registered"
+    )
+    assert seam.calls, "the worker never consulted the injected enhancer"
 
 
 # --------------------------------------------------------------------------
@@ -396,10 +451,16 @@ def test_the_toggle_is_hidden_for_modes_that_discard_the_prompt():
 def test_the_wait_announces_itself_as_a_prompt_rewrite_not_a_gpu_reservation():
     """The generic running message says "reserving a ZeroGPU slot".
 
-    With enhancement on that is not what happens first -- the app spends a
-    while downloading and running Gemma on the CPU, before any slot exists.
-    A status line describing something other than what is happening, exactly
-    where the user is waiting for it, is the same small lie as a hidden control.
+    With enhancement on that is not the whole story -- the first seconds of the
+    reservation go on rewriting the prompt rather than denoising. A status line
+    describing something other than what is happening, exactly where the user is
+    waiting for it, is the same small lie as a hidden control.
+
+    ⚠️ This test used to require the words "no quota" and "CPU" in the enhanced
+    message, and both were true of the placement it was written for. Both are
+    now false, so asserting them would pin a lie in place. The enhanced message
+    must still DIFFER and must still name the rewrite -- that part was never
+    about where it ran.
     """
     from ltx25_studio.ui import handlers
 
@@ -407,7 +468,25 @@ def test_the_wait_announces_itself_as_a_prompt_rewrite_not_a_gpu_reservation():
     enhancing = handlers.on_generate_start("text_to_video", True)
     assert plain != enhancing
     assert "quota" in plain
-    assert "no quota" in enhancing and "CPU" in enhancing
+    assert "Enhancing your prompt" in enhancing
+    assert "no quota" not in enhancing, (
+        "the enhanced message still tells the user enhancement is free. It runs inside the "
+        "reservation now and is billed like the rest of the run."
+    )
+
+
+def test_no_user_facing_copy_still_says_enhancement_is_free():
+    """The claim is gone from every surface, not just the one under test.
+
+    Three places said it -- the field caption, the running message and the
+    module that answers "where does this run" -- and a correction that lands on
+    two of three leaves the user reading the old promise wherever it survived.
+    """
+    from ltx25_studio.ui import fields
+
+    caption = fields.field_by_key("enhance_prompt").info
+    assert "NO extra GPU quota" not in caption and "costs a wait" not in caption, caption
+    assert "GPU" in caption, "the caption no longer says where the rewrite runs"
 
 
 def test_the_status_panel_shows_the_prompt_that_was_actually_sent(tmp_path, monkeypatch):
@@ -566,6 +645,18 @@ def upstream(monkeypatch):
     return types.SimpleNamespace(prepared=prepared)
 
 
+def _guard(target: str, replacement):
+    """An ``__import__`` that fails for exactly one module and defers otherwise."""
+    real = builtins.__import__
+
+    def _import(name, *args, **kwargs):
+        if name == target:
+            return replacement(name, *args, **kwargs)
+        return real(name, *args, **kwargs)
+
+    return _import
+
+
 def loader_for(model, processor):
     def _loader(repo_id):
         return model, processor
@@ -605,25 +696,54 @@ def test_decoding_is_greedy_and_bounded_at_the_planned_length(upstream):
     assert kwargs["no_repeat_ngram_size"] == 5
 
 
-def test_the_enhancer_never_leaves_the_cpu(upstream):
-    """The placement argument depends on this literally.
+def test_the_inputs_follow_the_model_onto_whatever_device_it_landed_on(upstream):
+    """Moving the model and not the tensors is a real failure mode, and a
+    **silent** one on a CPU-only host -- where both are right by accident.
 
-    A ``.to("cuda")`` here would initialise CUDA in the web process -- the hang
-    ``app.py`` warns about -- and it is also the only thing that could put the
-    enhancer back in the ZeroGPU packer's way, which is the whole cost argument.
+    Read off the model rather than re-probing torch, so an injected loader that
+    moved nothing still gets coherent inputs.
     """
-    assert enhance_module.ENHANCER_DEVICE == "cpu"
     model, processor = FakeModel(), FakeProcessor()
     enhance_module.enhance(ORIGINAL, repo_id="org/enhancer", loader=loader_for(model, processor))
-    # The tensors follow the model. Both are asserted because moving one and not
-    # the other is a real failure mode -- and a silent one on a CPU-only host.
     assert processor.calls, "the processor was never called"
     assert model.generate_kwargs, "the model never generated"
 
 
-def test_the_loaded_model_is_put_on_the_cpu_and_into_eval_mode(monkeypatch):
+def test_the_device_is_resolved_rather_than_pinned_to_the_cpu(monkeypatch):
+    """``ENHANCER_DEVICE = "cpu"`` used to be a module constant, and the
+    reasoning behind it was correct for where the call then lived: probing
+    ``torch.cuda`` from the web process is the blocked lazy init that *hangs*.
+
+    The call now runs inside the ``@spaces.GPU`` worker, past ``torch.unpatch``,
+    where CUDA is already up. A constant would pin a 5B-parameter model to the
+    device that took 0.9 s/token, for a reason that no longer applies -- so the
+    device is a resolution, and it answers "cuda" when there is one.
+    """
+    assert not hasattr(enhance_module, "ENHANCER_DEVICE"), (
+        "the CPU pin is back as a constant; enhancement runs on the GPU now"
+    )
+
+    torch = types.ModuleType("torch")
+    torch.cuda = types.SimpleNamespace(is_available=lambda: True)
+    monkeypatch.setitem(sys.modules, "torch", torch)
+    assert enhance_module.enhancer_device() == "cuda"
+
+    torch.cuda = types.SimpleNamespace(is_available=lambda: False)
+    assert enhance_module.enhancer_device() == "cpu"
+
+
+def test_a_host_without_torch_resolves_to_the_cpu_rather_than_raising(monkeypatch):
+    """The probe must never be the thing that breaks a run. A machine with no
+    torch, or a torch built without CUDA, enhances slowly -- which is the honest
+    answer for a machine that has nothing faster."""
+    broken = types.ModuleType("torch")  # no `.cuda` attribute at all
+    monkeypatch.setitem(sys.modules, "torch", broken)
+    assert enhance_module.enhancer_device() == "cpu"
+
+
+def test_the_loaded_model_is_put_on_the_resolved_device_and_into_eval_mode(monkeypatch):
     """Stated rather than inherited: a global default device must not be able to
-    move 2.5 GB of Gemma onto the GPU behind this module's back."""
+    decide where 2.5 GB of Gemma lands behind this module's back."""
     transformers = types.ModuleType("transformers")
     model, processor = FakeModel(), FakeProcessor()
     transformers.AutoProcessor = types.SimpleNamespace(
@@ -633,11 +753,70 @@ def test_the_loaded_model_is_put_on_the_cpu_and_into_eval_mode(monkeypatch):
         from_pretrained=lambda repo_id, **kwargs: model
     )
     monkeypatch.setitem(sys.modules, "transformers", transformers)
+    monkeypatch.setattr(enhance_module, "enhancer_device", lambda: "cuda")
 
     loaded, _ = enhance_module._load_enhancer("org/enhancer")
     assert loaded is model
     assert model.evaluated is True
-    assert model.moved_to == "cpu"
+    assert model.moved_to == "cuda", (
+        "the load ignored the resolved device, so the enhancer stays on the CPU inside the "
+        "worker and the move buys nothing"
+    )
+
+
+def test_the_freed_model_releases_vram_when_it_was_on_the_gpu(monkeypatch):
+    """``empty_cache`` matters now in a way it did not on the CPU: the other
+    tenant is the 22B transformer, and it is in the same VRAM.
+
+    Guarded on the MODEL's own device, never on ``torch.cuda.is_available()`` --
+    a parameter can only report cuda if CUDA was already initialised to put it
+    there, so reading it can never be what initialises it.
+    """
+    emptied: list = []
+    torch = types.ModuleType("torch")
+
+    class _NoGrad:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    torch.no_grad = _NoGrad
+    torch.cuda = types.SimpleNamespace(empty_cache=lambda: emptied.append(True))
+    monkeypatch.setitem(sys.modules, "torch", torch)
+    for name in ("diffusers", "diffusers.pipelines", "diffusers.pipelines.ltx2"):
+        monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
+    enhancement = types.ModuleType("diffusers.pipelines.ltx2.prompt_enhancement")
+    enhancement.clean_response = lambda text: text.strip()
+    enhancement._pad_inputs_for_attention_alignment = lambda inputs, pad_token_id=0: inputs
+    enhancement._prepare_enhance_image = lambda image, long_side=896: image
+    monkeypatch.setitem(sys.modules, enhancement.__name__, enhancement)
+    utils = types.ModuleType("diffusers.pipelines.ltx2.utils")
+    utils.LTX2_5_T2V_DEFAULT_SYSTEM_PROMPT = T2V_SYSTEM_PROMPT
+    utils.LTX2_5_I2V_DEFAULT_SYSTEM_PROMPT = I2V_SYSTEM_PROMPT
+    monkeypatch.setitem(sys.modules, utils.__name__, utils)
+
+    class OnCuda(FakeModel):
+        def parameters(self):
+            yield types.SimpleNamespace(device=types.SimpleNamespace(type="cuda"))
+
+    enhance_module.enhance(
+        ORIGINAL, repo_id="org/enhancer", loader=loader_for(OnCuda(), FakeProcessor())
+    )
+    assert emptied == [True], (
+        "a GPU-resident enhancer was dropped without emptying the CUDA cache, so its ~2.5 GB "
+        "can still be held when the transformer needs the VRAM"
+    )
+
+
+def test_a_cpu_enhancer_never_touches_torch_cuda_at_all(upstream):
+    """The other half of the same guard. ``upstream``'s fake torch has no
+    ``.cuda`` attribute, so any unguarded ``torch.cuda.empty_cache()`` on the
+    free path raises AttributeError and this fails."""
+    model, processor = FakeModel(), FakeProcessor()  # FakeParameter reports "cpu"
+    enhance_module.enhance(ORIGINAL, repo_id="org/enhancer", loader=loader_for(model, processor))
+    assert model.generate_kwargs, "the model never generated"
 
 
 def test_the_model_is_freed_before_the_call_returns(upstream):
@@ -696,6 +875,217 @@ def test_a_transformers_too_old_to_know_gemma_4_says_so(monkeypatch):
     message = str(caught.value)
     assert "org/nope" in message
     assert "5.15.1" in message, "the message must name the version floor it needs"
+
+
+# --------------------------------------------------------------------------
+# the prefetch: a download, at startup, that can fail without consequence
+# --------------------------------------------------------------------------
+#
+# Enhancement is inside the metered window now, so the 88 s Hub fetch would be
+# BILLED on the first enhanced call in every container -- ~176 GPU-seconds to
+# move a file. The prefetch spends that at startup instead. Three properties
+# make it safe to do that, and each is a test below: it downloads and does not
+# construct, it cannot fail the Space, and it cannot delay readiness.
+
+
+def _hub(monkeypatch, downloaded, *, boom=None):
+    """A fake ``huggingface_hub`` whose ``snapshot_download`` is observable."""
+    hub = types.ModuleType("huggingface_hub")
+
+    def snapshot_download(*, repo_id, token=None, **kwargs):
+        downloaded.append({"repo_id": repo_id, "token": token, **kwargs})
+        if boom is not None:
+            raise boom
+        return f"/cache/models--{repo_id.replace('/', '--')}/snapshots/deadbeef"
+
+    hub.snapshot_download = snapshot_download
+    monkeypatch.setitem(sys.modules, "huggingface_hub", hub)
+    return hub
+
+
+def test_the_prefetch_downloads_the_configured_repository(monkeypatch):
+    downloaded: list = []
+    _hub(monkeypatch, downloaded)
+    monkeypatch.setattr(enhance_module, "enhancer_repo_id", lambda: "org/enhancer")
+
+    path = enhance_module.prefetch(token="hf_secret")
+    assert downloaded == [{"repo_id": "org/enhancer", "token": "hf_secret"}]
+    assert path and "org--enhancer" in path
+
+
+def test_the_prefetch_follows_the_repo_lever_rather_than_a_hardcoded_name(monkeypatch):
+    """``LTX25_PROMPT_ENHANCER_REPO`` points the enhancer at any Hub repo, so a
+    prefetch that fetched a constant would warm the cache for a model this run
+    is never going to load -- paying the disk twice and the download twice."""
+    downloaded: list = []
+    _hub(monkeypatch, downloaded)
+    monkeypatch.setenv(config_module.ENV_PROMPT_ENHANCER_REPO, "google/gemma-4-E2B-it")
+
+    enhance_module.prefetch()
+    assert downloaded[0]["repo_id"] == "google/gemma-4-E2B-it"
+
+
+def test_the_prefetch_constructs_no_model_and_no_tensor(monkeypatch):
+    """**The whole disk argument, as an assertion.**
+
+    ZeroGPU packs tensors registered in ``cuda_aliases`` while the module scope
+    runs. A prefetch that called ``from_pretrained`` would build a real model
+    during exactly that window; a prefetch that only writes blobs cannot be
+    packed, because files on disk are not packable state. So: no transformers,
+    no torch, no ``from_pretrained`` -- reaching for any of them raises here.
+    """
+    downloaded: list = []
+    _hub(monkeypatch, downloaded)
+
+    for forbidden in ("torch", "transformers"):
+        module = types.ModuleType(forbidden)
+
+        def _explode(*args, **kwargs):
+            raise AssertionError(
+                "the prefetch touched the model stack; it must move bytes, not build models"
+            )
+
+        module.__getattr__ = _explode
+        monkeypatch.setitem(sys.modules, forbidden, module)
+
+    assert enhance_module.prefetch("org/enhancer") is not None
+    assert downloaded, "nothing was downloaded"
+
+
+def test_a_failed_prefetch_is_not_fatal_and_says_what_it_costs(monkeypatch, caplog):
+    """A Space that cannot reach the Hub at startup must still start.
+
+    The degraded outcome is one slow first enhanced call, not a dead Space and
+    not a dead un-enhanced path -- so this swallows, and the log has to say so,
+    because a silent swallow reads as a prefetch that worked.
+    """
+    _hub(monkeypatch, [], boom=OSError("connection reset by peer"))
+    with caplog.at_level("WARNING"):
+        assert enhance_module.prefetch("org/enhancer") is None
+    logged = caplog.text
+    assert "org/enhancer" in logged and "connection reset by peer" in logged
+    assert "un-enhanced" in logged, "the log does not say what still works"
+
+
+def test_a_missing_huggingface_hub_is_not_fatal_either(monkeypatch):
+    """Import failure is a failure like any other on this path."""
+
+    def _no_hub(name, *args, **kwargs):
+        raise ImportError("no huggingface_hub here")
+
+    monkeypatch.delitem(sys.modules, "huggingface_hub", raising=False)
+    monkeypatch.setattr(builtins, "__import__", _guard("huggingface_hub", _no_hub))
+    assert enhance_module.prefetch("org/enhancer") is None
+
+
+def test_the_prefetch_runs_on_a_daemon_thread_so_readiness_never_waits(monkeypatch):
+    """``app.py`` calls this before ``demo.launch()``. The fetch is ~88 s; doing
+    it inline would hold the Space unavailable for a minute and a half to
+    prepare an optional feature. A daemon thread also cannot keep the process
+    alive at exit, so a fetch still in flight does not delay a stop."""
+    downloaded: list = []
+    _hub(monkeypatch, downloaded)
+
+    thread = enhance_module.start_prefetch("org/enhancer", token="hf_secret")
+    assert thread.daemon is True, "a non-daemon prefetch can hold the process open at exit"
+    thread.join(timeout=10)
+    assert not thread.is_alive()
+    assert downloaded == [{"repo_id": "org/enhancer", "token": "hf_secret"}]
+
+
+def test_a_thrown_prefetch_never_escapes_the_thread(monkeypatch):
+    """An exception on a thread would not reach ``app.py`` anyway -- it would
+    print a traceback into the Space log and look like a startup crash. It is
+    handled at the source instead."""
+    _hub(monkeypatch, [], boom=RuntimeError("hub is down"))
+    thread = enhance_module.start_prefetch("org/enhancer")
+    thread.join(timeout=10)
+    assert not thread.is_alive()
+
+
+def test_app_gates_the_prefetch_on_the_config_flag_and_on_gpu_capability():
+    """~2.5 GB of startup download and disk, declinable.
+
+    It lands while ``demo.launch()`` is packing -- the window
+    ``ZEROGPU_DISK_CAP_GB`` is measured against -- so a deploy that will never
+    enable enhancement can keep the headroom. Read off app.py's source because
+    importing it a second time cannot re-run its module scope.
+    """
+    import ast
+
+    source = (PACKAGE_ROOT.parent / "app.py").read_text()
+    tree = ast.parse(source)
+    guarded = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.If) and "start_prefetch" in ast.dump(node)
+    ]
+    assert guarded, "app.py calls start_prefetch unconditionally, or not at all"
+    test = ast.dump(guarded[0].test)
+    assert "prefetch_enhancer" in test, "the config flag does not gate the prefetch"
+    assert "WILL_USE_GPU" in test, (
+        "a laptop with no GPU downloads 2.5 GB on every `python app.py`; the weight fetch "
+        "next to it is gated on capability for exactly this reason"
+    )
+
+
+def test_the_prefetch_flag_is_on_by_default_and_switchable(monkeypatch):
+    """Default ON, because the alternative is billed: without a prefetch the
+    first enhanced call in each container spends the download inside its own
+    reservation. A prefetch nobody gets by default would be the inert-lever
+    shape pointed the other way."""
+    monkeypatch.delenv(config_module.ENV_PREFETCH_ENHANCER, raising=False)
+    assert config_module.load_config().prefetch_enhancer is True
+
+    monkeypatch.setenv(config_module.ENV_PREFETCH_ENHANCER, "0")
+    assert config_module.load_config().prefetch_enhancer is False
+    monkeypatch.setenv(config_module.ENV_PREFETCH_ENHANCER, "false")
+    assert config_module.load_config().prefetch_enhancer is False
+    monkeypatch.setenv(config_module.ENV_PREFETCH_ENHANCER, "on")
+    assert config_module.load_config().prefetch_enhancer is True
+
+
+def test_an_unparseable_prefetch_flag_raises_rather_than_guessing(monkeypatch):
+    """``bool(os.environ.get(...))`` reads "0", "false" and "no" as TRUE. An
+    operator turning the prefetch off would turn it on and get no complaint,
+    which is the silent-misconfiguration class config.py exists to refuse."""
+    from ltx25_studio.errors import ConfigError
+
+    monkeypatch.setenv(config_module.ENV_PREFETCH_ENHANCER, "maybe")
+    with pytest.raises(ConfigError) as caught:
+        config_module.load_config()
+    message = str(caught.value)
+    assert config_module.ENV_PREFETCH_ENHANCER in message and "maybe" in message
+
+
+# --------------------------------------------------------------------------
+# the reservation: enhancement is billed now, so it must be reserved for
+# --------------------------------------------------------------------------
+
+
+def test_an_enhanced_run_reserves_more_than_an_unenhanced_one():
+    """The self-inflicted wound this prevents: enhancement moved inside the
+    metered window and the estimator did not follow, so the run gets killed at
+    the reservation boundary doing work the app itself asked for."""
+    from ltx25_studio import zerogpu
+
+    plain = zerogpu.estimate_duration(request=a_request())
+    enhanced = zerogpu.estimate_duration(request=a_request(enhance_prompt=True))
+    assert enhanced == plain + zerogpu.ENHANCE_DURATION_SECONDS
+    assert zerogpu.ENHANCE_DURATION_SECONDS >= 88, (
+        "the increment does not cover the measured 88 s Hub fetch. The prefetch is "
+        "best-effort by contract, so the estimator may not assume it succeeded"
+    )
+
+
+def test_the_increment_is_additive_rather_than_scaled_by_stage_2():
+    """The rewrite happens once, before any denoising, so its cost does not grow
+    with the refinement chain -- the same reasoning as LORA_DURATION_SECONDS."""
+    from ltx25_studio import zerogpu
+
+    staged = zerogpu.estimate_duration(request=a_request(enable_stage_2=True))
+    both = zerogpu.estimate_duration(request=a_request(enable_stage_2=True, enhance_prompt=True))
+    assert both == staged + zerogpu.ENHANCE_DURATION_SECONDS
 
 
 # --------------------------------------------------------------------------

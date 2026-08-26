@@ -410,8 +410,8 @@ FIELDS: tuple[Field, ...] = (
         info=(
             "Rewrites your line into a full LTX-2.5 caption first, using the model's own "
             "system prompt — image-aware when you supply a conditioning frame. It runs on the "
-            "CPU before the GPU is reserved, so it costs NO extra GPU quota; it costs a wait. "
-            "The prompt actually sent is reported with the run."
+            "GPU inside this run's reservation, so it adds a second or two of quota rather "
+            "than a separate wait. The prompt actually sent is reported with the run."
         ),
         group="prompt",
         default=False,

@@ -65,6 +65,7 @@ PLAN_MODULES = (
     "ltx25_studio.audio",
     "ltx25_studio.modes",
     "ltx25_studio.generate",
+    "ltx25_studio.enhance",
     "ltx25_studio.outputs",
     "ltx25_studio.lora.inspect",
     "ltx25_studio.lora.validate",
@@ -87,6 +88,16 @@ LAZY_MODULES = {
     "ltx25_studio.lora.apply": (
         "ltx25_studio/generate.py",
         "_apply_loras(), on every run whose request stages an adapter",
+    ),
+    # Note the "unconditionally" and the "every": the toggle is off by default,
+    # but the CALL is not conditional on it. `enhance_if_requested` returns
+    # immediately when the flag is clear, which is what keeps this module on the
+    # executed path of a default run rather than on the path of a checkbox
+    # almost nobody ticks. See test_the_module_runs_during_a_real_generation.
+    "ltx25_studio.enhance": (
+        "ltx25_studio/generate.py",
+        "enhance_if_requested(), called unconditionally on every generation, inside the "
+        "GPU worker wherever there is one",
     ),
     # Both reached through the package __init__: ui/handlers.py does
     # `from ..lora import validate_lora` on an upload and generate.py does
@@ -470,10 +481,23 @@ def run_generation(tmp_path, **overrides):
 
 @pytest.mark.parametrize(
     "module",
-    ["ltx25_studio.modes", "ltx25_studio.constraints", "ltx25_studio.outputs"],
+    [
+        "ltx25_studio.modes",
+        "ltx25_studio.constraints",
+        "ltx25_studio.outputs",
+        # `enhance` is on this list even though the toggle is off by default,
+        # and that is the point rather than an oversight. `generate()` calls
+        # `enhance_if_requested` unconditionally and it returns immediately when
+        # the toggle is off, precisely so the module is not one that only a
+        # non-default checkbox reaches -- the state four of this build's
+        # blockers shipped in. Gating the call on the flag would be the obvious
+        # tidy-up and would put the module straight back into that class, with
+        # nothing failing. This is what fails.
+        "ltx25_studio.enhance",
+    ],
 )
 def test_the_module_runs_during_a_real_generation(module, tmp_path):
-    """These three are on the path of every single run, with no conditions on it."""
+    """These are on the path of every single run, with no conditions on it."""
     ran = executed_package_files(lambda: run_generation(tmp_path))
     assert module_file(module) in ran, (
         f"{module} never executed during a complete generate() call. It is imported, so a "

@@ -155,6 +155,7 @@ EXPECTED_MODULES = (
     "audio.py",
     "modes.py",
     "generate.py",
+    "enhance.py",
     "outputs.py",
     "lora/inspect.py",
     "lora/validate.py",
