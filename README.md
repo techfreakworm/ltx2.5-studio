@@ -284,7 +284,7 @@ This is metered, and the meter is the resource you will actually run out of.
 | | |
 |---|---|
 | Hardware | NVIDIA RTX PRO 6000 Blackwell Server Edition (sm_120), not the A10G the id string implies |
-| Tier | **`xlarge`** — forced: packed bf16 weights are 67.23 GiB and the promotion threshold is 42.00 GiB |
+| Tier | **`xlarge`** — set explicitly via `LTX25_ZEROGPU_SIZE`. ⛔ Not "forced" by the packing threshold; see the 2026-08-27 note below |
 | Multiplier | **2×**. A 75-second run costs ~150 GPU-seconds |
 | PRO quota | 2400 GPU-seconds/day → **~16 runs/day** |
 
@@ -304,6 +304,17 @@ This is metered, and the meter is the resource you will actually run out of.
 > in every mode. Fixed at `eb1aa9f`: 316 of 1660 Linears spared, names read off
 > the real checkpoint, `llm_int8_threshold` untouched at its 6.0 default. The
 > packing arithmetic above is unaffected — ~51.1 GB and `xlarge` still hold.
+>
+> **⛔ Updated 2026-08-27 — the tier held, the mechanism did not, and the Space
+> had been running on half a GPU the whole time.** Both notes above reason that
+> packing past the 42.00 GiB threshold makes `xlarge` automatic. It does not.
+> The promotion sets a variable that only the *duration* estimator reads; the
+> `gpuSize` the scheduler actually allocates on is sent only when the size is
+> passed **explicitly**, and `LTX25_ZEROGPU_SIZE=auto` passes nothing. Measured
+> from inside the worker: **47.375 GiB before, 94.971 GiB after** setting
+> `xlarge`. Everything this project has ever measured on the Space — including
+> the stage-2 failure at 704×480×49, which needed 55.906 GiB — happened on the
+> smaller partition. Full trace in `docs/MIG_ALLOCATOR_SIGHTINGS.md`.
 
 Two consequences worth knowing as a user:
 

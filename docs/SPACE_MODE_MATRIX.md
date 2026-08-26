@@ -803,18 +803,19 @@ upload, download and client overhead, none of which is GPU time.
 | 10 | ⚠️ **The quota ledger's history begins mid-day** (§7). It reports 67.252 GPU-s for a day whose real bound is ~413, because it was installed after the matrix ran. The figure is accurate for what it observed and misleading if quoted as a daily total; nothing in its output says where its history starts. | ⏸️ open |
 | 11 | ⛔ **RECALIBRATE THE STRUCTURE DETECTOR AGAINST POST-FIX ARTIFACTS** (2026-08-25). `e54477c`'s SR/HF thresholds were fitted to a "real" population of eight banked artifacts that were all colour static, and one flat-grey failure. It therefore separates *flat* from *everything else* and does not separate static from picture: SR 0.9183 (static) against 0.9961–0.9968 (the post-fix photograph), with the 0.70 gate below both. The photograph's HF (0.075–0.133) sits **outside** the band the table calls real (0.147–0.386). The detector's conclusion is unaffected — it never promotes — but its numbers now describe the wrong two populations. | ⏸️ open |
 | 12 | ⏸️ **The post-fix eleven-mode matrix** — every mode re-run against `e3b5333` at a shippable config, with a frame from each looked at. §10 is where it goes. Until it lands, the only output this project has ever verified as an image is the single post-fix comparison frame. | ⏸️ running |
-| 13 | ⏸️ **The NVML allocator assert has now been seen THREE times, and the record held them apart** (2026-08-27). R3's VAE decode and R4b's diffusion decoder (both 2026-08-25, `SPACE_SESSION_2026-08-25.md` §4/§5) and the first enhanced generation in a fresh worker (2026-08-27) all died on `NVML_SUCCESS == r INTERNAL ASSERT FAILED at CUDACachingAllocator.cpp:1165`. Collected side by side in [`MIG_ALLOCATOR_SIGHTINGS.md`](MIG_ALLOCATOR_SIGHTINGS.md) with the shared shape stated as a **hypothesis, explicitly not established** — this partition may mishandle a large allocation that follows another large allocation. **Deliberately not being chased**: sighting 3's premise disappears if the enhancer is made resident, and every question is blocked on a headroom number nobody has. `0a4ddbb` now reports peak VRAM (allocated / reserved / total, split by phase) on every generation, so one flagship run settles whether there was room. | ⏸️ open, parked by ruling |
+| 13 | ⏸️ **The NVML allocator assert has now been seen THREE times, and the record held them apart** (2026-08-27). R3's VAE decode and R4b's diffusion decoder (both 2026-08-25, `SPACE_SESSION_2026-08-25.md` §4/§5) and the first enhanced generation in a fresh worker (2026-08-27) all died on `NVML_SUCCESS == r INTERNAL ASSERT FAILED at CUDACachingAllocator.cpp:1165`. Collected side by side in [`MIG_ALLOCATOR_SIGHTINGS.md`](MIG_ALLOCATOR_SIGHTINGS.md) with the shared shape stated as a **hypothesis, explicitly not established** — this partition may mishandle a large allocation that follows another large allocation. **Deliberately not being chased**: sighting 3's premise disappears if the enhancer is made resident, and every question is blocked on a headroom number nobody has. `0a4ddbb` now reports peak VRAM (allocated / reserved / total, split by phase) on every generation, so one flagship run settles whether there was room. **→ ✅ IT DID, AND THE ANSWER WAS THE PARTITION (2026-08-27). The first run to print `total_memory` read 47.375 GiB — ZeroGPU's `large` — where the whole build assumed `xlarge`'s 94.971 GiB. `LTX25_ZEROGPU_SIZE=auto` sends no `gpuSize` at all, and the packer's own promotion never leaves `get_duration_seconds`. R4b is RETIRED by measurement: re-run on `xlarge` it PASSES at 53.08 s with peak 55.906 GiB reserved — 8.5 GiB more than the entire old partition, so it was arithmetically impossible and always would have been. ⏸️ The other two sightings are NOT retired: R3's untiled path is consistent-but-permanently-untestable (tiling is unconditional since `cdb3211`, and a tiling-off toggle was refused), and the enhancer sighting is pending the residency change. The single-cause account is SUPPORTED, NOT PROVEN.** | ✅ root cause found · ⏸️ 2 of 3 sightings unretired |
 
-### ⛔ Item 6 is the THIRD instance of one defect class, and that is the finding
+### ⛔ Item 6 was the THIRD instance of one defect class. There are now FOUR, and the fourth cost half a GPU
 
-An advertised guard wired to nothing has now been found three times in this
-build, by three unrelated routes:
+An advertised guard wired to nothing has now been found four times in this
+build, by four unrelated routes:
 
 | | the guard | how it was inert | how it was caught |
 |---|---|---|---|
 | 1 | `LTX25_TEXT_ENCODER_PRECISION` / `LTX25_TRANSFORMER_PRECISION` | not a `RuntimeConfig` field at all — never resolved, validated or logged | mutation test, after the value had already been written into a findings doc as a live lever 📄 |
 | 2 | `--quota-ceiling` | per-invocation; five invocations each announced **FITS** knowing nothing of the other four | reading the runner's own output across runs |
 | 3 | `audio.validate_audio_latents_against_video` | exported, documented, **zero callers** | inspection, not by this matrix |
+| 4 ⛔ | `LTX25_ZEROGPU_SIZE=auto`, and the "ZeroGPU auto-promotes us" belief resting on it | the promotion **fires** and sets `_default_gpu_size`, which is read by one function (`get_duration_seconds`) and feeds one branch (the duration multiplier). It never reaches the `gpuSize` the scheduler allocates on. ✅ The Space ran on `large`/47.375 GiB for its entire life while four documents asserted `xlarge`/94.971 GiB | a peak-VRAM probe added for an unrelated reason (`0a4ddbb`) printing `total_memory` for the first time |
 
 > **Status of the three, read back 2026-08-25.** Instance 3 is **closed** —
 > wired at `59cfa6e` (follow-up #6). Instance 2 was closed at `62d612f` (the
@@ -829,12 +830,27 @@ build, by three unrelated routes:
 safety it never checked** — which is strictly worse than its absence, because an
 inert *lever* merely does nothing while an inert *report* actively tells you that
 you are safe. `PLAN.md` states the rule for levers already: *"an advertised lever
-attached to nothing is worse than no lever at all."* Three instances say the rule
+attached to nothing is worse than no lever at all."* Four instances say the rule
 needs a **test-shaped** counterpart, not another restatement.
+
+> ### ⛔ Instance 4 is a different animal and it deserves its own sentence
+>
+> The first three were **our** guards, in **our** code, which a mutation test or
+> a caller count can reach. The fourth was a claim about the **vendor's** code —
+> that `startup()`'s promotion reaches the scheduler — believed by four documents
+> in this repo, each citing the others, none of which had followed the value past
+> the function that sets it. No test we could write against our own package would
+> have caught it. What caught it was a number printed from inside the worker.
+>
+> ⏸️ **The generalisation this one implies, and nobody has run:** every remaining
+> claim in this repo of the form *"the platform does X for us automatically"*,
+> traced to the call that would actually **observe** X rather than the call that
+> sets it. Reading a source and reading a source *to the end of the value's life*
+> are different acts, and only one of them is evidence.
 
 ⏸️ **The cheap generalisation nobody has run:** every guard in this package that
 is exported and documented, checked for callers. #3 was found by eye. Nothing
-says it is the last one, and two of these three were invisible to a green gate.
+says it is the last one, and three of these four were invisible to a green gate.
 
 ---
 

@@ -20,16 +20,37 @@ several of its rules are silent-failure rules.
     import**, which on a Space means the app simply never starts and looks like
     a mysterious failure rather than a version problem.
 
-    We do not need it anyway: ZeroGPU's ``startup()`` packs the weights and, if
-    the total exceeds its 42.00 GiB threshold, sets ``_default_gpu_size`` to
-    ``xlarge`` itself. Ours is 67.23 GiB, so we are auto-promoted regardless --
-    passing ``size`` neither avoids nor incurs the 2x quota cost.
+    ⛔ **What used to be written here was wrong, and it cost this build half its
+    GPU.** The claim was: *"we do not need it anyway -- ZeroGPU's ``startup()``
+    packs the weights and, past its 42.00 GiB threshold, sets
+    ``_default_gpu_size`` to ``xlarge`` itself, so we are auto-promoted
+    regardless."* The promotion is real and it does fire. It **does not reach the
+    scheduler.** ``default_gpu_size()`` has exactly one consumer --
+    ``client.py:109``, inside ``get_duration_seconds`` -- where it rebinds a
+    *local* that feeds one branch: the ``duration_factor`` multiplier at
+    ``client.py:111-112``. ``schedule()`` then forwards its **own** ``gpu_size``
+    (still ``None``) to ``api.py:112-113``, which sends ``gpuSize`` **only when it
+    is not None**. So ``auto`` sent no size at all and the platform allocated its
+    default, ``large``: **47.375 GiB measured, against the 94.971 GiB of
+    ``xlarge``.** The app ran its entire life on half a GPU, was reserved for as
+    though it were on the whole one, and nobody noticed until a run finally
+    printed ``total_memory``. Four-hop trace and the arithmetic:
+    ``docs/MIG_ALLOCATOR_SIGHTINGS.md`` §1.
 
-    So: build the decorator kwargs defensively by checking
+    So ``size`` is NOT optional, and ``LTX25_ZEROGPU_SIZE`` must be set to a real
+    value -- the Space now runs ``xlarge``. The defensive construction below is
+    what makes that safe: build the decorator kwargs by checking
     ``inspect.signature(spaces.GPU).parameters``, include ``size`` only if the
     running ``spaces`` accepts it, log the detected version and whether it was
     passed, and log the size we actually got after packing so the quota cost is
     visible rather than inferred. Same treatment for any other newer kwarg.
+
+    ⚠️ **And note what the filter does on an old ``spaces``: it silently drops
+    ``size``, which is exactly the failure above.** It trades an import-time
+    ``TypeError`` -- an unexplained dead Space -- for a half-size GPU that runs
+    fine and says nothing. That is still the right trade, because one is
+    recoverable by reading a log and the other is not, but it is a trade and not
+    a free lunch. The startup log line is the only thing that distinguishes them.
 
   * **Never return CUDA tensors** across the boundary. Unpickling one in the main
     process triggers a blocked lazy CUDA init and THE CALL HANGS -- no error, no
@@ -479,9 +500,20 @@ def gpu_decorator_kwargs(gpu_callable, **kwargs) -> dict:
     import**, which on a Space looks like a mysterious startup failure rather
     than a version problem.
 
-    Dropping ``size`` costs nothing: ZeroGPU's own ``startup()`` promotes to
-    xlarge past its 42.00 GiB threshold and our packed weights are 67.23 GiB, so
-    the kwarg neither avoids nor incurs the 2x quota cost.
+    ⛔ **Dropping ``size`` does NOT cost nothing, whatever this docstring used to
+    say.** The old text claimed ZeroGPU's ``startup()`` promotion made the kwarg
+    redundant. It does not: the promoted value is read only by
+    ``get_duration_seconds`` (``client.py:109``) and never reaches the
+    ``gpuSize`` parameter the scheduler actually allocates on
+    (``api.py:112-113``). Sending no size got us ``large`` -- ✅ 47.375 GiB
+    measured, half of ``xlarge``'s 94.971 GiB -- for the life of the project. See
+    the module docstring and ``docs/MIG_ALLOCATOR_SIGHTINGS.md`` §1.
+
+    This filter therefore has a **silent** failure mode as well as the loud one
+    it was built for: against a ``spaces`` too old for ``size``, it drops the
+    kwarg and the Space runs at half capacity rather than not starting. Still the
+    right trade -- a half-size GPU is diagnosable and a dead import is not -- but
+    the caller must log what was passed, which ``app.py`` does.
     """
     try:
         accepted = inspect.signature(gpu_callable).parameters

@@ -392,7 +392,7 @@ first-contact.** All of Part A is **HOST-PROVEN / ZEROGPU-PENDING**.
 | | |
 |---|---|
 | PRO quota | **2400 GPU-seconds/day** — **verified**: `pro_quota_minutes = 40` at `spaces/zero/client.py:190`. Fixed 24 h window from first use |
-| Our tier | **`xlarge`** — forced, because packed weights are 67.23 GiB and `xlarge_threshold` is **42.00 GiB exactly** (`45097156608` bytes, **verified in the platform's own `spaces/zero/configs.json`**). *Annotation (2026-08-25): the live Space packs **~51.1 GB of int8** weights, not 67.23 GiB of bf16 — still over the threshold, so the tier conclusion stands on the new number* |
+| Our tier | ⛔ **`xlarge` — but only since 2026-08-27, and NOT because it was "forced".** The original claim: *"forced, because packed weights are 67.23 GiB and `xlarge_threshold` is 42.00 GiB exactly (`45097156608` bytes, verified in the platform's own `spaces/zero/configs.json`)"*, annotated 2026-08-25 to *"~51.1 GB of int8, still over the threshold, so the tier conclusion stands"*. The threshold reading was right and the conclusion did not follow. Crossing `xlarge_threshold` sets `_default_gpu_size`, which is read **only** by `get_duration_seconds` (`client.py:109`) and never reaches the `gpuSize` the scheduler allocates on (`api.py:112-113`). ✅ With `LTX25_ZEROGPU_SIZE=auto` the Space ran on **`large`, 47.375 GiB**, measured from inside the worker. It now runs `xlarge` — ✅ 94.971 GiB, also measured — because the size is passed **explicitly**. [`MIG_ALLOCATOR_SIGHTINGS.md`](MIG_ALLOCATOR_SIGHTINGS.md) §1 |
 | Multiplier | **assumed 2×** — ⚠️ **UNVERIFIED.** A 75 s run is budgeted at 150 GPU-seconds |
 | Practical ceiling | **~16 runs/day** |
 | **HARD STOP** | **1920 GPU-seconds (80%)** |
@@ -435,6 +435,21 @@ One trap from PLAN §5.8, now **confirmed at source**: `large` applies a hidden
 gates it on `gpu_size != 'xlarge'`, so it does **not** apply to us. The claim that `xlarge`
 "doubles the request instead" is the unverified half — see the warning above. And the maximum duration is a **server-side, tier-dependent, unpublished cap** —
 discover it, never hardcode it.
+
+> ### ⛔ Annotation (2026-08-27): "it does not apply to us" was accidentally right, for a reason that was catastrophically wrong
+>
+> The paragraph above is correct that the 1.5× never applied. What it did not
+> know is *why*: `get_duration_seconds` falls back to `default_gpu_size()`, which
+> `startup()` had promoted to `xlarge`, so the multiplier branch was skipped —
+> while the scheduler, which reads a different variable entirely, was handing us
+> a **`large` partition**. ✅ 47.375 GiB, measured.
+>
+> **We were reserved as `xlarge` and allocated as `large`, simultaneously, from
+> the same call.** Every reservation figure in this section is therefore sound
+> and every hardware assumption underneath it was not. This is the sharpest
+> illustration available of why "the platform does X for us automatically" has to
+> be traced to the call that *observes* X, not to the call that *sets* it.
+> [`MIG_ALLOCATOR_SIGHTINGS.md`](MIG_ALLOCATOR_SIGHTINGS.md) §1.
 
 ---
 

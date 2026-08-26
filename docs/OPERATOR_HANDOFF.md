@@ -435,12 +435,23 @@ of these questions and changed the answer to one of them:**
   `gpu_decorator_kwargs`'s signature filter and raised **no import-time
   `TypeError`**. That is the risk PLAN §5.8 actually named — the platform pins
   its own `spaces` and lags PyPI — so this is a real ✅ **on its own terms**.
-- ⏸️ **An explicit `size` value — never passed.** `app.py:107` sends
-  `size=None` whenever `LTX25_ZEROGPU_SIZE` is `auto`, which is its default and
-  what the Space runs. **ZeroGPU chose, not us.** ⚠️ It chose `xlarge` *by
-  inference* — packed 51.1 GB exceeds the documented 42.00 GiB threshold 📄 —
-  **not by us reading it back**, because the endpoint that would confirm it is
-  the same one that 404s for quota.
+- ⛔ **An explicit `size` value — never passed, and THAT WAS THE BUG.**
+  **→ RESOLVED (2026-08-27), and the inference above was wrong.** `app.py` sent
+  `size=None` whenever `LTX25_ZEROGPU_SIZE` was `auto`, which was its default and
+  what the Space ran. The reasoning recorded here — *"ZeroGPU chose `xlarge` by
+  inference, packed 51.1 GB exceeds the 42.00 GiB threshold"* — was the fourth
+  document in this repo to assert it and none of the four had followed the
+  promoted value past the function that sets it. It never reaches the scheduler:
+  `default_gpu_size()` is consumed only by `get_duration_seconds`
+  (`client.py:109`) and feeds only the duration multiplier, while `gpuSize` is
+  sent to the platform only when the *decorator's* size is not None
+  (`api.py:112-113`). ✅ **`auto` therefore ran the Space on `large` —
+  47.375 GiB — for its entire life, instead of `xlarge`'s 94.971 GiB.** Measured
+  from inside the worker, both before and after. `LTX25_ZEROGPU_SIZE` is now
+  `xlarge`. Full trace: [`MIG_ALLOCATOR_SIGHTINGS.md`](MIG_ALLOCATOR_SIGHTINGS.md) §1.
+  ⚠️ Note the exact shape of the error, because it is the interesting part: the
+  *reservation* really was computed as `xlarge` (no 1.5× `duration_factor`). The
+  hardware was `large`. We were priced as one and allocated the other.
 - ⏸️ **Quota metering** — still unreadable. All three candidate endpoints 404, so
   billed seconds can only be **bounded**, never measured.
 - ⏸️ **Ten of eleven modes** — no conditioning, no stage 2, no LoRA, and **no
@@ -545,13 +556,19 @@ caches per image or per cold worker is ⏸️ unknown and decides its severity.
 
 ## 4. Known gaps, stated plainly
 
-0. **The `size` kwarg has never carried a value.** ⏸️ Every run so far has been
-   `auto`, so the branch that sends an explicit `large` or `xlarge` has executed
-   **zero times** on the platform — and `large` is a 48 GB MIG slice that §3's
-   own stage-2 measurement says cannot hold stage 2 at all. If anyone sets
-   `LTX25_ZEROGPU_SIZE` to force a size, they are exercising an untested path
-   **and** possibly selecting one the workload does not fit. The ✅ next to the
-   kwarg in §3 covers its plumbing only.
+0. **~~The `size` kwarg has never carried a value.~~ ⛔ CLOSED, AND IT WAS THE
+   MOST EXPENSIVE ITEM IN THIS LIST (2026-08-27).** The gap was written as *"if
+   anyone sets `LTX25_ZEROGPU_SIZE` to force a size, they are exercising an
+   untested path"* — with the unstated assumption that leaving it at `auto` was
+   the safe, tested default. It was the opposite. `auto` sends **no** size, and
+   ZeroGPU's own promotion never reaches the scheduler, so `auto` **was** the
+   `large` branch: 47.375 GiB. ✅ The note above about `large` being a slice
+   "that §3's own stage-2 measurement says cannot hold stage 2 at all" was
+   therefore describing the partition the Space was already running on — and it
+   predicted R4b's failure precisely, a day before anyone connected the two.
+   `LTX25_ZEROGPU_SIZE=xlarge` is now set and ✅ verified from inside the worker
+   at 94.971 GiB. Stage 2 at 704×480×49 passes on it: 53.08 s, 1408×960, peak
+   55.906 GiB reserved. See [`MIG_ALLOCATOR_SIGHTINGS.md`](MIG_ALLOCATOR_SIGHTINGS.md).
 
 1. **H10 / H11 — the audio-input modes — have not passed.** ⏸️ The path they
    need was connected to nothing until very recently: the UI collected a file,

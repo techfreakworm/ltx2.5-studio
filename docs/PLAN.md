@@ -336,6 +336,17 @@ Packed weight size decides which ZeroGPU tier we land on, and the tier decides q
 threshold is `xlarge_threshold = 42.00 GiB`: **exceed it and ZeroGPU silently auto-promotes to
 `xlarge` and doubles quota cost, with no code change.**
 
+> ⛔ **The premise in bold is FALSE, and finding that out cost this project half
+> its GPU (2026-08-27).** Crossing the threshold sets `_default_gpu_size`, which
+> is read by exactly one function — `get_duration_seconds` — and feeds exactly
+> one branch: the `duration_factor` multiplier. It never reaches the `gpuSize`
+> the scheduler allocates on, which is sent **only** when a size is passed
+> explicitly. ✅ Measured from inside the worker: `LTX25_ZEROGPU_SIZE=auto` ran
+> the Space on `large` at **47.375 GiB**; setting `xlarge` gives **94.971 GiB**.
+> The tier argument below is still the right argument — it is just an argument
+> for *setting the variable*, never for trusting the packer to set it.
+> [`MIG_ALLOCATOR_SIGHTINGS.md`](MIG_ALLOCATOR_SIGHTINGS.md) §1.
+
 | config | approx total | packed vs 42.00 GiB | tier | quota | verdict |
 |---|---:|---|---|---|---|
 | **bf16 everything** | 72.19 GB (67.2 GiB) | over | `xlarge` | **2×** | **DEFAULT** — documented by the model card, matches the official Lightricks Space pattern; RAM/disk marginal |
@@ -547,7 +558,10 @@ selects the repo; the bf16 build is one environment variable away.
 
 **What ships.** `ltx25_studio/enhance.py`, called from `generate()` **below the dispatch
 branch** — i.e. inside the `@spaces.GPU` worker, on the GPU, within the metered window. It is
-loaded and freed inside one call, so it never coexists with the 22B transformer. Failure
+loaded on first use and **kept for the life of the worker** — freeing it per call cost a ✅
+measured **+30.78 s on every enhanced generation**, and the VRAM headroom that justified the
+freeing turned out to be an artefact of running on half a GPU (`MIG_ALLOCATOR_SIGHTINGS.md`).
+It is never loaded at module scope, which is what keeps it out of the packing window. Failure
 raises `PromptEnhancementError` naming the repository and the reason; it never falls through
 to the original prompt while the UI implies enhancement happened, and the prompt that was
 actually sent is quoted in the run report.
@@ -1319,8 +1333,9 @@ ltx25_studio/
   modes.py                   # §3.3 registry: 11 UI modes as data over the 4 real workflows
   generate.py                # §7.4 stage graph. OWNS the never-empty invariant (§5.3) and the
                              #   per-run output directory
-  enhance.py                 # §3.5 — the Gemma prompt rewrite. Loaded and freed inside one
-                             #   call, INSIDE the @spaces.GPU worker; startup weight prefetch
+  enhance.py                 # §3.5 — the Gemma prompt rewrite. Loaded on first use and kept
+                             #   for the worker's life, INSIDE the @spaces.GPU worker (never at
+                             #   module scope — that is the packing window); weight prefetch
   outputs.py                 # mux video+audio, single-track export, 20 GB oldest-first eviction
   lora/
     inspect.py               # header-only safetensors parse; metadata + convention detection
@@ -1629,6 +1644,21 @@ the cost is visible in the source rather than being a surprise in the quota dash
 > holds on the new number (51.1 GB > 42.00 GiB → `xlarge`), ⚠️ by inference:
 > the promotion is deduced from the threshold, not read back, because the
 > endpoint that would confirm it is the same one that 404s for quota.
+>
+> ### ⛔ The inference was wrong, and this annotation came within one step of catching it (2026-08-27)
+>
+> It correctly flagged the promotion as ⚠️ *deduced, not read back*, and then
+> accepted the deduction because the only way it could imagine reading it back
+> was an endpoint that 404s. **There was another way, and it was cheap: print
+> `torch.cuda.get_device_properties().total_memory` from inside the worker.**
+> `0a4ddbb` eventually did exactly that for unrelated reasons and the answer was
+> ✅ **47.375 GiB — `large`.** Not `xlarge`. `auto` sends no `gpuSize` at all, and
+> the promoted value never leaves `get_duration_seconds`.
+>
+> ✅ `LTX25_ZEROGPU_SIZE=xlarge` is now set, and the same probe reads **94.971
+> GiB**. §8.6's original instruction — *declare the size explicitly rather than
+> being silently promoted* — was right on the first try and was talked out of by
+> a threshold reading. Trace: [`MIG_ALLOCATOR_SIGHTINGS.md`](MIG_ALLOCATOR_SIGHTINGS.md) §1.
 
 **Quota arithmetic:** PRO gives 2400 s/day. At `duration=75` on `xlarge` (2×), each run is
 charged ~150 s → **~16 runs/day**. Dropping under 42.00 GiB via quantization would return us to
