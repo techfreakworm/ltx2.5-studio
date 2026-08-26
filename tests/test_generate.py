@@ -1046,3 +1046,336 @@ def test_a_hub_staged_adapter_is_loaded_from_its_fetched_local_path(tmp_path):
     assert pipe.loaded_from == [str(local), str(tmp_path / "uploaded.safetensors")], (
         "a repo id must never reach load_lora_weights — the GPU window reads files only"
     )
+
+
+# --------------------------------------------------------------------------
+# peak-VRAM instrumentation
+# --------------------------------------------------------------------------
+#
+# Two decisions on this path were taken on VRAM grounds with no VRAM number
+# behind either. The enhancer is loaded and freed on every call for "VRAM
+# safety", which costs +30.78 s of reload per enhanced generation; the VAE
+# decode went tiled+framewise after a MIG allocator assert nobody has headroom
+# for. Both are unmeasured trades. Neither can be revisited until a real run
+# says what the partition has, so every generation now reports it.
+#
+# The spec below is deliberately about the *properties* rather than the prose:
+# the reset happens first, the three quantities never collapse into one, the
+# split is real, and none of it can take a run down.
+
+_GiB = 1024**3
+
+
+class FakeCuda:
+    """A ``torch.cuda`` answering only the calls the probe is allowed to make.
+
+    Anything the probe reaches for that is not defined here raises
+    ``AttributeError`` -- which is how ``synchronize`` creeping onto the hot
+    path is caught rather than argued about.
+    """
+
+    def __init__(self, *, total, resident, allocated, reserved, available=True):
+        self.calls: list = []
+        self._total = total
+        self._resident = resident
+        self._allocated = list(allocated)
+        self._reserved = list(reserved)
+        self._available = available
+
+    def _next(self, values):
+        # Sticky last value: a probe that samples more often than the test
+        # scripted should report a plausible number, not blow up and disable
+        # itself, or the test would be asserting on the wrong failure.
+        return values.pop(0) if len(values) > 1 else values[0]
+
+    def is_available(self):
+        return self._available
+
+    def current_device(self):
+        self.calls.append("current_device")
+        return 0
+
+    def get_device_properties(self, index):
+        self.calls.append(("get_device_properties", index))
+        return SimpleNamespace(total_memory=self._total)
+
+    def memory_allocated(self):
+        self.calls.append("memory_allocated")
+        return self._resident
+
+    def max_memory_allocated(self):
+        self.calls.append("max_memory_allocated")
+        return self._next(self._allocated)
+
+    def max_memory_reserved(self):
+        self.calls.append("max_memory_reserved")
+        return self._next(self._reserved)
+
+    def reset_peak_memory_stats(self):
+        self.calls.append("reset_peak_memory_stats")
+
+
+class ExplodingCuda(FakeCuda):
+    """Available, and broken in every direction. Nothing here may reach the user."""
+
+    def __init__(self):
+        super().__init__(total=1, resident=1, allocated=[1], reserved=[1])
+
+    def _boom(self, *args, **kwargs):
+        raise RuntimeError("NVML_SUCCESS == r INTERNAL ASSERT FAILED")
+
+    current_device = _boom
+    get_device_properties = _boom
+    memory_allocated = _boom
+    max_memory_allocated = _boom
+    max_memory_reserved = _boom
+    reset_peak_memory_stats = _boom
+
+
+def install_fake_torch(monkeypatch, cuda):
+    """Put a ``torch`` in ``sys.modules`` carrying ``cuda``, and nothing else it
+    does not need. ``_seeded_generator`` also imports torch on this path, so the
+    fake owes it a Generator; that is the whole surface."""
+    import sys
+    import types
+
+    torch = types.ModuleType("torch")
+    torch.cuda = cuda
+
+    class _Generator:
+        def __init__(self, device=None):
+            self.device = device
+
+        def manual_seed(self, seed):
+            self.seed = seed
+            return self
+
+    torch.Generator = _Generator
+    monkeypatch.setitem(sys.modules, "torch", torch)
+    return cuda
+
+
+def a_cuda(**overrides):
+    fields = {
+        # A plausible MIG partition and a plausible flagship run: ~54 GiB of
+        # int8 transformer already resident, a peak in the low seventies.
+        "total": 79 * _GiB,
+        "resident": 54 * _GiB,
+        "allocated": [71 * _GiB],
+        "reserved": [73 * _GiB],
+    }
+    fields.update(overrides)
+    return FakeCuda(**fields)
+
+
+def vram_notes(result):
+    return [w for w in result.warnings if w.startswith("peak VRAM")]
+
+
+def run_on(tmp_path, **overrides):
+    return generate(
+        a_request(**overrides),
+        pipeline_factory=factory_for(FakePipe()),
+        encoder=good_encoder,
+        output_root=tmp_path,
+    )
+
+
+def test_a_run_with_no_cuda_reports_no_vram_and_reads_exactly_as_before(tmp_path):
+    """The offline gate runs on MPS and CPU. The probe must be invisible there.
+
+    Not "reports zero" -- absent. A local run that grew three lines of GiB
+    figures about a device it does not have would be a probe leaking into the
+    thing it measures.
+    """
+    result = run_on(tmp_path)
+    assert vram_notes(result) == [], (
+        "a box with no CUDA reported VRAM figures, so the probe is either "
+        "inventing numbers or initialising a device that is not there"
+    )
+
+
+def test_a_cuda_run_reports_allocated_and_reserved_and_total_without_conflating_them(
+    tmp_path, monkeypatch
+):
+    """The three quantities, distinguishable, in one note.
+
+    ``allocated`` is what the run needed, ``reserved`` is what the caching
+    allocator holds and therefore what actually bounds the next allocation, and
+    ``total`` is what the partition has. Headroom is ``total - reserved``.
+    Quoting ``allocated`` against ``total`` overstates it by the whole of the
+    allocator's slack -- and measuring the wrong quantity is precisely the
+    mistake this build keeps making.
+    """
+    install_fake_torch(monkeypatch, a_cuda())
+    notes = vram_notes(run_on(tmp_path))
+    assert len(notes) == 1, notes
+    note = notes[0]
+    for figure, quantity in (("71.000", "allocated"), ("73.000", "reserved"), ("79.000", "total")):
+        assert f"{figure} GiB" in note, (
+            f"the {quantity} figure is missing from {note!r}; all three have to be present "
+            f"or the reader cannot tell which one they are looking at"
+        )
+    assert "54.000 GiB" in note, (
+        "the resident-on-entry figure is missing, so nothing separates what the run "
+        "cost from what the transformer was already holding"
+    )
+
+
+def test_the_peak_is_reset_before_anything_is_read(tmp_path, monkeypatch):
+    """A ZeroGPU worker is reused across generations and arrives carrying the
+    previous run's peak. A probe that only reads reports the largest run the
+    container ever served, and calls it this one."""
+    cuda = install_fake_torch(monkeypatch, a_cuda())
+    run_on(tmp_path)
+    assert cuda.calls[0] == "reset_peak_memory_stats", (
+        f"the first CUDA call of the run was {cuda.calls[0]!r}, not the reset — a reused "
+        f"worker's stale peak is being reported as this run's"
+    )
+
+
+def test_enhancement_and_generation_are_measured_as_separate_windows(tmp_path, monkeypatch):
+    """The split that answers the actual open question.
+
+    The enhancer costs +30.78 s per enhanced generation because it is loaded and
+    freed every call. Making it resident is only safe if its ~2.49 GB is *not*
+    additive to the peak the denoise already reaches. One lap each side of the
+    rewrite is what settles that, and a whole-call number cannot.
+    """
+    cuda = install_fake_torch(
+        monkeypatch,
+        a_cuda(allocated=[57 * _GiB, 71 * _GiB], reserved=[59 * _GiB, 73 * _GiB]),
+    )
+    result = generate(
+        a_request(enhance_prompt=True),
+        pipeline_factory=factory_for(FakePipe()),
+        encoder=good_encoder,
+        output_root=tmp_path,
+        enhancer=lambda prompt, image=None: "a weathered stone lighthouse in dense fog",
+    )
+    notes = vram_notes(result)
+    assert len(notes) == 3, f"expected a lap each side plus the whole call, got {notes}"
+    assert "prompt enhancement" in notes[0] and "57.000 GiB" in notes[0]
+    assert "generation" in notes[1] and "71.000 GiB" in notes[1]
+    assert cuda.calls.count("reset_peak_memory_stats") == 3, (
+        "each lap must reset after it reads, or every window reports 'everything so "
+        "far' and the second phase is credited with the first phase's peak"
+    )
+
+
+def test_the_whole_call_figure_is_the_largest_lap_not_the_last(tmp_path, monkeypatch):
+    """Laps are windows, so the whole call is their maximum -- exactly, because
+    the max over two touching windows is the max of the two maxima.
+
+    Scripted here with the *enhancement* lap higher than the generation lap,
+    which is the case that catches a "just report the last sample" shortcut. It
+    is also the case that would matter most: an enhancer that peaks above the
+    denoise is an enhancer that cannot be made resident.
+    """
+    install_fake_torch(
+        monkeypatch,
+        a_cuda(allocated=[77 * _GiB, 71 * _GiB], reserved=[78 * _GiB, 73 * _GiB]),
+    )
+    result = generate(
+        a_request(enhance_prompt=True),
+        pipeline_factory=factory_for(FakePipe()),
+        encoder=good_encoder,
+        output_root=tmp_path,
+        enhancer=lambda prompt, image=None: "a weathered stone lighthouse in dense fog",
+    )
+    whole = vram_notes(result)[-1]
+    assert "whole call" in whole
+    assert "77.000 GiB" in whole and "78.000 GiB" in whole, (
+        f"the whole-call note is {whole!r}; it reported a later, smaller lap and so "
+        f"understates the peak the partition actually had to hold"
+    )
+
+
+def test_a_run_that_never_enhances_gets_one_window_and_no_phantom_phase(tmp_path, monkeypatch):
+    """``enhance_prompt`` off means no model was loaded, so there is no
+    enhancement phase to attribute. A lap there would report the baseline under
+    a label claiming a measurement happened."""
+    install_fake_torch(monkeypatch, a_cuda())
+    notes = vram_notes(run_on(tmp_path))
+    assert len(notes) == 1 and "whole call" in notes[0], notes
+    assert not any("prompt enhancement" in n for n in notes)
+
+
+def test_enhancement_requested_on_an_empty_prompt_reports_no_enhancement_phase(
+    tmp_path, monkeypatch
+):
+    """The other way the enhancer does not run. ``enhance_if_requested`` returns
+    without loading anything when the prompt is blank, so the toggle being set
+    is not evidence that a phase existed."""
+    install_fake_torch(monkeypatch, a_cuda())
+    result = generate(
+        a_request(prompt="   ", enhance_prompt=True),
+        pipeline_factory=factory_for(FakePipe()),
+        encoder=good_encoder,
+        output_root=tmp_path,
+        enhancer=lambda prompt, image=None: pytest.fail(
+            "the enhancer must not run on a blank prompt"
+        ),
+    )
+    assert not any("prompt enhancement" in n for n in vram_notes(result))
+
+
+def test_a_probe_that_cannot_measure_never_takes_the_run_down(tmp_path, monkeypatch):
+    """Log-only, and that is load-bearing rather than tidy.
+
+    There is no baseline yet, so there is no threshold that could be right, and
+    a wrong one breaks a working Space for the sake of a diagnostic. The exact
+    failure scripted here is the one this partition actually produces: the NVML
+    allocator assert, raised from inside the allocator bookkeeping the probe
+    reads.
+    """
+    install_fake_torch(monkeypatch, ExplodingCuda())
+    result = run_on(tmp_path)
+    assert Path(result.output_path).exists(), "a broken probe killed a good generation"
+    assert vram_notes(result) == [], "a probe that could not measure reported anyway"
+
+
+def test_the_probe_does_not_synchronise_the_stream(tmp_path, monkeypatch):
+    """A synchronize on the hot path would perturb both the number being
+    measured and the wall-clock it is measured against -- and the wall-clock is
+    the whole reason this instrumentation exists.
+
+    ``FakeCuda`` defines no ``synchronize`` and no ``empty_cache``, so reaching
+    for either raises ``AttributeError`` and fails the run rather than passing
+    quietly. The source check is the belt to that braces: an unreached branch
+    would slip past the fake.
+    """
+    install_fake_torch(monkeypatch, a_cuda())
+    run_on(tmp_path)
+    tokens = set(code_tokens(PACKAGE_ROOT / "generate.py"))
+    assert "synchronize" not in tokens and "empty_cache" not in tokens, (
+        "generate.py synchronises or empties the cache on the generation path; both cost "
+        "real time on every run to make a free measurement slightly tidier"
+    )
+
+
+def test_the_vram_notes_are_plain_strings_because_they_cross_the_fork(tmp_path, monkeypatch):
+    """They are built inside the ``@spaces.GPU`` worker and read in the web
+    process, so they ride the res queue. ``tests/test_request_fork_boundary.py``
+    owns the pickle proof; this pins the shape at the source."""
+    install_fake_torch(monkeypatch, a_cuda())
+    result = run_on(tmp_path)
+    assert all(isinstance(w, str) for w in result.warnings)
+    assert isinstance(result.warnings, tuple)
+
+
+def test_the_probe_is_opened_after_validation_so_a_bad_request_costs_nothing(tmp_path, monkeypatch):
+    """Everything cheap first still holds. A request refused for its geometry
+    must not first construct a probe and touch a device."""
+    cuda = install_fake_torch(monkeypatch, a_cuda())
+    with pytest.raises(LTXStudioError):
+        generate(
+            a_request(num_frames=120),
+            pipeline_factory=factory_for(FakePipe()),
+            encoder=good_encoder,
+            output_root=tmp_path,
+        )
+    assert cuda.calls == [], (
+        f"a request refused by validation still touched CUDA ({cuda.calls}); the probe is "
+        f"above the cheap refusals"
+    )

@@ -170,6 +170,10 @@ class GenerationResult:
     seed: int
     video_path: Path | None = None
     audio_path: Path | None = None
+    #: Everything the run wants to say out loud. Plain strings, because this
+    #: tuple is the ONLY channel from inside the ``@spaces.GPU`` worker back to
+    #: the user -- the enhancement note and the peak-VRAM figures are both built
+    #: on the far side of the fork and ride home here.
     warnings: tuple[str, ...] = ()
 
 
@@ -766,6 +770,153 @@ def _require_artifact(candidate, *, mode: str, run_dir: Path, track: str = "") -
     return path
 
 
+# --------------------------------------------------------------------------
+# peak-VRAM instrumentation -- PLAN §7.3
+# --------------------------------------------------------------------------
+
+#: Every VRAM figure this build prints is a GiB, because that is the unit
+#: ``scripts/host_matrix.py``, ``scripts/host_smoke.py`` and
+#: ``docs/HINODE_HOST_SETUP.md`` already use. A report that mixes GB and GiB is
+#: a report nobody can line up against the numbers already banked.
+_GiB = 1024**3
+
+
+class _VramProbe:
+    """Peak VRAM for one generation, split by phase. Inert wherever CUDA is not.
+
+    **Why this exists.** Two decisions on this path were taken on VRAM grounds
+    with no VRAM measurement behind them: the enhancer is loaded and freed on
+    every call for "VRAM safety" (+30.78 s of reload per enhanced generation),
+    and the VAE decode was pushed to tiled+framewise after a MIG allocator
+    assert that nobody has a headroom number for. Neither can be revisited
+    without knowing what the partition actually has. So every generation now
+    reports it.
+
+    **Three quantities, never conflated.** ``max_memory_allocated`` is what the
+    run needed; ``max_memory_reserved`` is what the caching allocator is holding
+    and therefore what actually bounds the next allocation; ``total_memory`` is
+    what the partition has. Headroom is ``total - reserved``, and a report that
+    quotes only ``allocated`` against ``total`` overstates it by the whole size
+    of the allocator's slack.
+
+    **Laps, not a running total.** :meth:`split` reads the peak and then resets,
+    so each phase reports *its own* window rather than "everything so far". The
+    whole-call figure is recovered as the largest lap, which is exact: the
+    maximum over two touching windows is the maximum of the two maxima. That is
+    what buys phase attribution without threading a measurement object through
+    ``enhance.py`` and ``pipelines.py``.
+
+    **Guarded once, here.** ``self._cuda`` is None off CUDA and every method
+    returns immediately, so the call sites in :func:`generate` stay
+    unconditional. The alternative -- ``if torch.cuda.is_available()`` at four
+    call sites -- is how a probe ends up half-instrumented, reporting a phase
+    split on one box and a whole-call number on another with nothing saying
+    which you are reading.
+
+    **Never raises, never gates.** There is no baseline yet, so there is no
+    threshold that could be right, and a wrong one would break a working Space
+    for a diagnostic. Every method swallows its own failure and disables the
+    probe; a generation that cannot be measured still runs.
+
+    **No synchronize.** ``reset_peak_memory_stats``, ``max_memory_allocated``,
+    ``max_memory_reserved``, ``memory_allocated`` and ``get_device_properties``
+    all read allocator bookkeeping on the host. None of them synchronises the
+    stream, so none of them can perturb the number they are measuring or the
+    wall-clock they are measured against. ``empty_cache`` would -- it is not
+    called here.
+    """
+
+    def __init__(self) -> None:
+        self._cuda = None
+        self._total = 0
+        self._resident = 0
+        self._laps: list[tuple[str, int, int]] = []
+        try:
+            import torch
+
+            if torch.cuda.is_available():
+                self._cuda = torch.cuda
+        except Exception:  # no torch at all is the normal case in tests
+            self._cuda = None
+
+    def start(self) -> None:
+        """Open the first window, discarding whatever the worker did before us.
+
+        Reset FIRST: a forked ZeroGPU worker is reused across generations and
+        arrives carrying the previous run's peak, so a probe that only read
+        would report the largest run the container had ever served.
+        """
+        cuda = self._cuda
+        if cuda is None:
+            return
+        try:
+            cuda.reset_peak_memory_stats()
+            # `current_device()` rather than a hardcoded 0: identical on the
+            # single-device MIG partition this is aimed at, and correct anywhere
+            # the worker is not on device 0.
+            self._total = int(cuda.get_device_properties(cuda.current_device()).total_memory)
+            # What the transformer is already holding when the run enters the
+            # worker. Peak minus this is roughly what the run itself cost.
+            self._resident = int(cuda.memory_allocated())
+        except Exception as exc:
+            logger.debug("peak-VRAM probe could not start: %r", exc)
+            self._cuda = None
+
+    def split(self, phase: str) -> None:
+        """Close the current window as ``phase`` and open the next one."""
+        cuda = self._cuda
+        if cuda is None:
+            return
+        try:
+            allocated = int(cuda.max_memory_allocated())
+            reserved = int(cuda.max_memory_reserved())
+            cuda.reset_peak_memory_stats()
+        except Exception as exc:
+            logger.debug("peak-VRAM probe could not sample %r: %r", phase, exc)
+            self._cuda = None
+            return
+        self._laps.append((phase, allocated, reserved))
+        # Logged as well as returned: a run that dies before it can build a
+        # GenerationResult still leaves its numbers in the Space log, and an OOM
+        # is exactly the run whose numbers we most want.
+        logger.info(
+            "peak VRAM, %s: %.3f GiB allocated / %.3f GiB reserved of %.3f GiB total",
+            phase,
+            allocated / _GiB,
+            reserved / _GiB,
+            self._total / _GiB,
+        )
+
+    def notes(self) -> tuple[str, ...]:
+        """The laps as user-visible notes, for ``GenerationResult.warnings``.
+
+        Plain strings, because that tuple crosses the fork on the res queue and
+        the one thing this build has learned twice is that what crosses a fork
+        must be boring (``tests/test_request_fork_boundary.py``).
+
+        Empty off CUDA, so a local MPS or CPU run reads exactly as it did before
+        the probe existed.
+        """
+        if not self._laps:
+            return ()
+        lines = []
+        if len(self._laps) > 1:
+            lines += [
+                f"peak VRAM, {phase}: {allocated / _GiB:.3f} GiB allocated / "
+                f"{reserved / _GiB:.3f} GiB reserved."
+                for phase, allocated, reserved in self._laps
+            ]
+        allocated = max(lap[1] for lap in self._laps)
+        reserved = max(lap[2] for lap in self._laps)
+        lines.append(
+            f"peak VRAM, whole call: {allocated / _GiB:.3f} GiB allocated / "
+            f"{reserved / _GiB:.3f} GiB reserved of {self._total / _GiB:.3f} GiB total, "
+            f"with {self._resident / _GiB:.3f} GiB already resident on entry. Reserved is "
+            f"what bounds the next allocation; allocated is what the run itself needed."
+        )
+        return tuple(lines)
+
+
 def generate(
     request: GenerationRequest | None = None,
     *,
@@ -820,6 +971,19 @@ def generate(
     spec = modes.get_mode(request.mode)
     request = _validated(request)
 
+    # --- peak-VRAM instrumentation, opened HERE ----------------------------
+    # Below the dispatch branch, so on a Space this is the first line of the
+    # `@spaces.GPU` worker's own work and the window covers everything the
+    # billed call does. Below `_validated` too, so "everything cheap first"
+    # still holds: a request with an illegal frame count is refused without
+    # even constructing a probe.
+    #
+    # Deliberately NOT above the dispatch: on the web-process side there is no
+    # CUDA to measure, and a probe opened there would report the fork's numbers
+    # as the run's.
+    probe = _VramProbe()
+    probe.start()
+
     # --- prompt enhancement, HERE and nowhere else -------------------------
     # BELOW the dispatch branch, so on a Space this executes inside the
     # `@spaces.GPU` worker. That placement is a correction, and the reason is
@@ -849,6 +1013,14 @@ def generate(
     enhanced, enhancement_notes = enhance_module.enhance_if_requested(request, enhancer=enhancer)
     if enhanced is not None:
         request = replace(request, prompt=enhanced)
+        # The split that answers the open question about this feature: is the
+        # enhancer's ~2.49 GB *additive* to the transformer's peak, or absorbed
+        # in allocator slack the denoise was going to hold anyway? One lap each
+        # side and the two figures say which. Taken only when the enhancer
+        # actually ran -- `enhanced is None` covers both "toggle off" and
+        # "prompt was empty", and in neither case did a model load, so a lap
+        # there would report the baseline under a label claiming otherwise.
+        probe.split("prompt enhancement")
 
     seed = _resolve_seed(request.seed)
 
@@ -936,12 +1108,23 @@ def generate(
             written, spec=spec, mode=request.mode, run_dir=run_dir, notes=encoder_warnings
         )
 
+        # The second lap: model load, denoise, decode and encode. Closed here
+        # rather than at the pipeline call so nothing CUDA-touching falls into a
+        # window that is never read -- the whole-call figure is only the largest
+        # lap, so an unclosed window is silently missing from it.
+        probe.split("generation (model load through encode)")
+
         warnings = (
             enhancement_notes
             + _sweep(root, retention_bytes)
             + tuple(encoder_warnings)
             + audio_notes
             + size_notes
+            # Last, because it is diagnostic rather than something the user has
+            # to act on -- but present on every run, because the one flagship
+            # generation that finally gives this build a headroom number is not
+            # going to be the run somebody remembered to turn a flag on for.
+            + probe.notes()
         )
 
         return GenerationResult(

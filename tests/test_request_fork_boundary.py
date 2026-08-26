@@ -256,3 +256,52 @@ def test_the_result_crossing_back_pickles(tmp_path):
     )
     back = pickle.loads(pickle.dumps(result))
     assert back == result
+
+
+def test_the_peak_vram_notes_cross_back_inside_the_result():
+    """The return leg for numbers that only exist on the far side.
+
+    The probe is opened inside the ``@spaces.GPU`` worker -- it has to be, since
+    the web process has no CUDA to measure. So the only way a headroom figure
+    ever reaches a human is if it survives the res queue in
+    ``GenerationResult.warnings``.
+
+    That is why they are plain ``str`` and not a dataclass, a namedtuple or a
+    dict of ints. This file exists because "obviously fine" was wrong once
+    already: ``LoRAInspection``'s ``MappingProxyType`` fields killed the first
+    staged generation on the Space at 2.05 s. A measurement that dies at the
+    fork measures nothing, and it would die on the *flagship* run -- the one
+    expensive enough to be worth instrumenting.
+    """
+    notes = (
+        "peak VRAM, prompt enhancement: 57.000 GiB allocated / 59.000 GiB reserved.",
+        "peak VRAM, generation (model load through encode): 71.011 GiB allocated / "
+        "73.484 GiB reserved.",
+        "peak VRAM, whole call: 71.011 GiB allocated / 73.484 GiB reserved of 79.139 GiB "
+        "total, with 54.912 GiB already resident on entry. Reserved is what bounds the "
+        "next allocation; allocated is what the run itself needed.",
+    )
+    result = generate_module.GenerationResult(
+        output_path=Path("/tmp/run-abc/video.mp4"),
+        run_id="abc123",
+        run_dir=Path("/tmp/run-abc"),
+        mode="text_to_video",
+        seed=7,
+        warnings=notes,
+    )
+    back = pickle.loads(pickle.dumps(result))
+    assert back == result
+    assert back.warnings == notes, (
+        "the peak-VRAM notes did not survive the fork, so the one run big enough to "
+        "give this build a headroom number reports it to nobody"
+    )
+
+
+def test_the_probe_the_worker_builds_is_never_itself_put_on_the_res_queue():
+    """Only its output crosses. The probe holds a live ``torch.cuda`` module
+    reference, which is exactly the kind of object that does not pickle -- and
+    the fix is that it never leaves the worker, not that it is made to."""
+    assert "probe" not in {f.name for f in dataclasses.fields(generate_module.GenerationResult)}, (
+        "GenerationResult grew a field holding the probe; it carries a module reference "
+        "and would die at the fork on every run"
+    )
