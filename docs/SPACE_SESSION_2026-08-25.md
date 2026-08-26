@@ -309,6 +309,17 @@ cost of roughly **+14 s** over the failing run's denoise-only wall ⚠️ (two
 different runs, not a controlled pair). **A resolution a user would actually
 choose now generates on ZeroGPU.**
 
+> ⏸️ ***Annotation (2026-08-27): this assert has now been seen a third time, on
+> another day, in another module.** The first enhanced generation in a fresh
+> worker died on the same `NVML_SUCCESS` allocator assert while loading the
+> 2.49 GB prompt enhancer onto CUDA with the transformer resident — and the
+> **second call in the same worker succeeded**. R3, R4b (§5) and that run are
+> now collected side by side in
+> [`MIG_ALLOCATOR_SIGHTINGS.md`](MIG_ALLOCATOR_SIGHTINGS.md), where the shared
+> shape is written down as a **hypothesis and labelled as one**. Nothing in this
+> section changes: R3's diagnosis, the ~26 GB estimate and `cdb3211` all stand
+> exactly as written.*
+
 ---
 
 ## 5. Stage 2 on the Space — first ever, and its ceiling
@@ -336,6 +347,15 @@ only the VAE.
 > 704×480.** One attempt per failure, by the operator's ruling — documented,
 > not chased. The follow-up is a **diffusion-decoder chunking investigation**
 > (§9), which is its own piece of work, not a knob.
+
+> ⏸️ ***Annotation (2026-08-27): R4b is the second of three sightings of the
+> same allocator assert.** Collected beside the other two in
+> [`MIG_ALLOCATOR_SIGHTINGS.md`](MIG_ALLOCATOR_SIGHTINGS.md). Two caveats travel
+> with it there and both belong here too: this row's "same NVML allocator
+> assert" is the day's characterisation and ⏸️ no traceback was ever quoted, and
+> the one-attempt ruling means ⏸️ nobody knows whether a retry in the same
+> worker would have passed — which is exactly the detail that separates the
+> other two sightings from each other. The ceiling itself is unaffected.*
 
 ⏸️ Where in [25, 49] the ceiling falls, and how it scales with input area, are
 unmeasured.
