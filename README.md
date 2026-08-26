@@ -190,9 +190,18 @@ worse than none.
 
 **It costs a second or two of quota.** The enhancer is
 `google/gemma-4-E2B-it-qat-mobile-transformers` (2.49 GB, public, ungated), loaded on the
-**GPU inside the run's own reservation** and freed again in the same call, so it never
-coexists with the 22B transformer. Point `LTX25_PROMPT_ENHANCER_REPO` at
+**GPU inside the run's own reservation** and then kept there for the life of the worker, so
+only the first enhanced run in a worker pays the load. Point `LTX25_PROMPT_ENHANCER_REPO` at
 `google/gemma-4-E2B-it` for the 10.28 GB bf16 build instead.
+
+> ⚠️ **It used to be freed after every single rewrite, and that cost +30.78 s a run.**
+> Measured: 46.53 s against a 15.75 s baseline at 256×256×9 — a 2.49 GB reload, every time,
+> to protect VRAM headroom on a partition nobody had measured. When the app was finally made
+> to print `total_memory` it turned out to be running on **47.375 GiB instead of the
+> 94.971 GiB it was entitled to**, because `LTX25_ZEROGPU_SIZE=auto` cannot actually promote
+> a Space to `xlarge`. On the corrected partition the largest peak ever measured here
+> (55.906 GiB) plus a permanently resident 2.49 GB still leaves ~36 GiB spare, so the
+> enhancer stays loaded. See `docs/MIG_ALLOCATOR_SIGHTINGS.md`.
 
 > ⚠️ **It used to cost no quota at all, and that was the problem.** The rewrite first ran on
 > the CPU in the web process, outside the metered window, which made it genuinely free of

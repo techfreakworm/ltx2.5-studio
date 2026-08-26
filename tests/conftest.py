@@ -36,6 +36,56 @@ from types import SimpleNamespace
 import pytest
 
 # --------------------------------------------------------------------------
+# process-lifetime caches — reset between specs
+# --------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _drop_resident_enhancer():
+    """Empty ``enhance._ENHANCER`` around every test in the suite.
+
+    The enhancer is deliberately **resident for the life of the worker process**
+    (``enhance.py``, and the +30.78 s per-call reload that bought). A pytest
+    session is one process, so without this the first spec to call ``enhance()``
+    would serve its fake model to every spec that followed — cross-test
+    contamination that reads as a mysterious unrelated failure.
+
+    Autouse and global rather than local to ``test_enhance.py``: the cache is
+    reachable from anything that calls ``generate()`` without injecting an
+    ``enhancer=`` seam, so scoping the reset to the file that happens to use it
+    today is a trap for whoever adds the next caller.
+
+    Imported inside the fixture so ``conftest``'s own import surface stays as
+    light as its docstring claims.
+    """
+    from ltx25_studio import enhance
+
+    _drop(enhance)
+    yield
+    _drop(enhance)
+
+
+def _drop(enhance):
+    """``clear_enhancer_cache()``, but it can never be the thing that fails a test.
+
+    The real free imports torch when the cached model reports a CUDA device, and
+    a spec that installed a *fake* cuda-reporting model has usually had its fake
+    ``sys.modules['torch']`` undone by ``monkeypatch`` before this teardown runs —
+    autouse fixtures tear down last. On a machine with no torch that import then
+    raises during cleanup and reports as an error in an unrelated test.
+
+    So: attempt the real free, because that is what exercises the production path,
+    and fall back to emptying the dict, because isolation is this fixture's only
+    job. ``test_dropping_the_resident_enhancer_gives_the_vram_back`` is what
+    actually holds the free honest.
+    """
+    try:
+        enhance.clear_enhancer_cache()
+    except Exception:  # noqa: BLE001 - cleanup must not fail somebody else's test
+        enhance._ENHANCER.clear()
+
+
+# --------------------------------------------------------------------------
 # safetensors synthesis (pure Python — no torch, no safetensors)
 # --------------------------------------------------------------------------
 

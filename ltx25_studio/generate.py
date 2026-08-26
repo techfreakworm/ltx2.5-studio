@@ -784,13 +784,21 @@ _GiB = 1024**3
 class _VramProbe:
     """Peak VRAM for one generation, split by phase. Inert wherever CUDA is not.
 
-    **Why this exists.** Two decisions on this path were taken on VRAM grounds
-    with no VRAM measurement behind them: the enhancer is loaded and freed on
-    every call for "VRAM safety" (+30.78 s of reload per enhanced generation),
-    and the VAE decode was pushed to tiled+framewise after a MIG allocator
-    assert that nobody has a headroom number for. Neither can be revisited
-    without knowing what the partition actually has. So every generation now
-    reports it.
+    **Why this exists, and what it has already settled.** Two decisions on this
+    path were taken on VRAM grounds with no VRAM measurement behind them: the
+    enhancer was loaded and freed on every call for "VRAM safety" (+30.78 s of
+    reload per enhanced generation), and the VAE decode was pushed to
+    tiled+framewise after a MIG allocator assert that nobody had a headroom
+    number for. Neither could be revisited without knowing what the partition
+    actually has. So every generation now reports it.
+
+    ✅ **The first one is settled and this probe is what settled it.** The
+    numbers it printed showed the partition was 47.375 GiB rather than the
+    94.971 GiB the Space was entitled to -- the app had spent its whole life on
+    ZeroGPU's ``large`` size because ``auto`` cannot promote. On the corrected
+    partition the enhancer is resident and the reload is gone. The reasoning
+    ladder is in ``docs/MIG_ALLOCATOR_SIGHTINGS.md``; the point worth keeping
+    here is that a decision defended for months fell to one printed number.
 
     **Three quantities, never conflated.** ``max_memory_allocated`` is what the
     run needed; ``max_memory_reserved`` is what the caching allocator is holding
@@ -1018,8 +1026,15 @@ def generate(
         # in allocator slack the denoise was going to hold anyway? One lap each
         # side and the two figures say which. Taken only when the enhancer
         # actually ran -- `enhanced is None` covers both "toggle off" and
-        # "prompt was empty", and in neither case did a model load, so a lap
+        # "prompt was empty", and in neither case did a rewrite happen, so a lap
         # there would report the baseline under a label claiming otherwise.
+        #
+        # It stays interesting now that the enhancer is RESIDENT rather than
+        # freed per call: this lap is what would show the 2.49 GB becoming a
+        # permanent floor under every subsequent generation in the worker, if it
+        # ever did. A load happens only on the first enhanced call in a worker,
+        # so on later calls this lap reports the decode alone -- which is the
+        # measurement that confirms the cache is hitting.
         probe.split("prompt enhancement")
 
     seed = _resolve_seed(request.seed)

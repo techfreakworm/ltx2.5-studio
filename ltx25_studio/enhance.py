@@ -45,9 +45,11 @@ to CUDA inside the worker does NOT put the enhancer back in the packer's way:
   upsampler and diffusion decoder to CUDA inside the worker for the same reason.
 
 So the enhancer stays ~2.5 GB in the HF cache, never packed, never in the
-snapshot, never in ``preload_from_hub`` -- and it gets CUDA speed. The cost is
-~1-2 s of billed wall per enhanced generation, against ~85 s for a real
-generation: under 5% overhead, where the CPU placement was **+3500%**.
+snapshot, never in ``preload_from_hub`` -- and it gets CUDA speed. The decode
+itself is ~1-2 s of billed wall against ~85 s for a real generation: under 5%
+overhead, where the CPU placement was **+3500%**. What that figure did NOT
+include, and what the next section is about, is the load that used to precede
+every single decode.
 
 **What it now costs, and who is told.** Enhancement is inside the metered
 window, so ``zerogpu.estimate_duration`` adds
@@ -64,21 +66,78 @@ transfer. It is best-effort by construction: a Space whose prefetch failed still
 starts and still serves un-enhanced generations, and its first enhanced call is
 merely slow.
 
-**Loaded per call and freed in the same call**, and the claim that buys is worth
-stating precisely rather than generously. It is *not* "the enhancer never
-coexists with the transformer": inside the worker the transformer has already
-been restored to VRAM before this runs, so for the length of the rewrite they
-are both resident. What is true, and what matters, is that the enhancer is
-**gone before denoising starts** -- ``enhance()`` frees it in the same frame
-that loaded it, and ``generate()`` calls it above the pipeline factory -- so the
-memory peak, which is denoising activations, never also carries 2.5 GB of Gemma.
-A cached singleton would hold that 2.5 GB across every subsequent generation for
-the sake of the minority of runs that enable it.
+**Loaded once per worker and KEPT**, which is the reverse of how it shipped.
+The measurement that reversed it is not the one anyone expected.
 
-The free path (``del`` + ``gc.collect()`` + ``torch.cuda.empty_cache()``) is
-guarded on the model's **own** parameter device rather than on
-``torch.cuda.is_available()``, so a run that never touched CUDA never
-initialises it.
+⛔ **The rule it replaces, and why it was wrong.** The enhancer used to be loaded
+to CUDA, used, and freed inside the same call, every call. The argument was VRAM
+safety -- 2.5 GB of Gemma must not still be held at the denoise peak -- and that
+argument was correct about the thing it reasoned about. What it never measured
+was the reload. ✅ **It cost +30.78 s per enhanced generation** (46.53 s against
+a 15.75 s baseline at 256x256x9): a 2.49 GB load, every single time, to protect
+headroom on a partition whose size nobody in this build had ever read.
+
+✅ **The partition had been read wrong, and that is the actual finding.** The
+Space ran its entire life on ZeroGPU's ``large`` size -- 47.375 GiB -- because
+``LTX25_ZEROGPU_SIZE=auto`` sends no ``gpuSize`` to the scheduler at all and
+ZeroGPU's own xlarge promotion never reaches it either. The four-hop trace is in
+``docs/MIG_ALLOCATOR_SIGHTINGS.md``. Set to ``xlarge``, the same worker reports::
+
+    before   47.375 GiB total   headroom  1.19 GiB   -> residency impossible
+    after    94.971 GiB total   headroom ~53.7 GiB   -> residency trivially affordable
+
+✅ The largest peak this build has ever measured is stage 2 at 704x480x49:
+**55.906 GiB reserved**. That, plus a permanently resident 2.49 GB, is ~58.4 GiB
+against 94.971 GiB. The VRAM argument for freeing did not get weaker. It stopped
+applying.
+
+✅ **The forked worker persists, so the cache actually hits.** This is the one
+way the change could silently do nothing, so it was established from ``spaces``'
+own source *before* anything was built rather than assumed afterwards:
+
+* ``spaces/zero/wrappers.py`` runs the forked child in a ``while True:`` loop
+  blocking on ``arg_queue.get()``. One process serves **many** tasks; it does not
+  exit when a task returns.
+* ``worker_init`` -- the ``torch.unpatch()`` / ``torch.init()`` / ``torch.move()``
+  that makes CUDA usable in the child -- is guarded by an ``initialized`` flag and
+  runs **once per process**. That guard is only meaningful because the process
+  outlives the call.
+* The web process keeps the child in ``workers[nvidia_index]`` on a successful
+  result and reuses it when ``worker.process.is_alive() and
+  schedule_response.idle``.
+
+So module state written during call N is still there for call N+1 in that worker.
+Corroborated by this build's own record: the enhancer sighting in
+``docs/MIG_ALLOCATOR_SIGHTINGS.md`` turns entirely on the observation that *"the
+second call in the same worker succeeded"*.
+
+⚠️ **It is a warm path with a cold fallback, not a guarantee**, and that is the
+honest version of the claim. Reuse needs the scheduler to report the slot idle
+and the child to still be alive. Three things send it back to cold: a new
+container, a reaped worker, and -- worth naming, because this module can cause it
+-- **any exception crossing the fork**, since the web process returns the worker
+to ``workers`` only on an ``OkResult``. A :class:`PromptEnhancementError`
+therefore costs the resident copy and the next enhanced call pays the load again.
+That is correct rather than a regression: a reload is the cheap half of what a
+failed enhancement already cost the user.
+
+⛔ **Still nothing at module scope, and this is the constraint most likely to be
+broken by a later "optimisation".** :data:`_ENHANCER` is a module-level dict that
+is **empty at import** and filled on first use, inside the worker, past the fork.
+Hoisting the load to module scope -- *"we know we need it, why not have it ready
+at startup"* -- would put a 2.49 GB CUDA allocation inside ZeroGPU's packing
+window, which fires exactly once at ``demo.launch()`` via ``torch.pack()`` and
+captures whatever registered in ``cuda_aliases`` during the import phase. That
+would put the enhancer straight back into the 72 GB disk budget this whole
+feature was shaped around avoiding, and it would do it **silently**. Lazy first
+use, then keep. Never at import.
+
+The free path is not deleted, it is **moved**: :func:`clear_enhancer_cache` still
+does ``del`` + ``gc.collect()`` + a ``torch.cuda.empty_cache()`` guarded on the
+model's **own** parameter device rather than on ``torch.cuda.is_available()``, so
+a process that never touched CUDA never initialises it. Nothing on the generation
+path calls it -- it exists so that dropping the enhancer is an operation somebody
+can actually perform rather than a comment describing one.
 
 **Upstream's shape, not our invention.** ``diffusers.pipelines.ltx2`` already
 owns this: :func:`clean_response`, :func:`_pad_inputs_for_attention_alignment`
@@ -110,6 +169,7 @@ logger = logging.getLogger(__name__)
 __all__ = [
     "GENERATION_KWARGS",
     "MAX_NEW_TOKENS",
+    "clear_enhancer_cache",
     "enhance",
     "enhance_if_requested",
     "enhancer_device",
@@ -128,6 +188,22 @@ MAX_NEW_TOKENS = 600
 #: which is what makes ``prompt_enhancement_seed`` inert and why this app offers
 #: no seed for it. See the module docstring.
 GENERATION_KWARGS = {"do_sample": False, "no_repeat_ngram_size": 5}
+
+#: The loaded ``(model, processor)``, kept for the life of the worker process.
+#:
+#: ⛔ **EMPTY AT IMPORT, AND IT MUST STAY THAT WAY.** This dict is declared here
+#: and populated on first use inside the ``@spaces.GPU`` worker -- never at module
+#: scope. A ``.to("cuda")`` during the import phase registers in ZeroGPU's
+#: ``cuda_aliases`` and is captured by the ``torch.pack()`` that fires once at
+#: ``demo.launch()``, which would put 2.49 GB of Gemma back into the 72 GB disk
+#: budget the whole feature was shaped around avoiding -- silently. Declaring the
+#: container at import costs nothing; *filling* it at import costs the feature.
+#:
+#: Keyed by repo id because ``LTX25_PROMPT_ENHANCER_REPO`` is a real lever: an
+#: operator who repoints it must not be served the previous repo's weights.
+#: Same shape as ``pipelines._CACHE``, and cleared the same way -- see
+#: :func:`clear_enhancer_cache`.
+_ENHANCER: dict[str, tuple] = {}
 
 def enhancer_repo_id() -> str:
     """The Hub repo the enhancer is loaded from, from the runtime config."""
@@ -312,38 +388,74 @@ def enhance_if_requested(request, *, enhancer=None) -> tuple[str | None, tuple[s
 
 
 def enhance(prompt: str, *, image=None, repo_id: str | None = None, loader=None) -> str:
-    """Load the enhancer, rewrite one prompt, free the enhancer. In that order.
+    """Rewrite one prompt with the enhancer, loading it on first use and KEEPING it.
+
+    The load happens at most once per worker process. The reload it replaces cost
+    a measured **+30.78 s on every enhanced generation**; see the module docstring
+    for that number, for the partition measurement that made residency
+    affordable, and for the evidence that the forked worker lives long enough for
+    a module-level cache to be hit at all.
 
     ``loader`` is the seam that keeps this function testable offline: it takes a
-    repo id and returns ``(model, processor)``. The default hits the Hub.
+    repo id and returns ``(model, processor)``. The default hits the Hub. It is
+    cached exactly like the default -- an injected loader that was *not* cached
+    would mean the tested lifetime and the shipped lifetime were different
+    lifetimes, which is the shape of test theatre this suite exists to avoid.
     """
     repo_id = repo_id or enhancer_repo_id()
-    load = loader if loader is not None else _load_enhancer
-    model, processor = load(repo_id)
+    model, processor = _resident_enhancer(repo_id, loader)
     # Read off the MODEL rather than re-probing: the inputs must land wherever
     # the weights actually did, and an injected test loader that moved nothing
     # answers "cpu" without anyone having to tell it to.
     device = _model_device(model)
-    try:
-        return _rewrite(
-            model, processor, prompt=prompt, image=image, repo_id=repo_id, device=device
-        )
-    finally:
-        # Locals are dropped HERE, in the frame that owns the only references,
-        # so the enhancer is gone before the caller returns -- and `generate()`
-        # calls this above the pipeline factory, so it is gone before denoising
-        # starts. That is the honest version of the claim: inside the worker the
-        # transformer is already VRAM-resident while the rewrite runs, so the
-        # two do overlap. What must not happen is 2.5 GB of Gemma still being
-        # held at the memory peak, which is the activations.
-        on_cuda = device == "cuda"
+    # No `finally: del` any more, and that is the whole change. `generate()` still
+    # calls this above the pipeline factory, so the ordering is untouched -- what
+    # is gone is the free, which means the next enhanced call in this worker skips
+    # the load entirely instead of paying for it again.
+    return _rewrite(model, processor, prompt=prompt, image=image, repo_id=repo_id, device=device)
+
+
+def _resident_enhancer(repo_id: str, loader=None) -> tuple:
+    """The cached ``(model, processor)`` for ``repo_id``, loading it if need be.
+
+    **Only a successful load is cached.** :func:`_load_enhancer` raises
+    :class:`~ltx25_studio.errors.PromptEnhancementError` on a bad repo, an offline
+    Hub or a too-old ``transformers``, and caching that would turn one transient
+    network failure into an enhancer that stays broken for the life of the worker
+    with no way to retry.
+    """
+    cached = _ENHANCER.get(repo_id)
+    if cached is not None:
+        return cached
+    load = loader if loader is not None else _load_enhancer
+    loaded = load(repo_id)
+    _ENHANCER[repo_id] = loaded
+    return loaded
+
+
+def clear_enhancer_cache() -> None:
+    """Drop every resident enhancer and give its VRAM back.
+
+    **Nothing on the generation path calls this.** It exists because "the
+    enhancer is resident" should be a state something can leave, not a one-way
+    door -- and because the test suite needs each spec to start from an empty
+    cache rather than inheriting the previous spec's fake model.
+
+    The free itself is the one the per-call path used to run, moved rather than
+    deleted: drop the references, collect, and empty the CUDA cache **only** when
+    the model was actually on CUDA. Guarded on the model's OWN parameter device
+    rather than on ``torch.cuda.is_available()`` -- a parameter can only report
+    ``cuda`` if CUDA was already initialised to put it there, so this can never be
+    the call that initialises it.
+    """
+    while _ENHANCER:
+        _repo_id, (model, processor) = _ENHANCER.popitem()
+        on_cuda = _model_device(model) == "cuda"
+        # The dict held the last strong references until `popitem`; these locals
+        # hold them now, and they die at the end of this iteration.
         del model, processor
         gc.collect()
         if on_cuda:
-            # Guarded on the model's OWN device rather than on
-            # `torch.cuda.is_available()`: a parameter can only be on CUDA if
-            # CUDA was already initialised, so this never initialises it. See
-            # the module docstring.
             import torch
 
             torch.cuda.empty_cache()

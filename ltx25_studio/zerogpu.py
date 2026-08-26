@@ -306,12 +306,33 @@ LORA_DURATION_SECONDS = 60
 #: it must never block readiness or fail startup -- so "the prefetch worked" is
 #: not something the estimator is allowed to assume.
 #:
-#: 120 covers 88 s of download, a sub-second load and the decode, with headroom.
+#: ⚠️ **Residency does NOT let this shrink, and the reason is structural rather
+#: than cautious.** ``enhance.py`` now keeps the model loaded for the life of the
+#: worker, so a *warm* enhanced call costs only the decode. The estimator cannot
+#: spend that saving, because it does not know whether the call will be warm:
+#: ``spaces`` computes the duration in the WEB process and hands it to
+#: ``client.schedule()`` **before** a worker is selected -- ``schedule_response``
+#: is what carries the ``idle`` flag that decides reuse, and it does not exist yet
+#: when this function runs. So every reservation must still fit the cold path.
+#:
+#: ⛔ **Raised 120 -> 180, because the old arithmetic has been measured wrong.**
+#: The 120 was justified as "88 s of download, a **sub-second load** and the
+#: decode, with headroom". The load is not sub-second: it is the **~29 s** left
+#: over from the ✅ measured +30.78 s per-call reload once the ~1-2 s decode is
+#: taken out. The real degraded worst case was therefore 88 + 29 + 2 ~= 119 s
+#: against a 120 s allowance -- about **one second** of margin, where the comment
+#: claimed headroom. 120 was right by luck, not by construction, and the same
+#: measurement that motivated residency is what exposed it.
+#:
 #: The asymmetry in the module docstring decides the rounding: reservation and
 #: billing are different meters, so an over-generous request costs
 #: schedulability and nothing at all in billing, while an under-generous one
 #: kills the run at the boundary after the user has already waited through it.
-ENHANCE_DURATION_SECONDS = 120
+#: 180 keeps ~50% headroom over the measured cold path. It is not free -- the
+#: pre-check compares the *requested* duration against remaining quota, and on
+#: xlarge that comparison is doubled -- but a queued run is recoverable and
+#: reports why, while a run killed at the boundary is not.
+ENHANCE_DURATION_SECONDS = 180
 
 
 def _request_field(params, name):

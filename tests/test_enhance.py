@@ -764,9 +764,14 @@ def test_the_loaded_model_is_put_on_the_resolved_device_and_into_eval_mode(monke
     )
 
 
-def test_the_freed_model_releases_vram_when_it_was_on_the_gpu(monkeypatch):
-    """``empty_cache`` matters now in a way it did not on the CPU: the other
-    tenant is the 22B transformer, and it is in the same VRAM.
+def test_dropping_the_resident_enhancer_gives_the_vram_back(monkeypatch):
+    """The free path was **moved, not deleted**, and this is where it lives now.
+
+    ``enhance()`` no longer frees per call -- that cost a measured +30.78 s every
+    time -- so the ``del`` + ``gc.collect()`` + ``empty_cache()`` sequence moved
+    into ``clear_enhancer_cache()``. If it had simply been deleted, "resident"
+    would be a one-way door and the VRAM would be unrecoverable without killing
+    the worker.
 
     Guarded on the MODEL's own device, never on ``torch.cuda.is_available()`` --
     a parameter can only report cuda if CUDA was already initialised to put it
@@ -804,10 +809,17 @@ def test_the_freed_model_releases_vram_when_it_was_on_the_gpu(monkeypatch):
     enhance_module.enhance(
         ORIGINAL, repo_id="org/enhancer", loader=loader_for(OnCuda(), FakeProcessor())
     )
+    assert emptied == [], (
+        "enhance() emptied the CUDA cache on its way out, which is the per-call free this "
+        "commit removed -- the model is supposed to still be resident here"
+    )
+
+    enhance_module.clear_enhancer_cache()
     assert emptied == [True], (
         "a GPU-resident enhancer was dropped without emptying the CUDA cache, so its ~2.5 GB "
         "can still be held when the transformer needs the VRAM"
     )
+    assert enhance_module._ENHANCER == {}, "the cache still holds the model it just freed"
 
 
 def test_a_cpu_enhancer_never_touches_torch_cuda_at_all(upstream):
@@ -819,12 +831,17 @@ def test_a_cpu_enhancer_never_touches_torch_cuda_at_all(upstream):
     assert model.generate_kwargs, "the model never generated"
 
 
-def test_the_model_is_freed_before_the_call_returns(upstream):
-    """It must never coexist with the 22B transformer.
+def test_the_model_survives_the_call_and_dies_when_the_cache_is_cleared(upstream):
+    """The inversion of the rule this module shipped with, and the point of the change.
 
-    Checked with a weak reference rather than by trusting a ``del``: the point is
-    that no strong reference survives the call, which is the only version of
-    "freed" that means anything.
+    It used to be checked that NO strong reference survived ``enhance()``. That
+    was a real property, argued on VRAM safety, and it cost a 2.49 GB reload on
+    every enhanced generation -- ✅ +30.78 s measured -- to protect headroom on a
+    partition that turned out to be half the size the app was entitled to.
+
+    Checked with a weak reference in both directions rather than by trusting the
+    dict: "still referenced" and "actually collectable" are the only versions of
+    resident and freed that mean anything.
     """
     import gc
     import weakref
@@ -832,16 +849,169 @@ def test_the_model_is_freed_before_the_call_returns(upstream):
     watched: dict = {}
 
     def loader(repo_id):
-        # Built HERE so the reference `enhance()` takes is the only strong one.
+        # Built HERE so the only strong reference is the one the cache takes.
         model = FakeModel()
         watched["model"] = weakref.ref(model)
         return model, FakeProcessor()
 
     enhance_module.enhance(ORIGINAL, repo_id="org/enhancer", loader=loader)
     gc.collect()
+    assert watched["model"]() is not None, (
+        "the enhancer was dropped when enhance() returned, so the next enhanced generation "
+        "in this worker pays the 2.49 GB load again (+30.78 s measured)"
+    )
+
+    enhance_module.clear_enhancer_cache()
+    gc.collect()
     assert watched["model"]() is None, (
-        "the enhancer was still referenced after enhance() returned, so ~2.5 GB stays "
-        "resident for every generation that follows"
+        "clearing the cache left a strong reference behind, so residency cannot be undone "
+        "and the VRAM is unrecoverable short of killing the worker"
+    )
+
+
+# --------------------------------------------------------------------------
+# residency: loaded once per worker, and never at import
+# --------------------------------------------------------------------------
+
+
+def test_the_second_rewrite_in_a_worker_does_not_load_the_model_again(upstream):
+    """The change, stated as the only thing that makes it worth making.
+
+    ``spaces`` runs the forked worker in a ``while True:`` loop that serves many
+    tasks from one process, so module state written by call N is still there for
+    call N+1. If it were not -- if the platform forked fresh per request -- this
+    cache would never hit and the whole commit would be a no-op. See the module
+    docstring in ``enhance.py`` for that reading of ``spaces/zero/wrappers.py``.
+    """
+    loads: list[str] = []
+
+    def counting_loader(repo_id):
+        loads.append(repo_id)
+        return FakeModel(), FakeProcessor()
+
+    first = enhance_module.enhance(ORIGINAL, repo_id="org/enhancer", loader=counting_loader)
+    second = enhance_module.enhance(ORIGINAL, repo_id="org/enhancer", loader=counting_loader)
+
+    assert first == second == REWRITTEN
+    assert loads == ["org/enhancer"], (
+        f"the enhancer was loaded {len(loads)} times for two rewrites in one process. "
+        f"Residency is not hitting, so every enhanced generation still pays the 2.49 GB "
+        f"reload this commit exists to remove"
+    )
+
+
+def test_a_failed_load_is_not_cached_so_the_next_call_can_retry(monkeypatch):
+    """A transient Hub failure must not brick the enhancer for the worker's life.
+
+    Caching the *attempt* rather than the result is the easy version of this bug:
+    one 503 during a deploy and every enhanced run in that worker fails forever,
+    with the toggle still advertising a feature that can no longer work.
+    """
+    attempts: list[str] = []
+
+    def flaky(repo_id):
+        attempts.append(repo_id)
+        if len(attempts) == 1:
+            raise PromptEnhancementError(repo_id=repo_id, reason="the Hub was briefly down")
+        return FakeModel(), FakeProcessor()
+
+    with pytest.raises(PromptEnhancementError):
+        enhance_module.enhance(ORIGINAL, repo_id="org/enhancer", loader=flaky)
+    assert enhance_module._ENHANCER == {}, "a load that raised was cached anyway"
+
+    # Second call: the fake upstream helpers are needed only now, because the
+    # first call never got as far as rewriting.
+    torch = types.ModuleType("torch")
+
+    class _NoGrad:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    torch.no_grad = _NoGrad
+    monkeypatch.setitem(sys.modules, "torch", torch)
+    for name in ("diffusers", "diffusers.pipelines", "diffusers.pipelines.ltx2"):
+        monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
+    enhancement = types.ModuleType("diffusers.pipelines.ltx2.prompt_enhancement")
+    enhancement.clean_response = lambda text: text.strip().lstrip("\u201c")
+    enhancement._pad_inputs_for_attention_alignment = lambda inputs, pad_token_id=0: inputs
+    enhancement._prepare_enhance_image = lambda image, long_side=896: image
+    monkeypatch.setitem(sys.modules, enhancement.__name__, enhancement)
+    utils = types.ModuleType("diffusers.pipelines.ltx2.utils")
+    utils.LTX2_5_T2V_DEFAULT_SYSTEM_PROMPT = T2V_SYSTEM_PROMPT
+    utils.LTX2_5_I2V_DEFAULT_SYSTEM_PROMPT = I2V_SYSTEM_PROMPT
+    monkeypatch.setitem(sys.modules, utils.__name__, utils)
+
+    assert enhance_module.enhance(ORIGINAL, repo_id="org/enhancer", loader=flaky) == REWRITTEN
+    assert attempts == ["org/enhancer", "org/enhancer"], (
+        "the retry never reached the loader, so a single transient failure is permanent"
+    )
+
+
+def test_the_cache_is_keyed_on_the_repository_so_the_lever_still_works(upstream):
+    """``LTX25_PROMPT_ENHANCER_REPO`` is a real lever -- an operator repointing it
+    at the bf16 build must not be served the QAT weights out of a cache that
+    forgot which repo it loaded."""
+    loads: list[str] = []
+
+    def counting_loader(repo_id):
+        loads.append(repo_id)
+        return FakeModel(), FakeProcessor()
+
+    enhance_module.enhance(ORIGINAL, repo_id="org/qat", loader=counting_loader)
+    enhance_module.enhance(ORIGINAL, repo_id="org/bf16", loader=counting_loader)
+    enhance_module.enhance(ORIGINAL, repo_id="org/qat", loader=counting_loader)
+
+    assert loads == ["org/qat", "org/bf16"], (
+        "the cache ignored the repo id, so pointing LTX25_PROMPT_ENHANCER_REPO somewhere "
+        "new serves the previous repository's weights"
+    )
+
+
+def test_nothing_at_module_scope_fills_the_cache():
+    """⛔ The constraint most likely to be broken by a later "optimisation".
+
+    ZeroGPU packing fires once at ``demo.launch()`` and captures whatever
+    registered in ``cuda_aliases`` during the import phase. A module-scope load --
+    "we know we need it, why not have it ready" -- would put 2.49 GB of Gemma back
+    into the 72 GB disk budget the whole feature was shaped around avoiding, and
+    it would do it silently, with no error anywhere.
+
+    Parsed rather than grepped: the module *documents* this constraint at length,
+    so a string search finds the explanation and proves nothing.
+    """
+    import ast
+
+    tree = ast.parse(ENHANCE_SOURCE.read_text())
+
+    declarations = [
+        node
+        for node in tree.body
+        if isinstance(node, ast.AnnAssign) and getattr(node.target, "id", "") == "_ENHANCER"
+    ]
+    assert len(declarations) == 1, "expected exactly one module-scope _ENHANCER declaration"
+    declared = declarations[0].value
+    assert isinstance(declared, ast.Dict) and not declared.keys, (
+        "the enhancer cache is not declared empty; anything prebuilt here runs during the "
+        "import phase, which is the packing window"
+    )
+
+    executable = [
+        node
+        for node in tree.body
+        if node is not declarations[0]
+        and not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+        and any(isinstance(n, ast.Name) and n.id == "_ENHANCER" for n in ast.walk(node))
+    ]
+    assert executable == [], (
+        "a module-scope statement touches the enhancer cache. It must be filled on first "
+        "use inside the GPU worker, past the fork, and never during import"
+    )
+
+    assert enhance_module._ENHANCER == {}, (
+        "importing enhance.py left something in the cache"
     )
 
 

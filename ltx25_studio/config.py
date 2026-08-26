@@ -87,8 +87,10 @@ DEFAULT_LORA_MAX_GB = 12.0
 DEFAULT_QUANTIZATION = "bf16"
 QUANTIZATION_CHOICES = ("bf16", "int8")
 
-#: The prompt enhancer (PLAN §3.5), loaded lazily by ``enhance.py`` and freed
-#: again in the same call. A variable rather than a constant because it is the
+#: The prompt enhancer (PLAN §3.5), loaded lazily by ``enhance.py`` on first use
+#: inside the GPU worker and then KEPT for the life of that worker -- freeing it
+#: per call cost a measured +30.78 s every time. A variable rather than a
+#: constant because it is the
 #: one model this app resolves OUTSIDE the pinned pack -- ``model_index.json``
 #: ships ``prompt_enhancer: [None, None]`` and there is no ``prompt_enhancer/``
 #: folder in ``Lightricks/LTX-2.5-Diffusers``, so it is an ordinary
