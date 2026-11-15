@@ -537,9 +537,12 @@ def test_the_note_reaches_the_result_the_user_is_handed(tmp_path):
     """End to end through the production encoder. A warning that stops at the
     Space's logs is a warning the user never sees — which is most of what it
     was for."""
+    from conftest import inputs_for
+
     result = generate_module.generate(
         mode="text_to_video",
         seed=7,
+        **inputs_for("text_to_video"),
         width=SIZE,
         height=SIZE,
         pipeline_factory=lambda **kwargs: StaticPipe(),

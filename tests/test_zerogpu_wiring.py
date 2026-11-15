@@ -338,8 +338,10 @@ def test_a_wrapper_installed_after_startup_does_not_break_a_run(
         generate_module, "generate", _wrapper_supplying_the_gpu_seams(real, tmp_path, depth)
     )
 
+    from conftest import inputs_for
+
     # Entering the way the UI does: through generate(), not the entrypoint.
-    result = generate_module.generate(mode=mode_id, seed=7)
+    result = generate_module.generate(mode=mode_id, seed=7, **inputs_for(mode_id))
 
     assert result.video_path is not None
     assert depth["max"] <= 1, (
@@ -370,9 +372,12 @@ def test_a_run_through_the_dispatch_still_reserves_the_gpu_exactly_once(
 
     generate_module.set_gpu_dispatch(counting_entrypoint)
 
+    from conftest import inputs_for
+
     generate_module.generate(
         mode="text_to_video",
         seed=7,
+        **inputs_for("text_to_video"),
         pipeline_factory=factory_returning(FakePipe()),
         encoder=one_muxed_file_encoder,
         output_root=tmp_path,

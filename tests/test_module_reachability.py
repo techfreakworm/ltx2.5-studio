@@ -145,7 +145,7 @@ import numpy as np
 from pathlib import Path
 from conftest import (
     NATIVE_PREFIX, OFFICIAL_METADATA, TRANSFORMER_MODULE_PATHS,
-    FakePipeline, build_safetensors_bytes, lora_tensors,
+    FakePipeline, audio_file, build_safetensors_bytes, image_input, inputs_for, lora_tensors,
 )
 from ltx25_studio import generate as generate_module
 
@@ -197,7 +197,8 @@ with tempfile.TemporaryDirectory() as directory:
     try:
         generate_module.generate(
             mode="image_to_video", seed=7, width=SIZE, height=SIZE,
-            conditions=[["a wide establishing shot", 8, 0.8]],
+            **inputs_for("image_to_video"),
+            conditions=[{"source": image_input(), "index": 8, "strength": 0.8}],
             loras=({"source": str(adapter), "weight": 1.0},),
             pipeline_factory=lambda **_: Pipe(), encoder=None,
             output_root=directory, retention_bytes=10**9,
@@ -211,7 +212,7 @@ with tempfile.TemporaryDirectory() as directory:
         audio_module.load_waveform = lambda source: (STUB_WAVEFORM, STUB_SAMPLING_RATE)
         generate_module.generate(
             mode="audio_to_audio", seed=7, width=SIZE, height=SIZE,
-            audio="an-upload.wav",
+            audio=audio_file(),
             pipeline_factory=lambda **_: Pipe(), encoder=None,
             output_root=directory, retention_bytes=10**9,
         )
@@ -464,10 +465,13 @@ class _Pipe:
 
 
 def run_generation(tmp_path, **overrides):
+    from conftest import inputs_for
+
     from ltx25_studio import generate as generate_module
 
+    mode = overrides.pop("mode", "text_to_video")
     return generate_module.generate(
-        mode=overrides.pop("mode", "text_to_video"),
+        mode=mode,
         seed=7,
         width=SIZE,
         height=SIZE,
@@ -475,7 +479,7 @@ def run_generation(tmp_path, **overrides):
         encoder=None,
         output_root=tmp_path,
         retention_bytes=10**9,
-        **overrides,
+        **{**inputs_for(mode), **overrides},
     )
 
 
@@ -515,7 +519,9 @@ def test_conditioning_runs_when_the_request_carries_shots(tmp_path):
     never caught. Upstream skips such a condition with a log line and generates
     anyway, so the shot silently did nothing and the metered run was spent.
     """
-    shots = [["a wide establishing shot", 8, 0.8]]
+    from conftest import image_input
+
+    shots = [{"source": image_input(), "index": 8, "strength": 0.8}]
     ran = executed_package_files(
         lambda: run_generation(tmp_path, mode="image_to_video", conditions=shots)
     )
@@ -632,6 +638,8 @@ def executed_by_a_full_generation(tmp_path_factory) -> set[Path]:
     runs the suite has already imported most of the package and an import-based
     measure would report everything as reached.
     """
+    from conftest import image_input, inputs_for
+
     from ltx25_studio import generate as generate_module
 
     directory = tmp_path_factory.mktemp("full")
@@ -643,7 +651,8 @@ def executed_by_a_full_generation(tmp_path_factory) -> set[Path]:
             seed=7,
             width=SIZE,
             height=SIZE,
-            conditions=[["a wide establishing shot", 8, 0.8]],
+            **inputs_for("image_to_video"),
+            conditions=[{"source": image_input(), "index": 8, "strength": 0.8}],
             loras=({"source": str(lora), "weight": 1.0},),
             pipeline_factory=lambda **_: _LoRAPipe(),
             encoder=None,
