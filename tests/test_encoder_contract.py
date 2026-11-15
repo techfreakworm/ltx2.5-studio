@@ -33,6 +33,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from conftest import FakeAudioVae, audio_file, inputs_for
 from test_exports_contract import MODE_IDS, factory_returning
 
 from ltx25_studio import generate as generate_module
@@ -66,10 +67,14 @@ class RealOutput:
 
 
 class VocoderPipe:
-    """A pipeline that exposes the vocoder ``generate()`` must read the rate off."""
+    """A pipeline that exposes the vocoder ``generate()`` must read the rate off.
+
+    It has an audio VAE too, because the audio-input modes encode their upload.
+    """
 
     def __init__(self, sampling_rate=VOCODER_SAMPLING_RATE):
         self.vocoder = SimpleNamespace(config=SimpleNamespace(output_sampling_rate=sampling_rate))
+        self.audio_vae = FakeAudioVae()
         self.calls: list[dict] = []
 
     def __call__(self, **kwargs):
@@ -78,14 +83,26 @@ class VocoderPipe:
 
 
 class VocoderlessPipe:
-    """A pipeline with nothing to read the sampling rate off."""
+    """A pipeline with nothing to read the sampling rate off (it can still encode an upload)."""
+
+    def __init__(self):
+        self.audio_vae = FakeAudioVae()
 
     def __call__(self, **kwargs):
         return RealOutput()
 
 
+@pytest.fixture(autouse=True)
+def _uploads_load_without_torch(audio_input_ready):
+    """The audio modes get a real upload; its loader is stubbed so no torch is needed."""
+
+
 def run_production(mode_id, tmp_path, *, pipe=None, **overrides):
-    """``encoder=None`` — the real ``outputs.write_output``, no fake in the way."""
+    """``encoder=None`` — the real ``outputs.write_output``, no fake in the way.
+
+    Real inputs for every kind the mode requires. A caller in another module
+    must also request the ``audio_input_ready`` fixture for the audio modes.
+    """
     return generate_module.generate(
         mode=mode_id,
         seed=7,
@@ -95,7 +112,7 @@ def run_production(mode_id, tmp_path, *, pipe=None, **overrides):
         encoder=None,
         output_root=tmp_path,
         retention_bytes=10**9,
-        **overrides,
+        **{**inputs_for(mode_id), **overrides},
     )
 
 
@@ -298,7 +315,7 @@ def test_a_supplied_upload_reaches_the_container_as_48k_stereo_at_its_own_pitch(
     and the tone must come back at the SAME frequency: muxing 16 kHz samples
     as if they were 48 kHz would triple the pitch with no error anywhere.
     """
-    from conftest import STUB_SAMPLING_RATE, FakeAudioVae
+    from conftest import STUB_SAMPLING_RATE
 
     from ltx25_studio import audio as audio_module
 
@@ -307,12 +324,7 @@ def test_a_supplied_upload_reaches_the_container_as_48k_stereo_at_its_own_pitch(
     t = np.arange(samples) / STUB_SAMPLING_RATE
     upload = np.stack([0.5 * np.sin(2 * np.pi * tone_hz * t)] * 2).astype(np.float32)
     monkeypatch.setattr(audio_module, "load_waveform", lambda source: (upload, STUB_SAMPLING_RATE))
-    pipe = VocoderPipe()
-    pipe.audio_vae = FakeAudioVae()
-
-    result = run_production(
-        "audio_to_video", tmp_path, pipe=pipe, audio="a-song-the-user-cares-about.wav"
-    )
+    result = run_production("audio_to_video", tmp_path, audio=audio_file())
 
     with av.open(str(result.video_path)) as container:
         stream = next(s for s in container.streams if s.type == "audio")

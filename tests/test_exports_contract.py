@@ -38,7 +38,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from conftest import FakeAudioVae
+from conftest import FakeAudioVae, inputs_for
 
 from ltx25_studio import generate as generate_module
 from ltx25_studio import modes, outputs
@@ -131,7 +131,13 @@ ENCODERS = {
 }
 
 
+@pytest.fixture(autouse=True)
+def _uploads_load_without_torch(audio_input_ready):
+    """The audio modes get a real upload; its loader is stubbed so no torch is needed."""
+
+
 def run(mode_id, tmp_path, *, encoder=one_muxed_file_encoder, **overrides):
+    """One run of ``mode_id`` with real inputs for every kind the mode requires."""
     return generate_module.generate(
         mode=mode_id,
         seed=7,
@@ -139,7 +145,7 @@ def run(mode_id, tmp_path, *, encoder=one_muxed_file_encoder, **overrides):
         encoder=encoder,
         output_root=tmp_path,
         retention_bytes=10**9,
-        **overrides,
+        **{**inputs_for(mode_id), **overrides},
     )
 
 

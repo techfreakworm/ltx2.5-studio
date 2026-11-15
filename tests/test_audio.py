@@ -844,6 +844,8 @@ def test_a_sample_only_encoder_draws_with_the_generator_the_pipeline_gets(
     import types
     from pathlib import Path
 
+    from conftest import audio_file
+
     from ltx25_studio import generate as generate_module
     from ltx25_studio import outputs
 
@@ -878,7 +880,7 @@ def test_a_sample_only_encoder_draws_with_the_generator_the_pipeline_gets(
     generate_module.generate(
         mode="audio_to_audio",
         seed=1234,
-        audio="an-upload.wav",
+        audio=audio_file(),
         pipeline_factory=lambda *args, **kwargs: pipe,
         encoder=encoder,
         output_root=tmp_path,

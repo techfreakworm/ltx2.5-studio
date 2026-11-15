@@ -492,7 +492,7 @@ def test_an_audio_run_hands_the_pipeline_the_mode_of_the_real_distribution(
     """Through ``generate``: two seeds, one upload, identical conditioning latents."""
     torch = pytest.importorskip("torch")
     vae = pytest.importorskip("diffusers.models.autoencoders.vae")
-    from conftest import FakeAudioVae
+    from conftest import FakeAudioVae, inputs_for
     from test_exports_contract import factory_returning, one_muxed_file_encoder
 
     from ltx25_studio import generate as generate_module
@@ -520,11 +520,11 @@ def test_an_audio_run_hands_the_pipeline_the_mode_of_the_real_distribution(
         generate_module.generate(
             mode="audio_to_audio",
             seed=seed,
-            audio="an-upload.wav",
             pipeline_factory=factory_returning(pipe),
             encoder=one_muxed_file_encoder,
             output_root=tmp_path / str(seed),
             retention_bytes=10**9,
+            **inputs_for("audio_to_audio"),
         )
         handed.append(pipe.calls[-1]["audio_latents"])
 
@@ -659,7 +659,7 @@ def test_a_video_only_write_returns_no_wav(tmp_path):
     assert not (tmp_path / "run" / outputs.AUDIO_FILENAME).exists()
 
 
-def test_a_joint_generation_hands_the_audio_player_a_wav(tmp_path):
+def test_a_joint_generation_hands_the_audio_player_a_wav(tmp_path, audio_input_ready):
     """Through ``generate`` with the production writer."""
     from test_encoder_contract import JOINT_MODES, run_production
 
