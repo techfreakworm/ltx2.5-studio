@@ -759,17 +759,139 @@ def test_the_frame_count_tracks_the_input_duration(seconds, expected):
 
 
 def test_the_real_transform_agrees_with_the_layout_model():
-    """The fixture above is only worth its weight if it matches real torch."""
+    """The fixture above is only worth its weight if it matches real torch.
+
+    Fed **the way production feeds it**: ``encode_waveform_to_latents`` settles
+    the channel count, ``batched`` adds the batch axis, and only then does the
+    front-end run. This test used to hand the transform a bare ``(2, 16000)``
+    and unpack four axes from the 3D result, so it could never pass -- and it
+    never ran, because every recorded gate had no torch. With torch 2.11 the
+    batched input gives ``(1, 2, 101, 64)``: time-major, and 16000 // 160 + 1
+    frames, which is the count ``FakeAudioVae.mel_spectrogram`` derives.
+    """
     torch = pytest.importorskip("torch", reason="fidelity check needs real torch")
 
-    to_mel = audio.build_mel_front_end(FakeAudioVae(), FakeVocoder())
-    mel = to_mel(torch.zeros((2, 16000), dtype=torch.float32))
+    vae = FakeAudioVae()
+    to_mel = audio.build_mel_front_end(vae, FakeVocoder())
+    waveform, _note = audio.match_channel_count(
+        torch.zeros((2, 16000), dtype=torch.float32), channels=audio.audio_channels_from(vae)
+    )
+    prepared = audio.batched(waveform)
+    mel = to_mel(prepared)
 
+    assert mel.ndim == len(audio.MEL_INPUT_DIMS), tuple(mel.shape)
     batch, channels, time, mel_bins = mel.shape
     assert (batch, channels, mel_bins) == (1, 2, 64), tuple(mel.shape)
     assert time > mel_bins, (
         f"time ({time}) should exceed mel bins ({mel_bins}) at hop 160; if not, the axes "
         f"are reversed and ShapedTensor is modelling the wrong rearrangement"
+    )
+    assert tuple(mel.shape) == vae.mel_spectrogram(prepared).shape, (
+        f"the real transform gave {tuple(mel.shape)} and the fake models "
+        f"{vae.mel_spectrogram(prepared).shape}; every offline encode test measures the fake"
+    )
+
+    # What `batched` exists to prevent: the transform keeps its input's rank, so
+    # an unbatched waveform yields a 3D mel -- which conv2d would read as
+    # unbatched, and which the rank guard refuses before it gets there.
+    unbatched = to_mel(waveform)
+    assert tuple(unbatched.shape) == (channels, time, mel_bins), tuple(unbatched.shape)
+    with pytest.raises(LTXStudioError):
+        audio._validate_mel_rank(unbatched)
+
+
+def test_the_fake_distribution_takes_what_the_real_one_takes():
+    """``FakeLatentDist.sample`` must accept exactly what upstream's does.
+
+    ``sample=lambda: latents`` took nothing while the real
+    ``DiagonalGaussianDistribution.sample`` takes a generator, and the
+    mismatch hid until torch was installed: then every audio-input test
+    raised ``TypeError`` inside the fixture. Pinned against the installed
+    diffusers so the fake cannot drift from it again.
+    """
+    import inspect
+
+    from conftest import FakeLatentDist
+
+    vae_module = pytest.importorskip(
+        "diffusers.models.autoencoders.vae", reason="needs the installed diffusers"
+    )
+
+    def shape_of(method):
+        return [(p.name, p.kind, p.default) for p in inspect.signature(method).parameters.values()]
+
+    real = shape_of(vae_module.DiagonalGaussianDistribution.sample)
+    fake = shape_of(FakeLatentDist.sample)
+    assert fake == real, f"the fake samples as {fake}; diffusers samples as {real}"
+
+
+def test_the_audio_encode_draws_with_the_generator_the_pipeline_gets(
+    monkeypatch, tmp_path, audio_input_ready
+):
+    """``audio_vae.encode`` returns a distribution; ``.sample`` draws from it.
+
+    ``generate._prepared_audio`` hands the encode the SAME generator the
+    pipeline receives, so a same-seed rerun draws the same audio latents. An
+    unseeded draw makes two runs differ whatever lever is under test -- the
+    third reason H10b established less than it appeared to.
+
+    A stand-in ``torch`` supplies the generator, so this asserts the same thing
+    with or without torch installed: without one, ``_seeded_generator`` returns
+    None and the identity would hold trivially.
+    """
+    import sys
+    import types
+    from pathlib import Path
+
+    from ltx25_studio import generate as generate_module
+    from ltx25_studio import outputs
+
+    class Generator:
+        def __init__(self, device=None):
+            self.device = device
+
+        def manual_seed(self, value):
+            self.seed = value
+            return self
+
+    fake_torch = types.ModuleType("torch")
+    fake_torch.Generator = Generator
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+
+    class Pipe:
+        def __init__(self):
+            self.audio_vae = FakeAudioVae()
+            self.calls: list[dict] = []
+
+        def __call__(self, **kwargs):
+            self.calls.append(kwargs)
+            return SimpleNamespace(frames=("frame",), audio=("sample",))
+
+    def encoder(output, *, run_dir, exports, **kwargs):
+        target = Path(run_dir) / outputs.AUDIO_FILENAME
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"\x00" * 2048)
+        return target
+
+    pipe = Pipe()
+    generate_module.generate(
+        mode="audio_to_audio",
+        seed=1234,
+        audio="an-upload.wav",
+        pipeline_factory=lambda *args, **kwargs: pipe,
+        encoder=encoder,
+        output_root=tmp_path,
+        retention_bytes=10**9,
+    )
+
+    handed = pipe.calls[-1].get("generator")
+    assert isinstance(handed, Generator) and handed.seed == 1234, (
+        f"the pipeline was not handed the run's seeded generator: {handed!r}"
+    )
+    drawn = pipe.audio_vae.sample_generators
+    assert len(drawn) == 1 and drawn[0] is handed, (
+        f"the audio latents were drawn with {drawn!r}, not the generator the pipeline got "
+        f"({handed!r}), so two same-seed runs encode the same upload differently"
     )
 
 

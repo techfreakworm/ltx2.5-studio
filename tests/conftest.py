@@ -499,6 +499,33 @@ class FakeMel:
         )
 
 
+class FakeLatentDist:
+    """Duck-types diffusers' ``DiagonalGaussianDistribution`` -- **with its signature.**
+
+    The real one is ``sample(self, generator: torch.Generator | None = None)``,
+    and ``audio._sampled`` hands it the run's generator positionally. This fake
+    used to be ``sample=lambda: latents``, which takes nothing: in a gate with
+    no torch ``_seeded_generator`` returns None, the draw is bare, and the
+    lambda agreed with it. Install requirements.txt and the generator is real,
+    so every audio-input test raised ``TypeError`` inside the fake -- 34
+    failures and 20 errors measuring the fixture, not the code.
+
+    It **records** what each draw was handed (None for a bare draw) in the list
+    it is given, which is the VAE's ``sample_generators``. Accepting the
+    generator alone would make the gate pass while proving nothing about
+    seeding; recording it lets a test check that the encode draws with the
+    SAME generator the pipeline gets (``generate._prepared_audio``).
+    """
+
+    def __init__(self, latents, draws: list):
+        self._latents = latents
+        self._draws = draws
+
+    def sample(self, generator=None):
+        self._draws.append(generator)
+        return self._latents
+
+
 class FakeAudioVae:
     """Duck-types an audio VAE closely enough to really encode a waveform.
 
@@ -543,6 +570,8 @@ class FakeAudioVae:
         self.temporal_compression_ratio = 4
         self.mels: list = []
         self.encoded: list = []
+        #: One entry per ``latent_dist.sample`` call: the generator it was handed.
+        self.sample_generators: list = []
 
     def mel_spectrogram(self, waveform):
         """A mel whose TIME axis is derived from the waveform, in encoder layout.
@@ -583,7 +612,7 @@ class FakeAudioVae:
                 second // ratio,
             )
         )
-        return SimpleNamespace(latent_dist=SimpleNamespace(sample=lambda: latents))
+        return SimpleNamespace(latent_dist=FakeLatentDist(latents, self.sample_generators))
 
 
 def waveform_of(channels: int, samples: int = 4096):
