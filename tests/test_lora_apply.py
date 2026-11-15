@@ -36,7 +36,12 @@ from conftest import (
     lora_tensors,
 )
 
-from ltx25_studio.errors import LoRAError, LoRANotAttachedError
+from ltx25_studio.errors import (
+    LoRADimensionError,
+    LoRAError,
+    LoRAFormatError,
+    LoRANotAttachedError,
+)
 from ltx25_studio.lora import apply as lora_apply
 
 # --------------------------------------------------------------------------
@@ -141,24 +146,21 @@ def test_the_fake_pipeline_reproduces_the_peft_config_trap(fake_pipeline, wrong_
     assert fake_pipeline.get_list_adapters()["transformer"]
 
 
-def test_stage_seven_alone_would_not_have_caught_a_wrong_dimension_adapter(
-    fake_pipeline, wrong_dimension_lora
-):
-    """**Necessary but NOT sufficient. Do not delete stage 6.5 as redundant.**
-
-    This loads the LTX-Video-2B adapter the way diffusers would, bypassing our
-    validator entirely, and shows the "attached > 0" criterion being *satisfied*
-    by an adapter built for a different model. Its module names are the ones
-    LTX-2.5 uses, so it really does attach; only its dimensions are wrong.
-
-    Stage 7 answers "did anything happen?". It cannot answer "was it the right
-    thing?" — that is stage 6.5's job (``test_lora_compat.py``).
-    """
-    attached = fake_pipeline.load_lora_weights(wrong_dimension_lora, adapter_name="user_lora")
-    assert attached > 0, (
-        "the fixture no longer reproduces the case: a 2048-dim adapter with matching module "
-        "names must still ATTACH, which is precisely why stage 7 cannot be the last check"
-    )
+def test_real_peft_refuses_a_wrong_dimension_adapter_and_says_which_module(tmp_path):
+    """**Stage 7 alone would not explain this one.** The 2B-shaped adapter's
+    module names are LTX's, so it gets as far as the load; real peft then raises
+    torch's size-mismatch, one line per tensor. The user is told the first
+    mismatching module, as a dimension error, not "could not be read"."""
+    tiny = _tiny_pipeline()
+    path = tiny.adapter(tmp_path / "wrong.safetensors", in_features={"to_q": 8, "to_k": 8})
+    with pytest.raises(LoRADimensionError) as excinfo:
+        lora_apply.apply_lora(tiny.pipe, path, adapter_name="user_lora_0")
+    error = excinfo.value
+    assert error.module == "transformer_blocks.0.attn1.to_q"
+    assert (error.expected, error.actual) == (16, 8)
+    assert "attn1.to_k" not in str(error), "only the first mismatch is named"
+    assert isinstance(error.__cause__, RuntimeError)
+    assert "size mismatch" in str(error.__cause__)
 
 
 def test_an_adapter_matching_nothing_in_either_component_raises(make_pipeline, good_lora):
@@ -282,3 +284,232 @@ def test_there_is_no_flag_that_skips_the_attach_assertion():
     }
     found = banned & set(params)
     assert not found, f"apply_lora exposes {sorted(found)} — stage 7 must not be optional"
+
+
+# --------------------------------------------------------------------------
+# F55 — load failures say what they are, with the original kept as __cause__
+# --------------------------------------------------------------------------
+
+#: torch's own wording, as real peft surfaces it through diffusers (measured on
+#: diffusers @ac56fa2f + peft 0.20.0 with a tiny LTX2 transformer).
+SIZE_MISMATCH = "Error(s) in loading state_dict for LTX2VideoTransformer3DModel:\n" + "".join(
+    f"\tsize mismatch for transformer_blocks.{i}.attn1.to_k.lora_A.user_lora_0.weight: "
+    "copying a param with shape torch.Size([32, 2048]) from checkpoint, the shape in "
+    "current model is torch.Size([32, 4096]).\n"
+    for i in range(448)
+)
+
+PEFT_NOTHING_TARGETED = (
+    "No modules were targeted for adaptation. This might be caused by a combination of "
+    "mismatched target modules and excluded modules. Please check your `target_modules` and "
+    "`exclude_modules` configuration. You may also have only targeted modules that are "
+    "marked to be saved (`modules_to_save`)."
+)
+
+
+class RaisingPipeline:
+    _lora_loadable_modules = ["transformer", "connectors"]
+
+    def __init__(self, exc):
+        from conftest import FakeComponent
+
+        self.exc = exc
+        self.transformer = FakeComponent(("a.b",))
+        self.connectors = FakeComponent(("c.d",))
+
+    def load_lora_weights(self, source, adapter_name="default", **kwargs):
+        raise self.exc
+
+
+def test_a_torch_size_mismatch_becomes_a_one_line_dimension_error(good_lora):
+    original = RuntimeError(SIZE_MISMATCH)
+    with pytest.raises(LoRADimensionError) as excinfo:
+        lora_apply.apply_lora(RaisingPipeline(original), good_lora, adapter_name="user_lora_0")
+    error = excinfo.value
+    assert error.module == "transformer_blocks.0.attn1.to_k"
+    assert (error.expected, error.actual) == (4096, 2048)
+    assert len(str(error)) < 600, f"{len(str(error))} characters: {str(error)[:200]}…"
+    assert error.__cause__ is original
+
+
+def test_a_lora_b_size_mismatch_reads_the_out_dimension(good_lora):
+    original = RuntimeError(
+        "Error(s) in loading state_dict for X:\n\tsize mismatch for "
+        "transformer_blocks.3.ff.net.2.lora_B.user_lora_0.weight: copying a param with shape "
+        "torch.Size([2048, 16]) from checkpoint, the shape in current model is "
+        "torch.Size([4096, 16])."
+    )
+    with pytest.raises(LoRADimensionError) as excinfo:
+        lora_apply.apply_lora(RaisingPipeline(original), good_lora, adapter_name="user_lora_0")
+    assert excinfo.value.module == "transformer_blocks.3.ff.net.2"
+    assert (excinfo.value.expected, excinfo.value.actual) == (4096, 2048)
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        PEFT_NOTHING_TARGETED,
+        "Target modules {'down_blocks.0.conv'} not found in the base model. Please check the "
+        "target modules and try again.",
+    ],
+    ids=["peft-0.20", "older-peft"],
+)
+def test_peft_finding_nothing_to_target_is_the_not_attached_error(message, good_lora):
+    original = ValueError(message)
+    with pytest.raises(LoRANotAttachedError) as excinfo:
+        lora_apply.apply_lora(RaisingPipeline(original), good_lora, adapter_name="user_lora_0")
+    assert excinfo.value.__cause__ is original
+    assert excinfo.value.adapter_name == "user_lora_0"
+
+
+def test_a_duplicate_adapter_name_is_reported_as_one(good_lora):
+    original = ValueError(
+        "Adapter name user_lora_0 already in use in the model - please select a new adapter name."
+    )
+    with pytest.raises(lora_apply.LoRADuplicateAdapterError) as excinfo:
+        lora_apply.apply_lora(RaisingPipeline(original), good_lora, adapter_name="user_lora_0")
+    assert isinstance(excinfo.value, LoRAError)
+    assert "user_lora_0" in str(excinfo.value) and "already" in str(excinfo.value)
+    assert "could not be read" not in str(excinfo.value)
+    assert excinfo.value.__cause__ is original
+
+
+def test_any_other_load_failure_is_cut_to_its_first_line(good_lora):
+    original = OSError("disk read failed\n" + "noise\n" * 500)
+    with pytest.raises(LoRAFormatError) as excinfo:
+        lora_apply.apply_lora(RaisingPipeline(original), good_lora)
+    assert "disk read failed" in str(excinfo.value)
+    assert "noise" not in str(excinfo.value)
+    assert excinfo.value.__cause__ is original
+
+
+# --------------------------------------------------------------------------
+# F53 — weight is validated and reported; the report reads as a run-report line
+# --------------------------------------------------------------------------
+
+
+def test_the_attach_report_reads_as_one_run_report_line(fake_pipeline, write_safetensors):
+    path = write_safetensors(
+        name="BTSMovieSet_LTX25_v1.safetensors",
+        tensors=lora_tensors(NATIVE_PREFIX, TRANSFORMER_MODULE_PATHS),
+        metadata=OFFICIAL_METADATA,
+    )
+    report = lora_apply.apply_lora(fake_pipeline, path, adapter_name="user_lora_0", weight=0.8)
+    assert report.weight == 0.8
+    assert report.summary == (
+        f"BTSMovieSet_LTX25_v1 attached to {report.attached} modules at weight 0.8"
+    )
+
+
+def test_a_label_names_the_adapter_in_the_report(fake_pipeline, good_lora):
+    report = lora_apply.apply_lora(fake_pipeline, good_lora, label="org/my-lora")
+    assert report.summary.startswith("org/my-lora attached to ")
+    assert report.summary.endswith(" at weight 1.0")
+
+
+@pytest.mark.parametrize("weight", [0, -0.5, 2.01, float("nan"), float("inf")])
+def test_an_out_of_range_weight_is_refused_before_loading(weight, fake_pipeline, good_lora):
+    with pytest.raises(LoRAError) as excinfo:
+        lora_apply.apply_lora(fake_pipeline, good_lora, weight=weight)
+    assert "strength" in str(excinfo.value)
+    assert fake_pipeline.calls == [], "nothing may load with a weight outside (0, 2]"
+
+
+@pytest.mark.parametrize("weight", [0.05, 1.0, 2.0])
+def test_weights_inside_the_range_are_applied(weight, fake_pipeline, good_lora):
+    lora_apply.apply_lora(fake_pipeline, good_lora, weight=weight)
+    assert fake_pipeline.calls[-1] == {"set_adapters": (("default", weight), {})}
+
+
+# --------------------------------------------------------------------------
+# the same mappings through real diffusers + peft (FULL env only)
+# --------------------------------------------------------------------------
+
+
+class _Tiny:
+    def __init__(self, pipe, linears):
+        self.pipe = pipe
+        self.linears = linears
+
+    def adapter(self, path, modules=("to_q", "to_k"), in_features=None, block="attn1"):
+        import torch
+        from safetensors.torch import save_file
+
+        tensors = {}
+        for leaf in modules:
+            name = f"transformer_blocks.0.{block}.{leaf}"
+            in_dim, out_dim = self.linears.get(name, (16, 16))
+            in_dim = (in_features or {}).get(leaf, in_dim)
+            tensors[f"diffusion_model.{name}.lora_A.weight"] = torch.zeros(4, in_dim)
+            tensors[f"diffusion_model.{name}.lora_B.weight"] = torch.zeros(out_dim, 4)
+        save_file(tensors, str(path))
+        return path
+
+
+def _tiny_pipeline():
+    torch = pytest.importorskip("torch")
+    pytest.importorskip("peft")
+    pytest.importorskip("safetensors")
+    diffusers = pytest.importorskip("diffusers")
+    from diffusers.loaders.lora_pipeline import LTX2LoraLoaderMixin
+
+    transformer = diffusers.LTX2VideoTransformer3DModel(
+        in_channels=8,
+        out_channels=8,
+        num_attention_heads=2,
+        attention_head_dim=8,
+        cross_attention_dim=16,
+        audio_in_channels=8,
+        audio_out_channels=8,
+        audio_num_attention_heads=2,
+        audio_attention_head_dim=4,
+        audio_cross_attention_dim=8,
+        num_layers=1,
+        caption_channels=16,
+    )
+
+    class TinyPipeline(LTX2LoraLoaderMixin):
+        hf_device_map = None
+
+        def __init__(self):
+            self.transformer = transformer
+            self.connectors = None
+
+        @property
+        def components(self):
+            return {"transformer": self.transformer}
+
+    linears = {
+        name: (module.in_features, module.out_features)
+        for name, module in transformer.named_modules()
+        if isinstance(module, torch.nn.Linear)
+    }
+    return _Tiny(TinyPipeline(), linears)
+
+
+def test_real_peft_attaches_a_matching_adapter_and_reports_it(tmp_path):
+    tiny = _tiny_pipeline()
+    report = lora_apply.apply_lora(
+        tiny.pipe,
+        tiny.adapter(tmp_path / "tiny.safetensors"),
+        adapter_name="user_lora_0",
+        weight=0.5,
+    )
+    assert report.attached == 2
+    assert report.summary == "tiny attached to 2 modules at weight 0.5"
+
+
+def test_real_peft_finding_nothing_is_the_not_attached_error(tmp_path):
+    tiny = _tiny_pipeline()
+    path = tiny.adapter(tmp_path / "foreign.safetensors", modules=("conv1",), block="resnets")
+    with pytest.raises(LoRANotAttachedError) as excinfo:
+        lora_apply.apply_lora(tiny.pipe, path, adapter_name="user_lora_0")
+    assert isinstance(excinfo.value.__cause__, ValueError)
+
+
+def test_real_peft_duplicate_name_is_reported_as_one(tmp_path):
+    tiny = _tiny_pipeline()
+    path = tiny.adapter(tmp_path / "twice.safetensors")
+    lora_apply.apply_lora(tiny.pipe, path, adapter_name="user_lora_0")
+    with pytest.raises(lora_apply.LoRADuplicateAdapterError):
+        lora_apply.apply_lora(tiny.pipe, path, adapter_name="user_lora_0")
