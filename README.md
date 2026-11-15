@@ -244,10 +244,15 @@ python3.12 -m venv .venv                       # 3.12 is required, not preferred
 .venv/bin/python app.py
 ```
 
-Tests — no GPU, no weights, no network:
+Tests — no GPU, no weights, no network — in **this** venv, with `requirements.txt`
+installed. A venv without torch passes too, but it skips the checks that compare our
+fakes and layouts with real torch, torchaudio, diffusers and safetensors, so it cannot
+vouch for them. `scripts/gate.sh` runs pytest, then ruff if it is installed, and prints
+the interpreter and the torch version so a result says which environment it came from:
 
 ```bash
 .venv/bin/python -m pytest -q
+PYTHON=.venv/bin/python scripts/gate.sh
 ```
 
 You need a `HF_TOKEN` with access to `Lightricks/LTX-2.5-Diffusers`; the repo is gated.
