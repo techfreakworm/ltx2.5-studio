@@ -2,6 +2,7 @@
 """Verify a produced artifact against the mode's DECLARED exports.
 
     python tests/verify_streams.py <mode_id> <file> [--frame-rate 24] [--sampling-rate <hz>]
+                                   [--geometry WxH]
 
 **Do not hardcode a sampling rate.** The vocoder knows its own
 (``vocoder.config.output_sampling_rate``, 48000 at the pinned revision) and
@@ -9,6 +10,9 @@
 ``scripts/host_matrix.py`` passes that value through. A second copy of the
 number here would be a second thing to be wrong. Omitting the flag skips the
 rate check rather than assuming one.
+
+``--geometry WxH`` checks the picture's size, e.g. that a stage-2 run returned
+twice the requested width and height. Omitting it skips the size check.
 
 Part A's pass criterion is the expected stream layout per mode, not that a file
 appeared. Read by eye across sixteen runs, that is sixteen chances for a
@@ -32,11 +36,12 @@ contents at all.
 `startup_report` once defaulted to "nothing is missing" and reported 37/37 having
 checked nothing; this is that same shape one layer out.
 
-Exit codes:  0 = matches   1 = mismatch   2 = could not probe
+Exit codes:  0 = matches   1 = mismatch   2 = could not probe, or a usage error
 """
 
 from __future__ import annotations
 
+import argparse
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -101,7 +106,9 @@ def probe_streams(path) -> dict | None:
                     actual["video_codec"] = stream.codec_context.name
                     rate = stream.average_rate
                     actual["frame_rate"] = float(rate) if rate else None
-                    actual["size"] = f"{stream.codec_context.width}x{stream.codec_context.height}"
+                    actual["width"] = stream.codec_context.width
+                    actual["height"] = stream.codec_context.height
+                    actual["size"] = f"{actual['width']}x{actual['height']}"
                 elif stream.type == "audio":
                     actual["audio"] = True
                     actual["audio_codec"] = stream.codec_context.name
@@ -112,9 +119,14 @@ def probe_streams(path) -> dict | None:
         return None
 
 
-def verify(mode_id, path, *, frame_rate=None, sampling_rate=None) -> Verdict:
-    """Compare a real container against what the mode declares it exports."""
+def verify(mode_id, path, *, frame_rate=None, sampling_rate=None, geometry=None) -> Verdict:
+    """Compare a real container against what the mode declares it exports.
+
+    ``geometry`` is an optional ``(width, height)`` the picture must have.
+    """
     expected = expected_streams(mode_id)
+    if geometry is not None:
+        expected["size"] = "{}x{}".format(*geometry)
     actual = probe_streams(path)
     if actual is None:
         return Verdict(
@@ -165,6 +177,18 @@ def verify(mode_id, path, *, frame_rate=None, sampling_rate=None) -> Verdict:
             f"written at the wrong rate plays at the wrong speed and reports no error"
         )
 
+    if geometry is not None:
+        if not actual["video"]:
+            problems.append(
+                f"a size of {expected['size']} was asked for and the file has no video stream "
+                f"to measure"
+            )
+        elif (actual.get("width"), actual.get("height")) != tuple(geometry):
+            problems.append(
+                f"the picture is {actual.get('size')}, expected {expected['size']} -- the file "
+                f"is not the size the run was asked for"
+            )
+
     return Verdict(
         mode=mode_id,
         path=str(path),
@@ -176,24 +200,49 @@ def verify(mode_id, path, *, frame_rate=None, sampling_rate=None) -> Verdict:
     )
 
 
+def _geometry(value: str) -> tuple[int, int]:
+    width, sep, height = value.lower().partition("x")
+    try:
+        size = (int(width), int(height))
+    except ValueError:
+        size = None
+    if not sep or size is None or min(size) <= 0:
+        raise argparse.ArgumentTypeError(f"{value!r} is not WIDTHxHEIGHT, e.g. 1408x960")
+    return size
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="verify_streams.py",
+        description="Verify a produced artifact against the mode's declared exports.",
+        epilog="Exit codes: 0 = matches, 1 = mismatch, 2 = could not probe or a usage error.",
+        allow_abbrev=False,
+    )
+    parser.add_argument("mode_id")
+    parser.add_argument("file")
+    parser.add_argument("--frame-rate", type=float, metavar="FPS")
+    parser.add_argument("--sampling-rate", type=int, metavar="HZ")
+    parser.add_argument("--geometry", type=_geometry, metavar="WxH")
+    return parser
+
+
 def main(argv=None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
-    if len(argv) < 2:
-        print(__doc__)
-        return 2
-    mode_id, path = argv[0], argv[1]
-    frame_rate = sampling_rate = None
-    for flag, cast in (("--frame-rate", float), ("--sampling-rate", int)):
-        if flag in argv:
-            value = argv[argv.index(flag) + 1]
-            if flag == "--frame-rate":
-                frame_rate = cast(value)
-            else:
-                sampling_rate = cast(value)
     try:
-        verdict = verify(mode_id, path, frame_rate=frame_rate, sampling_rate=sampling_rate)
+        args = _parser().parse_args(argv)
+    except SystemExit as exc:
+        # argparse has already printed the problem; a usage error is never a mismatch.
+        return 0 if exc.code == 0 else 2
+    try:
+        verdict = verify(
+            args.mode_id,
+            args.file,
+            frame_rate=args.frame_rate,
+            sampling_rate=args.sampling_rate,
+            geometry=args.geometry,
+        )
     except Exception as exc:
-        print(f"COULD NOT PROBE  mode={mode_id}  file={path}\n  ✗ {exc}")
+        print(f"COULD NOT PROBE  mode={args.mode_id}  file={args.file}\n  ✗ {exc}")
         return 2
     print(verdict.render())
     return verdict.exit_code
