@@ -709,6 +709,54 @@ def test_the_inputs_follow_the_model_onto_whatever_device_it_landed_on(upstream)
     assert model.generate_kwargs, "the model never generated"
 
 
+class RecordingProcessor(FakeProcessor):
+    """Keeps the inputs it returned, so a test can see where they were moved."""
+
+    def __init__(self):
+        super().__init__()
+        self.returned: list = []
+
+    def __call__(self, *, text, images, return_tensors):
+        inputs = super().__call__(text=text, images=images, return_tensors=return_tensors)
+        self.returned.append(inputs)
+        return inputs
+
+
+@pytest.mark.parametrize("device", ["mps", "cuda", "cpu"])
+def test_image_aware_inputs_go_to_the_device_the_model_is_on(device, upstream):
+    """Measured on a real MPS run: the model sat on mps, the inputs were moved to
+    cpu, and image-aware enhancement failed with "Tensor for argument input is on
+    cpu but expected on mps". The device is read off the model's parameters."""
+
+    class Placed(FakeModel):
+        def parameters(self):
+            yield types.SimpleNamespace(device=types.SimpleNamespace(type=device))
+
+    processor = RecordingProcessor()
+    enhance_module.enhance(
+        ORIGINAL, image="a-frame", repo_id="org/enhancer", loader=loader_for(Placed(), processor)
+    )
+    assert processor.calls[0]["images"] == "prepared:a-frame"
+    assert processor.returned[0].moved_to == device
+
+
+def test_a_real_tensor_dict_follows_a_real_mps_model():
+    """FULL env, Apple silicon only: a small BatchFeature with pixel values lands
+    on the device _model_device reads off a real MPS parameter."""
+    torch = pytest.importorskip("torch")
+    if not torch.backends.mps.is_available():
+        pytest.skip("MPS is not available on this machine")
+    transformers = pytest.importorskip("transformers")
+
+    model = torch.nn.Linear(4, 4).to("mps")
+    device = enhance_module._model_device(model)
+    assert device == "mps"
+    inputs = transformers.BatchFeature(
+        {"input_ids": torch.zeros(1, 3, dtype=torch.long), "pixel_values": torch.zeros(1, 3, 4, 4)}
+    ).to(device)
+    assert {tensor.device.type for tensor in inputs.values()} == {"mps"}
+
+
 def test_the_device_is_resolved_rather_than_pinned_to_the_cpu(monkeypatch):
     """``ENHANCER_DEVICE = "cpu"`` used to be a module constant, and the
     reasoning behind it was correct for where the call then lived: probing

@@ -698,14 +698,15 @@ def _model_device(model) -> str:
 
     Asked of the model rather than of ``torch``, which is what makes it safe: a
     parameter can only report ``cuda`` if CUDA was already initialised to put it
-    there, so reading this can never be the thing that initialises it. A model
-    with no parameters -- every fake in the test suite -- answers ``"cpu"``,
-    which is also the honest answer for a load that never moved anything.
+    there, so reading this can never be the thing that initialises it. The
+    processor's outputs are moved here, so it must be the real device type
+    (``cuda``, ``mps``, ``cpu`` ...): answering ``cpu`` for an MPS model sent the
+    image tensors to the CPU and failed image-aware enhancement. A model with no
+    parameters answers ``"cpu"``.
     """
     try:
         for parameter in model.parameters():
-            kind = parameter.device.type
-            return kind if kind in ("cuda", "mps") else "cpu"
+            return str(parameter.device.type)
     except Exception:  # noqa: BLE001 -- a fake model in a test has no parameters
         return "cpu"
     return "cpu"
