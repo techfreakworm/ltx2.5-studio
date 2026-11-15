@@ -732,6 +732,62 @@ def test_the_device_is_resolved_rather_than_pinned_to_the_cpu(monkeypatch):
     assert enhance_module.enhancer_device() == "cpu"
 
 
+def _torch_with(*, cuda, mps, emptied=None):
+    sink = emptied if emptied is not None else []
+    torch = types.ModuleType("torch")
+    torch.cuda = types.SimpleNamespace(
+        is_available=lambda: cuda, empty_cache=lambda: sink.append("cuda")
+    )
+    torch.backends = types.SimpleNamespace(mps=types.SimpleNamespace(is_available=lambda: mps))
+    torch.mps = types.SimpleNamespace(empty_cache=lambda: sink.append("mps"))
+    return torch
+
+
+def test_apple_silicon_resolves_to_mps(monkeypatch):
+    monkeypatch.setitem(sys.modules, "torch", _torch_with(cuda=False, mps=True))
+    assert enhance_module.enhancer_device() == "mps"
+
+
+def test_cuda_still_wins_when_both_are_present(monkeypatch):
+    monkeypatch.setitem(sys.modules, "torch", _torch_with(cuda=True, mps=True))
+    assert enhance_module.enhancer_device() == "cuda"
+
+
+def test_an_explicit_device_is_honoured(monkeypatch):
+    monkeypatch.setitem(sys.modules, "torch", _torch_with(cuda=True, mps=False))
+    assert enhance_module.enhancer_device("cpu") == "cpu"
+    assert enhance_module.enhancer_device("mps") == "mps"
+
+
+def test_an_explicit_device_reaches_the_load(monkeypatch):
+    transformers = types.ModuleType("transformers")
+    model, processor = FakeModel(), FakeProcessor()
+    transformers.AutoProcessor = types.SimpleNamespace(
+        from_pretrained=lambda repo_id, **kwargs: processor
+    )
+    transformers.Gemma4ForConditionalGeneration = types.SimpleNamespace(
+        from_pretrained=lambda repo_id, **kwargs: model
+    )
+    monkeypatch.setitem(sys.modules, "transformers", transformers)
+    monkeypatch.setitem(sys.modules, "torch", _torch_with(cuda=True, mps=False))
+
+    enhance_module._load_enhancer("org/enhancer", device="cpu")
+    assert model.moved_to == "cpu"
+
+
+def test_dropping_an_mps_resident_enhancer_empties_the_mps_cache(monkeypatch):
+    emptied: list = []
+    monkeypatch.setitem(sys.modules, "torch", _torch_with(cuda=False, mps=True, emptied=emptied))
+
+    class OnMps(FakeModel):
+        def parameters(self):
+            yield types.SimpleNamespace(device=types.SimpleNamespace(type="mps"))
+
+    enhance_module._ENHANCER[("org/enhancer", None)] = (OnMps(), FakeProcessor())
+    enhance_module.clear_enhancer_cache()
+    assert emptied == ["mps"]
+
+
 def test_a_host_without_torch_resolves_to_the_cpu_rather_than_raising(monkeypatch):
     """The probe must never be the thing that breaks a run. A machine with no
     torch, or a torch built without CUDA, enhances slowly -- which is the honest
@@ -1015,6 +1071,63 @@ def test_nothing_at_module_scope_fills_the_cache():
     )
 
 
+def _recording_transformers(monkeypatch):
+    seen: dict = {}
+    model, processor = FakeModel(), FakeProcessor()
+    transformers = types.ModuleType("transformers")
+
+    def _processor(repo_id, **kwargs):
+        seen["processor"] = (repo_id, kwargs)
+        return processor
+
+    def _model(repo_id, **kwargs):
+        seen["model"] = (repo_id, kwargs)
+        return model
+
+    transformers.AutoProcessor = types.SimpleNamespace(from_pretrained=_processor)
+    transformers.Gemma4ForConditionalGeneration = types.SimpleNamespace(from_pretrained=_model)
+    monkeypatch.setitem(sys.modules, "transformers", transformers)
+    monkeypatch.setattr(enhance_module, "enhancer_device", lambda device=None: "cpu")
+    return seen
+
+
+def test_the_default_enhancer_loads_at_its_pinned_commit(monkeypatch):
+    """The repo's chat template changed twice in July 2026; the template is what
+    the rewrite is built from, so an unpinned load can change enhancement output
+    without any change here."""
+    seen = _recording_transformers(monkeypatch)
+    default = config_module.DEFAULT_PROMPT_ENHANCER_REPO
+    enhance_module._load_enhancer(default, revision=enhance_module.enhancer_revision(default))
+    assert seen["processor"] == (default, {"revision": enhance_module.ENHANCER_REVISION})
+    assert seen["model"] == (default, {"revision": enhance_module.ENHANCER_REVISION, "dtype": "auto"})
+
+
+def test_the_pin_reaches_the_load_through_enhance(monkeypatch, upstream):
+    seen = _recording_transformers(monkeypatch)
+    monkeypatch.delenv(config_module.ENV_PROMPT_ENHANCER_REPO, raising=False)
+    enhance_module.enhance(ORIGINAL)
+    assert seen["model"][1]["revision"] == enhance_module.ENHANCER_REVISION
+    assert seen["processor"][1]["revision"] == enhance_module.ENHANCER_REVISION
+
+
+def test_the_pin_is_the_commit_that_was_head_when_it_was_measured():
+    assert enhance_module.ENHANCER_REVISION == "dd693ff40353f057ca5f07e945ad867f4afbf2ec"
+    default = config_module.DEFAULT_PROMPT_ENHANCER_REPO
+    assert default == "google/gemma-4-E2B-it-qat-mobile-transformers", (
+        "the default repo changed: the pin belongs to the old one, choose a new pin"
+    )
+    assert enhance_module.enhancer_revision(default) == enhance_module.ENHANCER_REVISION
+
+
+def test_an_overridden_repo_is_loaded_unpinned_and_the_log_says_so(monkeypatch, caplog):
+    seen = _recording_transformers(monkeypatch)
+    assert enhance_module.enhancer_revision("google/gemma-4-E2B-it") is None
+    with caplog.at_level("WARNING"):
+        enhance_module._load_enhancer("google/gemma-4-E2B-it", revision=None)
+    assert seen["model"][1]["revision"] is None
+    assert "not pinned" in caplog.text
+
+
 def test_a_load_failure_names_the_repository_and_the_reason(monkeypatch):
     """The enhancer is the one model resolved outside the pinned pack, so
     "which repo?" is a real question with a configurable answer."""
@@ -1073,14 +1186,33 @@ def _hub(monkeypatch, downloaded, *, boom=None):
     return hub
 
 
-def test_the_prefetch_downloads_the_configured_repository(monkeypatch):
+def test_the_prefetch_downloads_the_configured_repository_at_its_pinned_commit(monkeypatch):
+    downloaded: list = []
+    _hub(monkeypatch, downloaded)
+    monkeypatch.delenv(config_module.ENV_PROMPT_ENHANCER_REPO, raising=False)
+
+    path = enhance_module.prefetch(token="hf_secret")
+    assert downloaded == [
+        {
+            "repo_id": config_module.DEFAULT_PROMPT_ENHANCER_REPO,
+            "revision": enhance_module.ENHANCER_REVISION,
+            "token": "hf_secret",
+        }
+    ]
+    assert path and "gemma-4-E2B-it-qat-mobile-transformers" in path
+
+
+def test_a_repo_other_than_the_default_is_prefetched_at_its_head_and_the_log_says_so(
+    monkeypatch, caplog
+):
     downloaded: list = []
     _hub(monkeypatch, downloaded)
     monkeypatch.setattr(enhance_module, "enhancer_repo_id", lambda: "org/enhancer")
 
-    path = enhance_module.prefetch(token="hf_secret")
-    assert downloaded == [{"repo_id": "org/enhancer", "token": "hf_secret"}]
-    assert path and "org--enhancer" in path
+    with caplog.at_level("WARNING"):
+        enhance_module.prefetch(token="hf_secret")
+    assert downloaded == [{"repo_id": "org/enhancer", "revision": None, "token": "hf_secret"}]
+    assert "org/enhancer" in caplog.text and "not pinned" in caplog.text
 
 
 def test_the_prefetch_follows_the_repo_lever_rather_than_a_hardcoded_name(monkeypatch):
@@ -1156,11 +1288,14 @@ def test_the_prefetch_runs_on_a_daemon_thread_so_readiness_never_waits(monkeypat
     downloaded: list = []
     _hub(monkeypatch, downloaded)
 
-    thread = enhance_module.start_prefetch("org/enhancer", token="hf_secret")
+    default = config_module.DEFAULT_PROMPT_ENHANCER_REPO
+    thread = enhance_module.start_prefetch(default, token="hf_secret")
     assert thread.daemon is True, "a non-daemon prefetch can hold the process open at exit"
     thread.join(timeout=10)
     assert not thread.is_alive()
-    assert downloaded == [{"repo_id": "org/enhancer", "token": "hf_secret"}]
+    assert downloaded == [
+        {"repo_id": default, "revision": enhance_module.ENHANCER_REVISION, "token": "hf_secret"}
+    ]
 
 
 def test_a_thrown_prefetch_never_escapes_the_thread(monkeypatch):
@@ -1398,7 +1533,10 @@ def test_the_default_enhancer_repository_is_public_and_loadable():
     total = sum(s.size or 0 for s in info.siblings)
     assert total < 4e9, f"{repo_id} is now {total / 1e9:.3f} GB, not the ~2.49 GB budgeted"
 
-    with open(hf_hub_download(repo_id, "config.json")) as handle:
+    pinned = HfApi().model_info(repo_id, revision=enhance_module.ENHANCER_REVISION)
+    assert pinned.sha == enhance_module.ENHANCER_REVISION, "the pinned commit no longer resolves"
+
+    with open(hf_hub_download(repo_id, "config.json", revision=pinned.sha)) as handle:
         config = json.load(handle)
     assert config["model_type"] == "gemma4"
     assert config["quantization_config"]["quant_method"] == "gemma"

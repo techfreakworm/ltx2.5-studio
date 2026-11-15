@@ -167,6 +167,7 @@ from .errors import PromptEnhancementError
 logger = logging.getLogger(__name__)
 
 __all__ = [
+    "ENHANCER_REVISION",
     "GENERATION_KWARGS",
     "MAX_NEW_TOKENS",
     "clear_enhancer_cache",
@@ -174,9 +175,17 @@ __all__ = [
     "enhance_if_requested",
     "enhancer_device",
     "enhancer_repo_id",
+    "enhancer_revision",
     "prefetch",
     "start_prefetch",
 ]
+
+#: The commit ``config.DEFAULT_PROMPT_ENHANCER_REPO``
+#: (``google/gemma-4-E2B-it-qat-mobile-transformers``) is loaded at: its head
+#: on 2026-08-27 and still on 2026-11-16. The repo's chat template, which the
+#: rewrite is built from, changed twice in July 2026. Applies to the default
+#: repo only; a repo set through ``LTX25_PROMPT_ENHANCER_REPO`` loads at its head.
+ENHANCER_REVISION = "dd693ff40353f057ca5f07e945ad867f4afbf2ec"
 
 #: ``GEMMA4_PROMPT_ENHANCEMENT_CONFIG.max_new_tokens`` upstream, and the number
 #: PLAN §3.5 banked in advance. Not a UI control: the caption length is what the
@@ -199,11 +208,11 @@ GENERATION_KWARGS = {"do_sample": False, "no_repeat_ngram_size": 5}
 #: budget the whole feature was shaped around avoiding -- silently. Declaring the
 #: container at import costs nothing; *filling* it at import costs the feature.
 #:
-#: Keyed by repo id because ``LTX25_PROMPT_ENHANCER_REPO`` is a real lever: an
-#: operator who repoints it must not be served the previous repo's weights.
-#: Same shape as ``pipelines._CACHE``, and cleared the same way -- see
-#: :func:`clear_enhancer_cache`.
-_ENHANCER: dict[str, tuple] = {}
+#: Keyed by ``(repo id, revision)`` because ``LTX25_PROMPT_ENHANCER_REPO`` is a
+#: real lever: an operator who repoints it must not be served the previous
+#: repo's weights. Cleared by :func:`clear_enhancer_cache`.
+_ENHANCER: dict[tuple, tuple] = {}
+
 
 def enhancer_repo_id() -> str:
     """The Hub repo the enhancer is loaded from, from the runtime config."""
@@ -212,8 +221,26 @@ def enhancer_repo_id() -> str:
     return load_config().prompt_enhancer_repo
 
 
-def enhancer_device() -> str:
-    """``"cuda"`` where there is a GPU to use, ``"cpu"`` where there is not.
+def enhancer_revision(repo_id: str | None = None) -> str | None:
+    """The pinned commit for the default repo; ``None`` (the Hub head) for any other."""
+    from .config import DEFAULT_PROMPT_ENHANCER_REPO
+
+    repo_id = repo_id or enhancer_repo_id()
+    return ENHANCER_REVISION if repo_id == DEFAULT_PROMPT_ENHANCER_REPO else None
+
+
+def _warn_unpinned(repo_id: str, action: str) -> None:
+    logger.warning(
+        "prompt enhancer %r is not the default repository, so it is not pinned: %s it at its "
+        "current Hub head. Its chat template, and so the rewritten prompts, can change "
+        "without notice.",
+        repo_id,
+        action,
+    )
+
+
+def enhancer_device(device: str | None = None) -> str:
+    """``device`` when the caller names one; otherwise ``"cuda"``, then ``"mps"``, then ``"cpu"``.
 
     **Resolved per call rather than fixed at import**, because the answer
     differs by *process*, not by deployment. This used to be the constant
@@ -226,16 +253,23 @@ def enhancer_device() -> str:
     slow device for a reason that no longer applies. See the module docstring
     for the measurement that moved it.
 
-    Never raises. A host with no torch, or a torch built without CUDA, answers
-    ``"cpu"`` and the enhancement still runs -- slowly, which is the correct
-    outcome for a machine that has nothing faster.
+    Never raises. A host with no torch, or a torch with neither CUDA nor MPS,
+    answers ``"cpu"`` and the enhancement still runs -- slowly, which is the
+    correct outcome for a machine that has nothing faster.
     """
+    if device:
+        return str(device)
     try:
         import torch
 
         if torch.cuda.is_available():
             return "cuda"
     except Exception:  # noqa: BLE001 -- no torch, or no CUDA build; both mean cpu
+        return "cpu"
+    try:
+        if torch.backends.mps.is_available():
+            return "mps"
+    except Exception:  # noqa: BLE001 -- a torch without the mps backend
         return "cpu"
     return "cpu"
 
@@ -292,10 +326,15 @@ def prefetch(repo_id: str | None = None, *, token=None) -> str | None:
     download rather than for a decode.
     """
     repo_id = repo_id or enhancer_repo_id()
+    revision = enhancer_revision(repo_id)
+    if revision is None:
+        _warn_unpinned(repo_id, "prefetching")
     try:
         from huggingface_hub import snapshot_download
 
-        path = snapshot_download(repo_id=repo_id, token=token)
+        # A commit-hash revision also lets later loads resolve cached files
+        # with no network round-trip.
+        path = snapshot_download(repo_id=repo_id, revision=revision, token=token)
     except Exception as exc:  # noqa: BLE001 -- see "best-effort" above
         logger.warning(
             "prompt-enhancer prefetch failed for %r (%r). The Space is unaffected: "
@@ -387,7 +426,9 @@ def enhance_if_requested(request, *, enhancer=None) -> tuple[str | None, tuple[s
     return (enhanced, (*image_notes, _rewrite_note(enhanced)))
 
 
-def enhance(prompt: str, *, image=None, repo_id: str | None = None, loader=None) -> str:
+def enhance(
+    prompt: str, *, image=None, repo_id: str | None = None, loader=None, device: str | None = None
+) -> str:
     """Rewrite one prompt with the enhancer, loading it on first use and KEEPING it.
 
     The load happens at most once per worker process. The reload it replaces cost
@@ -401,9 +442,11 @@ def enhance(prompt: str, *, image=None, repo_id: str | None = None, loader=None)
     cached exactly like the default -- an injected loader that was *not* cached
     would mean the tested lifetime and the shipped lifetime were different
     lifetimes, which is the shape of test theatre this suite exists to avoid.
+
+    ``device`` overrides :func:`enhancer_device` for the default loader.
     """
     repo_id = repo_id or enhancer_repo_id()
-    model, processor = _resident_enhancer(repo_id, loader)
+    model, processor = _resident_enhancer(repo_id, loader, device=device)
     # Read off the MODEL rather than re-probing: the inputs must land wherever
     # the weights actually did, and an injected test loader that moved nothing
     # answers "cpu" without anyone having to tell it to.
@@ -415,7 +458,7 @@ def enhance(prompt: str, *, image=None, repo_id: str | None = None, loader=None)
     return _rewrite(model, processor, prompt=prompt, image=image, repo_id=repo_id, device=device)
 
 
-def _resident_enhancer(repo_id: str, loader=None) -> tuple:
+def _resident_enhancer(repo_id: str, loader=None, *, device: str | None = None) -> tuple:
     """The cached ``(model, processor)`` for ``repo_id``, loading it if need be.
 
     **Only a successful load is cached.** :func:`_load_enhancer` raises
@@ -424,12 +467,15 @@ def _resident_enhancer(repo_id: str, loader=None) -> tuple:
     network failure into an enhancer that stays broken for the life of the worker
     with no way to retry.
     """
-    cached = _ENHANCER.get(repo_id)
+    revision = enhancer_revision(repo_id)
+    cached = _ENHANCER.get((repo_id, revision))
     if cached is not None:
         return cached
-    load = loader if loader is not None else _load_enhancer
-    loaded = load(repo_id)
-    _ENHANCER[repo_id] = loaded
+    if loader is not None:
+        loaded = loader(repo_id)
+    else:
+        loaded = _load_enhancer(repo_id, revision=revision, device=device)
+    _ENHANCER[(repo_id, revision)] = loaded
     return loaded
 
 
@@ -443,22 +489,26 @@ def clear_enhancer_cache() -> None:
 
     The free itself is the one the per-call path used to run, moved rather than
     deleted: drop the references, collect, and empty the CUDA cache **only** when
-    the model was actually on CUDA. Guarded on the model's OWN parameter device
-    rather than on ``torch.cuda.is_available()`` -- a parameter can only report
-    ``cuda`` if CUDA was already initialised to put it there, so this can never be
-    the call that initialises it.
+    the model was actually on CUDA (or MPS, the same way). Guarded on the
+    model's OWN parameter device rather than on ``torch.cuda.is_available()`` --
+    a parameter can only report ``cuda`` if CUDA was already initialised to put
+    it there, so this can never be the call that initialises it.
     """
     while _ENHANCER:
-        _repo_id, (model, processor) = _ENHANCER.popitem()
-        on_cuda = _model_device(model) == "cuda"
+        _key, (model, processor) = _ENHANCER.popitem()
+        device = _model_device(model)
         # The dict held the last strong references until `popitem`; these locals
         # hold them now, and they die at the end of this iteration.
         del model, processor
         gc.collect()
-        if on_cuda:
+        if device == "cuda":
             import torch
 
             torch.cuda.empty_cache()
+        elif device == "mps":
+            import torch
+
+            torch.mps.empty_cache()
 
 
 # ---------------------------------------------------------------------------
@@ -509,13 +559,15 @@ def _reference_frame(image):
     )
 
 
-def _load_enhancer(repo_id: str):
-    """``(model, processor)`` from the Hub, or one of ours naming the repo.
+def _load_enhancer(repo_id: str, *, revision: str | None = None, device: str | None = None):
+    """``(model, processor)`` from the Hub at ``revision``, or one of ours naming the repo.
 
     Two failures are worth separating and both are named: ``transformers`` too
     old to know ``Gemma4ForConditionalGeneration`` at all, and the fetch/load
     itself. Neither ever falls through to the original prompt.
     """
+    if revision is None:
+        _warn_unpinned(repo_id, "loading")
     try:
         from transformers import AutoProcessor, Gemma4ForConditionalGeneration
     except Exception as exc:
@@ -532,12 +584,14 @@ def _load_enhancer(repo_id: str):
         # The processor supplies BOTH halves upstream's `enhance_prompt` uses:
         # `.tokenizer` for the chat template and the decode, and the image prep
         # for the I2V route.
-        processor = AutoProcessor.from_pretrained(repo_id)
+        processor = AutoProcessor.from_pretrained(repo_id, revision=revision)
         # Named explicitly rather than through `AutoModel*`: the QAT repo's
         # config.json has no `architectures` key, so auto-dispatch cannot
         # resolve it. `dtype="auto"` honours the checkpoint's own dtype and the
         # `quantization_config` block the QAT build carries.
-        model = Gemma4ForConditionalGeneration.from_pretrained(repo_id, dtype="auto")
+        model = Gemma4ForConditionalGeneration.from_pretrained(
+            repo_id, revision=revision, dtype="auto"
+        )
     except Exception as exc:
         raise PromptEnhancementError(repo_id=repo_id, reason=repr(exc)) from exc
 
@@ -546,7 +600,7 @@ def _load_enhancer(repo_id: str):
     # Gemma lands is exactly the kind of action-at-a-distance that made the
     # original CPU pin necessary. It is now resolved rather than hardcoded --
     # see `enhancer_device`.
-    return model.eval().to(enhancer_device()), processor
+    return model.eval().to(device or enhancer_device()), processor
 
 
 def _system_prompts():
@@ -650,7 +704,8 @@ def _model_device(model) -> str:
     """
     try:
         for parameter in model.parameters():
-            return "cuda" if parameter.device.type == "cuda" else "cpu"
+            kind = parameter.device.type
+            return kind if kind in ("cuda", "mps") else "cpu"
     except Exception:  # noqa: BLE001 -- a fake model in a test has no parameters
         return "cpu"
     return "cpu"
