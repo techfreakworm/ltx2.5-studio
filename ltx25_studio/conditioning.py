@@ -50,9 +50,10 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from fractions import Fraction
 from pathlib import Path
 
-from .constraints import DEFAULT_TEMPORAL_COMPRESSION_RATIO, image_crf_for
+from .constraints import DEFAULT_TEMPORAL_COMPRESSION_RATIO
 from .errors import ConstraintError
 
 __all__ = [
@@ -60,7 +61,6 @@ __all__ = [
     "ConditionSpec",
     "build_conditions",
     "decode_video_frames",
-    "image_crf_for",
     "latent_group_for",
     "latent_index_for",
     "latent_to_pixel_index",
@@ -257,7 +257,95 @@ def _already_decoded(source) -> bool:
     return False
 
 
-def decode_video_frames(source, *, max_frames: int | None = None):
+def _quarter_turns(frame, stream) -> int:
+    """Counter-clockwise quarter turns that make this stream's frames upright.
+
+    The display matrix (``frame.rotation``, counter-clockwise degrees) wins; an
+    older file may carry only a ``rotate`` stream tag, which counts clockwise.
+    Angles that are not a multiple of 90 are left alone.
+    """
+    degrees = int(round(getattr(frame, "rotation", 0) or 0))
+    if not degrees:
+        tag = next((v for k, v in stream.metadata.items() if k.lower() == "rotate"), None)
+        try:
+            degrees = -int(round(float(tag))) if tag else 0
+        except ValueError:
+            degrees = 0
+    if degrees % 90:
+        return 0
+    return (degrees // 90) % 4
+
+
+def _upright(frame, turns: int):
+    import numpy as np
+
+    array = frame.to_ndarray(format="rgb24")
+    return np.ascontiguousarray(np.rot90(array, k=turns)) if turns else array
+
+
+def _frame_by_frame(container, stream, *, max_frames):
+    frames, turns = [], None
+    for frame in container.decode(stream):
+        if turns is None:
+            turns = _quarter_turns(frame, stream)
+        frames.append(_upright(frame, turns))
+        if max_frames is not None and len(frames) >= max_frames:
+            break
+    return frames
+
+
+def _at_rate(container, stream, *, frame_rate: Fraction, max_frames):
+    """The frame nearest each ``t = i / frame_rate``, from the first frame on.
+
+    Ties go to the earlier frame. Targets past the last frame's display time
+    are not filled, so a short clip yields fewer frames.
+    """
+    limit = float("inf") if max_frames is None else max_frames
+    nominal = stream.average_rate or stream.guessed_rate or frame_rate
+    frames: list = []
+    turns = origin = None
+    previous = None  # (seconds, frame)
+    gap = None
+    cached = (None, None)
+
+    def take(frame):
+        nonlocal cached
+        if cached[0] is not frame:
+            cached = (frame, _upright(frame, turns))
+        frames.append(cached[1])
+
+    for frame in container.decode(stream):
+        if turns is None:
+            turns = _quarter_turns(frame, stream)
+        if frame.pts is None or frame.time_base is None:
+            when = Fraction(0) if previous is None else previous[0] + 1 / Fraction(nominal)
+        else:
+            origin = frame.pts if origin is None else origin
+            when = Fraction(frame.pts - origin) * frame.time_base
+        while len(frames) < limit and Fraction(len(frames)) / frame_rate <= when:
+            target = Fraction(len(frames)) / frame_rate
+            if previous is not None and target - previous[0] <= when - target:
+                take(previous[1])
+            else:
+                take(frame)
+        if len(frames) >= limit:
+            return frames
+        if previous is not None and when > previous[0]:
+            gap = when - previous[0]
+        previous = (when, frame)
+
+    if previous is not None:
+        last_seconds, last = previous
+        if last.duration and last.time_base is not None:
+            shown_for = Fraction(last.duration) * last.time_base
+        else:
+            shown_for = gap if gap is not None else 1 / Fraction(nominal)
+        while len(frames) < limit and Fraction(len(frames)) / frame_rate < last_seconds + shown_for:
+            take(last)
+    return frames
+
+
+def decode_video_frames(source, *, max_frames: int | None = None, frame_rate=None):
     """A video path -> the RGB frames the pipeline will actually take.
 
     Returns ``(F, H, W, 3)`` ``uint8``, which is one of the four payload types
@@ -274,6 +362,16 @@ def decode_video_frames(source, *, max_frames: int | None = None):
       already gives at length: it is a required dependency that bundles its own
       FFmpeg, so it works where the system codecs are not ours to install.
 
+    **Timing.** With ``frame_rate`` (the generation's rate), frames are chosen by
+    presentation timestamp: frame ``i`` is the source frame nearest to
+    ``i / frame_rate`` seconds after the first one. A 60 fps clip therefore
+    conditions a 24 fps run at real speed rather than at 0.4x, and a
+    variable-frame-rate clip keeps its timing. Without it, frames are read one
+    by one in order, which is only right when the clip's rate already matches.
+
+    **Orientation.** The display rotation a phone stores beside a portrait clip
+    is applied, so the frames are upright as a player would show them.
+
     **No resizing, deliberately.** Upstream scales the condition so the longer
     side fills the target and centre-crops to exactly ``(height, width)``.
     Re-deriving that here would be a second copy of somebody else's arithmetic,
@@ -285,9 +383,8 @@ def decode_video_frames(source, *, max_frames: int | None = None):
     takes the **first** of them, so everything past the target is decoded and
     thrown away. That is not a rounding error on a real upload: a ten-minute
     1080p clip is ~15,000 frames, and ``15_000 x 1920 x 1080 x 3`` bytes is
-    **~90 GB** of anonymous memory -- on the box whose RAM ceiling is the open
-    question of this build. ⏸️ Under ``auto_duration`` the real target is chosen
-    by the duration head after this runs, so the cap is the request's own
+    **~90 GB** of anonymous memory. Under ``auto_duration`` the real target is
+    chosen by the duration head after this runs, so the cap is the request's own
     ``num_frames``; a head that picks a longer clip would see a condition
     trimmed shorter than upstream would have trimmed it.
 
@@ -300,7 +397,18 @@ def decode_video_frames(source, *, max_frames: int | None = None):
     import av
     import numpy as np
 
-    frames: list = []
+    rate = None
+    if frame_rate is not None:
+        try:
+            rate = Fraction(str(frame_rate))
+        except (TypeError, ValueError):
+            rate = None
+        if rate is None or rate <= 0:
+            raise ConstraintError(
+                f"the frame rate {frame_rate!r} is not a positive number, so the video "
+                f"condition cannot be matched to the generation's timing."
+            )
+
     try:
         with av.open(str(source)) as container:
             if not container.streams.video:
@@ -308,10 +416,11 @@ def decode_video_frames(source, *, max_frames: int | None = None):
                     f"{source} carries no video stream, so there is nothing to condition on. "
                     f"Supply a video file rather than an audio-only or empty one."
                 )
-            for frame in container.decode(video=0):
-                frames.append(frame.to_ndarray(format="rgb24"))
-                if max_frames is not None and len(frames) >= max_frames:
-                    break
+            stream = container.streams.video[0]
+            if rate is None:
+                frames = _frame_by_frame(container, stream, max_frames=max_frames)
+            else:
+                frames = _at_rate(container, stream, frame_rate=rate, max_frames=max_frames)
     except ConstraintError:
         raise
     except Exception as exc:  # noqa: BLE001 -- every decode failure has one answer here
@@ -341,6 +450,7 @@ def build_conditions(
     *,
     num_frames: int,
     temporal_compression_ratio: int = DEFAULT_TEMPORAL_COMPRESSION_RATIO,
+    frame_rate=None,
 ) -> tuple[ConditionSpec, ...]:
     """Normalise every condition into a range-checked :class:`ConditionSpec`.
 
@@ -354,6 +464,9 @@ def build_conditions(
     as it arrived: only the payload type was ever wrong, and a decode that
     quietly reset an anchor or a strength would trade one silent defect for
     another.
+
+    ``frame_rate`` is the generation's rate; a video condition is read at it by
+    timestamp. Without it the video is read frame by frame.
 
     The returned list is always the same length as the input. A condition that
     cannot be built raises; it never comes back quietly shorter, because a shot
@@ -371,7 +484,9 @@ def build_conditions(
         source = fields["source"]
         if kind == "video" and not _already_decoded(source):
             source = decode_video_frames(
-                source, max_frames=num_frames if num_frames and num_frames > 0 else None
+                source,
+                max_frames=num_frames if num_frames and num_frames > 0 else None,
+                frame_rate=frame_rate,
             )
         built.append(
             ConditionSpec(
