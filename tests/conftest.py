@@ -680,6 +680,117 @@ def audio_input_ready(monkeypatch):
     )
 
 
+# --------------------------------------------------------------------------
+# real inputs, one per kind
+#
+# `generate()` checks a run's inputs in the web process before it reserves a
+# GPU: the mode's required inputs must be present and an audio file must open
+# with `av`. A path-shaped string is no longer enough to get a run started, so
+# runs that are about something else take their inputs from here.
+# --------------------------------------------------------------------------
+
+_MEDIA_DIR: list[Path] = []
+
+
+def _media_dir() -> Path:
+    import tempfile
+
+    if not _MEDIA_DIR:
+        _MEDIA_DIR.append(Path(tempfile.mkdtemp(prefix="ltx25-inputs-")))
+    return _MEDIA_DIR[0]
+
+
+_AUDIO_FILES: dict = {}
+
+
+def audio_file(seconds: float = 121 / 24.0, *, rate: int = STUB_SAMPLING_RATE) -> str:
+    """A real stereo 16-bit WAV of ``seconds`` of silence. Built once per length.
+
+    The default length matches ``STUB_WAVEFORM``, so the file the web-side probe
+    measures and the waveform the stubbed loader hands the worker agree.
+    """
+    key = (round(float(seconds), 6), int(rate))
+    if key not in _AUDIO_FILES:
+        import av
+        import numpy as np
+
+        path = _media_dir() / f"audio-{key[0]}s-{key[1]}hz.wav"
+        samples = max(round(seconds * rate), 1)
+        with av.open(str(path), "w", format="wav") as container:
+            stream = container.add_stream("pcm_s16le", rate=rate, layout="stereo")
+            frame = av.AudioFrame.from_ndarray(
+                np.zeros((1, samples * 2), dtype=np.int16), format="s16", layout="stereo"
+            )
+            frame.sample_rate = rate
+            for packet in stream.encode(frame):
+                container.mux(packet)
+            for packet in stream.encode():
+                container.mux(packet)
+        _AUDIO_FILES[key] = str(path)
+    return _AUDIO_FILES[key]
+
+
+_VIDEO_FILES: dict = {}
+
+
+def video_file(frames: int = 1, *, size: int = 64, rate: int = 24) -> str:
+    """A real, decodable h264 mp4 of ``frames`` black frames. Built once per shape."""
+    key = (int(frames), int(size), int(rate))
+    if key not in _VIDEO_FILES:
+        from fractions import Fraction
+
+        import av
+        import numpy as np
+
+        path = _media_dir() / f"video-{frames}f-{size}px-{rate}fps.mp4"
+        with av.open(str(path), "w") as container:
+            stream = container.add_stream("h264", rate=rate)
+            stream.width = stream.height = size
+            stream.pix_fmt = "yuv420p"
+            for index in range(frames):
+                frame = av.VideoFrame.from_ndarray(
+                    np.zeros((size, size, 3), dtype=np.uint8), format="rgb24"
+                )
+                frame.pts, frame.time_base = index, Fraction(1, rate)
+                for packet in stream.encode(frame):
+                    container.mux(packet)
+            for packet in stream.encode():
+                container.mux(packet)
+        _VIDEO_FILES[key] = str(path)
+    return _VIDEO_FILES[key]
+
+
+def image_input(size: int = 64):
+    """A PIL image, as ``gr.Image(type="pil")`` hands one over."""
+    from PIL import Image
+
+    return Image.new("RGB", (size, size))
+
+
+INPUT_PROMPT = "a lighthouse in heavy fog, slow dolly in"
+
+
+def inputs_for(mode_id: str) -> dict:
+    """The request fields that satisfy ``mode_id``'s REQUIRED inputs, and no others.
+
+    Read off the registry, so a mode whose inputs change gets matching inputs
+    here with no edit. Audio is a real WAV; pair it with ``audio_input_ready``
+    where the worker side must also load it without torch.
+    """
+    from ltx25_studio import modes
+
+    makers = {
+        "text": lambda: {"prompt": INPUT_PROMPT},
+        "image": lambda: {"image": image_input()},
+        "video": lambda: {"video": video_file()},
+        "audio": lambda: {"audio": audio_file()},
+    }
+    fields: dict = {}
+    for kind in modes.get_mode(mode_id).inputs:
+        fields.update(makers[kind]())
+    return fields
+
+
 class FakePipeline:
     """Duck-types the bits of an ``LTX2*Pipeline`` that ``lora/apply.py`` touches.
 
