@@ -390,3 +390,31 @@ def test_synthetic_fixtures_are_readable_by_the_real_safetensors_library(good_lo
     with safetensors.safe_open(str(good_lora), framework="numpy") as handle:
         assert handle.metadata() == OFFICIAL_METADATA
         assert set(handle.keys()) == set(lora_tensors(NATIVE_PREFIX, TRANSFORMER_MODULE_PATHS))
+
+
+# --------------------------------------------------------------------------
+# F53 — a cheap content key for refusing duplicate staging
+# --------------------------------------------------------------------------
+
+
+def test_the_header_hash_is_the_sha256_of_the_length_prefix_and_header(good_lora):
+    import hashlib
+
+    data = good_lora.read_bytes()
+    (declared,) = struct.unpack("<Q", data[:8])
+    expected = hashlib.sha256(data[: 8 + declared]).hexdigest()
+    assert lora_inspect.inspect_lora(good_lora).header_sha256 == expected
+
+
+def test_the_header_hash_reads_no_payload(good_lora, read_spy):
+    read_spy.watch(good_lora)
+    lora_inspect.inspect_lora(good_lora)
+    data_len = good_lora.stat().st_size
+    assert read_spy.bytes_read < data_len, "hashing must not read the tensor payload"
+
+
+def test_the_header_hash_survives_the_fork_transport(good_lora):
+    import pickle
+
+    inspection = lora_inspect.inspect_lora(good_lora)
+    assert pickle.loads(pickle.dumps(inspection)).header_sha256 == inspection.header_sha256

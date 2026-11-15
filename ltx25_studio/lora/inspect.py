@@ -25,6 +25,7 @@ the user what we saw, not to refuse what we understand.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import struct
 from dataclasses import dataclass
@@ -98,6 +99,9 @@ class LoRAInspection:
     #: tensor name -> (dtype, shape). Shapes only -- this is what stage 6.5
     #: compares against the real modules, and it costs nothing to carry.
     shapes: MappingProxyType
+    #: sha256 of the length prefix and header: a cheap content key, so the same
+    #: adapter staged twice can be recognised whatever its file name.
+    header_sha256: str = ""
 
     # -- fork transport ---------------------------------------------------
     #
@@ -280,4 +284,5 @@ def inspect_lora(path: str | Path) -> LoRAInspection:
         header_bytes=declared,
         file_bytes=file_bytes,
         shapes=MappingProxyType(shapes),
+        header_sha256=hashlib.sha256(struct.pack("<Q", declared) + blob).hexdigest(),
     )

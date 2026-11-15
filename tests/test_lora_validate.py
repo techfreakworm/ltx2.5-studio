@@ -23,20 +23,23 @@ the check that actually protects the user, and it cannot run here.
 from __future__ import annotations
 
 import pytest
-from conftest import (
+from lora_fixtures import (
     DIFFUSERS_PREFIX,
     NATIVE_CONNECTOR_PREFIX,
     NATIVE_PREFIX,
     OFFICIAL_METADATA,
-    TRANSFORMER_MODULE_PATHS,
-    lora_pair,
-    lora_tensors,
+    REAL_MODULES,
+    adapter_tensors,
+    good_adapter,
+    write_adapter,
 )
 
 from ltx25_studio.errors import (
     LoRAConventionError,
     LoRAError,
+    LoRAFetchError,
     LoRAFormatError,
+    LoRAModuleNotFoundError,
     LoRAPairingError,
     LoRATooLargeError,
     LoRAVersionError,
@@ -44,6 +47,29 @@ from ltx25_studio.errors import (
 from ltx25_studio.lora import validate as lora_validate
 
 HUB_REPO_ID = "techfreakworm/ltx25-test-lora"
+TRANSFORMER_MODULE_PATHS = REAL_MODULES
+
+
+def lora_tensors(prefix, modules, *, style="peft"):
+    return adapter_tensors(modules, prefix=prefix, style=style)
+
+
+def lora_pair(prefix, module):
+    return adapter_tensors((module,), prefix=prefix)
+
+
+@pytest.fixture
+def good_lora(tmp_path):
+    return good_adapter(tmp_path, "good-lora.safetensors")
+
+
+@pytest.fixture
+def write_safetensors(tmp_path):
+    def _write(name="adapter.safetensors", tensors=None, metadata=None):
+        tensors = tensors if tensors is not None else lora_tensors(NATIVE_PREFIX, REAL_MODULES)
+        return write_adapter(tmp_path / name, tensors, metadata)
+
+    return _write
 
 
 @pytest.fixture(params=["upload", "hub"])
@@ -241,11 +267,42 @@ def test_metadata_present_but_without_a_version_also_only_warns(validate_via, wr
     assert report.warnings
 
 
-def test_an_explicitly_incompatible_version_is_rejected(validate_via, write_safetensors):
+@pytest.mark.parametrize("declared", ["2.3.0", "2.3.1"])
+def test_a_2_3_model_version_warns_rather_than_rejects(declared, validate_via, write_safetensors):
+    """LTX-2.3 adapters resolve every target on 2.5 and the vendor says most run
+    unchanged; the official 2.3 adapter declares ``model_version: 2.3.0``. Same
+    policy as ``ss_ltx_version: 2.3``: a warning, not a refusal."""
     path = write_safetensors(
-        name="v230.safetensors",
+        name="v23.safetensors",
         tensors=lora_tensors(NATIVE_PREFIX, TRANSFORMER_MODULE_PATHS),
-        metadata=OFFICIAL_METADATA | {"model_version": "2.3.0"},
+        metadata=OFFICIAL_METADATA | {"model_version": declared},
+    )
+    report = validate_via(path)
+    assert report.model_version == declared
+    earlier = [w for w in report.warnings if "earlier LTX series" in w]
+    assert len(earlier) == 1 and declared in earlier[0], report.warnings
+
+
+def test_the_2_3_warning_uses_the_same_wording_as_ss_ltx_version(write_safetensors):
+    by_model_version = lora_validate.validate_lora(
+        write_safetensors(
+            name="mv.safetensors", metadata=OFFICIAL_METADATA | {"model_version": "2.3.0"}
+        )
+    ).warnings
+    by_trainer = lora_validate.validate_lora(
+        write_safetensors(name="ss.safetensors", metadata={"ss_ltx_version": "2.3"})
+    ).warnings
+    tail = "Most such adapters load unchanged, but treat unexpected output as suspect."
+    assert any(w.endswith(tail) for w in by_model_version), by_model_version
+    assert any(w.endswith(tail) for w in by_trainer), by_trainer
+
+
+@pytest.mark.parametrize("declared", ["2.0.0", "0.9.8", "3.0.0", "2.4.0"])
+def test_an_explicitly_incompatible_version_is_rejected(declared, validate_via, write_safetensors):
+    path = write_safetensors(
+        name="other-series.safetensors",
+        tensors=lora_tensors(NATIVE_PREFIX, TRANSFORMER_MODULE_PATHS),
+        metadata=OFFICIAL_METADATA | {"model_version": declared},
     )
     with pytest.raises(LoRAVersionError):
         validate_via(path)
@@ -253,14 +310,23 @@ def test_an_explicitly_incompatible_version_is_rejected(validate_via, write_safe
 
 def test_the_version_error_names_the_found_and_the_expected_version(write_safetensors):
     path = write_safetensors(
-        name="v230b.safetensors",
+        name="v200.safetensors",
         tensors=lora_tensors(NATIVE_PREFIX, TRANSFORMER_MODULE_PATHS),
-        metadata=OFFICIAL_METADATA | {"model_version": "2.3.0"},
+        metadata=OFFICIAL_METADATA | {"model_version": "2.0.0"},
     )
     with pytest.raises(LoRAVersionError) as excinfo:
         lora_validate.validate_lora(path)
     message = str(excinfo.value)
-    assert "2.3.0" in message and "2.5" in message, message
+    assert "2.0.0" in message and "2.5" in message, message
+
+
+def test_a_2_3_adapter_with_a_foreign_architecture_is_still_rejected(write_safetensors):
+    path = write_safetensors(
+        name="v23-flux.safetensors",
+        metadata={"model_version": "2.3.0", "modelspec.architecture": "flux-1-dev/lora"},
+    )
+    with pytest.raises(LoRAVersionError):
+        lora_validate.validate_lora(path)
 
 
 # --------------------------------------------------------------------------
@@ -272,9 +338,11 @@ def test_the_version_error_names_the_found_and_the_expected_version(write_safete
     "prefix", [NATIVE_PREFIX, DIFFUSERS_PREFIX, NATIVE_CONNECTOR_PREFIX, "connectors."]
 )
 def test_every_known_convention_is_accepted(prefix, validate_via, write_safetensors):
+    connector = prefix in (NATIVE_CONNECTOR_PREFIX, "connectors.")
+    module = "layers.0.proj" if connector else "transformer_blocks.0.attn1.to_q"
     path = write_safetensors(
         name="conv.safetensors",
-        tensors=lora_tensors(prefix, ("layers.0.proj",)),
+        tensors=lora_tensors(prefix, (module,)),
         metadata=OFFICIAL_METADATA,
     )
     assert validate_via(path).convention is not None
@@ -383,18 +451,113 @@ def test_the_pairing_error_names_the_unpaired_key(write_safetensors):
 # --------------------------------------------------------------------------
 
 
-def test_a_wrong_architecture_adapter_passes_stages_one_to_six(
-    validate_via, wrong_architecture_lora
-):
-    """This is not a bug in the validator — it is the point.
+def test_a_wrong_architecture_adapter_is_refused_at_validate_time(validate_via, write_safetensors):
+    """Stage 6.5 now runs against the checked-in shape manifest, so an adapter
+    whose modules this transformer does not have is refused before any GPU is
+    reserved — not discovered by stage 7 inside the billed window."""
+    path = write_safetensors(
+        name="wrong-arch-lora.safetensors",
+        tensors=adapter_tensors(
+            ("down_blocks.0.resnets.0.conv1", "mid_block.attentions.0.to_out.0"),
+            dims={
+                "down_blocks.0.resnets.0.conv1": (320, 320),
+                "mid_block.attentions.0.to_out.0": (1280, 1280),
+            },
+        ),
+        metadata=OFFICIAL_METADATA,
+    )
+    with pytest.raises(LoRAModuleNotFoundError):
+        validate_via(path)
 
-    With no transformer to compare against — which is the pre-load UI case, and
-    the Hub case before anything is downloaded — nothing readable from the header
-    tells you these module paths do not exist in *this* model. Stages 1-6 pass,
-    stage 6.5 cannot run, and the last line of defence is stage 7 in
-    ``lora/apply.py``. (Given a transformer, ``test_lora_compat.py`` requires 6.5
-    to catch it earlier.)
-    """
-    report = validate_via(wrong_architecture_lora)
-    assert report.model_version == "2.5.0"
-    assert report.convention is not None
+
+# --------------------------------------------------------------------------
+# F56 — the Hub box takes repo ids only; uploads are named as uploads
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "typed",
+    [
+        "/etc/passwd",
+        "./adapter.safetensors",
+        "../../secret.safetensors",
+        "C:\\x\\a.safetensors",
+        "org/name/../../../etc/passwd",
+        "org",
+        "~/adapter.safetensors",
+    ],
+)
+def test_the_hub_route_refuses_anything_that_is_not_a_repo_id(typed, monkeypatch):
+    """Shape is checked before any filesystem call: no ``exists``, no ``stat``."""
+    import pathlib
+
+    touched = []
+    real_exists, real_stat = pathlib.Path.exists, pathlib.Path.stat
+
+    def watched_exists(self, *args, **kwargs):
+        if typed.strip("/") and typed.strip("/").split("/")[-1] in str(self):
+            touched.append(("exists", str(self)))
+        return real_exists(self, *args, **kwargs)
+
+    def watched_stat(self, *args, **kwargs):
+        if typed.strip("/") and typed.strip("/").split("/")[-1] in str(self):
+            touched.append(("stat", str(self)))
+        return real_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(pathlib.Path, "exists", watched_exists)
+    monkeypatch.setattr(pathlib.Path, "stat", watched_stat)
+    calls = []
+    try:
+        with pytest.raises(LoRAFetchError):
+            lora_validate.validate_lora(typed, upload=False, fetcher=lambda s: calls.append(s))
+    finally:
+        monkeypatch.undo()
+    assert calls == []
+    assert touched == [], f"the Hub route touched the filesystem first: {touched}"
+
+
+def test_an_existing_server_path_typed_into_the_hub_box_is_not_validated(good_lora):
+    """Before: any existing local path in the repo-id box was read and staged."""
+    with pytest.raises(LoRAFetchError):
+        lora_validate.validate_lora(str(good_lora), upload=False, fetcher=lambda s: good_lora)
+
+
+@pytest.mark.parametrize("typed", ["org/name", "org/name/sub/dir/file.safetensors"])
+def test_a_repo_id_goes_to_the_fetcher(typed, good_lora):
+    seen = []
+
+    def fetcher(source):
+        seen.append(source)
+        return good_lora
+
+    report = lora_validate.validate_lora(typed, upload=False, fetcher=fetcher)
+    assert seen == [typed]
+    assert report.path == good_lora
+
+
+def test_an_upload_is_read_locally_and_never_fetched(good_lora):
+    def fetcher(source):  # pragma: no cover - must not run
+        pytest.fail("an upload must never be fetched")
+
+    assert lora_validate.validate_lora(str(good_lora), upload=True, fetcher=fetcher).path == (
+        good_lora
+    )
+
+
+def test_an_upload_that_is_missing_is_a_read_error_not_a_hub_lookup(tmp_path):
+    with pytest.raises(LoRAFormatError):
+        lora_validate.validate_lora(
+            str(tmp_path / "org" / "name.safetensors"), upload=True, fetcher=lambda s: s
+        )
+
+
+def test_the_size_cap_defaults_to_the_configured_limit(monkeypatch, tmp_path):
+    """Stage 1 on the UI route used the 12 GB constant whatever LTX25_LORA_MAX_GB said."""
+    monkeypatch.setenv("LTX25_LORA_MAX_GB", "0.01")
+    path = write_adapter(
+        tmp_path / "eleven-mb.safetensors",
+        {"diffusion_model.transformer_blocks.0.attn1.to_q.lora_A.weight": ("BF16", [1, 5_600_000])},
+    )
+    with pytest.raises(LoRATooLargeError) as excinfo:
+        lora_validate.validate_lora(path)
+    assert "10000000" in str(excinfo.value)
