@@ -2,6 +2,9 @@
 
 * A conditioning video is read at the generation's frame rate, by timestamp,
   and the right way up (F16).
+* 8-bit PCM is centred on zero (F18).
+* Conditioning audio is encoded to the distribution's mode, not a random draw
+  (F19).
 
 Nothing is committed as a fixture: every clip and every track is generated in
 the test, so what is measured is the file the code under test produced.
@@ -9,13 +12,15 @@ the test, so what is measured is the file the code under test produced.
 
 from __future__ import annotations
 
+import wave
 from fractions import Fraction
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
-from ltx25_studio import conditioning
+from ltx25_studio import audio, conditioning
 
 av = pytest.importorskip("av")
 
@@ -227,3 +232,140 @@ def test_an_unrotated_clip_is_left_alone(tmp_path):
     source = write_clip(tmp_path / "plain.mp4", [portrait()] * 3, rate=24)
 
     assert_upright(conditioning.decode_video_frames(source))
+
+
+# ---------------------------------------------------------------------------
+# F18 -- 8-bit PCM
+# ---------------------------------------------------------------------------
+
+
+def test_unsigned_8_bit_samples_are_centred_on_zero():
+    """8-bit WAV is offset binary: 128 is silence."""
+    scaled = audio._as_float_samples(np.array([[0, 128, 255]], dtype=np.uint8))
+
+    assert scaled.dtype == np.float32
+    assert scaled.tolist() == [[-1.0, 0.0, 127 / 128]]
+
+
+def test_signed_16_bit_scaling_is_unchanged():
+    scaled = audio._as_float_samples(np.array([[-32768, 0, 16384]], dtype=np.int16))
+    assert scaled.tolist() == [[-1.0, 0.0, 0.5]]
+
+
+def test_a_real_8_bit_wav_loads_without_a_dc_offset(tmp_path):
+    pytest.importorskip("torch")
+    path = tmp_path / "u8.wav"
+    square = bytes([128 + 100, 128 - 100] * 4000)
+    with wave.open(str(path), "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(1)
+        handle.setframerate(8000)
+        handle.writeframes(square)
+
+    waveform, rate = audio.load_waveform(path)
+    data = waveform.numpy()
+
+    assert rate == 8000
+    assert abs(float(data.mean())) < 1e-3, (
+        f"8-bit audio loaded with a DC offset of {data.mean():.3f}"
+    )
+    assert np.allclose(np.unique(data), [-100 / 128, 100 / 128]), np.unique(data)
+
+
+# ---------------------------------------------------------------------------
+# F19 -- the conditioning encode uses the mode
+# ---------------------------------------------------------------------------
+
+
+class RecordingDistribution:
+    def __init__(self, *, has_mode=True):
+        self.calls: list = []
+        if has_mode:
+            self.mode = self._mode
+
+    def _mode(self):
+        self.calls.append("mode")
+        return "the mode"
+
+    def sample(self, generator=None):
+        self.calls.append(("sample", generator))
+        return "a draw"
+
+
+def test_the_conditioning_encode_takes_the_mode_not_a_draw():
+    distribution = RecordingDistribution()
+    generator = object()
+
+    latents = audio._sampled(SimpleNamespace(latent_dist=distribution), generator)
+
+    assert latents == "the mode"
+    assert distribution.calls == ["mode"], distribution.calls
+
+
+def test_an_encoder_without_a_mode_still_draws_with_the_runs_generator():
+    distribution = RecordingDistribution(has_mode=False)
+    generator = object()
+
+    latents = audio._sampled(SimpleNamespace(latent_dist=distribution), generator)
+
+    assert latents == "a draw"
+    assert distribution.calls == [("sample", generator)]
+
+
+def test_the_real_vae_distribution_encodes_the_same_latents_whatever_the_seed():
+    torch = pytest.importorskip("torch")
+    vae = pytest.importorskip("diffusers.models.autoencoders.vae")
+    parameters = torch.randn(1, 16, 6, 4, generator=torch.Generator().manual_seed(0))
+    distribution = vae.DiagonalGaussianDistribution(parameters)
+    encoded = SimpleNamespace(latent_dist=distribution)
+
+    first = audio._sampled(encoded, torch.Generator().manual_seed(1))
+    second = audio._sampled(encoded, torch.Generator().manual_seed(2))
+
+    assert torch.equal(first, second)
+    assert torch.equal(first, distribution.mean)
+
+
+def test_an_audio_run_hands_the_pipeline_the_mode_of_the_real_distribution(
+    tmp_path, audio_input_ready
+):
+    """Through ``generate``: two seeds, one upload, identical conditioning latents."""
+    torch = pytest.importorskip("torch")
+    vae = pytest.importorskip("diffusers.models.autoencoders.vae")
+    from conftest import FakeAudioVae
+    from test_exports_contract import factory_returning, one_muxed_file_encoder
+
+    from ltx25_studio import generate as generate_module
+
+    class RealDistributionVae(FakeAudioVae):
+        def encode(self, mel):
+            shape = super().encode(mel).latent_dist.sample().shape
+            batch, channels, frames, bins = shape
+            count = batch * 2 * channels * frames * bins
+            parameters = torch.linspace(-1.0, 1.0, count).reshape(batch, 2 * channels, frames, bins)
+            return SimpleNamespace(latent_dist=vae.DiagonalGaussianDistribution(parameters))
+
+    class Pipe:
+        def __init__(self):
+            self.audio_vae = RealDistributionVae()
+            self.calls: list[dict] = []
+
+        def __call__(self, **kwargs):
+            self.calls.append(kwargs)
+            return SimpleNamespace(frames=("frame",), audio=("sample",))
+
+    handed = []
+    for seed in (1, 2):
+        pipe = Pipe()
+        generate_module.generate(
+            mode="audio_to_audio",
+            seed=seed,
+            audio="an-upload.wav",
+            pipeline_factory=factory_returning(pipe),
+            encoder=one_muxed_file_encoder,
+            output_root=tmp_path / str(seed),
+            retention_bytes=10**9,
+        )
+        handed.append(pipe.calls[-1]["audio_latents"])
+
+    assert torch.equal(handed[0], handed[1]), "the same upload encoded differently under two seeds"

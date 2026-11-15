@@ -587,13 +587,18 @@ def _resampled(waveform, *, from_rate: int, to_rate: int):
 def _sampled(encoded, generator=None):
     """Unwrap whatever ``audio_vae.encode`` returned into a latent tensor.
 
-    ``.sample()`` **draws**, so it takes a generator like any other sampler.
-    Upstream's ``retrieve_latents`` threads one; we called it bare, which made
-    two runs draw different latents regardless of the lever being tested. The
-    sampling *mode* was always right -- upstream defaults to ``"sample"`` too.
+    The conditioning audio is encoded to the distribution's **mode**, the way
+    upstream encodes a video condition (``retrieve_latents(...,
+    sample_mode="argmax")``): the user's audio is the signal, and a random draw
+    around it only adds noise that differs from seed to seed. An encoder whose
+    distribution has no ``mode()`` falls back to a draw seeded with the run's
+    generator.
     """
     distribution = getattr(encoded, "latent_dist", None)
     if distribution is not None:
+        mode = getattr(distribution, "mode", None)
+        if callable(mode):
+            return mode()
         return distribution.sample(generator) if generator is not None else distribution.sample()
     for attribute in ("latents", "sample"):
         found = getattr(encoded, attribute, None)
@@ -628,13 +633,19 @@ def _as_float_samples(data):
 
     ``pcm_s16le`` decodes to ``int16``. Handing those values to the VAE unscaled
     would be a signal four orders of magnitude too loud.
+
+    Unsigned PCM (8-bit WAV) is offset binary: its midpoint is silence, so it
+    is centred before scaling rather than mapped to [0, 1].
     """
     import numpy as np
 
     if np.issubdtype(data.dtype, np.floating):
         return data.astype(np.float32, copy=False)
     info = np.iinfo(data.dtype)
-    return data.astype(np.float32) / float(max(abs(info.min), info.max))
+    half = float(info.max // 2 + 1) if info.min == 0 else float(abs(info.min))
+    if info.min == 0:
+        return (data.astype(np.float32) - half) / half
+    return data.astype(np.float32) / half
 
 
 def load_waveform(source):

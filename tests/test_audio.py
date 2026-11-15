@@ -825,15 +825,16 @@ def test_the_fake_distribution_takes_what_the_real_one_takes():
     assert fake == real, f"the fake samples as {fake}; diffusers samples as {real}"
 
 
-def test_the_audio_encode_draws_with_the_generator_the_pipeline_gets(
+def test_a_sample_only_encoder_draws_with_the_generator_the_pipeline_gets(
     monkeypatch, tmp_path, audio_input_ready
 ):
-    """``audio_vae.encode`` returns a distribution; ``.sample`` draws from it.
+    """The fallback draw is seeded with the pipeline's own generator.
 
-    ``generate._prepared_audio`` hands the encode the SAME generator the
-    pipeline receives, so a same-seed rerun draws the same audio latents. An
-    unseeded draw makes two runs differ whatever lever is under test -- the
-    third reason H10b established less than it appeared to.
+    A real ``DiagonalGaussianDistribution`` has a ``mode()`` and the encode
+    takes it, so no draw happens at all (``test_media_io``). ``FakeLatentDist``
+    has only ``sample``, which is the fallback for an encoder without a mode:
+    ``generate._prepared_audio`` hands it the SAME generator the pipeline
+    receives, so a same-seed rerun still draws the same audio latents.
 
     A stand-in ``torch`` supplies the generator, so this asserts the same thing
     with or without torch installed: without one, ``_seeded_generator`` returns
