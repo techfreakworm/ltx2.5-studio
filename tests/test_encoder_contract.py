@@ -283,27 +283,30 @@ def test_the_muxed_audio_keeps_every_channel(mode_id, tmp_path):
     )
 
 
-def test_a_supplied_upload_reaches_the_container_at_its_OWN_rate(tmp_path, monkeypatch):
-    """The mode-11 flip, end to end through the real ``av`` writer.
+def test_a_supplied_upload_reaches_the_container_as_48k_stereo_at_its_own_pitch(
+    tmp_path, monkeypatch
+):
+    """The mode-11 substitution, end to end through the real ``av`` writer.
 
     Every other test of this substitution stops at the injected-encoder seam,
     and a fake accepts whatever it is handed -- which is the exact blind spot
     this file exists for. So this one drives ``outputs.write_output`` for real
     and opens the file back up.
 
-    The rate is the assertion that matters. The upload is 16 kHz and the
-    vocoder reports 48 kHz; those are the real numbers on this stack, they are
-    not interchangeable, and a container written at the wrong one is
-    pitch-shifted with no error anywhere. ``SuppliedAudio`` carries the waveform
-    and its rate as one record precisely so the writer cannot pick up the other.
+    The upload is a 16 kHz tone and the vocoder reports 48 kHz. The track in the
+    container is converted to the soundtrack's own format, 48 kHz stereo AAC,
+    and the tone must come back at the SAME frequency: muxing 16 kHz samples
+    as if they were 48 kHz would triple the pitch with no error anywhere.
     """
-    from conftest import STUB_SAMPLING_RATE, STUB_WAVEFORM, FakeAudioVae
+    from conftest import STUB_SAMPLING_RATE, FakeAudioVae
 
     from ltx25_studio import audio as audio_module
 
-    monkeypatch.setattr(
-        audio_module, "load_waveform", lambda source: (STUB_WAVEFORM, STUB_SAMPLING_RATE)
-    )
+    tone_hz = 440.0
+    samples = round(121 / 24.0 * STUB_SAMPLING_RATE)
+    t = np.arange(samples) / STUB_SAMPLING_RATE
+    upload = np.stack([0.5 * np.sin(2 * np.pi * tone_hz * t)] * 2).astype(np.float32)
+    monkeypatch.setattr(audio_module, "load_waveform", lambda source: (upload, STUB_SAMPLING_RATE))
     pipe = VocoderPipe()
     pipe.audio_vae = FakeAudioVae()
 
@@ -314,16 +317,21 @@ def test_a_supplied_upload_reaches_the_container_at_its_OWN_rate(tmp_path, monke
     with av.open(str(result.video_path)) as container:
         stream = next(s for s in container.streams if s.type == "audio")
         rate = stream.codec_context.sample_rate
-        samples = sum(frame.samples for frame in container.decode(stream))
+        channels = stream.codec_context.channels
+        decoded = np.concatenate([frame.to_ndarray() for frame in container.decode(stream)], 1)
 
-    assert rate == STUB_SAMPLING_RATE, (
-        f"the upload was muxed at {rate} Hz rather than its own {STUB_SAMPLING_RATE} Hz. "
-        f"{VOCODER_SAMPLING_RATE} Hz here is the vocoder's rate applied to somebody else's "
-        f"waveform -- a pitch-shifted track that reports no error."
+    assert (rate, channels) == (VOCODER_SAMPLING_RATE, AUDIO_CHANNELS), (
+        f"the upload was muxed at {rate} Hz with {channels} channel(s); the soundtrack is "
+        f"{VOCODER_SAMPLING_RATE} Hz stereo, which is also what verify_streams checks"
     )
-    assert samples > 0, (
-        f"mode 11 wrote an audio stream to {result.video_path} that decodes to zero samples. "
-        f"That is the defect this change exists to fix, reproduced by the fix itself."
+    spectrum = np.abs(np.fft.rfft(decoded[0] * np.hanning(decoded.shape[1])))
+    measured = float(np.fft.rfftfreq(decoded.shape[1], 1.0 / rate)[np.argmax(spectrum)])
+    assert abs(measured - tone_hz) <= 1.0, (
+        f"a {tone_hz:.0f} Hz upload came back at {measured:.1f} Hz: the track was resampled "
+        f"wrongly or written at the wrong rate, a pitch shift that reports no error"
+    )
+    assert any("16 kHz" in note and "48 kHz" in note for note in result.warnings), (
+        f"the upload's rate was changed and the result does not say so: {result.warnings}"
     )
 
 

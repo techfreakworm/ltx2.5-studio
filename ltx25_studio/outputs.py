@@ -33,17 +33,19 @@ because the model's audio generation is *suppressed* when audio is supplied as
 input -- measured on the live Space at identical geometry and seed:
 ``audio_to_video`` with audio in wrote a well-formed 48 kHz stereo AAC track at
 **-88.3 dBFS** (digital silence) while ``text_to_audio_video`` with no audio in
-wrote **-24.2 dBFS** of real content. 64 dB of separation, one variable. Muxing
-that empty track is the same emptiness wearing a stream header. This module
-still refuses to *invent* anything: the substitute waveform and its own sample
-rate both arrive from the caller, exactly like ``frame_rate`` and
-``sampling_rate`` do.
+wrote **-24.2 dBFS** of real content. (Those two runs also differ in pipeline
+class and ``noise_scale``, so the cause is not pinned down; the user's own track
+is the better one to hand back either way.) The substitute waveform and its own
+sample rate both arrive from the caller. The writer converts it to the
+soundtrack's format -- the vocoder's rate, stereo -- so the file plays like any
+other run's and its pitch and length are unchanged; the run says so when that
+changed anything.
 
-**Audio is stereo and stays stereo.** The vocoder reports two output channels.
-Nothing here may mono-downmix: the channel count is read off the array that
-arrives and the container layout is *derived* from it (FFmpeg's ``"{n}c"``
-spelling), so a stereo track cannot be silently flattened by a layout constant
-that says otherwise.
+**The model's audio is stereo and stays stereo.** The vocoder reports two output
+channels. Nothing here may mono-downmix it: the channel count is read off the
+array that arrives and the container layout is *derived* from it (FFmpeg's
+``"{n}c"`` spelling), so a stereo track cannot be silently flattened by a layout
+constant that says otherwise.
 
 **Nothing assumes a frame rate or a sample rate.** Both must be supplied by the
 caller, which knows them: the frame rate is the one the pipeline generated at,
@@ -64,10 +66,11 @@ these frames exist the user has already paid 35+ GPU-seconds for them and this
 is a heuristic that is wrong about real murky output by design. Emit the file,
 attach the note, let a human look.
 
-``av`` is the one media stack: it is already a pinned dependency for the §5.7 #7
-image-conditioning CRF path, and using it here means the audio-only export needs
-no second library. It is imported lazily so this module -- and the retention
-policy -- stay importable and testable with no media stack present (§9.1).
+``av`` is the one media stack: it is already a pinned dependency for decoding
+conditioning video and uploaded audio, and using it here means the audio-only
+export and the resampling of a supplied track need no second library. It is
+imported lazily so this module -- and the retention policy -- stay importable
+and testable with no media stack present (§9.1).
 
 Retention is not housekeeping, it is an availability requirement: the 2.3 Space
 filled its disk and went unhealthy. ``outputs/`` is capped, bounded-bytes,
@@ -110,11 +113,18 @@ __all__ = [
     "MAX_AUDIO_CHANNELS",
     "MAX_HIGH_FREQUENCY_RATIO",
     "MIN_STRUCTURE_RATIO",
+    "MUXED_AUDIO_CHANNELS",
     "MUXED_AUDIO_CODEC",
     "STRUCTURE_SAMPLE_FRAMES",
     "VIDEO_CODEC",
+    "VIDEO_COLOUR_MATRIX",
+    "VIDEO_COLOUR_RANGE",
+    "VIDEO_COLOUR_STANDARD",
+    "VIDEO_CONTAINER_OPTIONS",
+    "VIDEO_CRF",
     "VIDEO_FILENAME",
     "VIDEO_PIXEL_FORMAT",
+    "VIDEO_PRESET",
     "FrameStructure",
     "SuppliedAudio",
     "directory_size",
@@ -137,11 +147,35 @@ AUDIO_FILENAME = "output.wav"
 VIDEO_CODEC = "libx264"
 VIDEO_PIXEL_FORMAT = "yuv420p"
 
+#: Visually lossless for 8-bit H.264; x264's default of 23 smears fine detail.
+VIDEO_CRF = 17
+#: x264's balanced preset; slower ones cost encode time on every run for little gain at CRF 17.
+VIDEO_PRESET = "medium"
+#: Rec. 709 primaries and transfer (``ColorPrimaries`` / ``ColorTrc`` member): the HD standard.
+VIDEO_COLOUR_STANDARD = "BT709"
+#: Rec. 709 matrix (``Colorspace`` member), used for the RGB->YUV conversion AND tagged, so the
+#: tag describes the pixels; untagged files are often decoded as Rec. 601.
+VIDEO_COLOUR_MATRIX = "ITU709"
+#: Limited ("TV") range (``ColorRange`` member), what H.264 players expect for yuv420p.
+VIDEO_COLOUR_RANGE = "MPEG"
+#: The index (``moov``) goes before the media so a browser can start playing before the
+#: whole file has arrived.
+VIDEO_CONTAINER_OPTIONS = {"movflags": "+faststart"}
+
 #: AAC for the muxed track (MP4's normal audio codec) and uncompressed PCM for
 #: the audio-only export, where the point is to hand back exactly what the
 #: vocoder produced rather than a re-compressed approximation of it.
 MUXED_AUDIO_CODEC = "aac"
 AUDIO_ONLY_CODEC = "pcm_s16le"
+
+#: A supplied track is muxed with this many channels: the vocoder's layout, which is
+#: what every other run's soundtrack has and what ``tests/verify_streams.py`` expects.
+MUXED_AUDIO_CHANNELS = 2
+
+#: Plain downmix of more than two channels: front left/right at full level, every
+#: other channel at -3 dB, the LFE left out, each side then normalised so it cannot clip.
+_DOWNMIX_FRONT = ("FL", "FR")
+_DOWNMIX_OTHER_WEIGHT = 0.7071
 
 
 @dataclass(frozen=True)
@@ -154,7 +188,9 @@ class SuppliedAudio:
     48 kHz respectively, and muxing a 16 kHz waveform at 48 kHz pitch-shifts it
     silently, which is precisely the defect class :func:`_required` exists to
     refuse. Carrying the waveform and its rate as one frozen record means the
-    writer cannot be handed one without the other.
+    writer cannot be handed one without the other. The writer resamples it from
+    this rate to the vocoder's and brings it to stereo before muxing
+    (:func:`_conformed_supplied_audio`).
 
     **What it must contain: the RECONCILED waveform, never the raw upload.**
     ``generate._prepared_audio`` reconciles a supplied file against the video
@@ -173,6 +209,7 @@ class SuppliedAudio:
 
     waveform: object
     sampling_rate: int
+
 
 #: An audio array's channel axis is the short one. Above this, neither axis is
 #: plausibly channels and we refuse to guess rather than transpose a waveform
@@ -450,6 +487,105 @@ def _encode_audio(container, stream, planes, *, sampling_rate: int) -> None:
             container.mux(packet)
     for packet in stream.encode():
         container.mux(packet)
+
+
+def _describe_track(channels: int, sampling_rate: int) -> str:
+    layout = {1: "mono", 2: "stereo"}.get(channels, f"{channels}-channel")
+    return f"{layout} at {sampling_rate / 1000:g} kHz"
+
+
+def _downmixed_to_stereo(planes):
+    """More than two channels -> stereo. See ``_DOWNMIX_FRONT``.
+
+    Channels are named by FFmpeg's default layout for their count (6 is 5.1:
+    FL FR FC LFE BL BR), the same ``"{n}c"`` convention the writer uses.
+    """
+    import av
+    import numpy as np
+
+    names = [channel.name for channel in av.AudioLayout(f"{planes.shape[0]}c").channels]
+    sides = np.zeros((2, planes.shape[1]), dtype=np.float32)
+    weights = np.zeros(2, dtype=np.float32)
+    for plane, name in zip(planes, names, strict=True):
+        if "LFE" in name:
+            continue
+        weight = 1.0 if name in _DOWNMIX_FRONT else _DOWNMIX_OTHER_WEIGHT
+        left, right = "L" in name, "R" in name
+        for side, applies in ((0, left or not right), (1, right or not left)):
+            if applies:
+                sides[side] += weight * plane
+                weights[side] += weight
+    return np.ascontiguousarray(sides / np.maximum(weights, 1e-9)[:, None])
+
+
+def _as_stereo(planes):
+    import numpy as np
+
+    channels = planes.shape[0]
+    if channels == MUXED_AUDIO_CHANNELS:
+        return planes
+    if channels == 1:
+        return np.ascontiguousarray(np.repeat(planes, MUXED_AUDIO_CHANNELS, axis=0))
+    return _downmixed_to_stereo(planes)
+
+
+def _resampled_stereo(planes, *, from_rate: int, to_rate: int):
+    """Stereo float planes at another rate, with FFmpeg's resampler.
+
+    The length is pinned to ``round(samples * to_rate / from_rate)``, so the
+    duration is kept to within one output sample.
+    """
+    import av
+    import numpy as np
+
+    if from_rate == to_rate:
+        return planes
+    source = av.AudioFrame.from_ndarray(
+        np.ascontiguousarray(planes, dtype=np.float32), format=AUDIO_FRAME_FORMAT, layout="stereo"
+    )
+    source.sample_rate = from_rate
+    resampler = av.AudioResampler(format=AUDIO_FRAME_FORMAT, layout="stereo", rate=to_rate)
+    chunks = [
+        frame.to_ndarray() for frame in (*resampler.resample(source), *resampler.resample(None))
+    ]
+    resampled = np.concatenate(chunks, axis=1) if chunks else np.zeros((2, 0), dtype=np.float32)
+    wanted = (planes.shape[1] * to_rate + from_rate // 2) // from_rate
+    resampled = resampled[:, :wanted]
+    if resampled.shape[1] < wanted:
+        resampled = np.pad(resampled, ((0, 0), (0, wanted - resampled.shape[1])))
+    return np.ascontiguousarray(resampled, dtype=np.float32)
+
+
+def _conformed_supplied_audio(supplied: SuppliedAudio, *, sampling_rate: int, target: Path):
+    """The user's track in the soundtrack's format: ``sampling_rate``, stereo.
+
+    Returns ``(planes, note)``; ``note`` is ``None`` when nothing had to change.
+    """
+    try:
+        source_rate = int(supplied.sampling_rate)
+    except (TypeError, ValueError):
+        source_rate = 0
+    if source_rate <= 0:
+        raise EncodeError(
+            path=str(target),
+            reason=(
+                f"the supplied audio's sampling rate {supplied.sampling_rate!r} is not a "
+                f"positive number of samples per second"
+            ),
+        )
+    planes = _as_audio_planes(supplied.waveform, target=target)
+    channels = planes.shape[0]
+    planes = _resampled_stereo(_as_stereo(planes), from_rate=source_rate, to_rate=sampling_rate)
+    if channels == MUXED_AUDIO_CHANNELS and source_rate == sampling_rate:
+        return planes, None
+    note = (
+        f"Your audio was converted from {_describe_track(channels, source_rate)} to "
+        f"{_describe_track(MUXED_AUDIO_CHANNELS, sampling_rate)} to match the video's "
+        f"soundtrack. Its pitch and length are unchanged."
+    )
+    if channels > MUXED_AUDIO_CHANNELS:
+        note += " Its extra channels were mixed down into left and right."
+    return planes, note
 
 
 # ---------------------------------------------------------------------------
@@ -794,24 +930,31 @@ def _write_video(
     include_audio: bool,
     mode: str = "",
     supplied_audio: SuppliedAudio | None = None,
-) -> tuple[str, ...]:
+):
     """Encode the frames, muxing the audio track only if the mode exports it.
 
-    Returns any warnings the caller should surface. Audio present with no sample
-    rate raises rather than falling back to a video-only write: silently
-    dropping the audio track from a *joint* generation is the exact defect this
-    module is written against. Dropping it from a **video-only** mode is the
-    opposite case -- declared, intended, and reported rather than silent.
+    Returns ``(notes, planes)``: any warnings the caller should surface, and the
+    exact float samples muxed (``None`` when no audio was muxed). Audio present
+    with no sample rate raises rather than falling back to a video-only write:
+    silently dropping the audio track from a *joint* generation is the exact
+    defect this module is written against. Dropping it from a **video-only**
+    mode is the opposite case -- declared, intended, and reported rather than
+    silent.
 
-    ``supplied_audio`` REPLACES the model's track, waveform and rate together
-    (:class:`SuppliedAudio`). It applies only where the container is going to
-    carry audio at all -- a video-only mode still drops what the model rendered
-    and still says so, because substituting there would put sound into a file
-    whose mode declares it has none. The substitution happens before the
-    contract check below, so a mode that exports audio is satisfied by the
-    supplied track even where the model returned nothing.
+    ``supplied_audio`` REPLACES the model's track (:class:`SuppliedAudio`),
+    converted from its own rate and channel count to ``sampling_rate`` stereo.
+    It applies only where the container is going to carry audio at all -- a
+    video-only mode still drops what the model rendered and still says so,
+    because substituting there would put sound into a file whose mode declares
+    it has none. The substitution happens before the contract check below, so a
+    mode that exports audio is satisfied by the supplied track even where the
+    model returned nothing.
+
+    The picture is H.264 at :data:`VIDEO_CRF`, converted to yuv420p with the
+    Rec. 709 matrix and tagged as such, with the index at the front of the file.
     """
     import av
+    from av.video.reformatter import ColorPrimaries, ColorRange, Colorspace, ColorTrc
 
     frame_rate = _required(
         frame_rate,
@@ -823,11 +966,9 @@ def _write_video(
     )
     notes: list[str] = []
     planes = None
-    if supplied_audio is not None and include_audio:
-        # Both values, together, from the same record: see SuppliedAudio for why
-        # the rate cannot be left as the vocoder's.
-        audio = supplied_audio.waveform
-        sampling_rate = supplied_audio.sampling_rate
+    supplied = supplied_audio if include_audio else None
+    if supplied is not None:
+        audio = supplied.waveform
     if include_audio and audio is None:
         raise EncodeError(
             path=str(target),
@@ -851,7 +992,15 @@ def _write_video(
             "it would hand back a silent video that looks like a success",
             target=target,
         )
-        planes = _as_audio_planes(audio, target=target)
+        if supplied is not None:
+            planes, note = _conformed_supplied_audio(
+                supplied, sampling_rate=int(sampling_rate), target=target
+            )
+            if note is not None:
+                notes.append(note)
+                _log.warning("%s", note)
+        else:
+            planes = _as_audio_planes(audio, target=target)
 
     array = _as_video_frames(frames, target=target)
     _, height, width, _ = array.shape
@@ -863,7 +1012,12 @@ def _write_video(
         notes.append(note)
         _log.warning("%s", note)
 
-    container = av.open(str(target), mode="w")
+    matrix = Colorspace[VIDEO_COLOUR_MATRIX]
+    primaries = ColorPrimaries[VIDEO_COLOUR_STANDARD]
+    transfer = ColorTrc[VIDEO_COLOUR_STANDARD]
+    colour_range = ColorRange[VIDEO_COLOUR_RANGE]
+
+    container = av.open(str(target), mode="w", container_options=dict(VIDEO_CONTAINER_OPTIONS))
     try:
         video = container.add_stream(
             VIDEO_CODEC, rate=Fraction(float(frame_rate)).limit_denominator()
@@ -871,6 +1025,11 @@ def _write_video(
         video.width = int(width)
         video.height = int(height)
         video.pix_fmt = VIDEO_PIXEL_FORMAT
+        video.codec_context.options = {"crf": str(VIDEO_CRF), "preset": VIDEO_PRESET}
+        video.codec_context.colorspace = matrix
+        video.codec_context.color_primaries = primaries
+        video.codec_context.color_trc = transfer
+        video.codec_context.color_range = colour_range
 
         audio_stream = None
         if planes is not None:
@@ -882,9 +1041,16 @@ def _write_video(
             )
 
         for frame in array:
-            for packet in video.encode(
-                av.VideoFrame.from_ndarray(frame, format=VIDEO_FRAME_FORMAT)
-            ):
+            picture = av.VideoFrame.from_ndarray(frame, format=VIDEO_FRAME_FORMAT).reformat(
+                format=VIDEO_PIXEL_FORMAT,
+                src_colorspace=matrix,
+                dst_colorspace=matrix,
+                src_color_range=ColorRange.JPEG,
+                dst_color_range=colour_range,
+                dst_color_trc=transfer,
+                dst_color_primaries=primaries,
+            )
+            for packet in video.encode(picture):
                 container.mux(packet)
         for packet in video.encode():
             container.mux(packet)
@@ -893,16 +1059,17 @@ def _write_video(
             _encode_audio(container, audio_stream, planes, sampling_rate=sampling_rate)
     finally:
         container.close()
-    return tuple(notes)
+    return tuple(notes), planes
 
 
 def _write_audio(audio, target: Path, *, sampling_rate) -> None:
     """Write the audio track alone, preserving its channel count.
 
-    Uncompressed PCM, so what comes back is what the vocoder produced. The
-    sample rate must come from ``vocoder.config.output_sampling_rate`` at
-    runtime -- never assumed -- and the channel count survives, because the
-    vocoder is stereo and a mono downmix is a silent quality regression.
+    Uncompressed PCM, so what comes back is what the vocoder produced (or, for
+    a video+audio run, exactly the samples muxed into the mp4). The sample rate
+    must come from ``vocoder.config.output_sampling_rate`` at runtime -- never
+    assumed -- and the channel count survives, because the vocoder is stereo
+    and a mono downmix is a silent quality regression.
     """
     import av
 
@@ -943,11 +1110,15 @@ def write_output(
     warnings=None,
     supplied_audio: SuppliedAudio | None = None,
     **extra,
-) -> Path:
-    """Encode the pipeline output into ``run_dir`` and return the artifact path.
+) -> dict[str, Path]:
+    """Encode the pipeline output into ``run_dir``; return the artifact path per track.
 
     Every run gets its own directory, so an artifact is only ever looked up
     inside the run that produced it (PLAN §5.3).
+
+    A mode exporting video and audio gets ``output.mp4`` carrying both streams
+    AND ``output.wav``, the same samples that were muxed, so the audio player
+    is handed a sound file rather than the video. The mp4 is unchanged by it.
 
     ``frame_rate`` is the rate the pipeline generated at and ``sampling_rate``
     is ``vocoder.config.output_sampling_rate``. Neither is defaulted: see the
@@ -995,7 +1166,7 @@ def write_output(
 
     try:
         if wants_video:
-            notes = _write_video(
+            notes, muxed = _write_video(
                 frames,
                 audio,
                 target,
@@ -1007,25 +1178,19 @@ def write_output(
             )
             if warnings is not None:
                 warnings.extend(notes)
-            # Derived from the same two facts `_write_video` muxes on, NOT from
-            # "notes is empty". It used to be the latter, which was correct only
-            # while the dropped-audio note was the sole thing that could ever be
-            # in there -- the moment a second, unrelated note appeared (the
-            # structure warnings), a muxed audio track would have been reported
-            # as absent and every audio-exporting mode would have raised
-            # EmptyOutputError on a file that was perfectly fine.
-            # `supplied_audio` counts here for the same reason the model's track
-            # does: it is a track that ends up IN the container. Reading only
-            # `audio` would report the audio export as absent on exactly the runs
-            # this substitution exists for, and `generate._artifacts_for` would
-            # raise EmptyOutputError on a file that carries both streams.
-            muxed_audio = "audio" in exports and (audio is not None or supplied_audio is not None)
-            written = ("video", "audio") if muxed_audio else ("video",)
+            # The track is in the container exactly when `_write_video` muxed
+            # one -- never inferred from the notes, which also carry unrelated
+            # warnings. `supplied_audio` counts: it is the track in the file.
+            written = {"video": target}
+            if muxed is not None:
+                track = run_dir / AUDIO_FILENAME
+                _write_audio(muxed, track, sampling_rate=sampling_rate)
+                written["audio"] = track
         else:
             _write_audio(audio, target, sampling_rate=sampling_rate)
-            written = ("audio",)
+            written = {"audio": target}
     except LTXStudioError:
         raise
     except Exception as exc:
         raise EncodeError(path=str(target), reason=str(exc)) from exc
-    return dict.fromkeys(written, target)
+    return written

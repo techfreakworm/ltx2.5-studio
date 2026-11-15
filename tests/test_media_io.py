@@ -2,9 +2,13 @@
 
 * A conditioning video is read at the generation's frame rate, by timestamp,
   and the right way up (F16).
+* The user's own audio muxed into an ``audio_to_video`` mp4 is 48 kHz stereo
+  AAC, at its own pitch and length (F17).
 * 8-bit PCM is centred on zero (F18).
 * Conditioning audio is encoded to the distribution's mode, not a random draw
   (F19).
+* The mp4 is encoded at CRF 17 with bt709 tags and the index at the front (F20).
+* A video+audio run also hands back its soundtrack as a wav (F30).
 
 Nothing is committed as a fixture: every clip and every track is generated in
 the test, so what is measured is the file the code under test produced.
@@ -12,6 +16,7 @@ the test, so what is measured is the file the code under test produced.
 
 from __future__ import annotations
 
+import struct
 import wave
 from fractions import Fraction
 from pathlib import Path
@@ -20,9 +25,12 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from ltx25_studio import audio, conditioning
+from ltx25_studio import audio, conditioning, outputs
 
 av = pytest.importorskip("av")
+
+#: The vocoder's rate on this stack, which the writer is handed.
+VOCODER_RATE = 48000
 
 
 # ---------------------------------------------------------------------------
@@ -235,6 +243,158 @@ def test_an_unrotated_clip_is_left_alone(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# F17 -- the user's audio in the mp4
+# ---------------------------------------------------------------------------
+
+
+def tone(channels: int, rate: int, *, seconds: float = 2.0):
+    """A sine per channel: 440 Hz, except a stereo right channel at 660 Hz."""
+    t = np.arange(int(round(seconds * rate))) / rate
+    hz = (440.0, 660.0) if channels == 2 else (440.0,) * channels
+    return np.stack([0.5 * np.sin(2 * np.pi * f * t) for f in hz]).astype(np.float32)
+
+
+class JointOutput:
+    """Two seconds of picture at 24 fps, and a silent 48 kHz stereo model track."""
+
+    def __init__(self, model_audio=None):
+        self.frames = np.zeros((48, 64, 64, 3), dtype=np.uint8)
+        self.frames[:, 16:48, 16:48] = 200
+        self.audio = (
+            np.zeros((2, 2 * VOCODER_RATE), dtype=np.float32)
+            if model_audio is None
+            else model_audio
+        )
+
+
+def write_joint(tmp_path, *, mode="audio_to_video", supplied=None, model_audio=None, notes=None):
+    return outputs.write_output(
+        JointOutput(model_audio),
+        run_dir=tmp_path / "run",
+        mode=mode,
+        exports=("audio", "video"),
+        seed=1,
+        frame_rate=24,
+        sampling_rate=VOCODER_RATE,
+        warnings=notes,
+        supplied_audio=supplied,
+    )
+
+
+def decode_audio(path):
+    """``(codec, rate, channels, samples[C, N])`` of the first audio stream."""
+    with av.open(str(path)) as container:
+        stream = container.streams.audio[0]
+        context = stream.codec_context
+        chunks = []
+        for frame in container.decode(stream):
+            data = frame.to_ndarray()
+            if not frame.format.is_planar:
+                data = data.reshape(-1, context.channels).T
+            chunks.append(data)
+        samples = np.concatenate(chunks, axis=1)
+    if np.issubdtype(samples.dtype, np.integer):
+        samples = samples.astype(np.float32) / 32768.0
+    return context.name, context.sample_rate, context.channels, samples
+
+
+def peak_hz(signal, rate) -> float:
+    spectrum = np.abs(np.fft.rfft(signal * np.hanning(signal.size)))
+    return float(np.fft.rfftfreq(signal.size, 1.0 / rate)[np.argmax(spectrum)])
+
+
+UPLOADS = [
+    pytest.param(1, 24000, id="mono-24k"),
+    pytest.param(2, 44100, id="stereo-44.1k"),
+    pytest.param(1, 8000, id="mono-8k"),
+    pytest.param(6, 48000, id="5.1-48k"),
+    pytest.param(1, 37000, id="mono-37k-nonstandard"),
+]
+
+
+@pytest.mark.parametrize(("channels", "rate"), UPLOADS)
+def test_a_supplied_upload_is_muxed_as_48k_stereo_aac_at_its_own_pitch(channels, rate, tmp_path):
+    notes: list[str] = []
+    written = write_joint(
+        tmp_path, supplied=outputs.SuppliedAudio(tone(channels, rate), rate), notes=notes
+    )
+
+    codec, got_rate, got_channels, samples = decode_audio(written["video"])
+
+    assert (codec, got_rate, got_channels) == ("aac", VOCODER_RATE, 2), (
+        f"a {channels}-channel {rate} Hz upload was muxed as {codec} {got_rate} Hz "
+        f"{got_channels} ch; the soundtrack is 48 kHz stereo AAC"
+    )
+    # AAC pads its last frame, so the track is exact only to one 1024-sample frame.
+    assert abs(samples.shape[1] - 2 * VOCODER_RATE) < 1024, samples.shape
+    expected_hz = (440.0, 660.0) if channels == 2 else (440.0, 440.0)
+    measured = tuple(peak_hz(samples[c], VOCODER_RATE) for c in range(2))
+    assert all(abs(m - e) <= 1.0 for m, e in zip(measured, expected_hz, strict=True)), (
+        f"the tones came back at {measured} Hz, expected {expected_hz}: the track was "
+        f"pitch-shifted or its channels swapped"
+    )
+    assert float(np.abs(samples).max()) <= 1.0, "the downmix clipped"
+    assert any("48 kHz" in note and "stereo" in note for note in notes), (
+        f"the upload was converted and the run does not say so: {notes}"
+    )
+
+
+@pytest.mark.parametrize(("channels", "rate"), UPLOADS)
+def test_the_conversion_keeps_the_uploads_length_to_one_sample(channels, rate, tmp_path):
+    """Measured on the wav, which carries the muxed samples without AAC's padding."""
+    written = write_joint(tmp_path, supplied=outputs.SuppliedAudio(tone(channels, rate), rate))
+
+    _, got_rate, _, samples = decode_audio(written["audio"])
+
+    seconds_in = tone(channels, rate).shape[1] / rate
+    seconds_out = samples.shape[1] / got_rate
+    assert abs(seconds_out - seconds_in) <= 1.0 / VOCODER_RATE, (
+        f"{seconds_in:.6f} s of upload became {seconds_out:.6f} s"
+    )
+
+
+def test_a_mono_upload_is_duplicated_not_attenuated(tmp_path):
+    """Mono to stereo is a copy into both channels, at the same level."""
+    mono = tone(1, VOCODER_RATE)
+    written = write_joint(tmp_path, supplied=outputs.SuppliedAudio(mono, VOCODER_RATE))
+
+    _, _, _, samples = decode_audio(written["audio"])
+
+    assert np.allclose(samples[0], samples[1], atol=1 / 16384)
+    assert np.allclose(samples[0], mono[0], atol=1 / 16384), (
+        f"peak {np.abs(samples[0]).max():.3f} against the upload's {np.abs(mono[0]).max():.3f}"
+    )
+
+
+def test_an_upload_already_in_the_soundtrack_format_is_not_reported(tmp_path):
+    notes: list[str] = []
+    write_joint(
+        tmp_path, supplied=outputs.SuppliedAudio(tone(2, VOCODER_RATE), VOCODER_RATE), notes=notes
+    )
+    assert not any("converted" in note for note in notes), notes
+
+
+def test_the_models_own_track_is_not_reported_as_converted(tmp_path):
+    notes: list[str] = []
+    write_joint(
+        tmp_path, mode="text_to_audio_video", model_audio=tone(2, VOCODER_RATE), notes=notes
+    )
+    assert not any("converted" in note for note in notes), notes
+
+
+def test_a_torch_waveform_from_the_loader_is_conformed_too(tmp_path):
+    """``audio.load_waveform`` hands back a torch tensor; that is the real input."""
+    torch = pytest.importorskip("torch")
+    supplied = outputs.SuppliedAudio(torch.from_numpy(tone(1, 24000)), 24000)
+
+    written = write_joint(tmp_path, supplied=supplied)
+
+    _, got_rate, got_channels, samples = decode_audio(written["video"])
+    assert (got_rate, got_channels) == (VOCODER_RATE, 2)
+    assert abs(peak_hz(samples[0], VOCODER_RATE) - 440.0) <= 1.0
+
+
+# ---------------------------------------------------------------------------
 # F18 -- 8-bit PCM
 # ---------------------------------------------------------------------------
 
@@ -369,3 +529,142 @@ def test_an_audio_run_hands_the_pipeline_the_mode_of_the_real_distribution(
         handed.append(pipe.calls[-1]["audio_latents"])
 
     assert torch.equal(handed[0], handed[1]), "the same upload encoded differently under two seeds"
+
+
+# ---------------------------------------------------------------------------
+# F20 -- the encode
+# ---------------------------------------------------------------------------
+
+
+def top_level_boxes(path) -> list[str]:
+    data = Path(path).read_bytes()
+    boxes, offset = [], 0
+    while offset + 8 <= len(data):
+        size, kind = struct.unpack(">I4s", data[offset : offset + 8])
+        if size == 1:
+            size = struct.unpack(">Q", data[offset + 8 : offset + 16])[0]
+        boxes.append(kind.decode("latin-1"))
+        offset += size if size else len(data)
+    return boxes
+
+
+def x264_settings(path) -> str:
+    """The settings string x264 embeds in its first SEI message."""
+    with av.open(str(path)) as container:
+        frame = next(container.decode(video=0))
+        for side_data in frame.side_data:
+            text = bytes(side_data).decode("latin-1", errors="replace")
+            if "x264" in text:
+                return text
+    return ""
+
+
+@pytest.fixture
+def written_video(tmp_path):
+    return write_joint(tmp_path, mode="text_to_audio_video", model_audio=tone(2, VOCODER_RATE))[
+        "video"
+    ]
+
+
+def test_the_mp4_is_h264_yuv420p_tagged_bt709_limited_range(written_video):
+    with av.open(str(written_video)) as container:
+        context = container.streams.video[0].codec_context
+        tags = (context.name, context.pix_fmt, context.color_primaries, context.color_trc)
+        tags += (context.colorspace, context.color_range)
+
+    reformatter = av.video.reformatter
+    assert tags == (
+        "h264",
+        "yuv420p",
+        reformatter.ColorPrimaries.BT709,
+        reformatter.ColorTrc.BT709,
+        reformatter.Colorspace.ITU709,
+        reformatter.ColorRange.MPEG,
+    ), f"codec, pix_fmt, primaries, transfer, matrix, range = {tags}"
+
+
+def test_the_index_precedes_the_media_so_playback_can_start_early(written_video):
+    boxes = top_level_boxes(written_video)
+    assert "moov" in boxes and "mdat" in boxes, boxes
+    assert boxes.index("moov") < boxes.index("mdat"), f"moov after mdat: {boxes}"
+
+
+def test_the_encode_runs_at_crf_17(written_video):
+    settings = x264_settings(written_video)
+    assert "crf=17.0" in settings, f"x264 settings: {settings[-400:]!r}"
+    assert outputs.VIDEO_CRF == 17 and outputs.VIDEO_PRESET == "medium"
+
+
+def test_colours_survive_the_encode(tmp_path):
+    """The tag must match the matrix the pixels were converted with."""
+    output = JointOutput(tone(2, VOCODER_RATE))
+    output.frames[:] = (200, 120, 40)
+    written = outputs.write_output(
+        output,
+        run_dir=tmp_path / "run",
+        mode="text_to_video",
+        exports=("video",),
+        frame_rate=24,
+        sampling_rate=VOCODER_RATE,
+    )
+    with av.open(str(written["video"])) as container:
+        decoded = next(container.decode(video=0)).to_ndarray(format="rgb24")
+
+    centre = decoded[32, 32].astype(int)
+    assert np.abs(centre - (200, 120, 40)).max() <= 3, f"(200, 120, 40) came back as {centre}"
+
+
+# ---------------------------------------------------------------------------
+# F30 -- the soundtrack on its own
+# ---------------------------------------------------------------------------
+
+
+def test_a_video_and_audio_write_also_returns_the_soundtrack_as_a_wav(tmp_path):
+    model = tone(2, VOCODER_RATE)
+    written = write_joint(tmp_path, mode="text_to_audio_video", model_audio=model)
+
+    video, track = written["video"], written["audio"]
+    assert video.name == outputs.VIDEO_FILENAME and track.name == outputs.AUDIO_FILENAME
+    assert video.parent == track.parent
+
+    codec, rate, channels, samples = decode_audio(track)
+    assert (codec, rate, channels) == ("pcm_s16le", VOCODER_RATE, 2)
+    assert samples.shape == model.shape
+    assert np.abs(samples - model).max() <= 1.0 / 32767, "the wav is not the muxed samples"
+
+    with av.open(str(video)) as container:
+        kinds = sorted(stream.type for stream in container.streams)
+    assert kinds == ["audio", "video"], f"the mp4 must still carry the sound: {kinds}"
+
+
+def test_the_wav_of_a_supplied_upload_is_the_converted_track(tmp_path):
+    written = write_joint(tmp_path, supplied=outputs.SuppliedAudio(tone(1, 24000), 24000))
+
+    _, rate, channels, samples = decode_audio(written["audio"])
+
+    assert (rate, channels) == (VOCODER_RATE, 2)
+    assert abs(peak_hz(samples[0], VOCODER_RATE) - 440.0) <= 1.0
+
+
+def test_a_video_only_write_returns_no_wav(tmp_path):
+    written = outputs.write_output(
+        JointOutput(),
+        run_dir=tmp_path / "run",
+        mode="text_to_video",
+        exports=("video",),
+        frame_rate=24,
+        sampling_rate=VOCODER_RATE,
+    )
+    assert set(written) == {"video"}
+    assert not (tmp_path / "run" / outputs.AUDIO_FILENAME).exists()
+
+
+def test_a_joint_generation_hands_the_audio_player_a_wav(tmp_path):
+    """Through ``generate`` with the production writer."""
+    from test_encoder_contract import JOINT_MODES, run_production
+
+    for mode_id in JOINT_MODES:
+        result = run_production(mode_id, tmp_path / mode_id)
+        assert result.audio_path.suffix == ".wav", f"{mode_id}: audio_path={result.audio_path}"
+        assert result.video_path.suffix == ".mp4", f"{mode_id}: video_path={result.video_path}"
+        assert result.output_path == result.video_path
