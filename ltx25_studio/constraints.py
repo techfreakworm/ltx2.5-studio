@@ -21,7 +21,15 @@ Never both, never neither.
 
 from __future__ import annotations
 
-from .errors import AudioVideoDesyncError, ConstraintError, DimensionError, FrameCountError
+import math
+
+from .errors import (
+    AudioVideoDesyncError,
+    ConstraintError,
+    DimensionError,
+    FrameCountError,
+    OverLimitError,
+)
 
 __all__ = [
     "DEFAULT_FRAME_RATE",
@@ -32,18 +40,26 @@ __all__ = [
     "DIMENSION_MULTIPLE",
     "DISTILLED_SIGMA_VALUES",
     "LTX2_5_IMAGE_CRF",
+    "MAX_DIMENSION",
+    "MAX_NUM_FRAMES",
+    "MAX_SECONDS",
     "STAGE_2_DISTILLED_SIGMA_VALUES",
     "LTX2_5_TEXT_ENCODER_TYPES",
+    "duration_head_frame_range",
     "image_crf_for",
     "is_valid_num_frames",
+    "largest_num_frames_within",
     "nearest_valid_num_frames",
     "snap_dimension",
     "snap_dimensions",
     "snap_num_frames",
     "validate_audio_video_agreement",
     "validate_dimension",
+    "validate_dimension_limit",
     "validate_dimensions",
     "validate_num_frames",
+    "validate_num_frames_limit",
+    "validate_seconds_limit",
 ]
 
 #: Fallback for ``vae.temporal_compression_ratio``, used only before a VAE is
@@ -97,6 +113,13 @@ DEFAULT_LENGTH_TOLERANCE_SECONDS = 0.05
 
 #: The shortest legal clip: one frame, at any compression ratio.
 MIN_NUM_FRAMES = 1
+
+#: Upper bounds on one run. Not model limits: the most this app will attempt.
+#: No stage-2 or pixel-count ceiling yet -- those wait for measurements.
+MAX_DIMENSION = 1920
+#: 20 s at 24 fps, the vendor duration head's own default maximum.
+MAX_NUM_FRAMES = 481
+MAX_SECONDS = 20.0
 
 
 #: Text-encoder ``model_type`` values that identify an LTX-2.5 stack.
@@ -193,6 +216,85 @@ def validate_num_frames(
     )
 
 
+def largest_num_frames_within(
+    seconds: float,
+    *,
+    frame_rate: float,
+    temporal_compression_ratio: int = DEFAULT_TEMPORAL_COMPRESSION_RATIO,
+    maximum: int = MAX_NUM_FRAMES,
+) -> int:
+    """The longest legal clip that does not outlast ``seconds``.
+
+    ``num_frames / frame_rate <= seconds``, clamped to ``[MIN_NUM_FRAMES,
+    maximum]``. Used where an audio input sets the length.
+    """
+    ratio = _check_ratio(temporal_compression_ratio)
+    # The epsilon keeps 193/24 s (float) from flooring to 192.999… frames.
+    fitting = math.floor(float(seconds) * float(frame_rate) + 1e-6)
+    if fitting < MIN_NUM_FRAMES:
+        return MIN_NUM_FRAMES
+    frames = ((fitting - 1) // ratio) * ratio + 1
+    ceiling = ((int(maximum) - 1) // ratio) * ratio + 1
+    return max(MIN_NUM_FRAMES, min(frames, ceiling))
+
+
+def duration_head_frame_range(
+    *,
+    min_seconds: float,
+    max_seconds: float,
+    frame_rate: float,
+    temporal_compression_ratio: int = DEFAULT_TEMPORAL_COMPRESSION_RATIO,
+) -> tuple[int, int]:
+    """The shortest and longest clip the duration head can return for these bounds.
+
+    Mirrors ``diffusers.pipelines.ltx2.duration_head.predict_num_frames``: clamp
+    to ``[round(min*fps), round(max*fps)]``, floor to the grid, snap up when the
+    floor undershoots the minimum. The function is monotone, so its ends are
+    the picks for the two clamp bounds.
+    """
+    ratio = _check_ratio(temporal_compression_ratio)
+    min_frames = max(1, round(min_seconds * frame_rate))
+    max_frames = round(max_seconds * frame_rate)
+
+    def pick(clamped: int) -> int:
+        frames = ((clamped - 1) // ratio) * ratio + 1
+        if frames < min_frames:
+            snapped_up = frames + ratio
+            if snapped_up <= max_frames or abs(snapped_up - clamped) < abs(frames - clamped):
+                frames = snapped_up
+        return frames
+
+    return pick(min_frames), pick(max(min_frames, max_frames))
+
+
+def validate_num_frames_limit(
+    num_frames: int,
+    *,
+    maximum: int = MAX_NUM_FRAMES,
+    temporal_compression_ratio: int = DEFAULT_TEMPORAL_COMPRESSION_RATIO,
+) -> int:
+    """Return ``num_frames`` unchanged, or raise :class:`OverLimitError`."""
+    if num_frames <= maximum:
+        return num_frames
+    ratio = _check_ratio(temporal_compression_ratio)
+    raise OverLimitError(
+        name="num_frames",
+        value=num_frames,
+        limit=maximum,
+        nearest=((maximum - 1) // ratio) * ratio + 1,
+        why=f"{MAX_SECONDS:g} s at {DEFAULT_FRAME_RATE:g} fps",
+    )
+
+
+def validate_seconds_limit(
+    seconds: float, *, name: str = "max_seconds", maximum: float = MAX_SECONDS
+) -> float:
+    """Return ``seconds`` unchanged, or raise :class:`OverLimitError`."""
+    if seconds <= maximum:
+        return seconds
+    raise OverLimitError(name=name, value=seconds, limit=maximum, nearest=maximum)
+
+
 # ---------------------------------------------------------------------------
 # width / height
 # ---------------------------------------------------------------------------
@@ -216,6 +318,17 @@ def validate_dimensions(
     return (
         validate_dimension(width, name="width", multiple=multiple),
         validate_dimension(height, name="height", multiple=multiple),
+    )
+
+
+def validate_dimension_limit(
+    value: int, *, name: str, maximum: int = MAX_DIMENSION, multiple: int = DIMENSION_MULTIPLE
+) -> int:
+    """Return ``value`` unchanged, or raise :class:`OverLimitError`."""
+    if value <= maximum:
+        return value
+    raise OverLimitError(
+        name=name, value=value, limit=maximum, nearest=(maximum // multiple) * multiple
     )
 
 

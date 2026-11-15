@@ -347,3 +347,113 @@ def test_sub_frame_rounding_slack_is_tolerated():
         )
         is None
     )
+
+
+# --------------------------------------------------------------------------
+# upper bounds, and a length derived from seconds
+# --------------------------------------------------------------------------
+
+
+def test_the_upper_bounds_are_the_agreed_ones():
+    assert constraints.MAX_DIMENSION == 1920
+    assert constraints.MAX_NUM_FRAMES == 481
+    assert constraints.MAX_SECONDS == 20.0
+    assert constraints.is_valid_num_frames(constraints.MAX_NUM_FRAMES)
+
+
+@pytest.mark.parametrize(
+    ("check", "value", "named"),
+    [
+        (lambda v: constraints.validate_dimension_limit(v, name="width"), 1952, "1920"),
+        (constraints.validate_num_frames_limit, 489, "481"),
+        (constraints.validate_seconds_limit, 25.0, "20"),
+    ],
+    ids=["dimension", "frames", "seconds"],
+)
+def test_a_value_over_a_bound_raises_naming_the_value_and_the_nearest_legal_one(
+    check, value, named
+):
+    from ltx25_studio.errors import OverLimitError
+
+    with pytest.raises(OverLimitError) as caught:
+        check(value)
+    assert str(value) in str(caught.value) and named in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    ("check", "value"),
+    [
+        (lambda v: constraints.validate_dimension_limit(v, name="width"), 1920),
+        (constraints.validate_num_frames_limit, 481),
+        (constraints.validate_seconds_limit, 20.0),
+    ],
+    ids=["dimension", "frames", "seconds"],
+)
+def test_a_value_at_a_bound_is_returned_unchanged(check, value):
+    assert check(value) == value
+
+
+@pytest.mark.parametrize(
+    ("seconds", "frame_rate", "expected"),
+    [
+        (8.16, 24.0, 193),
+        (7.96, 24.0, 185),
+        (7.96, 25.0, 193),
+        (193 / 24.0, 24.0, 193),
+        (193 / 24.0 - 0.002, 24.0, 185),
+        (25.0, 24.0, 481),
+        (0.03, 24.0, 1),
+        (0.0, 24.0, 1),
+    ],
+)
+def test_the_longest_legal_clip_within_a_duration(seconds, frame_rate, expected):
+    frames = constraints.largest_num_frames_within(seconds, frame_rate=frame_rate)
+    assert frames == expected
+    assert constraints.is_valid_num_frames(frames)
+
+
+@pytest.mark.parametrize(
+    ("min_seconds", "max_seconds", "expected"),
+    [
+        (1.0, 5.0, (25, 113)),  # floor of 24 is 17, below the minimum: snapped up
+        (1.0, 2.0, (25, 41)),
+        (1.0, 1.02, (25, 25)),  # no grid point inside the window: the nearest
+    ],
+)
+def test_the_frame_range_the_duration_head_can_return(min_seconds, max_seconds, expected):
+    assert (
+        constraints.duration_head_frame_range(
+            min_seconds=min_seconds, max_seconds=max_seconds, frame_rate=24.0
+        )
+        == expected
+    )
+
+
+@pytest.mark.parametrize(
+    ("min_seconds", "max_seconds"), [(1.0, 5.0), (1.0, 2.0), (1.0, 1.02), (0.5, 20.0), (2.3, 7.7)]
+)
+def test_the_frame_range_matches_the_vendor_duration_head(min_seconds, max_seconds):
+    """The ends of the range are what the real head returns for a prediction of
+    zero and of forever: its clamp, floor and snap, run by diffusers itself."""
+    torch = pytest.importorskip("torch")
+    duration_head = pytest.importorskip("diffusers.pipelines.ltx2.duration_head")
+
+    class Predicting:
+        def __init__(self, seconds):
+            self.seconds = seconds
+
+        def __call__(self, video_tokens, audio_tokens):
+            return torch.tensor([self.seconds])
+
+    def vendor(seconds):
+        return duration_head.LTX2DurationHead.predict_num_frames(
+            Predicting(seconds),
+            frame_rate=24.0,
+            temporal_compression_ratio=8,
+            min_seconds=min_seconds,
+            max_seconds=max_seconds,
+        )
+
+    assert constraints.duration_head_frame_range(
+        min_seconds=min_seconds, max_seconds=max_seconds, frame_rate=24.0
+    ) == (vendor(0.0), vendor(1e6))

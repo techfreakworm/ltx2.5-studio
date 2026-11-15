@@ -66,9 +66,11 @@ __all__ = [
     "LoRATooLargeError",
     "LoRATruncatedError",
     "LoRAVersionError",
+    "MissingInputError",
     "MissingModelFileError",
     "ModelFileError",
     "ModelLoadError",
+    "OverLimitError",
     "PromptEnhancementError",
     "UnknownComponentError",
     "UnknownModeError",
@@ -260,6 +262,58 @@ class DimensionError(ConstraintError):
             f"{name}={value} is not divisible by {multiple}. LTX-2.5 requires every spatial "
             f"dimension to be a multiple of {multiple}. Use {lower} or {upper} instead."
         )
+
+
+class OverLimitError(ConstraintError):
+    """A size, length or duration above the most this app will generate."""
+
+    def __init__(self, *, name, value, limit, nearest, why=""):
+        self.name = name
+        self.value = value
+        self.limit = limit
+        self.nearest = nearest
+        self.why = why
+        reason = f" ({why})" if why else ""
+        super().__init__(
+            f"{name}={value} is above the maximum of {limit}{reason}. Use {nearest} instead."
+        )
+
+
+#: How each input kind is named to a creator, and what they would do to supply it.
+_INPUT_WORDS = {
+    "text": ("a prompt", "type a prompt"),
+    "image": ("an image", "upload an image"),
+    "video": ("a video", "upload a video"),
+    "audio": ("an audio file", "upload an audio file"),
+}
+
+
+def _and(items) -> str:
+    items = list(items)
+    if len(items) < 2:
+        return "".join(items)
+    return f"{', '.join(items[:-1])} and {items[-1]}"
+
+
+class MissingInputError(ConstraintError):
+    """The mode needs an input the request does not carry.
+
+    Without this check an image-to-video run with no image renders an
+    unconditioned clip, is billed, and reports success.
+    """
+
+    def __init__(self, *, mode, missing, alternative=None):
+        self.mode = mode
+        self.missing = tuple(missing)
+        self.alternative = alternative
+        nouns = [_INPUT_WORDS.get(kind, (kind, f"add {kind}"))[0] for kind in self.missing]
+        actions = [_INPUT_WORDS.get(kind, (kind, f"add {kind}"))[1] for kind in self.missing]
+        remedy = _and(actions)
+        remedy = remedy[0].upper() + remedy[1:]
+        if alternative:
+            remedy += f", or switch to {alternative}"
+        none = {1: "none was", 2: "neither was"}.get(len(self.missing), "none were")
+        super().__init__(f"{mode} needs {_and(nouns)}, and {none} supplied. {remedy}.")
 
 
 class AudioVideoDesyncError(ConstraintError):

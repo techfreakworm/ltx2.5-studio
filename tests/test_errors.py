@@ -50,6 +50,14 @@ ERROR_SPECS = {
         {"video_seconds": 5.0, "audio_seconds": 4.25},
         ["5.0", "4.25"],
     ),
+    "OverLimitError": (
+        {"name": "width", "value": 2048, "limit": 1920, "nearest": 1920},
+        ["width", "2048", "1920"],
+    ),
+    "MissingInputError": (
+        {"mode": "Image to video", "missing": ("image",), "alternative": "Text to video"},
+        ["Image to video", "image", "Text to video"],
+    ),
     # -- model files (PLAN §5.2) -----------------------------------------
     "MissingModelFileError": (
         {
@@ -191,6 +199,8 @@ BASE_OF = {
     "FrameCountError": "ConstraintError",
     "DimensionError": "ConstraintError",
     "AudioVideoDesyncError": "ConstraintError",
+    "OverLimitError": "ConstraintError",
+    "MissingInputError": "ConstraintError",
     "MissingModelFileError": "ModelFileError",
     "UnknownComponentError": "ModelFileError",
     "LoRAFetchError": "LoRAError",
