@@ -188,7 +188,6 @@ def ab_transpose(vae, vocoder, wave, rate, tones, src):
     Every step is the app's own helper except the transpose itself, so this is not
     a reimplementation of the path -- it is the path, forked at one point.
     """
-    import torch
 
     log("\n=== A/B: the ONLY difference is unpacked_latents' transpose ===")
     prepared, note = audio_module.match_channel_count(

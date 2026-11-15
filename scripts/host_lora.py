@@ -14,7 +14,6 @@ needs it too — it asserts the adapter attached to more than zero modules, whic
 is the check that turns "it validated" into "it is actually in the graph".
 """
 
-import os
 import time
 import traceback
 from pathlib import Path
