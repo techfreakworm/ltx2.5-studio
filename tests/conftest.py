@@ -129,8 +129,6 @@ TRANSFORMER_MODULE_DIMS = {
     "transformer_blocks.0.ff.net.2": (16384, 4096),
     "transformer_blocks.0.audio_ff.net.0.proj": (2048, 8192),
     "transformer_blocks.0.audio_ff.net.2": (8192, 2048),
-    "adaln_single.linear": (256, 4096),
-    "audio_adaln_single.linear": (256, 2048),
 }
 
 #: Adapter keys that resolve to one of these are what "attached" means.
