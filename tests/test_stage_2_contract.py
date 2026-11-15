@@ -30,6 +30,7 @@ unit tests.
 from __future__ import annotations
 
 import pytest
+from conftest import inputs_for
 from test_exports_contract import (
     MODE_IDS,
     FakePipe,
@@ -40,6 +41,9 @@ from test_exports_contract import (
 from ltx25_studio import generate as generate_module
 from ltx25_studio import modes, zerogpu
 from ltx25_studio.ui import fields, handlers
+
+#: The audio-input modes load their upload in the worker; stub the loader there.
+pytestmark = pytest.mark.usefixtures("audio_input_ready")
 
 STAGE_2_KWARG = "enable_stage_2"
 
@@ -54,11 +58,11 @@ def pipeline_kwargs_for(mode_id, tmp_path, **overrides):
     generate_module.generate(
         mode=mode_id,
         seed=7,
+        **{**inputs_for(mode_id), **overrides},
         pipeline_factory=factory_returning(pipe),
         encoder=one_muxed_file_encoder,
         output_root=tmp_path,
         retention_bytes=10**9,
-        **overrides,
     )
     assert pipe.calls, "the pipeline was never called"
     return pipe.calls[-1]
@@ -195,30 +199,35 @@ def _stage_2_update(mode_id):
     return updates[index]
 
 
+def _usable(update) -> bool:
+    """A control the user can see AND change."""
+    return update.visible is not False and update.interactive is not False
+
+
 @pytest.mark.parametrize("mode_id", SKIP_MODES)
-def test_the_stage_2_checkbox_is_disabled_where_the_registry_overrides_it(mode_id):
+def test_the_stage_2_checkbox_is_not_usable_where_the_registry_overrides_it(mode_id):
     """A tickable box the backend ignores is a small lie with a quota-shaped cost.
 
     The user ticks it, pays nothing extra, gets nothing extra, and has no way to
-    tell which of those three happened.
+    tell which of those three happened. Hidden or disabled both answer that; the
+    value the UI writes is deliberately not pinned. The real guarantee is the
+    backend's: a submitted ``enable_stage_2=True`` in these modes runs single
+    stage -- ``test_a_skip_mode_never_sends_the_stage_2_flag_however_hard_the_user_asks``
+    above.
     """
-    update = _stage_2_update(mode_id)
-    assert update.interactive is False, (
-        f"mode {mode_id!r} leaves the stage-2 checkbox interactive even though the registry "
+    assert not _usable(_stage_2_update(mode_id)), (
+        f"mode {mode_id!r} leaves the stage-2 checkbox usable even though the registry "
         f"forces the chain off. The control cannot change the outcome."
-    )
-    assert update.value is False, (
-        f"mode {mode_id!r} does not pin the stage-2 checkbox to the value the backend will "
-        f"actually use ({update.value!r})."
     )
 
 
 @pytest.mark.parametrize("mode_id", HONOURS_MODES)
 def test_the_stage_2_checkbox_stays_usable_where_the_choice_is_real(mode_id):
-    """The inverse: disabling it everywhere would kill the feature just as dead."""
-    assert _stage_2_update(mode_id).interactive is True, (
-        f"mode {mode_id!r} honours the stage-2 toggle in generate() but the UI disables it, "
-        f"so the quality path is unreachable from the app."
+    """The inverse: hiding or disabling it everywhere would kill the feature just as dead."""
+    update = _stage_2_update(mode_id)
+    assert update.visible and update.interactive, (
+        f"mode {mode_id!r} honours the stage-2 toggle in generate() but the UI hides or "
+        f"disables it, so the quality path is unreachable from the app."
     )
 
 
@@ -226,7 +235,7 @@ def test_the_stage_2_checkbox_stays_usable_where_the_choice_is_real(mode_id):
 def test_the_ui_and_the_backend_agree_about_who_decides(mode_id):
     """One registry, read by both sides. This is the seam, stated directly."""
     spec = modes.get_mode(mode_id)
-    ui_offers_a_choice = _stage_2_update(mode_id).interactive
+    ui_offers_a_choice = _usable(_stage_2_update(mode_id))
     backend_honours_a_choice = generate_module.stage_2_enabled(
         spec, a_request(mode=mode_id, enable_stage_2=True)
     )

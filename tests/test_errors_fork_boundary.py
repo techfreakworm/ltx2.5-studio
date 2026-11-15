@@ -19,7 +19,7 @@ So the fix is a pair, and this file pins both halves independently:
 It also pins what the pair must NOT change: ``str(exc)`` stays byte-identical
 to the pre-gr.Error hierarchy (gr.Error's own ``__str__`` repr-quotes the
 message — the single quotes around ``'DecodeError'`` on the Space were exactly
-that), and ``ui.render.failure`` output is unchanged, before *and after* a
+that), and ``ui.render.failure`` shows the message verbatim, before *and after* a
 round trip — the after case being precisely what the parent process renders.
 
 Discovery is programmatic. The classes are walked out of the module, split
@@ -206,23 +206,27 @@ def test_root_arity_semantics_match_plain_exception_exactly():
 
 
 @pytest.mark.parametrize("name", sorted(PRE_CHANGE_STR))
-def test_render_failure_output_is_unchanged_and_survives_the_round_trip(name):
-    """``ui/render.py::failure`` must keep taking the ours-branch (class name
-    plus verbatim message), and — the point of the whole fix — must render the
-    *same* string for the object the parent process unpickles as for the
-    object the worker raised."""
+def test_render_failure_carries_the_message_and_survives_the_round_trip(name):
+    """``ui/render.py::failure`` must show the error's own message verbatim, and
+    -- the point of the whole fix -- must render the *same* card for the object
+    the parent process unpickles as for the object the worker raised.
+
+    Format-agnostic on purpose: the card's headline and layout belong to the UI
+    and are pinned in its own tests."""
     exc = _construct(name)
     rendered = render.failure(exc)
-    assert rendered == f"### ❌ Generation failed\n\n**{name}**\n\n> {PRE_CHANGE_STR[name]}"
-    assert "unexpected" not in rendered
+    assert PRE_CHANGE_STR[name] in rendered
     assert render.failure(pickle.loads(pickle.dumps(exc))) == rendered
 
 
-def test_a_foreign_gradio_error_still_renders_as_not_ours():
+def test_a_foreign_gradio_error_renders_its_own_text():
     """The platform's own errors (``'GPU task aborted'`` and friends) are
-    gr.Error instances that are NOT LTXStudioError, and they must keep taking
-    the honest not-one-of-ours branch."""
-    assert "unexpected" in render.failure(gr.Error("GPU task aborted"))
+    gr.Error instances that are NOT LTXStudioError. Whatever card they get, the
+    platform's text must reach the user verbatim, before and after a round trip."""
+    exc = gr.Error("GPU task aborted")
+    rendered = render.failure(exc)
+    assert "GPU task aborted" in rendered
+    assert render.failure(pickle.loads(pickle.dumps(exc))) == rendered
 
 
 # --------------------------------------------------------------------------
