@@ -683,11 +683,11 @@ reservation increment is sized for the download rather than for the decode.
 enhancement — it lands while `demo.launch()` is packing, which is the window
 `ZEROGPU_DISK_CAP_GB` is measured against.
 
-> ⛔ **Corrected 2026-11-16: on the deployed build the prefetch failed on every boot**
-> (`AttributeError: 'tqdm' object has no attribute '_progress'`, in the 2026-11-13 log): the
-> UI's `gr.Progress(track_tqdm=True)` patched tqdm process-wide and broke the prefetch's
-> progress bars. The degraded path was the normal one, so the first enhanced run in each
-> container paid the download inside its reservation. The UI no longer installs that patch
+> ⛔ **Corrected 2026-11-16: on the deployed build the prefetch fails at startup**
+> (`AttributeError: 'tqdm' object has no attribute '_progress'`, in the 2026-11-13 log; the
+> cause applies to every boot): the UI's `gr.Progress(track_tqdm=True)` patched tqdm
+> process-wide and broke the prefetch's progress bars. The degraded path is the normal one, so
+> the first enhanced run in each container pays the download inside its reservation. The UI no longer installs that patch
 > (`ui/blocks.py`); a prefetch that works on the Space is not verified yet.
 
 The settings, unchanged from what this section banked in advance and now imported from
