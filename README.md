@@ -132,19 +132,34 @@ and a 60 fps clip is read in real time.
 **Audio is not a first-class argument** — there is no `audio=` kwarg anywhere in the API. Your
 audio is encoded to `audio_latents`, and then:
 
-- **Audio to video** holds your audio fixed while the picture is generated to it. The file
-  carries your audio, length-matched to the video.
+- **Audio to video** holds your audio fixed while the picture is generated to it. The file's
+  sound track is your recording itself, cut to the video's length. By default the video takes
+  its length from the recording (the longest length that fits in it); a set length longer than
+  the recording is refused before anything runs. The prompt is optional, and so is an image for
+  the first frame.
 - **Audio to audio** changes your audio by one of the model's own levels: 0.42, 0.73 or 0.91
-  (lightly, moderately, strongly), or 1.0, which ignores your audio and makes fresh sound.
+  (*A little*, *Moderately*, *A lot*), or 1.0 (*Ignore my audio (new sound)*), which makes
+  fresh sound.
 - With automatic length on, these two modes take their length from your audio file: the
   duration predictor reads only the text, so it cannot hear the upload.
 
-> **Known issue (2026-11-16; cause found, fix in progress).** Audio that goes through the app's
-> audio encoding comes back about 9 dB quieter and duller, measured on real weights even with no
-> generation in between. The cause is the app's own mel transform, built with the wrong FFT
-> size. It shows in audio to audio's output, and it is the version of your audio that audio to
-> video's picture is made to; the soundtrack in audio to video's file is your own file and is
-> not affected.
+What the modes that take or make sound were measured to do, on real weights on a Mac, after the
+audio-encoding fix of 2026-11-16 (until then every uploaded sound reached the model about 9 dB
+too quiet and duller, because the app's mel transform used the wrong window size):
+
+- **Audio to audio** returns sound at your input's own level at *A little* and *Moderately*
+  (within 1.5 dB), changed as much as you chose: on speech, the same sound events at the same
+  times scored 0.97, 0.95 and 0.71 at the three levels, and the words came back exactly at
+  *A little*.
+- **Video to audio** makes sound for what is visible. From a silent clip of a man shouting it
+  made a voice in time with his mouth (its loudness follows the clip's original sound track at
+  a correlation of 0.92), in words of its own.
+- **Audio to video** carries your recording exactly and takes its length from it, with or
+  without a prompt and with or without a first-frame image.
+
+Through the API, pass `noise_scale` yourself for video to video and audio to audio: the
+endpoint's published default, 0.5, is snapped to the nearest level, 0.42 (*A little*), in both.
+The page always sends the level you chose.
 
 ---
 

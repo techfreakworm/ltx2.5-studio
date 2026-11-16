@@ -1137,6 +1137,16 @@ Mel/audio parameters come from `audio_vae.config` at runtime: `audio_sampling_ra
 `audio_hop_length`, `audio_mel_bins`, `audio_vae_mel_compression_ratio`,
 `audio_vae_temporal_compression_ratio`, `audio_latent_channels`.
 
+> ⛔ **Corrected 2026-11-16: the analysis window is in no config, and taking it from the wrong
+> one cost 9 dB.** No config describes the audio VAE's mel analysis window. The app took its
+> FFT size and window (512) from `vocoder.config`, whose values set up the vocoder's own
+> internal mel stage, so every uploaded sound reached the model about 9 dB too quiet and
+> duller: the app's encode → decode round trip, with no generation, returned speech at
+> −8.9 dB. Since `7cf1547` the window is a declared convention in `audio.py`
+> (`MEL_CONVENTIONS`: FFT and window 1024, slaney mel scale and norm, magnitude), chosen by
+> measured round trip (speech +0.2 dB, ocean −0.3 dB) and pinned by a test against the real
+> audio VAE and vocoder. The sample rate, hop and mel bins still come from `audio_vae.config`.
+
 This mirrors the pipeline itself, whose constructor reads `self.vae.spatial_compression_ratio`,
 `self.vae.temporal_compression_ratio`, `self.audio_vae.mel_compression_ratio`,
 `self.audio_vae.temporal_compression_ratio` and `self.transformer.config.patch_size` from the
