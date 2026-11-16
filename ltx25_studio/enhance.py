@@ -161,6 +161,7 @@ from __future__ import annotations
 
 import gc
 import logging
+from pathlib import Path
 
 from .errors import PromptEnhancementError
 
@@ -186,6 +187,12 @@ __all__ = [
 #: rewrite is built from, changed twice in July 2026. Applies to the default
 #: repo only; a repo set through ``LTX25_PROMPT_ENHANCER_REPO`` loads at its head.
 ENHANCER_REVISION = "dd693ff40353f057ca5f07e945ad867f4afbf2ec"
+
+#: The one weight the default checkpoint stores block-wise: [262144, 35], one
+#: scale per 256-wide per-layer slice. transformers' ``QuantizedEmbedding`` builds
+#: it with one column and dequantises either shape. transformers 5.22.2 and older
+#: load it as stored; 5.23.0 reports it as a size mismatch instead.
+_BLOCKWISE_SCALE_KEY = "model.language_model.embed_tokens_per_layer.embedding_scale"
 
 #: ``GEMMA4_PROMPT_ENHANCEMENT_CONFIG.max_new_tokens`` upstream, and the number
 #: PLAN §3.5 banked in advance. Not a UI control: the caption length is what the
@@ -463,9 +470,9 @@ def _resident_enhancer(repo_id: str, loader=None, *, device: str | None = None) 
 
     **Only a successful load is cached.** :func:`_load_enhancer` raises
     :class:`~ltx25_studio.errors.PromptEnhancementError` on a bad repo, an offline
-    Hub or a too-old ``transformers``, and caching that would turn one transient
-    network failure into an enhancer that stays broken for the life of the worker
-    with no way to retry.
+    Hub, a too-old ``transformers`` or a checkpoint that does not fit the model,
+    and caching that would turn one transient network failure into an enhancer
+    that stays broken for the life of the worker with no way to retry.
     """
     revision = enhancer_revision(repo_id)
     cached = _ENHANCER.get((repo_id, revision))
@@ -562,9 +569,11 @@ def _reference_frame(image):
 def _load_enhancer(repo_id: str, *, revision: str | None = None, device: str | None = None):
     """``(model, processor)`` from the Hub at ``revision``, or one of ours naming the repo.
 
-    Two failures are worth separating and both are named: ``transformers`` too
-    old to know ``Gemma4ForConditionalGeneration`` at all, and the fetch/load
-    itself. Neither ever falls through to the original prompt.
+    Three failures are worth separating and all are named: ``transformers`` too
+    old to know ``Gemma4ForConditionalGeneration`` at all, the fetch/load
+    itself, and a checkpoint that does not fit the model (see
+    :func:`_restore_blockwise_scale`). None ever falls through to the original
+    prompt.
     """
     if revision is None:
         _warn_unpinned(repo_id, "loading")
@@ -575,8 +584,8 @@ def _load_enhancer(repo_id: str, *, revision: str | None = None, device: str | N
             repo_id=repo_id,
             reason=(
                 f"transformers could not provide Gemma4ForConditionalGeneration ({exc!r}). "
-                f"The enhancer needs transformers >= 5.15.1, which is the floor in "
-                f"requirements.txt"
+                f"The enhancer needs transformers 5.15.1 or newer; this app is pinned to and "
+                f"tested with transformers 5.23.0"
             ),
         ) from exc
 
@@ -588,12 +597,19 @@ def _load_enhancer(repo_id: str, *, revision: str | None = None, device: str | N
         # Named explicitly rather than through `AutoModel*`: the QAT repo's
         # config.json has no `architectures` key, so auto-dispatch cannot
         # resolve it. `dtype="auto"` honours the checkpoint's own dtype and the
-        # `quantization_config` block the QAT build carries.
-        model = Gemma4ForConditionalGeneration.from_pretrained(
-            repo_id, revision=revision, dtype="auto"
+        # `quantization_config` block the QAT build carries. A size mismatch is
+        # reported rather than raised, and the report is checked below.
+        model, loading_info = Gemma4ForConditionalGeneration.from_pretrained(
+            repo_id,
+            revision=revision,
+            dtype="auto",
+            ignore_mismatched_sizes=True,
+            output_loading_info=True,
         )
     except Exception as exc:
         raise PromptEnhancementError(repo_id=repo_id, reason=repr(exc)) from exc
+
+    _restore_blockwise_scale(model, loading_info, repo_id=repo_id, revision=revision)
 
     # `.eval()` and an explicit device, in that order. The device is STATED
     # rather than inherited: a global default device deciding where 2.5 GB of
@@ -601,6 +617,137 @@ def _load_enhancer(repo_id: str, *, revision: str | None = None, device: str | N
     # original CPU pin necessary. It is now resolved rather than hardcoded --
     # see `enhancer_device`.
     return model.eval().to(device or enhancer_device()), processor
+
+
+def _restore_blockwise_scale(model, loading_info, *, repo_id: str, revision: str | None) -> None:
+    """Put back the one weight transformers 5.23.0 does not load as stored; refuse anything else.
+
+    5.23.0 reports :data:`_BLOCKWISE_SCALE_KEY` as a size mismatch and
+    re-initialises it, and a re-initialised scale table makes the rewrite garbage
+    text. So that one tensor is read back from the cached checkpoint, never from
+    the network, and only if it can scale the embedding in equal blocks. Any
+    other mismatched key, any missing key and any loader error is a refusal.
+    With nothing mismatched (5.22.2 and older) the model is left as loaded.
+    """
+    try:
+        mismatched = {
+            key: tuple(checkpoint_shape)
+            for key, checkpoint_shape, _model_shape in loading_info["mismatched_keys"]
+        }
+        missing = sorted(loading_info["missing_keys"])
+        errors = [str(message) for message in loading_info["error_msgs"]]
+    except Exception as exc:
+        raise PromptEnhancementError(
+            repo_id=repo_id,
+            reason=(
+                f"transformers did not report which weights it loaded ({exc!r}), so a "
+                f"re-initialised weight could not be ruled out"
+            ),
+        ) from exc
+
+    others = sorted(set(mismatched) - {_BLOCKWISE_SCALE_KEY})
+    if others or missing or errors:
+        problems = [
+            *([f"weights of the wrong size: {_listed(others)}"] if others else []),
+            *([f"weights missing from the checkpoint: {_listed(missing)}"] if missing else []),
+            *([f"loader errors: {'; '.join(errors)}"] if errors else []),
+        ]
+        raise PromptEnhancementError(
+            repo_id=repo_id,
+            reason=(
+                f"its checkpoint does not fit the model this version of transformers builds "
+                f"({'; '.join(problems)}), and running it with those weights re-initialised "
+                f"would produce garbage text"
+            ),
+        )
+    if not mismatched:
+        logger.info(
+            "prompt enhancer %r: every weight loaded as stored, nothing to restore", repo_id
+        )
+        return
+
+    reported = mismatched[_BLOCKWISE_SCALE_KEY]
+    path = _cached_checkpoint(repo_id, revision)
+    module_path, _, name = _BLOCKWISE_SCALE_KEY.rpartition(".")
+    try:
+        import torch
+        from safetensors import safe_open
+
+        with safe_open(path, framework="pt") as weights:
+            names = set(weights.keys())
+            stored = (
+                weights.get_tensor(_BLOCKWISE_SCALE_KEY) if _BLOCKWISE_SCALE_KEY in names else None
+            )
+        module = model.get_submodule(module_path)
+        rows = int(getattr(module, name).shape[0])
+        width = int(getattr(module, "embedding_dim", 0))
+    except Exception as exc:
+        raise PromptEnhancementError(
+            repo_id=repo_id,
+            reason=f"its per-layer embedding scale could not be read back from {path} ({exc!r})",
+        ) from exc
+
+    shape = tuple(stored.shape) if stored is not None else None
+    fits = (
+        shape == reported
+        and len(shape) == 2
+        and shape[0] == rows
+        and shape[1] > 0
+        and width > 0
+        and width % shape[1] == 0
+    )
+    if not fits:
+        raise PromptEnhancementError(
+            repo_id=repo_id,
+            reason=(
+                f"the per-layer embedding scale in {Path(path).name} is "
+                f"{list(shape) if shape is not None else 'absent'} (the loader reported "
+                f"{list(reported)}), which cannot scale an embedding of {rows} rows and "
+                f"{width} columns in equal blocks"
+            ),
+        )
+    setattr(module, name, torch.nn.Parameter(stored, requires_grad=False))
+    logger.warning(
+        "prompt enhancer %r: restored %s %s from %s. This transformers version builds it "
+        "with one column and reports it as a size mismatch, which is expected from 5.23.0 on.",
+        repo_id,
+        _BLOCKWISE_SCALE_KEY,
+        list(shape),
+        Path(path).name,
+    )
+
+
+def _cached_checkpoint(repo_id: str, revision: str | None) -> str:
+    """The cached single-file checkpoint at ``revision``: a cache lookup, never a download."""
+    try:
+        from huggingface_hub import constants, hf_hub_download
+
+        # The name `from_pretrained` loads a single-file safetensors checkpoint under.
+        from transformers.utils import SAFE_WEIGHTS_NAME
+    except Exception as exc:
+        raise PromptEnhancementError(
+            repo_id=repo_id,
+            reason=f"the checkpoint could not be located in the cache ({exc!r})",
+        ) from exc
+    try:
+        # `from_pretrained` has just read this file, so it is a cache hit. With
+        # `local_files_only` a miss raises here instead of starting a download.
+        return hf_hub_download(repo_id, SAFE_WEIGHTS_NAME, revision=revision, local_files_only=True)
+    except Exception as exc:
+        raise PromptEnhancementError(
+            repo_id=repo_id,
+            reason=(
+                f"{SAFE_WEIGHTS_NAME} at revision {revision or 'main'} is not in the Hugging "
+                f"Face cache at {constants.HF_HUB_CACHE} ({type(exc).__name__}). One weight has "
+                f"to be read from that file because this version of transformers does not "
+                f"load it as stored"
+            ),
+        ) from exc
+
+
+def _listed(keys: list[str], limit: int = 5) -> str:
+    shown = ", ".join(keys[:limit])
+    return shown if len(keys) <= limit else f"{shown} and {len(keys) - limit} more"
 
 
 def _system_prompts():

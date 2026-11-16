@@ -32,7 +32,7 @@ import types
 from pathlib import Path
 
 import pytest
-from conftest import PACKAGE_ROOT
+from conftest import PACKAGE_ROOT, REPO_ROOT
 from test_generate import FakePipe, factory_for, good_encoder
 
 from ltx25_studio import config as config_module
@@ -599,6 +599,32 @@ class FakeModel:
         return [[1, 2, 3, 9, 9, 9]]
 
 
+def loading_report(*, mismatched=(), missing=(), unexpected=(), errors=()):
+    """``from_pretrained(..., output_loading_info=True)``'s second value, shaped as 5.23.0 returns it.
+
+    ``mismatched`` entries are ``(key, checkpoint shape, model shape)``.
+    """
+    return {
+        "missing_keys": set(missing),
+        "unexpected_keys": set(unexpected),
+        "mismatched_keys": set(mismatched),
+        "error_msgs": list(errors),
+    }
+
+
+def from_pretrained_returning(model, report=None, seen=None):
+    """A model ``from_pretrained`` that, like transformers, adds the report when asked for it."""
+
+    def from_pretrained(repo_id, **kwargs):
+        if seen is not None:
+            seen.append((repo_id, kwargs))
+        if kwargs.get("output_loading_info"):
+            return model, loading_report() if report is None else report
+        return model
+
+    return from_pretrained
+
+
 T2V_SYSTEM_PROMPT = "SYSTEM-T2V: write a caption for a text-to-video request."
 I2V_SYSTEM_PROMPT = "SYSTEM-I2V: write a caption that BEGINS from the reference image."
 
@@ -820,7 +846,7 @@ def test_an_explicit_device_reaches_the_load(monkeypatch):
         from_pretrained=lambda repo_id, **kwargs: processor
     )
     transformers.Gemma4ForConditionalGeneration = types.SimpleNamespace(
-        from_pretrained=lambda repo_id, **kwargs: model
+        from_pretrained=from_pretrained_returning(model)
     )
     monkeypatch.setitem(sys.modules, "transformers", transformers)
     monkeypatch.setitem(sys.modules, "torch", _torch_with(cuda=True, mps=False))
@@ -860,7 +886,7 @@ def test_the_loaded_model_is_put_on_the_resolved_device_and_into_eval_mode(monke
         from_pretrained=lambda repo_id, **kwargs: processor
     )
     transformers.Gemma4ForConditionalGeneration = types.SimpleNamespace(
-        from_pretrained=lambda repo_id, **kwargs: model
+        from_pretrained=from_pretrained_returning(model)
     )
     monkeypatch.setitem(sys.modules, "transformers", transformers)
     monkeypatch.setattr(enhance_module, "enhancer_device", lambda: "cuda")
@@ -1136,7 +1162,7 @@ def _recording_transformers(monkeypatch):
 
     def _model(repo_id, **kwargs):
         seen["model"] = (repo_id, kwargs)
-        return model
+        return from_pretrained_returning(model)(repo_id, **kwargs)
 
     transformers.AutoProcessor = types.SimpleNamespace(from_pretrained=_processor)
     transformers.Gemma4ForConditionalGeneration = types.SimpleNamespace(from_pretrained=_model)
@@ -1153,7 +1179,17 @@ def test_the_default_enhancer_loads_at_its_pinned_commit(monkeypatch):
     default = config_module.DEFAULT_PROMPT_ENHANCER_REPO
     enhance_module._load_enhancer(default, revision=enhance_module.enhancer_revision(default))
     assert seen["processor"] == (default, {"revision": enhance_module.ENHANCER_REVISION})
-    assert seen["model"] == (default, {"revision": enhance_module.ENHANCER_REVISION, "dtype": "auto"})
+    # A size mismatch is reported rather than raised, so the load can repair the one
+    # weight transformers 5.23.0 refuses and refuse anything else (F67, below).
+    assert seen["model"] == (
+        default,
+        {
+            "revision": enhance_module.ENHANCER_REVISION,
+            "dtype": "auto",
+            "ignore_mismatched_sizes": True,
+            "output_loading_info": True,
+        },
+    )
 
 
 def test_the_pin_reaches_the_load_through_enhance(monkeypatch, upstream):
@@ -1211,7 +1247,374 @@ def test_a_transformers_too_old_to_know_gemma_4_says_so(monkeypatch):
         enhance_module.enhance(ORIGINAL, repo_id="org/nope")
     message = str(caught.value)
     assert "org/nope" in message
-    assert "5.15.1" in message, "the message must name the version floor it needs"
+    assert "5.15.1" in message, "the message must name the oldest transformers that works"
+    assert f"transformers {requirement_pin('transformers')}" in message, (
+        "the message must name the transformers version the app pins and was tested with"
+    )
+    assert "floor" not in message and "requirements.txt" not in message, (
+        "requirements.txt pins one exact version now; there is no floor to point at"
+    )
+
+
+def requirement_pin(name: str) -> str:
+    """The exact version ``requirements.txt`` pins ``name`` to."""
+    for raw in (REPO_ROOT / "requirements.txt").read_text().splitlines():
+        found, sep, version = raw.split("#")[0].strip().partition("==")
+        if sep and found.strip().lower() == name:
+            return version.strip()
+    raise AssertionError(f"requirements.txt does not pin {name} exactly")
+
+
+# --------------------------------------------------------------------------
+# F67: transformers 5.23.0 and the checkpoint's block-wise per-layer scale
+# --------------------------------------------------------------------------
+#
+# The QAT checkpoint stores SCALE_KEY as [262144, 35], one scale per 256-wide
+# per-layer slice, and transformers' QuantizedEmbedding builds it as [262144, 1].
+# Up to 5.22.2 the loader put the checkpoint tensor in place. 5.23.0 reports a
+# size mismatch and raises, so every enhanced run failed before generating.
+
+SCALE_KEY = "model.language_model.embed_tokens_per_layer.embedding_scale"
+TINY_REV = "0123456789abcdef0123456789abcdef01234567"
+
+
+def hub_cache(monkeypatch, tmp_path):
+    """An empty Hugging Face cache in ``tmp_path``, in offline mode: nothing can reach the Hub."""
+    hub = pytest.importorskip("huggingface_hub")
+    cache = tmp_path / "hub"
+    cache.mkdir()
+    monkeypatch.setattr(hub.constants, "HF_HUB_CACHE", str(cache))
+    monkeypatch.setattr(hub.constants, "HF_HUB_OFFLINE", True)
+    return cache
+
+
+def cached_snapshot(cache, repo_id, revision):
+    """``<cache>/models--org--name/snapshots/<revision>/``, laid out as the Hub client does."""
+    snapshot = cache / f"models--{repo_id.replace('/', '--')}" / "snapshots" / revision
+    snapshot.mkdir(parents=True)
+    return snapshot
+
+
+def fake_transformers(monkeypatch, model, report, seen=None):
+    """A ``transformers`` whose model load returns ``model`` and ``report``."""
+    transformers = types.ModuleType("transformers")
+    processor = FakeProcessor()
+    transformers.AutoProcessor = types.SimpleNamespace(
+        from_pretrained=lambda repo_id, **kwargs: processor
+    )
+    transformers.Gemma4ForConditionalGeneration = types.SimpleNamespace(
+        from_pretrained=from_pretrained_returning(model, report, seen)
+    )
+    # The single-file checkpoint name, as `transformers.utils` defines it.
+    utils = types.ModuleType("transformers.utils")
+    utils.SAFE_WEIGHTS_NAME = "model.safetensors"
+    transformers.utils = utils
+    monkeypatch.setitem(sys.modules, "transformers", transformers)
+    monkeypatch.setitem(sys.modules, "transformers.utils", utils)
+    monkeypatch.setattr(enhance_module, "enhancer_device", lambda device=None: "cpu")
+    return processor
+
+
+class UntouchableModel(FakeModel):
+    """A loaded model that fails the test if the load reaches into it for a weight."""
+
+    def get_submodule(self, path):
+        raise AssertionError(f"the load reached into the model for {path!r}")
+
+
+def test_a_checkpoint_that_loads_as_stored_is_left_untouched(monkeypatch, tmp_path, caplog):
+    """transformers 5.22.2 and older report nothing mismatched, and the load is then
+    the plain load it always was: nothing read from the cache (it is empty here, so
+    a read would fail) and no weight touched."""
+    hub_cache(monkeypatch, tmp_path)
+    model = UntouchableModel()
+    fake_transformers(monkeypatch, model, loading_report())
+
+    with caplog.at_level("INFO", logger=enhance_module.logger.name):
+        loaded, _ = enhance_module._load_enhancer("org/qat", revision=TINY_REV)
+    assert loaded is model and model.evaluated and model.moved_to == "cpu"
+    assert "loaded as stored" in caplog.text, caplog.text
+
+
+SCALE_AS_5_23_REPORTS_IT = (SCALE_KEY, (8, 2), (8, 1))
+
+
+@pytest.mark.parametrize(
+    ("report", "named"),
+    [
+        (
+            loading_report(mismatched=[("model.language_model.norm.weight", (16,), (8,))]),
+            "model.language_model.norm.weight",
+        ),
+        (
+            loading_report(
+                mismatched=[SCALE_AS_5_23_REPORTS_IT, ("lm_head.weight_scale", (32, 2), (32, 1))]
+            ),
+            "lm_head.weight_scale",
+        ),
+        (
+            loading_report(
+                mismatched=[SCALE_AS_5_23_REPORTS_IT],
+                missing=["model.language_model.layers.0.mlp.down_proj.weight"],
+            ),
+            "model.language_model.layers.0.mlp.down_proj.weight",
+        ),
+        (loading_report(errors=["size mismatch for lm_head.weight"]), "size mismatch for lm_head"),
+    ],
+    ids=["another-mismatch", "a-second-mismatch", "a-missing-key", "a-loader-error"],
+)
+def test_any_other_mismatch_missing_key_or_loader_error_is_refused(
+    monkeypatch, tmp_path, report, named
+):
+    """``ignore_mismatched_sizes=True`` must not become a licence to run on
+    re-initialised weights: the scale is the one allow-listed key, and anything
+    else the loader reports is a refusal that names it."""
+    hub_cache(monkeypatch, tmp_path)
+    model = UntouchableModel()
+    fake_transformers(monkeypatch, model, report)
+
+    with pytest.raises(PromptEnhancementError) as caught:
+        enhance_module._load_enhancer("org/qat", revision=TINY_REV)
+    message = str(caught.value)
+    assert named in message and "org/qat" in message, message
+    assert model.moved_to is None and model.evaluated is False, "a refused model was put to use"
+
+
+def test_a_loading_report_that_cannot_be_read_is_refused(monkeypatch, tmp_path):
+    """No report, no proof that nothing was re-initialised: refuse rather than assume."""
+    hub_cache(monkeypatch, tmp_path)
+    model = UntouchableModel()
+    fake_transformers(monkeypatch, model, {"missing_keys": set()})
+
+    with pytest.raises(PromptEnhancementError) as caught:
+        enhance_module._load_enhancer("org/qat", revision=TINY_REV)
+    assert "did not report" in str(caught.value), str(caught.value)
+    assert model.moved_to is None
+
+
+def test_the_checkpoint_missing_from_the_cache_is_refused_and_named(monkeypatch, tmp_path):
+    """The scale is read back from the cached ``model.safetensors`` with no network.
+    A miss is a refusal that says exactly which file, at which revision, and where
+    it looked -- and a failed load is not cached, so the next call can retry."""
+    cache = hub_cache(monkeypatch, tmp_path)
+    model = FakeModel()
+    fake_transformers(monkeypatch, model, loading_report(mismatched=[SCALE_AS_5_23_REPORTS_IT]))
+    monkeypatch.delenv(config_module.ENV_PROMPT_ENHANCER_REPO, raising=False)
+    # Offline mode keeps this test off the network either way; the lookup must
+    # also refuse to download by itself, or a miss on the Space is a 2.5 GB fetch.
+    hub = sys.modules["huggingface_hub"]
+    lookups: list = []
+    real_download = hub.hf_hub_download
+
+    def recording_download(*args, **kwargs):
+        lookups.append(kwargs)
+        return real_download(*args, **kwargs)
+
+    monkeypatch.setattr(hub, "hf_hub_download", recording_download)
+
+    with pytest.raises(PromptEnhancementError) as caught:
+        enhance_module.enhance(ORIGINAL)
+    message = str(caught.value)
+    assert "model.safetensors" in message, message
+    assert enhance_module.ENHANCER_REVISION in message, message
+    assert str(cache) in message, message
+    assert [lookup.get("local_files_only") for lookup in lookups] == [True]
+    assert model.moved_to is None and enhance_module._ENHANCER == {}
+
+
+def scaled_model(rows=8, width=8):
+    """A loaded model with the REAL ``QuantizedEmbedding`` at the scale's path, its
+    scale as 5.23.0 leaves it: re-initialised with one column."""
+    torch = pytest.importorskip("torch")
+    gemma_quant = pytest.importorskip("transformers.integrations.gemma_quant")
+    embedding = gemma_quant.QuantizedEmbedding(
+        num_embeddings=rows, embedding_dim=width, output_dtype=torch.float32, num_bits=8
+    )
+    generator = torch.Generator().manual_seed(0)
+    embedding.embedding_quantized.data = torch.randint(
+        -128, 128, (rows, width), dtype=torch.int8, generator=generator
+    )
+    model = torch.nn.Module()
+    model.model = torch.nn.Module()
+    model.model.language_model = torch.nn.Module()
+    model.model.language_model.embed_tokens_per_layer = embedding
+    return model, embedding
+
+
+def write_checkpoint(snapshot, tensors):
+    save_file = pytest.importorskip("safetensors.torch").save_file
+    save_file(
+        {key: value.contiguous() for key, value in tensors.items()},
+        str(snapshot / "model.safetensors"),
+    )
+
+
+def test_on_5_23_the_scale_is_read_back_from_the_cached_checkpoint(monkeypatch, tmp_path, caplog):
+    """The repair, through the real seam: the loader reports the one key as
+    mismatched and re-initialised; the load puts the checkpoint's own tensor back,
+    read from the offline cache, and the REAL ``QuantizedEmbedding`` then
+    dequantises block-wise exactly as the checkpoint says."""
+    torch = pytest.importorskip("torch")
+    model, embedding = scaled_model(rows=8, width=8)
+    scale = torch.rand(8, 2, generator=torch.Generator().manual_seed(1)) + 0.5
+    cache = hub_cache(monkeypatch, tmp_path)
+    write_checkpoint(
+        cached_snapshot(cache, "org/qat", TINY_REV),
+        {SCALE_KEY: scale, "model.language_model.norm.weight": torch.ones(8)},
+    )
+    seen: list = []
+    report = loading_report(mismatched=[(SCALE_KEY, torch.Size([8, 2]), torch.Size([8, 1]))])
+    fake_transformers(monkeypatch, model, report, seen)
+
+    with caplog.at_level("INFO", logger=enhance_module.logger.name):
+        loaded, _ = enhance_module._load_enhancer("org/qat", revision=TINY_REV, device="cpu")
+
+    assert loaded is model and not model.training
+    kwargs = seen[0][1]
+    assert kwargs["ignore_mismatched_sizes"] is True and kwargs["output_loading_info"] is True
+    assert kwargs["revision"] == TINY_REV and kwargs["dtype"] == "auto"
+
+    restored = embedding.embedding_scale
+    assert isinstance(restored, torch.nn.Parameter) and not restored.requires_grad
+    assert torch.equal(restored, scale), "the scale is not the checkpoint's own tensor"
+    # Two blocks of four columns, each scaled by its own entry of the checkpoint's scale.
+    ints = embedding.embedding_quantized.to(torch.float32)
+    expected = (ints.view(8, 2, 4) * scale.view(8, 2, 1)).view(8, 8)
+    assert torch.equal(embedding.weight, expected)
+    assert torch.equal(embedding(torch.tensor([3, 5])), expected[[3, 5]])
+    assert "restored" in caplog.text and SCALE_KEY in caplog.text, caplog.text
+
+
+@pytest.mark.parametrize(
+    ("stored", "reported"),
+    [
+        ((8, 3), (8, 3)),  # three columns cannot split an 8-wide row into equal blocks
+        ((9, 2), (9, 2)),  # a table for a different vocabulary
+        ((8, 2), (8, 4)),  # not the tensor the loader reported
+        (None, (8, 2)),  # not in the file at all
+    ],
+    ids=["columns-do-not-divide", "wrong-rows", "not-what-was-reported", "absent"],
+)
+def test_a_scale_that_cannot_apply_to_the_embedding_is_refused(
+    monkeypatch, tmp_path, stored, reported
+):
+    torch = pytest.importorskip("torch")
+    model, embedding = scaled_model(rows=8, width=8)
+    cache = hub_cache(monkeypatch, tmp_path)
+    tensors = {"model.language_model.norm.weight": torch.ones(8)}
+    if stored is not None:
+        tensors[SCALE_KEY] = torch.ones(*stored)
+    write_checkpoint(cached_snapshot(cache, "org/qat", TINY_REV), tensors)
+    report = loading_report(mismatched=[(SCALE_KEY, torch.Size(reported), torch.Size([8, 1]))])
+    fake_transformers(monkeypatch, model, report)
+
+    with pytest.raises(PromptEnhancementError) as caught:
+        enhance_module._load_enhancer("org/qat", revision=TINY_REV, device="cpu")
+    assert "per-layer embedding scale" in str(caught.value), str(caught.value)
+    assert tuple(embedding.embedding_scale.shape) == (8, 1), "a refused scale was applied"
+
+
+def tiny_qat_checkpoint(snapshot, *, blockwise):
+    """A text-only Gemma 4 checkpoint in the QAT layout, a few kB.
+
+    The module swap is ``GemmaQuantizer``'s own, so the keys, shapes and dtypes are
+    the ones the real loader expects. The per-layer embedding is 4-bit like the
+    real checkpoint's; its scale is stored with one column per decoder layer
+    (``blockwise``) or with the single column the module is built with.
+    Returns ``(per-layer scale, packed per-layer table)`` as stored.
+    """
+    import json
+
+    torch = pytest.importorskip("torch")
+    transformers = pytest.importorskip("transformers")
+    from transformers.quantizers.quantizer_gemma import GemmaQuantizer
+    from transformers.utils.quantization_config import GemmaQuantizationConfig
+
+    quantization = {
+        "num_bits": 8,
+        "quantize_embeddings": True,
+        "module_quant_configs": {"language_model\\.embed_tokens_per_layer$": {"num_bits": 4}},
+        "modules_to_not_convert": ["per_layer_model_projection"],
+    }
+    text = {
+        "vocab_size": 32,
+        "vocab_size_per_layer_input": 32,
+        "hidden_size": 16,
+        "hidden_size_per_layer_input": 4,
+        "intermediate_size": 32,
+        "num_hidden_layers": 2,
+        "num_attention_heads": 2,
+        "num_key_value_heads": 1,
+        "head_dim": 8,
+        "global_head_dim": 8,
+        "layer_types": ["sliding_attention", "full_attention"],
+        "sliding_window": 8,
+        "max_position_embeddings": 64,
+        "tie_word_embeddings": False,
+    }
+    config = transformers.Gemma4Config(
+        text_config=text, vision_config=None, audio_config=None, tie_word_embeddings=False
+    )
+    model = transformers.Gemma4ForConditionalGeneration(config)
+    GemmaQuantizer(GemmaQuantizationConfig(**quantization))._process_model_before_weight_loading(
+        model
+    )
+    generator = torch.Generator().manual_seed(2)
+    tensors = {}
+    for key, value in model.state_dict().items():
+        if value.dtype in (torch.int8, torch.uint8):
+            bounds = torch.iinfo(value.dtype)
+            tensors[key] = torch.randint(
+                bounds.min, bounds.max + 1, value.shape, dtype=value.dtype, generator=generator
+            )
+        elif key.endswith("activation_scale"):
+            tensors[key] = torch.zeros(value.shape, dtype=value.dtype)  # 0: uncalibrated
+        else:
+            tensors[key] = (torch.rand(value.shape, generator=generator) + 0.5).to(value.dtype)
+    columns = 2 if blockwise else 1
+    tensors[SCALE_KEY] = torch.rand(32, columns, generator=generator) + 0.5
+    write_checkpoint(snapshot, tensors)
+    on_disk = config.to_dict()
+    on_disk["quantization_config"] = {"quant_method": "gemma", **quantization}
+    (snapshot / "config.json").write_text(json.dumps(on_disk))
+    return tensors[SCALE_KEY], tensors[SCALE_KEY.replace("embedding_scale", "embedding_quantized")]
+
+
+@pytest.mark.parametrize("blockwise", [True, False], ids=["block-wise-scale", "one-column-scale"])
+def test_the_real_loader_on_a_tiny_qat_checkpoint(monkeypatch, tmp_path, caplog, blockwise):
+    """F67 end to end with the REAL transformers loader, offline, on a checkpoint
+    built in the test: no real weights. On 5.23.0 the block-wise scale is reported
+    as mismatched (the X3b failure) and put back; a one-column scale loads as
+    stored. Either way the per-layer table dequantises as the checkpoint says."""
+    torch = pytest.importorskip("torch")
+    processing_auto = pytest.importorskip("transformers.models.auto.processing_auto")
+    cache = hub_cache(monkeypatch, tmp_path)
+    scale, packed = tiny_qat_checkpoint(
+        cached_snapshot(cache, "org/tiny-qat", TINY_REV), blockwise=blockwise
+    )
+    # The tiny checkpoint has no tokenizer or image processor. Stubbed on the class:
+    # transformers swaps its top-level lazy module on first use, so a stub set on the
+    # module object can be lost before the load reads it.
+    processor = object()
+    monkeypatch.setattr(
+        processing_auto.AutoProcessor, "from_pretrained", lambda *args, **kwargs: processor
+    )
+
+    with caplog.at_level("INFO", logger=enhance_module.logger.name):
+        model, loaded_processor = enhance_module._load_enhancer(
+            "org/tiny-qat", revision=TINY_REV, device="cpu"
+        )
+
+    assert loaded_processor is processor
+    embedding = model.get_submodule(SCALE_KEY.rpartition(".")[0])
+    assert torch.equal(embedding.embedding_scale, scale)
+    # 4-bit storage, two values per byte, low nibble first, offset by 8.
+    ints = torch.stack([(packed & 0x0F), (packed >> 4)], dim=-1).reshape(32, 8).float() - 8
+    columns = scale.shape[1]
+    expected = (ints.view(32, columns, 8 // columns) * scale.view(32, columns, 1)).view(32, 8)
+    assert torch.equal(embedding.weight, expected)
+    case_lines = [r.getMessage() for r in caplog.records if r.name == enhance_module.logger.name]
+    assert sum(("restored" in line) or ("loaded as stored" in line) for line in case_lines) == 1
 
 
 # --------------------------------------------------------------------------
@@ -1569,8 +1972,8 @@ def test_the_default_enhancer_repository_is_public_and_loadable():
 
     Costs one metadata request and moves **no weights**. What it pins:
     the repo exists, is not gated, is a single ``model.safetensors``, and its
-    ``config.json`` carries the ``quant_method`` that requires the
-    ``transformers`` floor already in requirements.txt.
+    ``config.json`` carries the ``quant_method`` that needs ``transformers``
+    5.15.1 or newer (requirements.txt pins 5.23.0).
     """
     if not os.environ.get("LTX25_NETWORK_TESTS"):
         pytest.skip("set LTX25_NETWORK_TESTS=1 to check the enhancer against the real Hub")

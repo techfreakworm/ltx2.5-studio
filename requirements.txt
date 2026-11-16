@@ -53,6 +53,9 @@ diffusers @ git+https://github.com/huggingface/diffusers@ac56fa2f25c1c15b4cbaa1e
 # checkpoint (`google/gemma-4-E2B-it-qat-mobile-transformers`, quant_method
 # "gemma"). That quantizer is registered from transformers 5.15.1 and is pure
 # torch, so the enhancer needs 5.15.1 or newer and runs on CUDA, MPS or CPU.
+# 5.23.0 refuses that checkpoint's block-wise per-layer embedding scale, so
+# enhance.py reads that one weight back from the cached checkpoint (on 5.22.2
+# and older it loads as stored and nothing is restored).
 #
 # tokenizers is pinned beside transformers because it decides whether
 # transformers imports at all: transformers 5.15.1 raises ImportError with
