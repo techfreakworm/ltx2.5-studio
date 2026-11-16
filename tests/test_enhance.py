@@ -421,7 +421,13 @@ def test_the_toggle_is_appended_rather_than_inserted():
     """
     from ltx25_studio.ui import fields
 
-    assert fields.FIELD_KEYS[-1] == "enhance_prompt"
+    before = (
+        "prompt", "negative_prompt", "image", "video", "audio", "conditions", "width",
+        "height", "auto_duration", "num_frames", "min_seconds", "max_seconds",
+        "enable_stage_2", "seed", "strength", "noise_scale", "loras",
+    )  # fmt: skip
+    assert fields.FIELD_KEYS.index("enhance_prompt") == len(before) == 17
+    assert fields.FIELD_KEYS[:17] == before, "a field was inserted ahead of the toggle"
 
 
 def test_there_is_no_seed_control_for_enhancement():
