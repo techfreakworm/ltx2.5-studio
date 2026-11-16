@@ -436,53 +436,33 @@ def reconcile_waveform_with_video(
 # waveform <-> mel <-> latents
 # ---------------------------------------------------------------------------
 
-#: Attribute names a loaded ``audio_vae`` may carry its own mel front-end under.
-#: Searched in order; we never construct one from guessed FFT parameters,
-#: because the window and FFT size are not among the fields §5.4 declares and
-#: inventing them would produce a mel spectrogram the VAE was not trained on --
-#: silently, and only audible as degraded audio.
+#: Attribute names a loaded ``audio_vae`` may carry its own mel front-end under,
+#: searched in order. The pinned checkpoint carries none, so
+#: :func:`build_mel_front_end` builds it.
 MEL_FRONT_END_ATTRS = ("mel_spectrogram", "mel_transform", "_mel_spectrogram")
 
 
-#: Where each mel parameter comes from. **Four of the five are declared by BOTH
-#: components and agree**, which is what makes this a lookup rather than a
-#: reconstruction: the vocoder's ``num_mel_channels`` is 64 and the VAE's
-#: ``mel_bins`` is 64; the vocoder's ``input_sampling_rate`` is 16000 and the
-#: VAE's ``sample_rate`` is 16000.
-#:
-#: ⚠️ **The hop is the one disagreement, and it is read from the VAE on purpose.**
-#: ``audio_vae.mel_hop_length`` is 160; ``vocoder.hop_length`` is 80. The
-#: vocoder's own ``upsample_factors`` -- ``[5, 2, 2, 2, 2, 2]`` -- multiply to
-#: **160**, matching the VAE rather than the vocoder's own declared 80, so that
-#: 80 refers to something else inside the vocoder. Read ``window_length`` across
-#: from the vocoder; **do NOT read a hop across.** The asymmetry is deliberate
-#: and is exactly the kind of thing a later reader will "tidy" into consistency.
-#:
-#: *Read off vocoder/config.json and audio_vae/config.json at revision
-#: 871165de…, cross-checked against the upsample factors.*
+#: Read from ``audio_vae.config``: torchaudio ``MelSpectrogram`` argument -> config key.
 MEL_PARAM_SOURCES = MappingProxyType(
     {
-        "n_fft": ("vocoder", "filter_length"),
-        "win_length": ("vocoder", "window_length"),
-        "hop_length": ("audio_vae", "mel_hop_length"),
-        "n_mels": ("audio_vae", "mel_bins"),
-        "sample_rate": ("audio_vae", "sample_rate"),
+        "sample_rate": "sample_rate",
+        "hop_length": "mel_hop_length",
+        "n_mels": "mel_bins",
     }
 )
 
-#: ⚠️ **These are CONVENTIONS, not readings.** Neither config declares them and
-#: no forward transform ships anywhere in ``diffusers.pipelines.ltx2`` -- the
-#: vocoder's only ``hann`` window belongs to its anti-aliasing filter, not to an
-#: STFT. So unlike everything in :data:`MEL_PARAM_SOURCES`, each of these is a
-#: choice, and a wrong one is *"audible as degraded audio, reported as nothing"*.
-#:
-#: **The round-trip test is what validates them**, and it is not optional
-#: decoration: a wrong window or scaling smears the spectrum and the
-#: reconstruction degrades measurably. If that test fails, these are the
-#: candidates -- in this order.
+#: Declared, not read: no config describes the audio VAE's analysis window, and
+#: the vocoder's filter_length / window_length / hop_length (512 / 512 / 80) set
+#: up its own internal mel stage, so nothing here comes from the vocoder.
+#: Measured by round trip through the pinned audio VAE and vocoder, 2026-11-16,
+#: CPU float32: with these values speech, an ocean recording and the model's own
+#: output came back at +0.1 / -0.2 / +0.1 dB (mel offset -0.10 / -0.03 / -0.11);
+#: with n_fft = win_length = 512 they lost 8.9 / 9.7 / 8.8 dB.
 MEL_CONVENTIONS = MappingProxyType(
     {
-        "power": 1.0,  # magnitude, not power; log is applied after
+        "n_fft": 1024,
+        "win_length": 1024,
+        "power": 1.0,  # magnitude; the log is taken after
         "f_min": 0.0,
         "f_max": None,  # -> sample_rate / 2
         "mel_scale": "slaney",
@@ -512,20 +492,26 @@ MEL_INPUT_DIMS = ("batch", "channels", "time", "mel")
 MEL_LOG_FLOOR = 1e-5
 
 
-def mel_parameters(audio_vae, vocoder):
-    """The five declared mel parameters, each from the component that owns it."""
-    owners = {"audio_vae": audio_vae, "vocoder": vocoder}
-    values = {}
-    for name, (owner, field) in MEL_PARAM_SOURCES.items():
-        component = owners[owner]
-        if component is None:
-            raise LTXStudioError(
-                f"the mel front-end needs {name!r}, which is declared by the {owner}, and no "
-                f"{owner} was supplied. Every value comes from a loaded component; this module "
-                f"holds no defaults, because a guessed FFT size produces a mel spectrogram the "
-                f"VAE was never trained on."
-            )
-        values[name] = int(_read(_config_of(component, name=owner), field, owner=f"{owner}.config"))
+def mel_parameters(audio_vae, vocoder=None):
+    """Every argument the forward transform is built with.
+
+    The audio VAE's rate, hop and mel bins (:data:`MEL_PARAM_SOURCES`), then
+    :data:`MEL_CONVENTIONS` with ``f_max`` resolved. ``vocoder`` is accepted
+    from existing callers and supplies nothing.
+    """
+    if audio_vae is None:
+        raise LTXStudioError(
+            "the mel front-end is built from audio_vae.config (sample rate, hop, mel bins), "
+            "and no audio_vae was supplied."
+        )
+    config = _config_of(audio_vae, name="audio_vae")
+    values = {
+        name: int(_read(config, field, owner="audio_vae.config"))
+        for name, field in MEL_PARAM_SOURCES.items()
+    }
+    values.update(MEL_CONVENTIONS)
+    if values["f_max"] is None:
+        values["f_max"] = values["sample_rate"] / 2
     return values
 
 
@@ -560,21 +546,18 @@ def encoder_layout(mel):
     return mel.transpose(-2, -1)
 
 
-def build_mel_front_end(audio_vae, vocoder):
-    """Construct the forward transform, because the checkpoint ships none.
+def build_mel_front_end(audio_vae, vocoder=None):
+    """The forward transform, waveform -> log-mel in encoder layout, from :func:`mel_parameters`.
 
-    **Only the forward direction needs this.** ``decode_latents_to_waveform``
-    works without any STFT -- the VAE decoder emits a mel and the vocoder
-    inverts it -- which is why H5-H9 produce real audio while the audio-INPUT
-    modes cannot start. The gap is asymmetric by nature, not by oversight.
+    Only the encode needs it: on the way out the VAE decoder emits the mel and
+    the vocoder inverts it. ``vocoder`` supplies nothing.
     """
+    # Read before torch is imported, so a missing audio_vae is the same typed error without it.
+    params = mel_parameters(audio_vae)
     import torch
     import torchaudio
 
-    params = mel_parameters(audio_vae, vocoder)
-    conventions = dict(MEL_CONVENTIONS)
-    conventions["f_max"] = conventions["f_max"] or params["sample_rate"] / 2
-    transform = torchaudio.transforms.MelSpectrogram(**params, **conventions)
+    transform = torchaudio.transforms.MelSpectrogram(**params)
 
     def to_mel(waveform):
         mel = transform.to(device=waveform.device, dtype=torch.float32)(waveform.float())
@@ -585,25 +568,16 @@ def build_mel_front_end(audio_vae, vocoder):
 
 
 def mel_front_end_for(audio_vae, vocoder=None):
-    """The callable that turns a waveform into the mel the VAE expects.
+    """The callable that turns a waveform into the mel the audio VAE encodes.
 
-    Deliberately *found*, never built: see :data:`MEL_FRONT_END_ATTRS`. If the
-    loaded VAE does not carry one, the caller must pass ``to_mel=`` explicitly
-    rather than have this module guess an FFT size.
+    One the VAE carries itself (:data:`MEL_FRONT_END_ATTRS`) is used as is;
+    otherwise :func:`build_mel_front_end` builds it. ``vocoder`` supplies nothing.
     """
     for attribute in MEL_FRONT_END_ATTRS:
         found = getattr(audio_vae, attribute, None)
         if callable(found):
             return found
-    if vocoder is not None:
-        return build_mel_front_end(audio_vae, vocoder)
-    raise LTXStudioError(
-        f"the loaded audio_vae carries no mel front-end (looked for "
-        f"{', '.join(MEL_FRONT_END_ATTRS)}), and this module will not construct one: the FFT "
-        f"and window sizes are not among the parameters audio_vae.config declares, so any "
-        f"value chosen here would be a guess that produces a mel spectrogram the VAE was never "
-        f"trained on -- audible as degraded audio, reported as nothing. Pass to_mel= explicitly."
-    )
+    return build_mel_front_end(audio_vae)
 
 
 def _resampled(waveform, *, from_rate: int, to_rate: int):

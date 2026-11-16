@@ -124,9 +124,34 @@ SUSPICIOUS_LITERALS = {8000, 16000, 22050, 24000, 32000, 44100, 48000, 1024}
 
 AUDIO_MODULE = PACKAGE_ROOT / "audio.py"
 
+#: The only numbers audio.py may write down: the analysis window, declared in
+#: ``MEL_CONVENTIONS`` because no config describes it.
+DECLARED_WINDOW_KEYS = ("n_fft", "win_length")
+
+
+def _declared_window_values(tree) -> set[int]:
+    """The ``id`` of each window value node in the ``MEL_CONVENTIONS`` literal."""
+    declared = set()
+    for node in ast.walk(tree):
+        names = [t.id for t in getattr(node, "targets", ()) if isinstance(t, ast.Name)]
+        if not isinstance(node, ast.Assign) or "MEL_CONVENTIONS" not in names:
+            continue
+        for inner in ast.walk(node.value):
+            if isinstance(inner, ast.Dict):
+                for key, value in zip(inner.keys, inner.values, strict=True):
+                    if isinstance(key, ast.Constant) and key.value in DECLARED_WINDOW_KEYS:
+                        declared.add(id(value))
+    return declared
+
 
 def test_no_sample_rate_is_hardcoded():
-    """Comments and docstrings may cite numbers; code may not use them."""
+    """Comments and docstrings may cite numbers; code may not use them.
+
+    Except the analysis window, declared once in ``MEL_CONVENTIONS``: no config
+    describes the audio VAE's window, and 1024 was measured by round trip
+    through the real audio VAE and vocoder (2026-11-16). Anywhere else, a 1024
+    is as suspect as a sample rate.
+    """
     tree = ast.parse(AUDIO_MODULE.read_text())
     docstring_ids = set()
     for node in ast.walk(tree):
@@ -138,6 +163,11 @@ def test_no_sample_rate_is_hardcoded():
             continue
         if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant):
             docstring_ids.add(id(body[0].value))
+    declared = _declared_window_values(tree)
+    assert len(declared) == len(DECLARED_WINDOW_KEYS), (
+        f"expected MEL_CONVENTIONS to declare {DECLARED_WINDOW_KEYS} once each, found "
+        f"{len(declared)}; this scan exempts exactly those values and nothing else"
+    )
     found = {
         node.value
         for node in ast.walk(tree)
@@ -145,11 +175,13 @@ def test_no_sample_rate_is_hardcoded():
         and isinstance(node.value, int)
         and not isinstance(node.value, bool)
         and id(node) not in docstring_ids
+        and id(node) not in declared
         and node.value in SUSPICIOUS_LITERALS
     }
     assert not found, (
-        f"audio.py hardcodes {sorted(found)}. Every mel parameter comes from "
-        "audio_vae.config at runtime (PLAN §5.4)."
+        f"audio.py hardcodes {sorted(found)}. Rate, hop and mel bins are read from "
+        "audio_vae.config at runtime (PLAN §5.4); the only numbers written down are the "
+        "declared conventions in MEL_CONVENTIONS."
     )
 
 
@@ -476,12 +508,12 @@ def test_a_planar_file_is_concatenated_rather_than_reshaped():
 # --------------------------------------------------------------------------
 # the mel front-end the checkpoint does not ship
 #
-# No forward transform exists anywhere in diffusers.pipelines.ltx2 -- the
-# vocoder's only `hann` window belongs to its anti-aliasing filter. So the
-# forward direction has to be built, from parameters that live across TWO
-# components. `decode_latents_to_waveform` needs none of this: the VAE decoder
-# emits a mel and the vocoder inverts it. That asymmetry is why H5-H9 produce
-# real audio while the audio-INPUT modes cannot start.
+# The forward transform is built here: sample rate, hop and mel bins read from
+# the audio VAE's config, n_fft and win_length declared in MEL_CONVENTIONS.
+# The vocoder's filter_length / window_length / hop_length (512 / 512 / 80) set
+# up its own internal mel stage, so nothing is read from it; taking the window
+# from there made every encoded sound about 9 dB too quiet. The decode needs
+# none of this: the VAE decoder emits a mel and the vocoder inverts it.
 # --------------------------------------------------------------------------
 
 #: The exact key set of ``vocoder/config.json`` at revision 871165de….
@@ -527,37 +559,65 @@ REAL_VOCODER_CONFIG_KEYS = frozenset(
     }
 )
 
-REAL_KEYS_BY_OWNER = {
-    "audio_vae": REAL_AUDIO_VAE_CONFIG_KEYS,
-    "vocoder": REAL_VOCODER_CONFIG_KEYS,
+#: Every argument the forward transform is built with, for the pinned checkpoint.
+PINNED_MEL_PARAMETERS = {
+    "sample_rate": 16000,
+    "hop_length": 160,
+    "n_mels": 64,
+    "n_fft": 1024,
+    "win_length": 1024,
+    "power": 1.0,
+    "f_min": 0.0,
+    "f_max": 8000.0,
+    "mel_scale": "slaney",
+    "norm": "slaney",
+    "center": True,
 }
+
+
+class UntouchableVocoder:
+    """A vocoder that fails the test the moment anything reads from it."""
+
+    def __getattr__(self, name):
+        raise AssertionError(f"the mel front end read vocoder.{name}")
 
 
 @pytest.mark.parametrize("name", sorted(audio.MEL_PARAM_SOURCES))
 def test_every_mel_parameter_names_a_key_the_checkpoint_really_has(name):
     """The check a fake cannot make, because fakes are built from the mapping."""
-    owner, field = audio.MEL_PARAM_SOURCES[name]
+    field = audio.MEL_PARAM_SOURCES[name]
 
-    assert field in REAL_KEYS_BY_OWNER[owner], (
-        f"{name!r} is read from {owner}.config[{field!r}] and the real checkpoint has no "
+    assert field in REAL_AUDIO_VAE_CONFIG_KEYS, (
+        f"{name!r} is read from audio_vae.config[{field!r}] and the real checkpoint has no "
         f"such key -- it would raise on real weights and pass every offline test"
     )
 
 
-def test_the_window_is_read_across_and_the_hop_is_not():
-    """The asymmetry IS the judgement, and it is the thing someone will tidy.
+def test_only_the_rate_hop_and_bins_are_read_and_the_window_is_declared():
+    """n_fft and win_length are conventions, not readings from the vocoder.
 
-    ``audio_vae.mel_hop_length`` is 160 and ``vocoder.hop_length`` is 80. The
-    vocoder's own ``upsample_factors`` multiply to 160, matching the VAE — so
-    its 80 means something else inside the vocoder. Reading the hop across for
-    consistency would halve it.
+    The vocoder's 512 / 512 set up its own mel stage; the audio VAE was built
+    for 1024 (measured by round trip, 2026-11-16). The hop is the VAE's 160,
+    never the vocoder's 80.
     """
-    assert audio.MEL_PARAM_SOURCES["win_length"][0] == "vocoder"
-    assert audio.MEL_PARAM_SOURCES["n_fft"][0] == "vocoder"
-    assert audio.MEL_PARAM_SOURCES["hop_length"] == ("audio_vae", "mel_hop_length"), (
-        f"the hop is {audio.MEL_PARAM_SOURCES['hop_length']}. Taking it from the vocoder "
-        f"gives 80 against the VAE's 160, and the vocoder's own upsample factors say 160."
-    )
+    assert dict(audio.MEL_PARAM_SOURCES) == {
+        "sample_rate": "sample_rate",
+        "hop_length": "mel_hop_length",
+        "n_mels": "mel_bins",
+    }
+    assert {key: audio.MEL_CONVENTIONS[key] for key in ("n_fft", "win_length")} == {
+        "n_fft": 1024,
+        "win_length": 1024,
+    }
+
+
+def test_nothing_is_read_from_the_vocoder():
+    """A vocoder whose every attribute raises changes nothing, and so does none at all."""
+    vae = FakeAudioVae()
+
+    assert audio.mel_parameters(vae, UntouchableVocoder()) == PINNED_MEL_PARAMETERS
+    assert audio.mel_parameters(vae, None) == PINNED_MEL_PARAMETERS
+    assert audio.mel_parameters(vae) == PINNED_MEL_PARAMETERS
 
 
 def test_the_vocoders_upsample_factors_corroborate_the_vaes_hop():
@@ -569,38 +629,101 @@ def test_the_vocoders_upsample_factors_corroborate_the_vaes_hop():
 
     assert product == 160
     assert product != vocoder.config.hop_length, (
-        "the vocoder's declared hop now equals its upsample product; if that is really "
-        "true the comment in MEL_PARAM_SOURCES needs revisiting"
+        "the fake vocoder's hop_length now equals its upsample product; the real config "
+        "says 80 against 160, and its 80 is the hop of the vocoder's own mel stage"
     )
 
 
-def test_the_two_components_agree_on_everything_except_the_hop():
-    """Four of five parameters are corroborated, which is what makes this a lookup."""
-    vae, vocoder = FakeAudioVae(), FakeVocoder()
+def test_the_vocoder_shares_only_the_rate_and_bins_with_the_front_end():
+    """The vocoder takes the VAE's mel, so it agrees on the rate and the bins.
 
-    assert vae.config.mel_bins == vocoder.config.num_mel_channels
-    assert vae.config.sample_rate == vocoder.config.input_sampling_rate
-    assert vae.config.mel_hop_length != vocoder.config.hop_length
+    Its filter_length / window_length / hop_length -- 512 / 512 / 80 in the
+    real config and in the suite's fake -- set up its internal mel stage for
+    bandwidth extension, and none of them is what the transform is built with.
+    """
+    vae, vocoder = FakeAudioVae(), FakeVocoder()
+    stft_keys = ("filter_length", "window_length", "hop_length")
+
+    params = audio.mel_parameters(vae, vocoder)
+
+    assert set(stft_keys) <= REAL_VOCODER_CONFIG_KEYS
+    assert tuple(getattr(vocoder.config, key) for key in stft_keys) == (512, 512, 80)
+    assert (params["n_fft"], params["win_length"], params["hop_length"]) == (1024, 1024, 160)
+    assert params["n_mels"] == vae.config.mel_bins == vocoder.config.num_mel_channels
+    assert params["sample_rate"] == vae.config.sample_rate == vocoder.config.input_sampling_rate
 
 
 def test_the_declared_parameters_are_read_not_defaulted():
-    params = audio.mel_parameters(FakeAudioVae(), FakeVocoder())
+    """Rate, hop and bins follow the audio VAE's config; the window does not move with them."""
+    assert audio.mel_parameters(FakeAudioVae(), FakeVocoder()) == PINNED_MEL_PARAMETERS
 
-    assert params == {
-        "n_fft": 512,
-        "win_length": 512,
-        "hop_length": 160,
-        "n_mels": 64,
-        "sample_rate": 16000,
-    }, params
+    unusual = FakeAudioVae(sampling_rate=22050)
+    unusual.config.mel_hop_length = 256
+    unusual.config.mel_bins = 80
+    params = audio.mel_parameters(unusual)
+
+    read = {key: params[key] for key in ("sample_rate", "hop_length", "n_mels", "f_max")}
+    assert read == {"sample_rate": 22050, "hop_length": 256, "n_mels": 80, "f_max": 11025.0}
+    assert (params["n_fft"], params["win_length"]) == (1024, 1024), params
 
 
-def test_building_without_a_vocoder_refuses_rather_than_guessing():
-    """A guessed FFT size produces a mel the VAE was never trained on."""
+def test_a_missing_config_field_is_named_rather_than_defaulted():
+    vae = FakeAudioVae()
+    del vae.config.mel_hop_length
+
     with pytest.raises(LTXStudioError) as excinfo:
-        audio.mel_parameters(FakeAudioVae(), None)
+        audio.mel_parameters(vae)
 
-    assert "vocoder" in str(excinfo.value), excinfo.value
+    assert "mel_hop_length" in str(excinfo.value), excinfo.value
+
+
+@pytest.mark.parametrize(
+    "build",
+    [audio.mel_parameters, audio.build_mel_front_end, audio.mel_front_end_for],
+    ids=["mel_parameters", "build_mel_front_end", "mel_front_end_for"],
+)
+def test_a_missing_audio_vae_is_a_typed_error(build):
+    """Raised before torch is imported, so it is the same error with or without torch."""
+    with pytest.raises(LTXStudioError) as excinfo:
+        build(None, FakeVocoder())
+
+    assert "audio_vae" in str(excinfo.value), excinfo.value
+
+
+@pytest.mark.parametrize("vocoder", [FakeVocoder(), None], ids=["fake_vocoder", "no_vocoder"])
+def test_the_encode_builds_the_transform_with_the_measured_window(monkeypatch, vocoder):
+    """Through the encode, as ``generate`` calls it, with the real torchaudio class.
+
+    Like the checkpoint's, this VAE carries no front end, so one is built. The
+    fake vocoder's config says 512 / 512 / 80 and changes nothing; neither does
+    passing no vocoder at all.
+    """
+    torch = pytest.importorskip("torch", reason="needs real torch")
+    torchaudio = pytest.importorskip("torchaudio", reason="needs real torchaudio")
+    built = []
+
+    class Recorded(torchaudio.transforms.MelSpectrogram):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            built.append(self)
+
+    class CheckpointLikeVae(FakeAudioVae):
+        mel_spectrogram = None
+        dtype = torch.float32
+        device = torch.device("cpu")
+
+    monkeypatch.setattr(torchaudio.transforms, "MelSpectrogram", Recorded)
+    vae = CheckpointLikeVae()
+
+    audio.encode_waveform_to_latents(
+        torch.zeros((2, 16000)), audio_vae=vae, sampling_rate=16000, vocoder=vocoder
+    )
+
+    (transform,) = built
+    assert (transform.n_fft, transform.win_length, transform.hop_length) == (1024, 1024, 160)
+    assert (transform.sample_rate, transform.n_mels, transform.f_max) == (16000, 64, 8000.0)
+    assert tuple(transform.mel_scale.fb.shape) == (513, 64)
+    assert tuple(vae.encoded[-1].shape) == (1, 2, 101, 64), tuple(vae.encoded[-1].shape)
 
 
 def test_the_mel_is_cast_to_the_dtype_the_vae_actually_uses():
