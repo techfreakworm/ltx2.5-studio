@@ -392,11 +392,19 @@ and has not been run through the UI again yet.
 
 **What it costs in memory, as measured** (the whole machine's committed memory — active,
 wired and compressed pages — on the 128 GB Mac): 57–61 GB at 704×480 with 49–121 frames,
-and 70 GB at 193 frames (8 s); across all of that day's runs, at 704×480 or 480×704 with up to
+and 70 GB at 193 frames (8 s); across that day's earlier runs, at 704×480 or 480×704 with up to
 193 frames, the peaks were 57–72 GB, and runs made while other heavy jobs shared the machine
-read up to 75 GB. Up to 121 frames the peak comes from loading the text encoder or the
-transformer, not from the denoise. With Enhance on, 65.0 and 69.6 GB were measured at 704×480
-with 49 frames (the text and the image route), against 57 GB for the same size without it.
+read up to 75 GB. The figure is the whole machine's, so it moves with whatever else runs: the
+final pass on the final code, with other jobs' test suites coming and going, peaked at
+66.5–78.2 GB. Up to 121 frames the peak comes from loading the text encoder or the transformer,
+not from the denoise. With Enhance on, 65.0 and 69.6 GB were measured at 704×480 with 49 frames
+(the text and the image route), against 57 GB for the same size without it.
+
+**When the model picks the length**, the memory check budgets the denoise for the longest clip
+the model may return, set by the longest length you allow, not for the length it then picks.
+At 704×480, up to 10 s is 233 frames, about 27.6 GB of activations, so on this Mac that setting
+needs a quiet machine: with test suites running, the check refused it (`64.0 + 27.6 = 91.6 GB`).
+Up to 8 s ran at a peak of 84.5 GB with a base load of about 46 GB; the model chose 5.0 s.
 
 **How long it takes.** At 704×480×121 (5 s of video), the denoise and decode took 142 s on a
 quiet machine and 333 s with other work running, plus about a minute of loading; 193 frames
