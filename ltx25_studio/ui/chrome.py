@@ -273,6 +273,8 @@ body { color: var(--mr-paper); color-scheme: dark; }
 footer { color: var(--mr-dust) !important; }
 footer a, footer button { color: var(--mr-dust) !important; }
 footer img, footer svg { filter: grayscale(1) brightness(1.5); }
+footer { flex-wrap: wrap !important; justify-content: center; gap: 4px 14px !important; }
+footer a, footer button { white-space: nowrap !important; }
 .mr-num { font-family: var(--mr-mono); font-weight: 500; font-variant-numeric: tabular-nums; }
 
 /* one focus ring, everywhere */
@@ -496,6 +498,7 @@ button:disabled { cursor: not-allowed !important; }
   font-family: var(--mr-mono) !important; font-size: 13px !important; }
 #monitor .progress-bar { background: var(--mr-paper) !important; }
 #monitor .wrap.default, #monitor .wrap.center { background: rgba(14,18,22,0.86) !important; }
+#monitor [aria-label="Empty value"] .icon { visibility: hidden; }
 #monitor-caption p { margin: 0; font-size: 13px; line-height: 19px; color: var(--mr-dust); }
 #monitor-caption strong { color: var(--mr-paper); font-weight: 600; }
 
@@ -605,7 +608,10 @@ button:disabled { cursor: not-allowed !important; }
   .gradio-container { padding-bottom: calc(var(--mr-bar-h) + env(safe-area-inset-bottom) + 16px) !important; }
   .mr-tagline { display: none; }
   .mr-id { justify-content: space-between; }
-  #commission button, #rail button { min-height: 44px; }
+  #commission button, #rail button, #commission button.secondary, #rail button.secondary,
+  #commission .mr-secondary, footer button, footer a { min-height: 44px !important; }
+  #commission button.reset-button, #commission .reset-button { min-width: 44px !important; }
+  footer button, footer a { display: inline-flex !important; align-items: center; }
   .mr-chips label { min-height: 44px; }
 }
 @media (max-width: 560px) {

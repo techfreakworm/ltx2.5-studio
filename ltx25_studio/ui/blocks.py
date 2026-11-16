@@ -1178,9 +1178,7 @@ def build_ui() -> gr.Blocks:
 _SCROLL_TO_MONITOR = """
 (...args) => {
   if (window.innerWidth < 1024) {
-    const smooth = !window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-    document.getElementById('monitor')?.scrollIntoView({behavior: smooth ? 'smooth' : 'auto',
-      block: 'start'});
+    document.getElementById('monitor')?.scrollIntoView({behavior: 'instant', block: 'start'});
   }
   return args;
 }
