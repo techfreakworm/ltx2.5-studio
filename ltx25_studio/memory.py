@@ -80,6 +80,8 @@ SETTLE_STEP_SECONDS = 0.05
 SETTLE_TOLERANCE_GB = 0.25
 #: A live FAIL is read again at this step.
 REREAD_STEP_SECONDS = 0.1
+#: Less than this left of the bound is no time to wait.
+_LEAST_WAIT_SECONDS = 0.001
 #: The clock and the sleep a live judgement waits on (tests replace them).
 _clock = time.monotonic
 _sleep = time.sleep
@@ -509,7 +511,7 @@ def _settle(read, first: float, started: float, bound: float, clock, sleep) -> S
     previous = first
     while True:
         elapsed = clock() - started
-        if elapsed >= bound:
+        if bound - elapsed < _LEAST_WAIT_SECONDS:
             return Settle(first, previous, elapsed, steady=False)
         sleep(min(SETTLE_STEP_SECONDS, bound - elapsed))
         current = read()
@@ -525,7 +527,7 @@ def _read_again(failed: PreflightResult, read, started: float, bound: float, clo
     result = failed
     while result.verdict == "FAIL":
         elapsed = clock() - started
-        if elapsed >= bound:
+        if bound - elapsed < _LEAST_WAIT_SECONDS:
             break
         sleep(min(REREAD_STEP_SECONDS, bound - elapsed))
         reading = read()

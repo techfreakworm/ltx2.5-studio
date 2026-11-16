@@ -71,6 +71,15 @@ class Gauge:
         )
 
 
+class CoarseClock(Gauge):
+    """A clock that moves in whole milliseconds: a shorter sleep does not move it."""
+
+    def sleep(self, seconds):
+        assert len(self.slept) < 10_000, "the judgement kept waiting on a clock that did not move"
+        self.slept.append(seconds)
+        self.now += round(seconds, 3)
+
+
 class Rising(Gauge):
     """A gauge that never settles: 1 GB more at every reading."""
 
@@ -273,6 +282,18 @@ def test_the_bound_comes_from_the_environment(monkeypatch):
 
     assert result.verdict == "FAIL"
     assert sum(gauge.slept) == pytest.approx(0.5)
+
+
+def test_less_than_a_millisecond_left_of_the_bound_is_no_time_to_wait(monkeypatch):
+    """A wait that kept asking for the last 0.4 ms never ended on a clock that did not move."""
+    monkeypatch.setenv(SETTLE, "0.2004")
+    gauge = CoarseClock(67.3)
+
+    result = gauge.judge(released=True)
+
+    assert result.verdict == "FAIL"
+    assert gauge.slept == [0.05, 0.1, pytest.approx(0.0504)]
+    assert sum(gauge.slept) <= 0.2004 + 1e-9
 
 
 @pytest.mark.parametrize("value", ["soon", "-1", "nan", "inf", "61", "1e9"])
