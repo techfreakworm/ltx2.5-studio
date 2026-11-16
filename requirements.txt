@@ -1,16 +1,24 @@
 # LTX-2.5 Studio — runtime dependencies.
 #
-# Every direct dependency has a floor AND a ceiling. See docs/PLAN.md §5.1 for
-# the reasoning; the short version is that the predecessor project shipped ~50
-# unbounded requirements and got burned by a silent torch/torchaudio ABI break.
+# Every direct dependency is pinned to ONE exact version: the versions verified
+# on real weights on 2026-11-16 (transformers 5.23.0 and the companions uv
+# resolves with it for the Space: Linux x86_64, Python 3.12, torch 2.11.0).
+# A range is re-resolved on every Space rebuild, so the image would get whatever
+# is newest that day instead of what was tested. tests/test_requirements_exact.py
+# fails on any range, except on a line marked `# platform-provided` for a package
+# the Spaces platform installs itself. Bump a pin only after verifying it.
+#
+# Fallback if the int8 load misbehaves on the Space: transformers==5.22.2 with
+# exactly the same companion pins (uv resolves the identical set for it).
 #
 # Dev/test tooling (pytest, ruff) is NOT here — it lives in pyproject.toml's
 # [project.optional-dependencies] dev extra, so the Space image stays lean.
 
 # --- NOT PINNED, DELIBERATELY -------------------------------------------------
 # `spaces` is intentionally absent. The Spaces platform pins its own version
-# (live Spaces report 0.49.3 / 0.50.0 / 0.50.4 while PyPI is at 0.51.1), and a
-# conflicting pin here breaks pip resolution at build time. The 2.3 repo's own
+# (live Spaces reported 0.49.3 / 0.50.0 / 0.50.4 while PyPI had 0.51.1; PyPI
+# has had 0.52.0 since 2026-11-13), and a conflicting pin here breaks pip
+# resolution at build time. See docs/PLAN.md §5.1. The 2.3 repo's own
 # AGENTS.md:19 states this rule and its requirements.txt:2 then violated it.
 # The import is guarded in ltx25_studio/zerogpu.py so local dev works without it.
 # ------------------------------------------------------------------------------
@@ -39,22 +47,23 @@ torchaudio==2.11.0
 diffusers @ git+https://github.com/huggingface/diffusers@ac56fa2f25c1c15b4cbaa1e0b3255e9bc38c06dc
 
 # --- model stack --------------------------------------------------------------
-# NOTE: 5.15.1 is now load-bearing for a SECOND reason, so do not lower it.
-# `ltx25_studio/enhance.py` loads the prompt enhancer as a plain transformers
-# model -- `Gemma4ForConditionalGeneration` -- and the default repo
-# (`google/gemma-4-E2B-it-qat-mobile-transformers`) is a pre-quantised checkpoint
-# whose config declares `quantization_config.quant_method = "gemma"`. That
-# quantizer is registered in `transformers/quantizers/auto.py` from 5.15.1
-# ("gemma": GemmaQuantizer) and is pure torch -- `integrations/gemma_quant.py`
-# imports nothing but torch/nn/functional -- which is what lets the enhancer run
-# on the CPU in the web process. No NEW dependency was added for the enhancer;
-# this pin already covered it.
-transformers>=5.15.1,<6
-accelerate>=1.14.0,<2
-peft>=0.20.0,<0.21          # LoRA backend; USE_PEFT_BACKEND gates load_lora_weights
-safetensors>=0.8.0,<0.9
-huggingface_hub>=1.28.0,<2
-hf_xet>=1.6.0,<2
+# transformers 5.23.0 is the version the 12B text encoder and the pipelines were
+# verified with on real weights. `ltx25_studio/enhance.py` loads the prompt
+# enhancer as a plain `Gemma4ForConditionalGeneration` from a pre-quantised
+# checkpoint (`google/gemma-4-E2B-it-qat-mobile-transformers`, quant_method
+# "gemma"). That quantizer is registered from transformers 5.15.1 and is pure
+# torch, so the enhancer needs 5.15.1 or newer and runs on CUDA, MPS or CPU.
+#
+# tokenizers is pinned beside transformers because it decides whether
+# transformers imports at all: transformers 5.15.1 raises ImportError with
+# tokenizers 0.23.3.
+transformers==5.23.0
+tokenizers==0.23.3
+accelerate==1.15.0
+peft==0.20.0                # LoRA backend; USE_PEFT_BACKEND gates load_lora_weights
+safetensors==0.8.0
+huggingface_hub==1.33.0
+hf_xet==1.8.0
 
 # `kernels` is required by the DIFFUSION DECODER, i.e. by stage 2 -- not by the
 # single-stage path, which is why nothing missed it until stage 2 was wired.
@@ -65,20 +74,20 @@ hf_xet>=1.6.0,<2
 # materialises the full score matrix and needs TENS OF GB at video resolutions.
 # `set_attention_backend` is not an escape: no backend other than `flex` accepts
 # the BlockMask. See ltx25_studio/pipelines.py::_stage_2_parts.
-kernels>=0.16.0,<0.17
+kernels==0.16.2
 
 # `bitsandbytes` is the int8 path for ZeroGPU, where bf16 does not fit: the
 # packing peak is snapshot + packed + image, and bf16 gives 152.4-156.4 GB
 # against a 150 GB cap. See docs/ZEROGPU_DISK.md 4.2 for the derivation.
 #
-# THE FLOOR IS 0.46.0 AND IT IS NOT DIFFUSERS' FLOOR. diffusers mandates
-# 0.43.3 (bnb_quantizer.py:70). The binding constraint is ZeroGPU:
-# spaces/zero/torch/bitsandbytes.py no-ops _patch/_unpatch/_move only ABOVE
-# 0.46.0, wired at patching.py:328/355/445. Below that the packer would try to
-# move quantised tensor subclasses itself. There is no equivalent module for
-# torchao at any version, which is what makes bnb the supported path rather
-# than a preference.
-bitsandbytes>=0.46.0,<0.51
+# ANY PIN HERE MUST STAY ABOVE THE FLOOR OF 0.46.0, AND THAT IS NOT DIFFUSERS'
+# FLOOR. diffusers mandates 0.43.3 (bnb_quantizer.py:70). The binding constraint
+# is ZeroGPU: spaces/zero/torch/bitsandbytes.py no-ops _patch/_unpatch/_move
+# only ABOVE 0.46.0, wired at patching.py:328/355/445. Below that the packer
+# would try to move quantised tensor subclasses itself. There is no equivalent
+# module for torchao at any version, which is what makes bnb the supported path
+# rather than a preference.
+bitsandbytes==0.50.2
 
 # --- UI -----------------------------------------------------------------------
 # gradio 5.x is END OF LIFE (last stable 5.50.0, 2025-11-21).
@@ -98,14 +107,15 @@ gradio==6.24.0
 # --- media I/O ----------------------------------------------------------------
 # av (PyAV) is not optional: image-conditioning CRF re-compression is applied by
 # default and requires it. See PLAN §5.7 #7.
-imageio>=2.37.4,<3
-imageio-ffmpeg>=0.6.0,<0.7
-av>=18.1.0,<19
+imageio==2.38.1
+imageio-ffmpeg==0.6.0
+av==18.1.0
 
 # --- numerics -----------------------------------------------------------------
-# numpy 2, deliberately. Do NOT pin <2: 1.26.4 is two years EOL and nothing in
-# this stack caps numpy. numpy 2.5.2 requires Python >=3.12, which is why the
-# Space frontmatter must set python_version: "3.12" — the default 3.10.13 image
-# silently resolves numpy and av DOWNWARD rather than failing.
-numpy>=2.5.2,<3
-pillow>=12.3.0,<13
+# numpy 2, deliberately. Do NOT go back to 1.x: 1.26.4 is two years EOL and
+# nothing in this stack caps numpy. numpy 2.5 requires Python >=3.12, which is
+# why the Space frontmatter must set python_version: "3.12". With ranges the
+# default 3.10.13 image silently resolved numpy and av DOWNWARD; with these
+# exact pins it fails the build instead.
+numpy==2.5.5
+pillow==12.3.0
