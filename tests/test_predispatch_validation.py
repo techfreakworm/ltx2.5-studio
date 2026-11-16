@@ -398,9 +398,12 @@ def test_no_chosen_length_note_when_the_user_set_the_length(tmp_path):
 
 
 def test_under_the_duration_head_a_video_condition_is_decoded_up_to_max_seconds(accepted):
-    """Not up to the hidden Frames box: the head may pick anything up to max_seconds."""
+    """Not up to the hidden Frames box: the head may pick anything up to max_seconds.
+
+    video_to_audio: its clip is a condition (video_to_video varies its clip instead).
+    """
     _result, sent = accepted(
-        mode="video_to_video",
+        mode="video_to_audio",
         video=video_file(frames=60),
         auto_duration=True,
         min_seconds=1.0,
@@ -533,7 +536,7 @@ def test_the_video_decode_gets_the_frame_rate_only_if_it_takes_one(
     takes_frame_rate, monkeypatch, accepted
 ):
     seen = _spy_decoder(monkeypatch, takes_frame_rate=takes_frame_rate)
-    accepted(mode="video_to_video", video=video_file(), frame_rate=25.0, num_frames=97)
+    accepted(mode="video_to_audio", video=video_file(), frame_rate=25.0, num_frames=97)
 
     assert len(seen) == 1, seen
     assert seen[0]["max_frames"] == 97

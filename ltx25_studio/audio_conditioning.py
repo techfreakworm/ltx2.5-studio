@@ -25,13 +25,19 @@ from __future__ import annotations
 from .constraints import DISTILLED_SIGMA_VALUES
 
 __all__ = [
+    "DEFAULT_AUDIO_LEVEL",
+    "DEFAULT_VIDEO_LEVEL",
     "FROZEN",
     "VARIATION_LEVELS",
+    "VIDEO_VARIATION_LEVELS",
     "audio_pipeline",
     "audio_sigmas",
     "is_condition_pipeline",
     "level_note",
+    "sigma_tail",
     "snap_level",
+    "snap_video_level",
+    "video_level_note",
 ]
 
 #: The audio is held exactly as supplied.
@@ -40,6 +46,15 @@ FROZEN = 0.0
 #: The levels a variation may start from: the model's own distilled sigmas below
 #: 1.0, and 1.0 itself (fresh audio).
 VARIATION_LEVELS = (*sorted(s for s in DISTILLED_SIGMA_VALUES if s < 0.95), 1.0)
+
+#: A clip variation's levels (``video_to_video``): 1.0 would be plain text to video.
+VIDEO_VARIATION_LEVELS = VARIATION_LEVELS[:-1]
+#: The defaults when the request names no level. A clip is changed a lot by
+#: default: the only level at which the prompt visibly acts (measured, F66).
+DEFAULT_AUDIO_LEVEL = VARIATION_LEVELS[0]
+DEFAULT_VIDEO_LEVEL = VIDEO_VARIATION_LEVELS[-1]
+
+_VIDEO_WORDS = dict(zip(VIDEO_VARIATION_LEVELS, ("a little", "moderately", "a lot"), strict=True))
 
 _LEVEL_WORDS = {
     VARIATION_LEVELS[0]: "lightly",
@@ -52,6 +67,30 @@ def snap_level(noise_scale) -> float:
     """The supported variation level nearest to ``noise_scale`` (ties go higher)."""
     value = float(noise_scale)
     return min(VARIATION_LEVELS, key=lambda level: (abs(level - value), -level))
+
+
+def snap_video_level(noise_scale) -> float:
+    """The supported clip-variation level nearest to ``noise_scale`` (ties go higher)."""
+    value = float(noise_scale)
+    return min(VIDEO_VARIATION_LEVELS, key=lambda level: (abs(level - value), -level))
+
+
+def sigma_tail(level: float) -> list[float]:
+    """The distilled schedule from ``level`` on: what a variation at ``level`` denoises."""
+    schedule = list(DISTILLED_SIGMA_VALUES)
+    return schedule[schedule.index(float(level)) :]
+
+
+def video_level_note(level: float, *, requested=None) -> str:
+    """What happened to the user's clip, in plain words."""
+    asked = ""
+    if requested is not None and abs(float(requested) - float(level)) > 1e-6:
+        asked = (
+            f" You asked for {_two(requested)}; the supported levels are "
+            f"{', '.join(_two(v) for v in VIDEO_VARIATION_LEVELS)}, and {_two(level)} is the "
+            f"nearest."
+        )
+    return f"your clip was changed {_VIDEO_WORDS[float(level)]} (level {_two(level)}).{asked}"
 
 
 def audio_sigmas(video_sigmas, level: float) -> list[float]:

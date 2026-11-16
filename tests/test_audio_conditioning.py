@@ -20,7 +20,7 @@ from __future__ import annotations
 import pytest
 from conftest import inputs_for
 
-from ltx25_studio import audio_conditioning, modes
+from ltx25_studio import audio_conditioning, errors, modes
 from ltx25_studio import generate as generate_module
 from ltx25_studio.constraints import DISTILLED_SIGMA_VALUES, STAGE_2_DISTILLED_SIGMA_VALUES
 
@@ -108,12 +108,13 @@ def test_video_to_audio_keeps_the_video_exactly(make_request):
     assert [c.strength for c in kwargs["conditions"]] == [1.0]
 
 
-def test_video_to_video_keeps_the_users_strength(make_request):
+@pytest.mark.parametrize("asked,level", [(None, 0.909375), (0.5, 0.421875), (1.0, 0.909375)])
+def test_video_to_video_reads_its_level_from_noise_scale(make_request, asked, level):
     kwargs = modes.get_mode("video_to_video").build_kwargs(
-        make_request(mode="video_to_video", video=object(), strength=0.6)
+        make_request(mode="video_to_video", video=object(), noise_scale=asked, strength=0.6)
     )
 
-    assert [c.strength for c in kwargs["conditions"]] == [0.6]
+    assert kwargs["video_variation"].level == level
 
 
 @pytest.mark.parametrize(
@@ -379,3 +380,108 @@ def test_video_to_audio_sends_a_full_strength_video_condition(tiny, tmp_path, se
 
     ((_name, _latents, kwargs),) = sent_audio
     assert [condition.strength for condition in kwargs["conditions"]] == [1.0]
+
+
+# --------------------------------------------------------------------------
+# video_to_video: a variation of the user's clip (F66)
+#
+# The conditioning mask was a switch (clip unchanged at 0.3-0.8, prompt only at
+# 0.0). The clip is now the starting point: encoded to raw VAE latents, noised to
+# a level, and only the tail of the distilled schedule from that level denoised,
+# with no condition -- what stage 2 does to its upsampled latents.
+# --------------------------------------------------------------------------
+
+
+def test_the_clip_levels_are_the_three_distilled_sigmas():
+    assert audio_conditioning.VIDEO_VARIATION_LEVELS == (0.421875, 0.725, 0.909375)
+    assert audio_conditioning.DEFAULT_VIDEO_LEVEL == 0.909375
+    assert audio_conditioning.sigma_tail(0.725) == [0.725, 0.421875]
+    assert audio_conditioning.snap_video_level(1.0) == 0.909375
+
+
+def test_the_clip_note_says_how_much_it_was_changed():
+    assert "changed a lot (level 0.91)" in audio_conditioning.video_level_note(0.909375)
+    assert "a little (level 0.42)" in audio_conditioning.video_level_note(0.421875)
+
+
+def _clip(tmp_path, frames, size=64):
+    from test_real_pipeline_tiny import load_smoke
+
+    return load_smoke().make_video(tmp_path / f"clip_{frames}.mp4", size, frames)
+
+
+def _v2v(tiny, tmp_path, **overrides):
+    return _run(tiny, "video_to_video", tmp_path, prompt="a cabin in snow", **overrides)
+
+
+@pytest.mark.parametrize("level", audio_conditioning.VIDEO_VARIATION_LEVELS)
+def test_the_first_call_starts_from_the_clips_latents_noised_to_the_level(
+    tiny, tmp_path, transformer_calls, sent_audio, level
+):
+    torch = pytest.importorskip("torch")
+    from diffusers.utils.torch_utils import randn_tensor
+
+    result = _v2v(tiny, tmp_path, video=_clip(tmp_path, 9), noise_scale=level)
+
+    ((_name, _audio, kwargs),) = sent_audio
+    assert not kwargs.get("conditions"), "a clip variation must not also condition on the clip"
+    assert kwargs["noise_scale"] == level
+    assert kwargs["sigmas"] == audio_conditioning.sigma_tail(level)
+    base = tiny["base"]
+    raw = kwargs["latents"]
+    clean = base._pack_latents(
+        base._normalize_latents(
+            raw, base.vae.latents_mean, base.vae.latents_std, base.vae.config.scaling_factor
+        ),
+        base.transformer_spatial_patch_size,
+        base.transformer_temporal_patch_size,
+    )
+    noise = randn_tensor(clean.shape, generator=torch.Generator().manual_seed(7), dtype=clean.dtype)
+    scaled = (1.0 - clean.new_zeros(clean.shape[:2] + (1,))) * level
+    expected = noise * scaled + clean * (1 - scaled)
+    assert torch.equal(transformer_calls[0]["hidden_states"], expected)
+    assert len(transformer_calls) == len(audio_conditioning.sigma_tail(level))
+    assert [c["sigma"] for c in transformer_calls] == pytest.approx(
+        audio_conditioning.sigma_tail(level)
+    )
+    assert result.record.video_level == level
+
+
+def test_the_length_follows_the_clip_and_the_note_says_so(tiny, tmp_path):
+    result = _v2v(tiny, tmp_path, video=_clip(tmp_path, 17), num_frames=9)
+
+    assert result.record.frames == 17
+    assert result.record.length_source == "video"
+    assert any("length set from your clip" in note for note in result.warnings)
+    assert any("changed a lot (level 0.91)" in note for note in result.warnings)
+
+
+def test_stage_2_composes_on_top_of_a_clip_variation(tiny, tmp_path, transformer_calls):
+    result = _v2v(tiny, tmp_path, video=_clip(tmp_path, 9), enable_stage_2=True)
+
+    tail = audio_conditioning.sigma_tail(audio_conditioning.DEFAULT_VIDEO_LEVEL)
+    sigmas = [c["sigma"] for c in transformer_calls]
+    assert sigmas == pytest.approx(tail + list(STAGE_2_DISTILLED_SIGMA_VALUES))
+    assert (result.record.width, result.record.height) == (128, 128)
+
+
+def test_a_missing_clip_is_refused_before_dispatch(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(generate_module, "_GPU_DISPATCH", lambda **kw: calls.append(kw))
+
+    with pytest.raises(errors.ConstraintError) as caught:
+        generate_module.generate(mode="video_to_video", video=str(tmp_path / "gone.mp4"))
+    assert not calls
+    assert errors.categorise(caught.value) == errors.Failure(errors.INPUT, False)
+
+
+def test_a_clip_with_no_picture_is_refused_before_dispatch(tmp_path, monkeypatch):
+    from conftest import audio_file
+
+    calls = []
+    monkeypatch.setattr(generate_module, "_GPU_DISPATCH", lambda **kw: calls.append(kw))
+
+    with pytest.raises(errors.ConstraintError) as caught:
+        generate_module.generate(mode="video_to_video", video=audio_file())
+    assert not calls
+    assert "no picture" in str(caught.value)

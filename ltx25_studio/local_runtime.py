@@ -1069,6 +1069,7 @@ class LocalStageRunner:
 
         kwargs = dict(pipelines._with_real_conditions(kwargs))
         audio_noise_level = kwargs.pop("audio_noise_level", None)
+        variation = kwargs.pop("video_variation", None)
         policy = kwargs.pop("video_decoder", None) or "auto"
         if policy == "diffusion":
             from .errors import DecoderUnavailableError
@@ -1082,7 +1083,27 @@ class LocalStageRunner:
             audio_noise_level=audio_noise_level,
         )
         kwargs = weights.with_explicit_crf(kwargs)
+        first = {}
+        if variation is not None:
+            # Encoded with only the small set resident, before either big model loads.
+            width, height, frames = kwargs["width"], kwargs["height"], kwargs["num_frames"]
+            weights._preflight(
+                f"encode clip {width}x{height}x{frames}",
+                memory.activation_estimate_gb(
+                    width, height, frames, dtype_bytes=weights.dtype_bytes
+                ),
+            )
+            with weights.phase("encode clip"), torch.inference_mode():
+                first = pipelines.variation_kwargs(
+                    self.pipeline,
+                    variation.source,
+                    variation.level,
+                    height=height,
+                    width=width,
+                    num_frames=frames,
+                )
         call = _merged(kwargs, pipelines.distilled_kwargs(), pipelines._sampling_kwargs(progress))
+        call.update(first)  # the clip's latents, level and schedule tail win
         if weights.residency == STAGED:
             call = weights.prompt_embeddings(self.pipeline, call)
             weights.ensure_transformer()

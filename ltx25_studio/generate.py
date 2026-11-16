@@ -141,11 +141,12 @@ class GenerationRequest:
     video: object | None = None
     audio: object | None = None
     audio_latents: object | None = None
-    #: ``audio_to_audio`` only: how strongly the user's audio is varied, snapped
-    #: to ``audio_conditioning.VARIATION_LEVELS``. 1.0 ignores the upload.
-    noise_scale: float = 0.5
+    #: ``audio_to_audio`` and ``video_to_video``: how strongly the user's audio or
+    #: clip is varied, snapped to the mode's levels (``audio_conditioning``). None
+    #: takes the mode's default (0.42 for audio, 0.91 for a clip).
+    noise_scale: float | None = None
     conditions: tuple = ()
-    #: ``video_to_video`` only: how strongly the video anchors the result (< 1).
+    #: Kept for the API; no mode reads it now (``video_to_video`` varies its clip).
     strength: float = 0.8
     #: NOTE: there is deliberately no `guidance_scale` or `num_inference_steps`.
     #: The distilled recipe fixes both, and a lever that fights the schedule is
@@ -202,6 +203,7 @@ class GenerationResult:
 LENGTH_FROM_REQUEST = "request"
 LENGTH_FROM_MODEL = "model"
 LENGTH_FROM_AUDIO = "audio"
+LENGTH_FROM_VIDEO = "video"
 
 
 @dataclass(frozen=True)
@@ -237,6 +239,8 @@ class RunRecord:
     #: Plain lines for the collapsed diagnostics block (VRAM laps, the GPU
     #: partition note, the run folder). Not in ``warnings``.
     diagnostics: tuple[str, ...] = ()
+    #: The clip-variation level used (``video_to_video``); None where none applies.
+    video_level: float | None = None
 
 
 def _default_pipeline_factory(**kwargs):
@@ -422,10 +426,13 @@ def scope_request_to_mode(request: GenerationRequest, spec) -> tuple[GenerationR
 
     # Levers a mode does not read go back to their defaults.
     if (
-        not accepts("video") or spec.video_strength is not None
+        not accepts("video")
+        or spec.video_strength is not None
+        or spec.video_conditioning is not None
     ) and request.strength != defaults.strength:
         changes["strength"] = defaults.strength
-    if spec.audio_conditioning != "variation" and request.noise_scale != defaults.noise_scale:
+    varies = "variation" in (spec.audio_conditioning, spec.video_conditioning)
+    if not varies and request.noise_scale != defaults.noise_scale:
         changes["noise_scale"] = defaults.noise_scale
     if spec.skip_stage_2 and request.enable_stage_2:
         changes["enable_stage_2"] = False
@@ -546,6 +553,79 @@ def _length_from_audio(
     return replace(request, auto_duration=False, num_frames=num_frames, extras=extras), (note,)
 
 
+def _condition_source(entry):
+    if isinstance(entry, dict):
+        return entry.get("source", entry.get("frames"))
+    return getattr(entry, "source", getattr(entry, "frames", None))
+
+
+def _video_seconds(source) -> float:
+    """Open a video input, check it has a picture and its first frame decodes; its length.
+
+    Bounded work (an open and one frame), before a GPU is reserved: a missing,
+    audio-only or undecodable clip is refused here, not in the billed worker.
+    """
+    import av
+
+    name = Path(str(source)).name
+    try:
+        with av.open(str(source)) as container:
+            if not container.streams.video:
+                raise constraints.ConstraintError(
+                    f"{name} has no picture in it, so it cannot be used as a video. Upload a "
+                    f"video file."
+                )
+            stream = container.streams.video[0]
+            if next(container.decode(stream), None) is None:
+                raise constraints.ConstraintError(
+                    f"{name} opened but none of its frames could be read. Re-export it as an "
+                    f"MP4 (H.264) file."
+                )
+            seconds = None
+            if stream.duration is not None and stream.time_base is not None:
+                seconds = float(stream.duration * stream.time_base)
+            elif container.duration is not None:
+                seconds = container.duration / av.time_base
+            elif stream.frames and stream.average_rate:
+                seconds = stream.frames / float(stream.average_rate)
+    except constraints.ConstraintError:
+        raise
+    except Exception as exc:  # noqa: BLE001 -- every open failure has one answer here
+        raise constraints.ConstraintError(
+            f"{source} could not be opened as a video ({type(exc).__name__}); it may have "
+            f"been removed. Upload it again, as an MP4, MOV or WebM file."
+        ) from exc
+    return float(seconds) if seconds else 0.0
+
+
+def _length_from_clip(
+    request: GenerationRequest, spec, seconds: float | None
+) -> tuple[GenerationRequest, tuple]:
+    """A clip variation takes its length from the clip: the longest legal length it covers."""
+    if spec.video_conditioning != "variation" or seconds is None:
+        return request, ()
+    if (request.extras or {}).get("length_source") == LENGTH_FROM_VIDEO:
+        return request, ()  # the worker's second pass
+    fps = float(request.frame_rate)
+    if seconds <= 0:
+        raise constraints.ConstraintError(
+            "Your clip opened, but its length could not be measured. Re-export it as an MP4 "
+            "(H.264) file."
+        )
+    num_frames = constraints.largest_num_frames_within(seconds, frame_rate=fps)
+    note = (
+        f"length set from your clip: {seconds:.2f} s → {num_frames} frames "
+        f"({num_frames / fps:.2f} s at {fps:g} fps)."
+    )
+    if seconds * fps > constraints.MAX_NUM_FRAMES:
+        note += (
+            f" Your clip is longer than the {constraints.MAX_SECONDS:g} s maximum, so it is "
+            f"trimmed to fit."
+        )
+    extras = {**(request.extras or {}), "length_source": LENGTH_FROM_VIDEO}
+    return replace(request, auto_duration=False, num_frames=num_frames, extras=extras), (note,)
+
+
 def _anchor_bound(request: GenerationRequest) -> int:
     """Frames an anchor must fall inside: the clip, or the shortest the head can pick."""
     if not request.auto_duration:
@@ -609,9 +689,16 @@ def prepare_request(request: GenerationRequest):
     supplied = _supplied_kinds(request)
     request, scope_notes = scope_request_to_mode(request, spec)
     require_inputs(request, spec, supplied=supplied)
-    request = _validated(request)
     seconds = _audio_seconds(request.audio) if request.audio is not None else None
     request, length_notes = _length_from_audio(request, spec, seconds)
+    clip_seconds = _video_seconds(request.video) if request.video is not None else None
+    request, clip_notes = _length_from_clip(request, spec, clip_seconds)
+    length_notes += clip_notes
+    for entry in request.conditions or ():
+        source = _condition_source(entry)
+        if modes.condition_kind(entry) == "video" and isinstance(source, (str, Path)):
+            _video_seconds(source)
+    request = _validated(request)
     _checked_conditions(request, spec)
     _checked_lora_files(request)
     _checked_stage_2_size(request, spec)
@@ -763,6 +850,43 @@ def _prepared_conditions(kwargs: dict, request: GenerationRequest) -> None:
         num_frames=_anchor_bound(request),
         temporal_compression_ratio=constraints.DEFAULT_TEMPORAL_COMPRESSION_RATIO,
     )
+
+
+def _prepared_variation(kwargs: dict, request: GenerationRequest, spec) -> tuple[str, ...]:
+    """Decode the clip a variation starts from, at the generation's size and rate.
+
+    The decoded frame count is the authority: a clip whose metadata promised
+    more frames than it holds is run at the longest legal length it covers.
+    """
+    if spec.video_conditioning != "variation":
+        return ()
+    from . import audio_conditioning
+
+    clip = kwargs.get("video_variation")
+    if clip is None:
+        return ()
+    level = clip.level
+    notes: list[str] = [audio_conditioning.video_level_note(level, requested=request.noise_scale)]
+    source = clip.source
+    if isinstance(source, (str, Path)):
+        num_frames = int(kwargs["num_frames"])
+        frames = conditioning.decode_video_frames(
+            source,
+            max_frames=num_frames,
+            notes=notes,
+            size=(int(kwargs["height"]), int(kwargs["width"])),
+            **_decode_options(request.frame_rate),
+        )
+        if len(frames) < num_frames:
+            fitting = constraints.nearest_valid_num_frames(int(len(frames)))[0]
+            notes.append(
+                f"your clip held {len(frames)} frames, fewer than its length promised, so the "
+                f"video is {fitting} frames long."
+            )
+            kwargs["num_frames"] = fitting
+            frames = frames[:fitting]
+        kwargs["video_variation"] = replace(clip, source=frames)
+    return tuple(notes)
 
 
 def _decode_options(frame_rate) -> dict:
@@ -1795,8 +1919,9 @@ def _frame_size(output) -> tuple[int, int] | None:
 
 
 def _length_source(request: GenerationRequest) -> str:
-    if (request.extras or {}).get("length_source") == LENGTH_FROM_AUDIO:
-        return LENGTH_FROM_AUDIO
+    source = (request.extras or {}).get("length_source")
+    if source in (LENGTH_FROM_AUDIO, LENGTH_FROM_VIDEO):
+        return source
     return LENGTH_FROM_MODEL if request.auto_duration else LENGTH_FROM_REQUEST
 
 
@@ -1837,6 +1962,11 @@ def _run_record(
         elapsed_seconds=round(float(elapsed), 3),
         peak_vram_gib=probe.peak_gib(),
         diagnostics=tuple(diagnostics),
+        video_level=(
+            None
+            if kwargs.get("video_variation") is None
+            else float(kwargs["video_variation"].level)
+        ),
     )
 
 
@@ -2033,6 +2163,7 @@ def generate(
         reporter.phase("preparing the inputs")
         kwargs = _pipeline_kwargs(spec, request)
         _prepared_conditions(kwargs, request)
+        clip_notes = _prepared_variation(kwargs, request, spec)
         lora_reports = _apply_loras(pipe, request)
         try:
             # Before `_prepared_audio`, because the audio encode samples from a
@@ -2046,7 +2177,7 @@ def generate(
             # container is the one it belongs in, and None everywhere else; see
             # `_muxes_supplied_audio`.
             audio_notes, supplied_audio = _prepared_audio(kwargs, request, pipe, spec=spec)
-            audio_notes += _audio_level_notes(kwargs, request, spec)
+            audio_notes += _audio_level_notes(kwargs, request, spec) + clip_notes
             # Consumed by `StageRunner`, never forwarded to diffusers -- the same
             # treatment `enable_stage_2` gets, and for the same reason: it is ours.
             # Only when somebody is listening, so an injected fake in the offline

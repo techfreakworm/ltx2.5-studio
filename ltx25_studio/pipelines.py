@@ -89,6 +89,7 @@ __all__ = [
     "DISTILLED_GUIDANCE",
     "stage_2_kwargs",
     "upsample_kwargs",
+    "variation_kwargs",
     "STAGE_2_STRIPPED_KEYS",
     "startup_report",
     "disk_footprint",
@@ -1304,6 +1305,48 @@ def check_decoder_minimum(config, *, width, height, num_frames, scale: int, stag
     raise DecoderTooSmallError(output=output, minimum=minimum, smallest=smallest, stage_2=stage_2)
 
 
+def variation_kwargs(pipeline, frames, level, *, height, width, num_frames) -> dict:
+    """A clip variation's first-denoise kwargs: the clip's latents, noised to ``level``.
+
+    The clip is preprocessed exactly as a video condition is (the pipeline's own
+    ``preprocess_conditions``), encoded with the video VAE to RAW ``[B, C, F, H, W]``
+    latents (the pipeline normalises and packs supplied latents itself), and the
+    call denoises only the tail of the distilled schedule from ``level``, with
+    ``noise_scale=level`` and the geometry the latents imply. No condition.
+    """
+    import torch
+    from diffusers.pipelines.ltx2.pipeline_ltx2_condition import (
+        LTX2VideoCondition,
+        retrieve_latents,
+    )
+
+    from .audio_conditioning import sigma_tail
+
+    device = pipeline._execution_device
+    condition = LTX2VideoCondition(frames=frames, index=0, strength=1.0)
+    with _no_grad():
+        pixels, _strengths, _indices, _counts = pipeline.preprocess_conditions(
+            [condition],
+            height=int(height),
+            width=int(width),
+            num_frames=int(num_frames),
+            device=device,
+        )
+        raw = retrieve_latents(pipeline.vae.encode(pixels[0]), sample_mode="argmax")
+    latents = raw.to(device=device, dtype=torch.float32)
+    _batch, _channels, latent_frames, latent_height, latent_width = latents.shape
+    spatial = int(getattr(pipeline, "vae_spatial_compression_ratio", 32))
+    temporal = int(getattr(pipeline, "vae_temporal_compression_ratio", 8))
+    return {
+        "latents": latents,
+        "noise_scale": float(level),
+        "sigmas": sigma_tail(level),
+        "height": latent_height * spatial,
+        "width": latent_width * spatial,
+        "num_frames": (latent_frames - 1) * temporal + 1,
+    }
+
+
 def check_cpu_decoder_size(*, width, height, num_frames) -> None:
     """Off CUDA a single-stage diffusion decode runs on the CPU, at very small sizes only."""
     from . import device as device_module
@@ -1528,9 +1571,20 @@ class StageRunner:
         # which decoder finishes the frames.
         audio_noise_level = kwargs.pop("audio_noise_level", None)
         policy = kwargs.pop("video_decoder", None) or "auto"
+        variation = kwargs.pop("video_variation", None)
         pipeline, audio_kwargs = self._pipeline_for(audio_noise_level)
         kwargs.update(audio_kwargs)
         self.last_run = None
+        # A clip variation replaces the first denoise's start: the clip's latents
+        # at its level and the schedule's tail, merged last so they win.
+        first = {}
+        if variation is not None:
+            from . import audio_conditioning
+
+            if audio_conditioning.is_condition_pipeline(self.pipeline):
+                first = self._variation(variation.source, variation.level, kwargs)
+            else:
+                first = {"video_variation": variation}  # a stand-in takes it as given
         if not enable_stage_2:
             decoder, why_conv = self._single_stage_decoder(policy, kwargs)
             self.last_run = run_facts(
@@ -1544,8 +1598,12 @@ class StageRunner:
                 # The distilled recipe applies here too. It used to apply ONLY
                 # on the stage-2 path, which is how eleven of twelve host runs
                 # were generated with a linear schedule and SFT guidance.
-                return pipeline(**_merged(kwargs, distilled_kwargs(), _sampling_kwargs(progress)))
-            single = pipeline(**_merged(kwargs, stage_1_kwargs(), _sampling_kwargs(progress)))
+                return pipeline(
+                    **_merged(kwargs, distilled_kwargs(), _sampling_kwargs(progress), first)
+                )
+            single = pipeline(
+                **_merged(kwargs, stage_1_kwargs(), _sampling_kwargs(progress), first)
+            )
             return self._diffusion_decoded(single, kwargs, progress)
         from . import device as device_module
 
@@ -1563,7 +1621,9 @@ class StageRunner:
         )
 
         stage_1 = pipeline(
-            **_merged(kwargs, stage_1_kwargs(), _sampling_kwargs(progress, index=1, passes=2))
+            **_merged(
+                kwargs, stage_1_kwargs(), _sampling_kwargs(progress, index=1, passes=2), first
+            )
         )
         if progress is not None:
             progress.upscaling()
@@ -1591,6 +1651,17 @@ class StageRunner:
             audio_noise_level=audio_noise_level,
         )
         return self._diffusion_decoded(stage_2, kwargs, progress)
+
+    def _variation(self, frames, level, kwargs) -> dict:
+        """The clip's first-denoise kwargs (see :func:`variation_kwargs`)."""
+        return variation_kwargs(
+            self.pipeline,
+            frames,
+            level,
+            height=kwargs.get("height"),
+            width=kwargs.get("width"),
+            num_frames=kwargs.get("num_frames"),
+        )
 
     def _diffusion_decoded(self, staged, kwargs, progress):
         """Decode a latent-output call with the diffusion decoder and reunite its audio."""

@@ -472,19 +472,16 @@ def test_image_text_to_video_keeps_the_prompt(make_request):
     assert kwargs["conditions"]
 
 
-def test_video_to_video_conditions_at_less_than_full_strength(make_request):
-    """§3.2 row 4: ``LTX2VideoCondition(frames=<video>, strength<1.0)`` — at
-    strength 1.0 the input is pinned and nothing is generated."""
+def test_video_to_video_starts_from_its_clip_rather_than_conditioning_on_it(make_request):
+    """F66: the conditioning mask is a switch (clip unchanged at 0.3-0.8, prompt only
+    at 0.0), so the clip is the starting point instead: noised to a level, and only
+    the tail of the schedule denoised. No condition is built from it."""
+    clip = object()
     kwargs = modes.get_mode("video_to_video").build_kwargs(
-        make_request(mode="video_to_video", video=object(), strength=0.7)
+        make_request(mode="video_to_video", video=clip, strength=0.7, noise_scale=None)
     )
-    conditions = kwargs["conditions"]
-    assert conditions
-    strengths = [
-        getattr(c, "strength", c.get("strength") if isinstance(c, dict) else None)
-        for c in conditions
-    ]
-    assert all(s is not None and s < 1.0 for s in strengths), strengths
+    assert "conditions" not in kwargs
+    assert kwargs["video_variation"] == modes.VariationClip(source=clip, level=0.909375)
 
 
 @pytest.mark.parametrize("mode_id,level", [("audio_to_audio", 0.421875), ("audio_to_video", 0.0)])

@@ -53,12 +53,21 @@ HONOURS_MODES = tuple(m for m in MODE_IDS if not modes.MODES[m].skip_stage_2)
 
 
 def pipeline_kwargs_for(mode_id, tmp_path, **overrides):
-    """Run one generation and return the kwargs the pipeline was actually called with."""
+    """Run one generation and return the kwargs the pipeline was actually called with.
+
+    A clip long enough for stage 2's decoder (17 frames): video_to_video takes its
+    length from its clip.
+    """
+    from conftest import video_file
+
     pipe = FakePipe()
+    inputs = inputs_for(mode_id)
+    if "video" in inputs:
+        inputs["video"] = video_file(frames=17)
     generate_module.generate(
         mode=mode_id,
         seed=7,
-        **{**inputs_for(mode_id), **overrides},
+        **{**inputs, **overrides},
         pipeline_factory=factory_returning(pipe),
         encoder=one_muxed_file_encoder,
         output_root=tmp_path,

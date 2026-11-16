@@ -45,6 +45,7 @@ __all__ = [
     "PIPELINE_KINDS",
     "ConditionSpec",
     "ModeSpec",
+    "VariationClip",
     "accepted_kinds",
     "accepts",
     "condition_kind",
@@ -127,6 +128,10 @@ class ModeSpec:
     audio_conditioning: str | None = None
     #: A video condition strength the mode fixes, overriding the request's.
     video_strength: float | None = None
+    #: ``"variation"``: the user's clip is not a condition but the starting
+    #: point, noised to the request's level and denoised along the tail of the
+    #: schedule (``audio_conditioning.sigma_tail``). None otherwise.
+    video_conditioning: str | None = None
 
 
 def accepts(spec: ModeSpec, kind: str) -> bool:
@@ -209,8 +214,47 @@ def _with_audio(request, kwargs: dict, conditioning: str) -> dict:
     else:
         noise_scale = getattr(request, "noise_scale", None)
         kwargs["audio_noise_level"] = audio_conditioning.snap_level(
-            1.0 if noise_scale is None else noise_scale
+            audio_conditioning.DEFAULT_AUDIO_LEVEL if noise_scale is None else noise_scale
         )
+    return kwargs
+
+
+@dataclass(frozen=True, eq=False)
+class VariationClip:
+    """The clip a variation starts from, and the level it is noised to.
+
+    ``source`` is the upload's path until ``generate`` decodes it to ``uint8``
+    frames ``[F, H, W, 3]``. Consumed by ``pipelines.StageRunner``: the clip is
+    encoded with the video VAE, noised to ``level``, and only the tail of the
+    schedule from ``level`` is denoised. No condition is built from it.
+    """
+
+    source: object
+    level: float
+
+    def __eq__(self, other):
+        if not isinstance(other, VariationClip):
+            return NotImplemented
+        if self.level != other.level:
+            return False
+        if hasattr(self.source, "shape") or hasattr(other.source, "shape"):
+            import numpy as np
+
+            return bool(np.array_equal(np.asarray(self.source), np.asarray(other.source)))
+        return self.source == other.source
+
+    __hash__ = object.__hash__
+
+
+def _with_video_variation(request, kwargs: dict) -> dict:
+    """The clip-variation route (:class:`VariationClip`), as ``video_variation``."""
+    video = getattr(request, "video", None)
+    noise_scale = getattr(request, "noise_scale", None)
+    level = audio_conditioning.snap_video_level(
+        audio_conditioning.DEFAULT_VIDEO_LEVEL if noise_scale is None else noise_scale
+    )
+    if video is not None:
+        kwargs["video_variation"] = VariationClip(source=video, level=level)
     return kwargs
 
 
@@ -256,7 +300,7 @@ def _refuse_unaccepted(request, accepted: frozenset[str], label: str) -> None:
 
 
 def _conditions(
-    request, accepted: frozenset[str], video_strength: float | None = None
+    request, accepted: frozenset[str], video_strength: float | None = None, *, use_video=True
 ) -> tuple[ConditionSpec, ...]:
     """Build the condition list. Image and video share one mechanism (§3.1a)."""
     specs: list[ConditionSpec] = []
@@ -266,7 +310,7 @@ def _conditions(
             ConditionSpec(source=image, kind="image", index=0, strength=IMAGE_CONDITION_STRENGTH)
         )
     video = getattr(request, "video", None)
-    if video is not None and "video" in accepted:
+    if video is not None and "video" in accepted and use_video:
         strength = getattr(request, "strength", None)
         if strength is None:
             strength = MAX_VIDEO_CONDITION_STRENGTH
@@ -292,7 +336,13 @@ def _text_builder(*, min_resolution: bool = False) -> Callable:
 def _condition_builder(*, min_resolution: bool = False) -> Callable:
     def build(request, accepted: frozenset[str], fields: dict) -> dict:
         kwargs = _base_kwargs(request, min_resolution=min_resolution)
-        conditions = _conditions(request, accepted, fields.get("video_strength"))
+        variation = fields.get("video_conditioning") == "variation"
+        if variation:
+            # The clip is the starting point, never a condition; see _with_video_variation.
+            _with_video_variation(request, kwargs)
+        conditions = _conditions(
+            request, accepted, fields.get("video_strength"), use_video=not variation
+        )
         if conditions:
             kwargs["conditions"] = conditions
         if fields.get("audio_conditioning"):
@@ -306,6 +356,8 @@ def _mode(builder: Callable, **fields) -> ModeSpec:
     """A registry entry whose builder knows, from the entry itself, what it accepts."""
     if fields.get("audio_conditioning") not in (None, "frozen", "variation"):
         raise ValueError(f"unknown audio_conditioning {fields['audio_conditioning']!r}")
+    if fields.get("video_conditioning") not in (None, "variation"):
+        raise ValueError(f"unknown video_conditioning {fields['video_conditioning']!r}")
     accepted = frozenset(fields["inputs"]) | frozenset(fields.get("optional_inputs", ()))
     label = fields["label"]
 
@@ -351,6 +403,7 @@ _SPECS = (
     ),
     _mode(
         _condition_builder(),
+        video_conditioning="variation",
         id="video_to_video",
         label="Video to video",
         pipeline="condition",

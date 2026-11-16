@@ -1028,3 +1028,75 @@ def test_a_memory_refusal_exits_2_before_anything_loads(tmp_path):
     assert not data.get("phases")
     assert [entry["when"] for entry in data["file_cache"]] == ["before the run", "at exit"]
     assert all(entry["files"] > 0 for entry in data["file_cache"])
+
+
+# --------------------------------------------------------------------------
+# video_to_video's clip variation on the local runner (F66)
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("residency", ["staged", "resident"])
+@pytest.mark.parametrize("level", [0.421875, 0.725, 0.909375])
+def test_a_clip_variation_runs_on_the_local_runner(residency, level, tmp_path, monkeypatch):
+    torch = _torch()
+    from diffusers import LTX2ConditionPipeline, LTX2VideoTransformer3DModel
+
+    from ltx25_studio import audio_conditioning
+    from ltx25_studio import generate as generate_module
+
+    sigmas, sent = [], []
+    forward = LTX2VideoTransformer3DModel.forward
+
+    def spy_forward(self, *args, **kwargs):
+        sigmas.append(float(kwargs["sigma"].flatten()[0]) / 1000.0)
+        return forward(self, *args, **kwargs)
+
+    call = LTX2ConditionPipeline.__call__
+
+    def spy_call(self, *args, **kwargs):
+        sent.append(kwargs)
+        return call(self, *args, **kwargs)
+
+    monkeypatch.setattr(LTX2VideoTransformer3DModel, "forward", spy_forward)
+    monkeypatch.setattr(LTX2ConditionPipeline, "__call__", spy_call)
+    lines = []
+
+    def factory(*, pipeline, **_):
+        return local_runtime.build_local_runner(
+            kind=pipeline,
+            device="cpu",
+            dtype="float32",
+            snapshot_dir=tiny_snapshot(),
+            residency=residency,
+            log=lines.append,
+        )
+
+    result = generate_module.generate(
+        mode="video_to_video",
+        prompt=PROMPT,
+        seed=SEED,
+        width=SIZE,
+        height=SIZE,
+        video=_inputs(tmp_path)["video"],
+        noise_scale=level,
+        pipeline_factory=factory,
+        output_root=tmp_path / "out",
+        retention_bytes=10**12,
+    )
+
+    ((kwargs),) = sent
+    tail = audio_conditioning.sigma_tail(level)
+    assert not kwargs.get("conditions")
+    assert kwargs["sigmas"] == tail and kwargs["noise_scale"] == level
+    assert (
+        tuple(kwargs["latents"].shape)[:3] == (1, 8, 2) and kwargs["latents"].dtype == torch.float32
+    )
+    assert sigmas == pytest.approx(tail)
+    assert result.record.video_level == level and result.record.frames == FRAMES
+    if residency == "staged":
+        order = [
+            line.split("]")[0].removeprefix("preflight[")
+            for line in lines
+            if line.startswith("preflight[")
+        ]
+        assert order.index(f"encode clip {SIZE}x{SIZE}x{FRAMES}") < order.index("load text encoder")

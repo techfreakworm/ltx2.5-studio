@@ -59,7 +59,8 @@ FIELD_KINDS = {
     "audio": {"audio"},
     "conditions": {"image", "video"},
     "strength": {"video"},
-    "noise_scale": {"audio"},
+    # video_to_video varies its clip by this level (F66), as audio_to_audio its audio.
+    "noise_scale": {"audio", "video"},
 }
 
 #: Fields whose drop must be announced: the user put something there.
