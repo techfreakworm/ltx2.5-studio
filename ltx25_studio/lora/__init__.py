@@ -40,10 +40,12 @@ from ..errors import (
 )
 from .fetch import (
     DIFFUSERS_LORA_WEIGHT_NAME,
+    EVICTION_GRACE_SECONDS,
     FetchedLoRA,
     evict_lora_cache,
     fetch_lora,
     lora_cache_dir,
+    mark_used,
 )
 from .inspect import LoRAInspection, inspect_lora, read_safetensors_header
 from .staging import LoRAWeightError, StagedLoRA, check_weight, find_duplicate, staged_entry
@@ -63,6 +65,7 @@ from .validate import (
 __all__ = [
     "DEFAULT_MAX_LORA_BYTES",
     "DIFFUSERS_LORA_WEIGHT_NAME",
+    "EVICTION_GRACE_SECONDS",
     "MIN_RESOLVED_FRACTION",
     "WARN_RESOLVED_FRACTION",
     "FetchedLoRA",
@@ -91,6 +94,7 @@ __all__ = [
     "find_duplicate",
     "inspect_lora",
     "lora_cache_dir",
+    "mark_used",
     "read_safetensors_header",
     "staged_entry",
     "validate_lora",

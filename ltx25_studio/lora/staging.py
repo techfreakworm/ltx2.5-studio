@@ -25,6 +25,7 @@ import math
 from typing import Any, TypedDict
 
 from ..errors import LoRAError
+from .fetch import mark_used
 
 __all__ = [
     "DEFAULT_WEIGHT",
@@ -73,14 +74,20 @@ def check_weight(weight, *, source="the adapter") -> float:
 
 
 def staged_entry(source, report, *, weight=DEFAULT_WEIGHT) -> StagedLoRA:
-    """The entry to append to the staged list for an accepted adapter."""
-    return StagedLoRA(
+    """The entry to append to the staged list for an accepted adapter.
+
+    Stamps the adapter in use, so the LoRA cache does not evict it while the
+    session still has it staged.
+    """
+    entry = StagedLoRA(
         source=str(source),
         path=str(report.path),
         weight=check_weight(weight, source=source),
         report=report,
         content_key=str(getattr(report, "content_key", "") or ""),
     )
+    mark_used(entry["path"])
+    return entry
 
 
 def find_duplicate(staged, entry) -> dict | None:

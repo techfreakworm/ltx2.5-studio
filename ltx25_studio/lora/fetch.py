@@ -19,7 +19,9 @@ What it guarantees:
    (:func:`lora_cache_dir`, beside the Hub cache, never inside another model's
    folder), each fetch stamps its repo folder, and :func:`evict_lora_cache`
    removes the least recently used ones over a byte budget. Only folders this
-   module stamped are ever counted or removed.
+   module stamped are ever counted or removed, and never one stamped in use
+   (:func:`mark_used`: staged by a session, or loading in a run) within
+   :data:`EVICTION_GRACE_SECONDS`.
 
 The listing also carries the repo's card tags and ``base_model`` references,
 which ``validate_lora`` uses to recognise IC-LoRAs whose file metadata is empty.
@@ -37,6 +39,7 @@ import logging
 import os
 import re
 import shutil
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -48,6 +51,8 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "DIFFUSERS_LORA_WEIGHT_NAME",
+    "EVICTION_GRACE_SECONDS",
+    "IN_USE_MARKER",
     "LAST_USED_MARKER",
     "FetchedLoRA",
     "RepoListing",
@@ -55,6 +60,7 @@ __all__ = [
     "fetch_lora",
     "listing_from_model_info",
     "lora_cache_dir",
+    "mark_used",
     "parse_hub_reference",
 ]
 
@@ -69,6 +75,17 @@ LORA_CACHE_DIRNAME = "ltx25-lora"
 #: Stamped into each repo folder this module fetched into; its mtime is the
 #: last use. Folders without it are never counted or evicted.
 LAST_USED_MARKER = ".ltx25-last-used"
+
+#: Stamped beside it by :func:`mark_used` alone: a session staged the adapter,
+#: or a run is about to load it. A download or an upload copy does not set it.
+IN_USE_MARKER = ".ltx25-in-use"
+
+#: An adapter stamped in use this recently is never evicted, whatever the
+#: budget. An hour covers a session between Validate and Generate, a ZeroGPU
+#: queue wait and the run itself, and every Validate and every run stamps it
+#: again. One idle for longer can go; its owner then gets the "no longer on
+#: disk, Validate it again" refusal in the web process, before any GPU time.
+EVICTION_GRACE_SECONDS = 3600
 
 _ACCEPTED_FORMS = (
     "a Hub repo id has the form `org/name`, or `org/name/path/to/file.safetensors` to pick "
@@ -331,6 +348,31 @@ def _mark_used(root: Path, repo_id: str) -> None:
         (folder / LAST_USED_MARKER).touch()
 
 
+def mark_used(path) -> bool:
+    """Stamp the cached adapter that holds ``path`` as in use now.
+
+    Call it when a session stages an adapter and right before a run loads one:
+    :func:`evict_lora_cache` never removes an adapter stamped within
+    :data:`EVICTION_GRACE_SECONDS`. Only a ``models--*`` folder this cache
+    stamped is touched, and any other path is left alone. Returns whether a
+    folder was stamped; never raises.
+    """
+    try:
+        here = Path(os.path.abspath(os.fspath(path)))
+    except TypeError:
+        return False
+    for folder in here.parents:
+        if folder.name.startswith("models--") and (folder / LAST_USED_MARKER).is_file():
+            try:
+                (folder / LAST_USED_MARKER).touch()
+                (folder / IN_USE_MARKER).touch()
+            except OSError as exc:
+                logger.warning("could not stamp LoRA %s as in use: %r", folder, exc)
+                return False
+            return True
+    return False
+
+
 def _tree_bytes(folder: Path) -> int:
     """Bytes of regular files under ``folder``; symlinks (snapshots) are not followed."""
     total = 0
@@ -346,19 +388,25 @@ def evict_lora_cache(max_bytes: int, *, cache_dir=None, keep=()) -> tuple[str, .
     """Remove least-recently-used adapters until the cache is within ``max_bytes``.
 
     Only ``models--*`` folders carrying :data:`LAST_USED_MARKER` count; nothing
-    else under ``cache_dir`` is touched. Repo ids in ``keep`` are never removed.
+    else under ``cache_dir`` is touched. Repo ids in ``keep``, and adapters
+    stamped in use (:func:`mark_used`) within :data:`EVICTION_GRACE_SECONDS`, are
+    never removed, so the cache may stay over budget while they are in use.
     Returns the evicted repo ids, oldest first.
     """
     root = Path(cache_dir) if cache_dir is not None else lora_cache_dir()
     if not root.is_dir():
         return ()
     kept = set(keep)
+    in_use_since = time.time() - EVICTION_GRACE_SECONDS
     entries = []
     for folder in root.iterdir():
         marker = folder / LAST_USED_MARKER
         if not (folder.is_dir() and folder.name.startswith("models--") and marker.is_file()):
             continue
         repo_id = folder.name[len("models--") :].replace("--", "/", 1)
+        in_use = folder / IN_USE_MARKER
+        if in_use.is_file() and in_use.stat().st_mtime >= in_use_since:
+            kept.add(repo_id)
         entries.append((marker.stat().st_mtime, repo_id, folder, _tree_bytes(folder)))
     total = sum(size for *_, size in entries)
     evicted = []

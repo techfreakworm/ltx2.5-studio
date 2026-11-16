@@ -630,3 +630,91 @@ def test_a_real_gate_is_called_gated_at_either_step(status, url, step):
 def test_a_typo_seen_with_a_valid_token_is_not_found():
     message = listing_refusal(hub_error(404, LISTING_URL, **{"X-Error-Code": "RepoNotFound"}))
     assert "not found" in message and "gated" not in message
+
+
+# --------------------------------------------------------------------------
+# review r1 lora-5 — an adapter a session has staged, or a run is loading, is not
+# evicted while it is in use, however many newer adapters are fetched after it
+# --------------------------------------------------------------------------
+
+
+def _adapter_in(folder):
+    return folder / "snapshots" / SHA / "adapter.safetensors"
+
+
+def _age_stamps(folder, seconds):
+    """Make every stamp this cache keeps in ``folder`` ``seconds`` old."""
+    stamp = time.time() - seconds
+    for marker in folder.glob(".ltx25-*"):
+        os.utime(marker, (stamp, stamp))
+
+
+def test_an_adapter_in_use_is_not_evicted_ahead_of_newer_fetches(tmp_path):
+    """The verifier's case: alice staged first, then bob and carol fetched."""
+    alice = _cached_repo(tmp_path, "alice/style", 900, age_seconds=0)
+    assert fetch.mark_used(_adapter_in(alice))
+    _age_stamps(alice, 600)
+    bob = _cached_repo(tmp_path, "bob/other", 900, age_seconds=300)
+    carol = _cached_repo(tmp_path, "carol/new", 900, age_seconds=0)
+
+    evicted = evict_lora_cache(2000, cache_dir=tmp_path, keep=("carol/new",))
+
+    assert evicted == ("bob/other",)
+    assert alice.exists() and carol.exists() and not bob.exists()
+
+
+def test_an_adapter_unused_past_the_grace_period_can_be_evicted_again(tmp_path):
+    alice = _cached_repo(tmp_path, "alice/style", 900, age_seconds=0)
+    fetch.mark_used(_adapter_in(alice))
+    _age_stamps(alice, fetch.EVICTION_GRACE_SECONDS + 60)
+    _cached_repo(tmp_path, "bob/other", 900, age_seconds=300)
+
+    assert evict_lora_cache(1000, cache_dir=tmp_path) == ("alice/style",)
+
+
+def test_mark_used_touches_nothing_this_cache_did_not_stamp(tmp_path):
+    loose = good_adapter(tmp_path / "elsewhere")
+    unmarked = tmp_path / "models--someone--else"
+    unmarked.mkdir()
+    (unmarked / "weights.safetensors").write_bytes(b"x")
+
+    assert fetch.mark_used(loose) is False
+    assert fetch.mark_used(unmarked / "weights.safetensors") is False
+    assert fetch.mark_used(tmp_path / "missing.safetensors") is False
+    assert not list(tmp_path.rglob(".ltx25-*"))
+
+
+def test_a_staged_upload_outlives_newer_copies_nobody_staged(tmp_path, monkeypatch):
+    """Through the LoRA bay: Validate stages the app's copy and marks it used."""
+    from ltx25_studio import lora
+    from ltx25_studio.ui import handlers, uploads
+
+    monkeypatch.setattr(lora, "lora_cache_dir", lambda: tmp_path / "lora-cache")
+    adapter = _valid_adapter(tmp_path)
+    monkeypatch.setattr(lora, "configured_max_bytes", lambda: int(adapter.stat().st_size * 1.5))
+    _verdict, staged, _ = handlers.on_validate_lora("", str(adapter), [])
+    copy = Path(staged[0]["path"])
+    _age_stamps(copy.parent, 600)
+
+    for index in range(5):
+        uploads.own_copy(good_adapter(tmp_path / f"later-{index}"))
+
+    assert copy.is_file(), "the staged adapter was evicted while its session still had it"
+
+
+def test_loading_an_adapter_marks_it_used_first(tmp_path, fake_pipeline, good_lora):
+    from ltx25_studio.lora import apply as lora_apply
+
+    folder = _cached_repo(tmp_path / "cache", "org/adapter", 10, age_seconds=0)
+    adapter = _adapter_in(folder)
+    adapter.unlink()
+    adapter.write_bytes(good_lora.read_bytes())
+    fetch.mark_used(adapter)
+    _age_stamps(folder, 5000)
+
+    lora_apply.apply_lora(fake_pipeline, adapter)
+
+    stamps = [marker.stat().st_mtime for marker in folder.glob(".ltx25-*")]
+    assert len(stamps) == 2 and min(stamps) > time.time() - 60, (
+        "a run loading an adapter must stamp it used before the load"
+    )

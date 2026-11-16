@@ -41,6 +41,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ..errors import LoRADimensionError, LoRAError, LoRAFormatError, LoRANotAttachedError
+from .fetch import mark_used
 from .staging import DEFAULT_WEIGHT, check_weight
 
 __all__ = [
@@ -196,6 +197,8 @@ def apply_lora(
     weight = check_weight(weight, source=label or str(path))
     components = _loadable_components(pipeline)
 
+    # So the LoRA cache cannot evict the file between here and the open.
+    mark_used(path)
     try:
         pipeline.load_lora_weights(path, adapter_name=adapter_name)
     except LoRAError:
