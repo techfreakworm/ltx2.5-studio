@@ -352,7 +352,19 @@ with **128 GB** of unified memory. Smaller machines are not verified.
 | `LTX25_MODEL_SNAPSHOT_DIR` | leave unset | unset, the app finds the pinned snapshot in the Hugging Face cache. Set, it loads the components from that directory instead, through the same staged runner; only a checkpoint under 1 GB (such as the test suite's tiny one) is loaded all at once |
 | `PYTORCH_MPS_HIGH_WATERMARK_RATIO`, `PYTORCH_MPS_LOW_WATERMARK_RATIO` | optional; the runs used `0.5` and `0.4` | caps on PyTorch's MPS allocator. **If you set them, the low one must not exceed the high one**: setting only the high one below 1.4 leaves the low one at PyTorch's default of 1.4, and then every GPU operation fails. The app refuses such a pair before it loads anything |
 | `LTX25_MEMORY_LIMIT_GB` | 90 on macOS by default | before each big load and before the denoise, the app checks that committed memory plus what that step adds stays under this, and refuses with the numbers if not |
+| `LTX25_MEMORY_SETTLE_SECONDS` | 2 by default, 0 to 60 | the longest that check may wait for the gauge: for memory just freed to leave it, and to read a failing check again before it refuses (below). `0` switches the wait off: one reading |
 | `LTX25_MPS_SELF_TEST` | `enforce` (default) or `warn` | what to do when PyTorch fails the MPS numerics self-test |
+
+**The memory check waits for memory just freed.** On a Mac, GPU memory the app frees leaves
+the gauge over a moment, not at once: after the text encoder's release the kernel gave its 24 GB
+back over 0.1–0.35 s, so a reading taken at once was 3.5–23 GB too high, and with a browser and
+test suites running it refused a run that fitted. So after a release the check reads the gauge
+once it has stopped falling (two readings 50 ms apart within 0.25 GB), and a check that fails is
+read again every 0.1 s and passes as soon as a reading fits; both within
+`LTX25_MEMORY_SETTLE_SECONDS`. On real weights the settled readings were 3 to 13 GB below the
+first ones, reached in 0.16–0.36 s, and the three runs the early reading had refused ran. A run
+the check refuses is reported as a memory refusal, a failure of its own kind, not as an error in
+the app.
 
 **One worked run** (the verified 704×480, 5-second text to video, through
 `scripts/local_generate.py`, which drives the app's own `generate()`):
@@ -372,8 +384,10 @@ PYTORCH_MPS_HIGH_WATERMARK_RATIO=0.5 PYTORCH_MPS_LOW_WATERMARK_RATIO=0.4 HF_HUB_
 `.venv-mps` is the separate environment above. The script takes its paths as flags; add
 `--dry-run` to print the plan and the memory arithmetic without loading anything. To use the
 UI instead, start `app.py` from that environment with `LTX25_DEVICE=mps` and
-`LTX25_TRANSFORMER_GGUF="$GGUF"`; a real-weights run through the UI on a Mac is **not
-verified yet**.
+`LTX25_TRANSFORMER_GGUF="$GGUF"`. Through the UI on real weights, in a real browser
+(2026-11-16): audio to video, and text to video with an adapter uploaded on the page, finished;
+text to video with sound was refused by the memory check's early reading, fixed since (above),
+and has not been run through the UI again yet.
 
 **What it costs in memory, as measured** (the whole machine's committed memory — active,
 wired and compressed pages — on the 128 GB Mac): 57–61 GB at 704×480 with 49–121 frames,

@@ -1198,6 +1198,17 @@ fix. It also runs the §1.3 diffusers-version assertion. Test case.
 > preflight exists for **local** runs only: `memory.py` checks committed memory plus what the
 > next load or the denoise will add against a limit (`LTX25_MEMORY_LIMIT_GB`, 90 GB on macOS by
 > default) and refuses with the numbers.
+>
+> On the live gauge it waits for memory just freed (`ba2d582`). Freed MPS memory is wired, and
+> the kernel un-wires it over a moment: the text encoder's 24 GB left the gauge over 0.1–0.35 s
+> after its release, so a check that read the gauge at once read it 3.5–23 GB too high and
+> refused runs that fitted. So after the local runner frees device memory, the next check reads
+> the gauge every 50 ms until two consecutive readings are within 0.25 GB and judges that
+> reading; a check that fails is read again every 0.1 s and passes as soon as a reading fits,
+> else it refuses on the last reading. Both waits share one bound, `LTX25_MEMORY_SETTLE_SECONDS`
+> (2 s by default, 0 to 60; 0 is a single reading, as before). A projected judgement (the dry
+> run), no gauge (off macOS) or no limit never waits. A refusal is its own failure category,
+> `memory`, not `bug` (`errors.py`).
 
 **The startup report** (`pipelines.startup_report`) prints, before anything expensive:
 
