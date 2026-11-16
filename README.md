@@ -135,6 +135,12 @@ audio is encoded to `audio_latents`, and then:
 - With automatic length on, these two modes take their length from your audio file: the
   duration predictor reads only the text, so it cannot hear the upload.
 
+> **Known issue (2026-11-16, being investigated).** Audio that goes through the app's audio
+> encoding comes back about 9 dB quieter and duller, measured on real weights even with no
+> generation in between. It shows in audio to audio's output, and it is the version of your
+> audio that audio to video's picture is made to; the soundtrack in audio to video's file is
+> your own file and is not affected.
+
 ---
 
 ## LoRA — the headline feature
