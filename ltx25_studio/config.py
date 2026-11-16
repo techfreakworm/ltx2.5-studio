@@ -18,6 +18,7 @@ class of failure §5 exists to eliminate.
 from __future__ import annotations
 
 import os
+import sys
 from dataclasses import dataclass
 
 from . import model_files
@@ -32,8 +33,11 @@ __all__ = [
     "ENV_LORA_MAX_GB",
     "ENV_MODEL_SNAPSHOT_DIR",
     "ENV_MPS_SELF_TEST",
+    "ENV_RESIDENCY",
+    "ENV_TRANSFORMER_GGUF",
     "ENV_QUANTIZATION",
     "MPS_SELF_TEST_CHOICES",
+    "RESIDENCY_CHOICES",
     "QUANTIZATION_CHOICES",
     "ENV_OUTPUT_DIR",
     "ENV_OUTPUT_RETENTION_GB",
@@ -57,6 +61,8 @@ ENV_DEVICE = "LTX25_DEVICE"
 ENV_CPU_DTYPE = "LTX25_CPU_DTYPE"
 ENV_MODEL_SNAPSHOT_DIR = "LTX25_MODEL_SNAPSHOT_DIR"
 ENV_MPS_SELF_TEST = "LTX25_MPS_SELF_TEST"
+ENV_TRANSFORMER_GGUF = "LTX25_TRANSFORMER_GGUF"
+ENV_RESIDENCY = "LTX25_RESIDENCY"
 
 #: ``auto`` passes no ``size`` and the platform then allocates its default,
 #: ``large`` (47.375 GiB measured). ZeroGPU does NOT promote by itself: its
@@ -94,6 +100,12 @@ CPU_DTYPE_CHOICES = ("fp32", "bf16")
 #: generate, ``warn`` runs anyway and says so in the log and the report.
 DEFAULT_MPS_SELF_TEST = "enforce"
 MPS_SELF_TEST_CHOICES = ("enforce", "warn")
+
+#: How the local (mps/cpu) runner holds real weights: ``staged`` never keeps the
+#: text encoder and the transformer resident together; ``resident`` keeps both.
+#: Staged by default on macOS, where memory is shared with the GPU.
+DEFAULT_RESIDENCY = "staged" if sys.platform == "darwin" else "resident"
+RESIDENCY_CHOICES = ("staged", "resident")
 
 #: The prompt enhancer (PLAN §3.5), loaded lazily by ``enhance.py`` on first use
 #: inside the GPU worker and then KEPT for the life of that worker -- freeing it
@@ -197,6 +209,17 @@ def _snapshot_dir(name: str) -> str | None:
     return path
 
 
+def _gguf_file(name: str) -> str | None:
+    """A local ``.gguf`` transformer file for the local runner, or None."""
+    raw = (os.environ.get(name) or "").strip()
+    if not raw:
+        return None
+    path = os.path.realpath(os.path.expanduser(raw))
+    if not (os.path.isfile(path) and path.endswith(".gguf")):
+        raise ConfigError(variable=name, value=raw, legal=("an existing .gguf file",))
+    return path
+
+
 def _number(name: str, default: float, *, minimum: float, integer: bool = False):
     raw = os.environ.get(name)
     if raw is None or raw == "":
@@ -230,6 +253,8 @@ class RuntimeConfig:
     cpu_dtype: str = DEFAULT_CPU_DTYPE
     model_snapshot_dir: str | None = None
     mps_self_test: str = DEFAULT_MPS_SELF_TEST
+    transformer_gguf: str | None = None
+    residency: str = DEFAULT_RESIDENCY
 
     @property
     def lora_max_bytes(self) -> int:
@@ -282,4 +307,6 @@ def load_config() -> RuntimeConfig:
         cpu_dtype=_choice(ENV_CPU_DTYPE, DEFAULT_CPU_DTYPE, CPU_DTYPE_CHOICES),
         model_snapshot_dir=_snapshot_dir(ENV_MODEL_SNAPSHOT_DIR),
         mps_self_test=_choice(ENV_MPS_SELF_TEST, DEFAULT_MPS_SELF_TEST, MPS_SELF_TEST_CHOICES),
+        transformer_gguf=_gguf_file(ENV_TRANSFORMER_GGUF),
+        residency=_choice(ENV_RESIDENCY, DEFAULT_RESIDENCY, RESIDENCY_CHOICES),
     )

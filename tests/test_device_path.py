@@ -180,12 +180,25 @@ def test_get_pipeline_refuses_on_a_ui_only_host_and_builds_nothing(monkeypatch, 
     assert "LTX25_DEVICE=mps" in message and "LTX25_DEVICE=cpu" in message, message
 
 
-def test_get_pipeline_uses_the_resolved_device(monkeypatch, no_cuda):
+def _override_snapshot(monkeypatch, tmp_path):
+    (tmp_path / "model_index.json").write_text("{}")
+    monkeypatch.setenv(config.ENV_MODEL_SNAPSHOT_DIR, str(tmp_path))
+
+
+def test_a_snapshot_override_keeps_the_resident_stage_runner(monkeypatch, no_cuda, tmp_path):
+    from ltx25_studio import local_runtime
+
     monkeypatch.setenv(config.ENV_DEVICE, "cpu")
+    _override_snapshot(monkeypatch, tmp_path)
     seen = []
     monkeypatch.setattr(pipelines, "_base_pipeline", lambda **k: seen.append(k) or object())
     monkeypatch.setattr(pipelines, "derive_pipeline", lambda base, cls: base)
     monkeypatch.setitem(sys.modules, "diffusers", types.SimpleNamespace(LTX2Pipeline=object))
+    monkeypatch.setattr(
+        local_runtime,
+        "build_local_runner",
+        lambda **k: pytest.fail("dispatched to the local runner"),
+    )
     pipelines.clear_cache()
     try:
         runner = pipelines.get_pipeline(pipeline="text2video")
@@ -193,7 +206,111 @@ def test_get_pipeline_uses_the_resolved_device(monkeypatch, no_cuda):
         pipelines.clear_cache()
 
     assert seen and seen[0]["device"] == "cpu", seen
-    assert runner.device == "cpu"
+    assert isinstance(runner, pipelines.StageRunner) and runner.device == "cpu"
+
+
+@pytest.fixture
+def fake_local_runner(monkeypatch):
+    """``build_local_runner`` replaced by a recorder: no real weights anywhere."""
+    from test_exports_contract import FakePipe
+
+    from ltx25_studio import local_runtime
+
+    calls = []
+
+    def build(**kwargs):
+        calls.append(kwargs)
+        return FakePipe()
+
+    monkeypatch.setattr(local_runtime, "build_local_runner", build)
+    monkeypatch.setattr(pipelines, "_base_pipeline", lambda **k: pytest.fail("StageRunner built"))
+    monkeypatch.delenv(config.ENV_MODEL_SNAPSHOT_DIR, raising=False)
+    monkeypatch.setattr(generate_module, "_GPU_DISPATCH", None)
+    pipelines.clear_cache()
+    return calls
+
+
+def test_generate_on_a_local_device_with_real_weights_uses_the_local_runner(
+    monkeypatch, no_cuda, tmp_path, fake_local_runner
+):
+    """The seam the UI uses: generate() -> default factory -> get_pipeline -> dispatch."""
+    from test_exports_contract import one_muxed_file_encoder
+
+    from ltx25_studio import preflight
+
+    gguf = tmp_path / "transformer-Q8_0.gguf"
+    gguf.write_bytes(b"")
+    monkeypatch.setenv(config.ENV_DEVICE, "cpu")
+    monkeypatch.setenv(config.ENV_TRANSFORMER_GGUF, str(gguf))
+    monkeypatch.setenv(config.ENV_RESIDENCY, "staged")
+
+    result = generate_module.generate(
+        mode="image_to_video",
+        seed=7,
+        width=64,
+        height=64,
+        num_frames=9,
+        encoder=one_muxed_file_encoder,
+        output_root=tmp_path / "out",
+        retention_bytes=10**9,
+        **inputs_for("image_to_video"),
+    )
+
+    assert result.output_path.is_file()
+    assert len(fake_local_runner) == 1, fake_local_runner
+    call = dict(fake_local_runner[0])
+    assert callable(call.pop("log"))
+    assert call == {
+        "kind": "condition",
+        "device": "cpu",
+        "dtype": "float32",
+        "snapshot_dir": preflight.snapshot_dir(),
+        "transformer_gguf": str(gguf.resolve()),
+        "residency": "staged",
+    }
+
+
+def test_mps_dispatch_uses_bf16_and_the_snapshot_transformer(
+    monkeypatch, no_cuda, fake_local_runner
+):
+    monkeypatch.setattr(device, "host_has_mps", lambda: True)
+    monkeypatch.setattr(device, "_MPS_SELF_TEST", _self_test())
+    monkeypatch.setenv(config.ENV_DEVICE, "mps")
+    monkeypatch.setenv(config.ENV_RESIDENCY, "resident")
+
+    pipelines.get_pipeline(pipeline="text2video")
+
+    call = fake_local_runner[0]
+    assert (call["kind"], call["device"], call["dtype"]) == ("text2video", "mps", "bfloat16")
+    assert call["transformer_gguf"] is None and call["residency"] == "resident"
+
+
+def test_an_explicit_mps_device_still_checks_numerics_before_the_local_runner(
+    monkeypatch, fake_local_runner
+):
+    monkeypatch.setattr(device, "_MPS_SELF_TEST", _self_test(sdpa=False))
+
+    with pytest.raises(device.MpsNumericsError):
+        pipelines.get_pipeline(pipeline="text2video", device="mps")
+    assert not fake_local_runner
+
+
+def test_cuda_never_dispatches_to_the_local_runner(monkeypatch, tmp_path):
+    from test_stage_graph_contract import install_fake_stack
+
+    from ltx25_studio import local_runtime
+
+    install_fake_stack(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        local_runtime, "build_local_runner", lambda **k: pytest.fail("CUDA reached local_runtime")
+    )
+    pipelines.clear_cache()
+    try:
+        runner = pipelines.get_pipeline(pipeline="condition", device="cuda")
+    finally:
+        pipelines.clear_cache()
+
+    assert isinstance(runner, pipelines.StageRunner) and runner.device == "cuda"
 
 
 @pytest.fixture

@@ -45,7 +45,7 @@ import sys
 from dataclasses import dataclass
 from types import MappingProxyType
 
-from . import model_files
+from . import local_runtime, model_files
 from .constraints import (
     DEFAULT_FRAME_RATE,
     DEFAULT_SPATIAL_COMPRESSION_RATIO,
@@ -966,14 +966,35 @@ def get_pipeline(*, pipeline: str = BASE_KIND, dtype=None, device: str | None = 
     With no ``device`` the process's resolved device is used, and a machine with
     no generation device (or an MPS torch that fails its self-test) is refused
     before anything is loaded -- never a silent full load on the CPU.
+
+    On mps/cpu with real weights the local runner (``local_runtime``) is
+    returned; a ``LTX25_MODEL_SNAPSHOT_DIR`` override keeps the resident
+    :class:`StageRunner`. CUDA is unchanged.
     """
     if pipeline in _CACHE:
         return _CACHE[pipeline]
 
-    if device is None:
-        from . import device as device_module
+    from . import device as device_module
 
+    if device is None:
         device = device_module.current().require_generation()
+    elif device == "mps":
+        device_module.require_mps_numerics()
+
+    if device in ("mps", "cpu") and _uses_local_runner():
+        from .config import load_config
+        from .preflight import snapshot_dir
+
+        runtime_config = load_config()
+        return local_runtime.build_local_runner(
+            kind=pipeline,
+            device=device,
+            dtype=dtype or device_module.weight_dtype_for(device, runtime_config),
+            snapshot_dir=snapshot_dir(),
+            transformer_gguf=runtime_config.transformer_gguf,
+            residency=runtime_config.residency,
+            log=_log().info,
+        )
 
     base = _base_pipeline(dtype=dtype, device=device)
     if pipeline == BASE_KIND:
@@ -1531,6 +1552,37 @@ def _dtype_label(dtype) -> str:
     return {"bfloat16": "bf16", "float32": "fp32", "float16": "fp16"}.get(name, name)
 
 
+def _uses_local_runner() -> bool:
+    """Real weights on a local device go to the local runner; a snapshot override does not."""
+    from .preflight import snapshot_override
+
+    return snapshot_override() is None
+
+
+def runner_summary(resolution, runtime_config) -> str:
+    """Which runner generation will use here, and where the transformer comes from."""
+    if resolution is None:
+        return "unknown (no device resolved)"
+    if resolution.device is None:
+        return "none (UI only)"
+    if resolution.device == "cuda":
+        return "StageRunner, the pipeline built at startup and resident on CUDA"
+    if not _uses_local_runner():
+        return (
+            f"StageRunner, resident on {resolution.device}; every component from "
+            f"{runtime_config.model_snapshot_dir} (LTX25_MODEL_SNAPSHOT_DIR)"
+        )
+    source = (
+        f"the GGUF file {runtime_config.transformer_gguf} (LTX25_TRANSFORMER_GGUF)"
+        if runtime_config.transformer_gguf
+        else "the pinned snapshot's safetensors"
+    )
+    return (
+        f"local runner, {runtime_config.residency} residency (LTX25_RESIDENCY), on "
+        f"{resolution.device}; transformer from {source}"
+    )
+
+
 def precision_summary(resolution) -> str:
     """What each component is loaded as, from the resolved configuration."""
     if resolution is None:
@@ -1616,6 +1668,7 @@ def startup_report(
         f"  config          : {runtime_config.describe()}",
         f"  device          : {resolution.describe() if resolution is not None else 'unknown'}",
         f"  precision       : {precision_summary(resolution)}",
+        f"  runner          : {runner_summary(resolution, runtime_config)}",
         f"  weights cached  : {found}/{expected_files} {unit}"
         + (f"  MISSING {len(missing_files)}" if missing_files else ""),
         f"  snapshot on disk: {snapshot} ({source}; download set "

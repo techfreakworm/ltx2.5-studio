@@ -948,7 +948,7 @@ def test_getting_a_pipeline_does_not_build_the_stage_2_parts(tmp_path, monkeypat
     snapshot.mkdir(parents=True)
     recorders = install_fake_stack(monkeypatch, snapshot)
 
-    pipelines.get_pipeline(device="cpu")
+    pipelines.get_pipeline(device="cuda")
 
     for name in ("LTX2LatentUpsamplerModel", "LTX2VideoDiffusionDecoderModel"):
         assert not recorders[name].calls, (

@@ -127,6 +127,36 @@ def test_the_mps_self_test_is_enforced_by_default(monkeypatch):
         config.load_config()
 
 
+def test_residency_defaults_to_staged_on_macos_and_resident_elsewhere(monkeypatch):
+    import sys
+
+    expected = "staged" if sys.platform == "darwin" else "resident"
+    assert config.load_config().residency == expected
+    for value in ("staged", "resident"):
+        monkeypatch.setenv(config.ENV_RESIDENCY, value)
+        assert config.load_config().residency == value
+    monkeypatch.setenv(config.ENV_RESIDENCY, "lazy")
+    with pytest.raises(config.ConfigError):
+        config.load_config()
+
+
+def test_a_gguf_transformer_is_optional_and_must_be_a_gguf_file(monkeypatch, tmp_path):
+    assert config.load_config().transformer_gguf is None
+
+    monkeypatch.setenv(config.ENV_TRANSFORMER_GGUF, str(tmp_path / "missing.gguf"))
+    with pytest.raises(config.ConfigError):
+        config.load_config()
+    other = tmp_path / "transformer.safetensors"
+    other.write_bytes(b"")
+    monkeypatch.setenv(config.ENV_TRANSFORMER_GGUF, str(other))
+    with pytest.raises(config.ConfigError):
+        config.load_config()
+    gguf = tmp_path / "transformer-Q8_0.gguf"
+    gguf.write_bytes(b"")
+    monkeypatch.setenv(config.ENV_TRANSFORMER_GGUF, str(gguf))
+    assert config.load_config().transformer_gguf == str(gguf.resolve())
+
+
 # --------------------------------------------------------------------------
 # the model-source override: optional, and validated loudly
 # --------------------------------------------------------------------------

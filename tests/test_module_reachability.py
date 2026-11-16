@@ -59,6 +59,9 @@ PLAN_MODULES = (
     "ltx25_studio.errors",
     "ltx25_studio.preflight",
     "ltx25_studio.zerogpu",
+    "ltx25_studio.device",
+    "ltx25_studio.local_runtime",
+    "ltx25_studio.memory",
     "ltx25_studio.constraints",
     "ltx25_studio.pipelines",
     "ltx25_studio.conditioning",
@@ -581,6 +584,11 @@ STARTUP_ONLY = {
         "bypassed offline by the injected pipeline_factory; exercised for real on the Space"
     ),
     "ltx25_studio.preflight": "startup resource and version checks, by definition",
+    "ltx25_studio.local_runtime": (
+        "imported by pipelines at module scope; runs only for a local mps/cpu generation with "
+        "real weights, which the offline probe cannot make"
+    ),
+    "ltx25_studio.memory": "the local runner's memory preflight; same reach as local_runtime",
 }
 
 

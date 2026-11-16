@@ -201,3 +201,53 @@ def test_the_app_logs_the_requested_size_value(monkeypatch, caplog):
 
     lines = [r.getMessage() for r in caplog.records if "spaces.GPU" in r.getMessage()]
     assert lines and "size=xlarge" in lines[0] and "180 s" in lines[0], lines
+
+
+# --------------------------------------------------------------------------
+# which runner a local device will use, and where the transformer comes from
+# --------------------------------------------------------------------------
+
+
+def _runner_line(monkeypatch, device_name):
+    monkeypatch.setattr(zerogpu, "host_has_cuda", lambda: device_name == "cuda")
+    monkeypatch.setattr(device, "host_has_mps", lambda: True)
+    monkeypatch.setenv(config.ENV_DEVICE, device_name)
+    runtime_config = config.load_config()
+    report = pipelines.startup_report(
+        runtime_config, missing_files=(), resolution=device.resolve(None, runtime_config)
+    )
+    return next(line for line in report.splitlines() if line.strip().startswith("runner"))
+
+
+def test_a_local_device_with_real_weights_reports_the_local_runner_and_its_gguf(
+    monkeypatch, tmp_path
+):
+    gguf = tmp_path / "transformer-Q8_0.gguf"
+    gguf.write_bytes(b"")
+    monkeypatch.setenv(config.ENV_TRANSFORMER_GGUF, str(gguf))
+    monkeypatch.setenv(config.ENV_RESIDENCY, "staged")
+
+    line = _runner_line(monkeypatch, "mps")
+
+    assert "local runner" in line and "staged" in line and str(gguf.resolve()) in line, line
+
+
+def test_a_local_device_without_gguf_reads_the_transformer_from_the_snapshot(monkeypatch):
+    line = _runner_line(monkeypatch, "cpu")
+
+    assert "local runner" in line and "snapshot" in line, line
+
+
+def test_a_snapshot_override_reports_the_resident_stage_runner(monkeypatch, tmp_path):
+    (tmp_path / "model_index.json").write_text("{}")
+    monkeypatch.setenv(config.ENV_MODEL_SNAPSHOT_DIR, str(tmp_path))
+
+    line = _runner_line(monkeypatch, "cpu")
+
+    assert "StageRunner" in line and str(tmp_path.resolve()) in line, line
+
+
+def test_cuda_reports_the_startup_built_stage_runner(monkeypatch):
+    line = _runner_line(monkeypatch, "cuda")
+
+    assert "StageRunner" in line and "CUDA" in line, line
