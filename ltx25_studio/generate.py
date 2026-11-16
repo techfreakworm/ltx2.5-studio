@@ -1518,11 +1518,13 @@ def _apply_loras(pipe, request: GenerationRequest):
                 source = entry.get("path") or entry.get("source")
                 label = _adapter_label(entry.get("source") or source)
                 weight = float(entry.get("weight", 1.0))
-                validated = entry.get("report") is not None
+                checked_at_gate = entry.get("report")
+                validated = checked_at_gate is not None
             else:
                 source = entry
                 label = _adapter_label(source)
                 weight = 1.0
+                checked_at_gate = None
                 validated = False
             if not validated:
                 max_bytes = None
@@ -1542,6 +1544,10 @@ def _apply_loras(pipe, request: GenerationRequest):
                     transformer=getattr(target, "transformer", None),
                     **_manifest_override(),
                 )
+            elif getattr(checked_at_gate, "shapes_checked", True) is False:
+                # Its 6.5 could not run at the gate (a snapshot override): it runs
+                # here, against the transformer, before anything is loaded.
+                _checked_live_shapes(source, target, label)
             # Checked like any other load, and outside apply_lora, which would
             # report a memory refusal as an unreadable file (review local-runtime-7).
             preflight_adapter = getattr(pipe, "preflight_adapter", None)
@@ -1572,6 +1578,18 @@ def _apply_loras(pipe, request: GenerationRequest):
         if callable(set_adapters):
             set_adapters([report.adapter_name for report in reports], weights)
     return tuple(reports)
+
+
+def _checked_live_shapes(source, target, label: str) -> None:
+    """Stage 6.5 against the live transformer, with the same refusal as at Validate."""
+    from .lora import validate as lora_validate
+
+    if not lora_validate.check_live_shapes(source, transformer=getattr(target, "transformer", None)):
+        logger.warning(
+            "LoRA %s: its per-module shapes could not be checked, at Validate or against the "
+            "transformer here; attaching it unchecked",
+            label,
+        )
 
 
 def _leftover_adapters(pipe) -> tuple[str, ...]:

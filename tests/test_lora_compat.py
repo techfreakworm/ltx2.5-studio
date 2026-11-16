@@ -341,6 +341,140 @@ def test_with_neither_manifest_nor_transformer_the_skip_is_said_out_loud(tmp_pat
 
 
 # --------------------------------------------------------------------------
+# F38 — a skipped 6.5 is run in the worker, against the live transformer
+#
+# With LTX25_MODEL_SNAPSHOT_DIR set the gate validates an adapter that came with
+# no report (scripts/local_generate.py --lora) without the pinned table and with
+# no transformer, so its 6.5 cannot run there. The report says so, and the worker
+# runs it against the transformer it is about to attach to, before attaching.
+# --------------------------------------------------------------------------
+
+
+def _snapshot_override(monkeypatch, tmp_path):
+    snapshot = tmp_path / "snapshot"
+    snapshot.mkdir()
+    (snapshot / "model_index.json").write_text("{}")
+    monkeypatch.setenv("LTX25_MODEL_SNAPSHOT_DIR", str(snapshot))
+
+
+def _live_pipe():
+    """The conftest pipeline over every manifest Linear at its real dims, and callable."""
+    import types
+
+    from conftest import FakePipeline
+
+    class Denoising(FakePipeline):
+        def __call__(self, **kwargs):
+            self.calls.append({"denoise": sorted(kwargs)})
+            return types.SimpleNamespace(frames=("frame",), audio=None)
+
+    real = manifest_dims()
+    return Denoising(transformer_paths=tuple(real), dims=real)
+
+
+def _generate_with_adapter(tmp_path, pipe, adapter):
+    from test_exports_contract import one_muxed_file_encoder
+
+    from ltx25_studio import generate as generate_module
+
+    return generate_module.generate(
+        mode="text_to_video",
+        prompt="p",
+        seed=7,
+        width=64,
+        height=64,
+        num_frames=9,
+        loras=({"source": str(adapter), "weight": 1.0},),
+        pipeline_factory=lambda **_: pipe,
+        encoder=one_muxed_file_encoder,
+        output_root=tmp_path / "out",
+        retention_bytes=10**9,
+    )
+
+
+def test_under_a_snapshot_override_a_wrong_dimension_adapter_is_refused_before_it_attaches(
+    tmp_path, monkeypatch
+):
+    _snapshot_override(monkeypatch, tmp_path)
+    pipe = _live_pipe()
+
+    with pytest.raises(_error("LoRADimensionError")) as caught:
+        _generate_with_adapter(tmp_path, pipe, wrong_dimension_adapter(tmp_path))
+
+    assert not [call for call in pipe.calls if "source" in call], "the adapter reached the loader"
+    assert not [call for call in pipe.calls if "denoise" in call], "the run was sampled"
+    assert (caught.value.expected, caught.value.actual) == (4096, 2048)
+
+
+def test_under_a_snapshot_override_an_adapter_that_fits_still_attaches(tmp_path, monkeypatch):
+    _snapshot_override(monkeypatch, tmp_path)
+
+    result = _generate_with_adapter(tmp_path, _live_pipe(), good_adapter(tmp_path))
+
+    ((_label, _weight, attached),) = result.record.adapters
+    assert attached > 0
+
+
+def test_with_the_pinned_table_the_worker_trusts_the_report_from_validate(tmp_path, monkeypatch):
+    """The UI's route: 6.5 ran against the pinned table, so nothing is repeated."""
+    monkeypatch.delenv("LTX25_MODEL_SNAPSHOT_DIR", raising=False)
+    checked = []
+    monkeypatch.setattr(
+        lora_validate, "check_live_shapes", lambda *a, **k: checked.append(a), raising=False
+    )
+
+    _generate_with_adapter(tmp_path, _live_pipe(), good_adapter(tmp_path))
+
+    assert checked == []
+
+
+def test_on_the_tiny_pipeline_with_the_override_a_wrong_dimension_adapter_never_loads(
+    tmp_path, monkeypatch
+):
+    """The brief's run, on the real tiny pipelines (FULL env): refused before the attach
+    with the dimension error, never at the attach with the loader's size mismatch."""
+    torch = pytest.importorskip("torch")
+    pytest.importorskip("peft")
+    pytest.importorskip("diffusers")
+    from safetensors.torch import save_file
+    from test_real_pipeline_tiny import _tiny_snapshot_cached, load_smoke, run_tiny
+
+    if not _tiny_snapshot_cached():
+        pytest.skip("the tiny checkpoint is not in the HF cache")
+    from diffusers.loaders.lora_pipeline import LTX2LoraLoaderMixin
+
+    tiny = load_smoke().tiny_stack(device="cpu")
+    name = "transformer_blocks.0.attn1.to_q"
+    module = tiny["base"].transformer.get_submodule(name)
+    wrong = module.in_features + 8
+    path = tmp_path / "wrong.safetensors"
+    save_file(
+        {
+            f"diffusion_model.{name}.lora_A.weight": torch.zeros(4, wrong),
+            f"diffusion_model.{name}.lora_B.weight": torch.zeros(module.out_features, 4),
+        },
+        str(path),
+        metadata={"model_version": "2.5.0"},
+    )
+    loads = []
+    original = LTX2LoraLoaderMixin.load_lora_weights
+
+    def spy(self, *args, **kwargs):
+        loads.append(args)
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(LTX2LoraLoaderMixin, "load_lora_weights", spy)
+
+    with pytest.raises(_error("LoRADimensionError")) as caught:
+        run_tiny(tiny, "text_to_video", tmp_path, loras=({"source": str(path), "weight": 1.0},))
+
+    assert loads == [], "the adapter reached the loader, which refused it with a size mismatch"
+    error = caught.value
+    assert (error.module, error.expected, error.actual) == (name, module.in_features, wrong)
+    assert error.__cause__ is None, "mapped from a loader failure, not refused by the check"
+
+
+# --------------------------------------------------------------------------
 # F54 — distillation adapters are flagged, not refused
 # --------------------------------------------------------------------------
 

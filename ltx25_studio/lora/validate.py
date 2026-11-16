@@ -42,7 +42,14 @@ from ..errors import (
     LoRATooLargeError,
     LoRAVersionError,
 )
-from .inspect import CONNECTOR_CONVENTIONS, KEY_PREFIXES, LoRAInspection, inspect_lora
+from .inspect import (
+    CONNECTOR_CONVENTIONS,
+    KEY_PREFIXES,
+    LoRAInspection,
+    _checked_entries,
+    inspect_lora,
+    read_safetensors_header,
+)
 from .keys import resolve_keys, split_suffix
 
 __all__ = [
@@ -60,6 +67,7 @@ __all__ = [
     "LoRAInContextNameError",
     "LoRAKeyNamingError",
     "LoRAValidation",
+    "check_live_shapes",
     "configured_max_bytes",
     "validate_lora",
 ]
@@ -164,6 +172,9 @@ class LoRAValidation:
     #: Set on the Hub route: the repo and the commit the file was fetched at.
     hub_repo: str | None = None
     hub_revision: str | None = None
+    #: False when stage 6.5 could not run (no shape table and no transformer); the
+    #: worker then runs it against the live transformer (:func:`check_live_shapes`).
+    shapes_checked: bool = True
 
     @property
     def rank(self) -> int | None:
@@ -386,8 +397,8 @@ def _dropped_module(key: str) -> str:
 
 def _check_dimensions(
     inspection: LoRAInspection, source: str, warnings: list[str], *, transformer, manifest
-) -> tuple[int, int, int]:
-    """Stage 6.5. Returns ``(targeted, resolved, reference size)``."""
+) -> tuple[int, int, int, bool]:
+    """Stage 6.5. Returns ``(targeted, resolved, reference size, whether it ran)``."""
     resolution = resolve_keys(inspection.keys)
     targeted = sorted(resolution.transformer)
     connector_prefixes = tuple(p for p, c in KEY_PREFIXES.items() if c in CONNECTOR_CONVENTIONS)
@@ -417,7 +428,7 @@ def _check_dimensions(
             "shape table was available to compare against. An adapter built for a different "
             "LTX model can still pass every header check."
         )
-        return targeted_count, 0, 0
+        return targeted_count, 0, 0, False
 
     for module in targeted:
         if module not in reference:
@@ -438,7 +449,7 @@ def _check_dimensions(
     missing = [module for module in targeted if module not in reference] + dropped
     resolved = targeted_count - len(missing)
     if not targeted_count or not missing:
-        return targeted_count, resolved, len(reference)
+        return targeted_count, resolved, len(reference), True
 
     resolved_fraction = resolved / targeted_count
     if resolved_fraction < MIN_RESOLVED_FRACTION:
@@ -455,7 +466,32 @@ def _check_dimensions(
         f"({resolved_fraction:.0%} resolved) are absent from this transformer and will not "
         f"receive the adapter: {', '.join(sorted(missing)[:5])}. {severity}."
     )
-    return targeted_count, resolved, len(reference)
+    return targeted_count, resolved, len(reference), True
+
+
+@dataclass(frozen=True)
+class _HeaderShapes:
+    """What stage 6.5 reads, taken from a header alone (the payload is not hashed)."""
+
+    keys: tuple[str, ...]
+    shapes: dict
+
+
+def check_live_shapes(source, *, transformer) -> bool:
+    """Stage 6.5 against a loaded transformer, from the adapter's header.
+
+    For a report whose own 6.5 could not run (``shapes_checked`` is False). Raises
+    what Validate raises; returns False when ``transformer`` has no Linear shapes
+    to compare with.
+    """
+    path = Path(source)
+    header, _declared = read_safetensors_header(path)
+    _metadata, entries = _checked_entries(header, source=str(path))
+    found = _HeaderShapes(
+        keys=tuple(entries),
+        shapes={name: (dtype, shape) for name, (dtype, shape, _start, _end) in entries.items()},
+    )
+    return _check_dimensions(found, str(path), [], transformer=transformer, manifest=None)[3]
 
 
 def _distillation_warning(path: Path, hub, ranks, resolved: int, reference_size: int):
@@ -518,7 +554,7 @@ def validate_lora(
 
     _check_pairing(_pairs(inspection), label)  # stage 6
     _check_factor_names(inspection, label)
-    targeted, resolved, reference_size = _check_dimensions(  # stage 6.5
+    targeted, resolved, reference_size, shapes_checked = _check_dimensions(  # stage 6.5
         inspection, label, warnings, transformer=transformer, manifest=manifest
     )
     ranks = _ranks(inspection)
@@ -537,4 +573,5 @@ def validate_lora(
         ranks=ranks,
         hub_repo=getattr(hub, "repo_id", None),
         hub_revision=getattr(hub, "revision", None),
+        shapes_checked=shapes_checked,
     )
