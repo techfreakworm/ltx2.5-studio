@@ -1,8 +1,10 @@
 """The local runner: the diffusers LTX-2.5 pipelines on mps/cpu, with staged residency.
 
-:class:`LocalStageRunner` is call-compatible with ``pipelines.StageRunner``
-(``runner(enable_stage_2=False, progress=None, **kwargs)``, ``.pipeline``,
-``.kind``), so ``generate.py`` drives it exactly as it drives the Space runner.
+:class:`LocalStageRunner` IS a ``pipelines.StageRunner``: the stage graph (the
+decode policy, stage 2 and its refusals, the audio conditioning, the clip
+variation, the run facts) is one piece of code, and this module supplies only
+residency, through its one seam (``_around_call``). ``generate.py`` drives both
+runners identically.
 
 What differs from the Space path, and why:
 
@@ -20,8 +22,10 @@ What differs from the Space path, and why:
   applied to the connectors once and to the transformer after every load.
 * **The image-conditioning CRF is set explicitly**, because upstream derives it
   from the text encoder, which is absent during a staged denoise.
-* **Memory preflight** before every heavy load and before the denoise.
-* No stage 2: its decoder's attention kernel exists only for CUDA.
+* **Memory preflight** before every heavy load and before each denoise.
+* Stage 2 and the diffusion decoder follow the Space runner's rules: off CUDA
+  the decoder runs on the CPU, at very small sizes only
+  (``device.check_stage_2_size``, ``pipelines.check_cpu_decoder_size``).
 
 Heavy imports happen inside functions, so the package stays importable without
 torch.
@@ -56,7 +60,6 @@ __all__ = [
     "LocalFilesMissingError",
     "LocalStageRunner",
     "PlanStep",
-    "StageTwoUnavailableError",
     "TransformerLoadError",
     "UnsupportedLocalDeviceError",
     "build_local_runner",
@@ -118,18 +121,6 @@ class UnsupportedLocalDeviceError(LTXStudioError):
         super().__init__(
             f"The local runner works on 'mps' (Apple GPU) or 'cpu', not {device!r}.{detail} "
             f"On an NVIDIA GPU (cuda) the app uses its regular pipeline, the one the Space runs."
-        )
-
-
-class StageTwoUnavailableError(ConstraintError):
-    """Stage 2 was requested on a device that cannot run its decoder."""
-
-    def __init__(self, *, device):
-        self.device = device
-        super().__init__(
-            f"Stage 2 (the upscaling refinement pass) cannot run on this machine ({device}): its "
-            f"diffusion decoder needs an attention kernel that exists only for NVIDIA GPUs (CUDA). "
-            f"Turn stage 2 off for local runs; stage 2 is verified on the GPU Space."
         )
 
 
@@ -811,17 +802,6 @@ def _load_need_gb(file_gb: float, spike: float, target_bytes: int, stored_bytes:
 # --------------------------------------------------------------------------
 
 
-def _merged(kwargs: dict, *extras: dict) -> dict:
-    """``f(**kwargs, **extra)`` semantics: a duplicate keyword is a TypeError, not an override."""
-    call = dict(kwargs)
-    for extra in extras:
-        clash = sorted(call.keys() & extra.keys())
-        if clash:
-            raise TypeError(f"got multiple values for keyword argument {clash[0]!r}")
-        call.update(extra)
-    return call
-
-
 class _LocalWeights:
     """The small set, the staged pair, the embedding cache: shared by both kinds."""
 
@@ -845,6 +825,8 @@ class _LocalWeights:
         self.timings: list[dict] = []
         self._adapters = None
         self._embeddings: OrderedDict = OrderedDict()
+        #: The stage-2 parts and the diffusion decoder, built on first use.
+        self.parts: dict = {}
         sizes = weight_sizes(self.snapshot_dir, self.transformer_gguf)
         self._gb = {name: size / memory.GB for name, (size, _) in sizes.items()}
 
@@ -1124,6 +1106,7 @@ class _LocalWeights:
         self._adapters = None
         self._embeddings.clear()
         self.pipelines.clear()
+        self.parts.clear()
         self._free()
         small = [
             p
@@ -1230,19 +1213,44 @@ def _call_defaults(pipeline) -> dict:
 # --------------------------------------------------------------------------
 
 
-class LocalStageRunner:
-    """Call-compatible with ``pipelines.StageRunner``, for mps and cpu."""
+class LocalStageRunner(pipelines.StageRunner):
+    """``pipelines.StageRunner`` on mps/cpu: the same stage graph, with staged residency.
+
+    Everything about the graph -- the decode policy, stage 2 and its size
+    refusals, the audio conditioning, the clip variation, the run facts -- is
+    the Space runner's own code. This class supplies residency through the one
+    seam (:meth:`_around_call`) that wraps every pipeline call, and preflights
+    the clip encode and the stage-2 loads.
+    """
 
     def __init__(self, weights: _LocalWeights, kind: str):
+        pipeline = weights.pipeline_for(kind)
         self._weights = weights
-        self.kind = kind
-        self.pipeline = weights.pipeline_for(kind)
-        self._audio_pipeline = None
-        self.last_run: dict | None = None
-
-    @property
-    def device(self) -> str:
-        return self._weights.device
+        super().__init__(
+            pipeline,
+            kind=kind,
+            device=weights.device,
+            stage_2_factory=self._loads(
+                pipelines._STAGE_2_CACHE_KEY,
+                ("latent_upsampler", "diffusion_decoder"),
+                lambda: pipelines._stage_2_parts(
+                    weights.pipelines[pipelines.BASE_KIND],
+                    dtype=weights.dtype,
+                    device=weights.device,
+                    cache=weights.parts,
+                ),
+            ),
+            decoder_factory=self._loads(
+                pipelines._DECODER_CACHE_KEY,
+                ("diffusion_decoder",),
+                lambda: pipelines._decoder_part(
+                    weights.pipelines[pipelines.BASE_KIND],
+                    dtype=weights.dtype,
+                    device=weights.device,
+                    cache=weights.parts,
+                ),
+            ),
+        )
 
     @property
     def residency(self) -> str:
@@ -1260,71 +1268,87 @@ class LocalStageRunner:
         """Check attaching the adapter at ``source`` fits, before it is loaded."""
         self._weights.preflight_adapter(source)
 
-    def __call__(self, *, enable_stage_2: bool = False, progress=None, **kwargs):
-        weights = self._weights
-        if enable_stage_2:
-            raise StageTwoUnavailableError(device=weights.device)
+    # -- the seam ----------------------------------------------------------
+
+    @contextmanager
+    def _around_call(self, pipeline, call: dict, *, stage: str):
+        """Make the call's components resident, swap the prompt for embeddings, preflight.
+
+        A denoise, in this order: the CRF on every condition lacking one;
+        staged, the embedding swap (a cache hit for stage 2, so the text encoder
+        is not reloaded and ``prompt`` never comes back) and the transformer made
+        resident; the memory preflight; then the call, under ``inference_mode``.
+        A stage-2 part (the upsampler, the decoder) runs under the same guards.
+        """
         import torch
 
-        kwargs = dict(pipelines._with_real_conditions(kwargs))
-        audio_noise_level = kwargs.pop("audio_noise_level", None)
-        variation = kwargs.pop("video_variation", None)
-        policy = kwargs.pop("video_decoder", None) or "auto"
-        if policy == "diffusion":
-            from .errors import DecoderUnavailableError
-
-            raise DecoderUnavailableError(reason=pipelines.OFF_CUDA_DECODER_NOTE)
-        self.last_run = pipelines.run_facts(
-            stage_2=False,
-            decoder="conv",
-            why_conv=pipelines.OFF_CUDA_DECODER_NOTE if policy == "auto" else None,
-            policy=policy,
-            audio_noise_level=audio_noise_level,
-        )
-        kwargs = weights.with_explicit_crf(kwargs)
-        first = {}
-        if variation is not None:
-            # Encoded with only the small set resident, before either big model loads.
-            width, height, frames = kwargs["width"], kwargs["height"], kwargs["num_frames"]
-            weights._preflight(
-                f"encode clip {width}x{height}x{frames}",
-                memory.activation_estimate_gb(
-                    width, height, frames, dtype_bytes=weights.dtype_bytes
-                ),
-            )
-            with weights.phase("encode clip"), weights.freed_on_failure(), torch.inference_mode():
-                first = pipelines.variation_kwargs(
-                    self.pipeline,
-                    variation.source,
-                    variation.level,
-                    height=height,
-                    width=width,
-                    num_frames=frames,
-                )
-        call = _merged(kwargs, pipelines.distilled_kwargs(), pipelines._sampling_kwargs(progress))
-        call.update(first)  # the clip's latents, level and schedule tail win
+        weights = self._weights
+        if stage in ("upsample", "decode"):
+            with weights.phase(stage), weights.freed_on_failure(), torch.inference_mode():
+                yield call
+            return
+        call = weights.with_explicit_crf(call)
         if weights.residency == STAGED:
-            call = weights.prompt_embeddings(self.pipeline, call)
+            call = weights.prompt_embeddings(pipeline, call)
             weights.ensure_transformer()
-        pipeline = self.pipeline
-        if audio_noise_level is not None:
-            from . import audio_conditioning
+        weights.preflight_denoise(pipeline, call)
+        label = "denoise and decode" if stage == "single" else f"denoise ({stage})"
+        with weights.phase(label), weights.freed_on_failure(), torch.inference_mode():
+            yield call
 
-            # After the transformer is resident: the derived pipeline syncs to it.
-            self._audio_pipeline = audio_conditioning.audio_pipeline(
-                self.pipeline, audio_noise_level, derived=self._audio_pipeline
-            )
+    def _pipeline_for(self, audio_noise_level):
+        pipeline = super()._pipeline_for(audio_noise_level)
+        if pipeline is not self.pipeline:
             # Registered so a release detaches the staged pair from it too;
             # otherwise it would keep a released transformer alive.
-            weights.pipelines[f"{self.kind}+audio"] = self._audio_pipeline
-            pipeline = self._audio_pipeline
-        weights.preflight_denoise(pipeline, call)
-        with (
-            weights.phase("denoise and decode"),
-            weights.freed_on_failure(),
-            torch.inference_mode(),
-        ):
-            return pipeline(**call)
+            self._weights.pipelines[f"{self.kind}+audio"] = pipeline
+        return pipeline
+
+    def _variation(self, frames, level, kwargs) -> dict:
+        """Encode the clip under a preflight, before the denoise makes anything resident."""
+        import torch
+
+        weights = self._weights
+        width, height, count = kwargs["width"], kwargs["height"], kwargs["num_frames"]
+        weights._preflight(
+            f"encode clip {width}x{height}x{count}",
+            memory.activation_estimate_gb(width, height, count, dtype_bytes=weights.dtype_bytes),
+        )
+        with weights.phase("encode clip"), weights.freed_on_failure(), torch.inference_mode():
+            return super()._variation(frames, level, kwargs)
+
+    def _loads(self, key, components, build):
+        """A stage-2 factory that preflights what it is about to load."""
+        weights = self._weights
+
+        def factory():
+            if key not in weights.parts:
+                need = sum(
+                    _part_need_gb(name, weights.dtype_bytes)
+                    for name in components
+                    if name != "diffusion_decoder"
+                    or pipelines._DECODER_CACHE_KEY not in weights.parts
+                )
+                weights._preflight(f"load {' and '.join(components)}", need)
+            with weights.phase("load stage-2 parts"), weights.freed_on_failure():
+                return build()
+
+        return factory
+
+
+def _part_need_gb(component: str, dtype_bytes: int) -> float:
+    """What loading a stage-2 component commits, from its pinned files on disk."""
+    from . import preflight
+
+    folder = Path(preflight.component_dir(component))
+    files = sorted(folder.glob(f"*{_WEIGHTS_SUFFIX}"))
+    file_gb = pipelines._weight_bytes(folder) / memory.GB
+    return _load_need_gb(
+        file_gb,
+        memory.load_spike_factor("safetensors"),
+        dtype_bytes,
+        _tag_bytes(_files_dtype(files)),
+    )
 
 
 # --------------------------------------------------------------------------

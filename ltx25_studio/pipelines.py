@@ -39,13 +39,14 @@ the whole package -- stays importable with no GPU, no weights and no diffusers.
 
 from __future__ import annotations
 
+import contextlib
 import inspect
 import os
 import sys
 from dataclasses import dataclass
 from types import MappingProxyType
 
-from . import local_runtime, model_files
+from . import model_files
 from .constraints import (
     DEFAULT_FRAME_RATE,
     DEFAULT_SPATIAL_COMPRESSION_RATIO,
@@ -850,7 +851,7 @@ def _base_pipeline(*, dtype=None, device: str | None = None, quantization: str |
     return built
 
 
-def _stage_2_parts(base, *, dtype=None, device: str | None = None):
+def _stage_2_parts(base, *, dtype=None, device: str | None = None, cache=None):
     """Build the latent upsampler and the diffusion decoder, once, sharing the base.
 
     **The diffusion decoder is never a pipeline component.** ``model_index.json``
@@ -865,8 +866,9 @@ def _stage_2_parts(base, *, dtype=None, device: str | None = None):
     the two model checkpoints themselves. The decoder is the same object a
     single-stage diffusion decode uses (:func:`_decoder_part`).
     """
-    if _STAGE_2_CACHE_KEY in _CACHE:
-        return _CACHE[_STAGE_2_CACHE_KEY]
+    cache = _CACHE if cache is None else cache
+    if _STAGE_2_CACHE_KEY in cache:
+        return cache[_STAGE_2_CACHE_KEY]
     try:
         from diffusers import LTX2LatentUpsamplePipeline
         from diffusers.pipelines.ltx2.latent_upsampler import LTX2LatentUpsamplerModel
@@ -876,7 +878,7 @@ def _stage_2_parts(base, *, dtype=None, device: str | None = None):
             reason=f"the stage-2 classes are not importable ({exc}).",
         ) from exc
 
-    decoder = _decoder_part(base, dtype=dtype, device=device)
+    decoder = _decoder_part(base, dtype=dtype, device=device, cache=cache)
     upsampler_model = _load_part(
         LTX2LatentUpsamplerModel, "latent_upsampler", dtype=dtype, device=device
     )
@@ -887,7 +889,7 @@ def _stage_2_parts(base, *, dtype=None, device: str | None = None):
     upsampler = LTX2LatentUpsamplePipeline(vae=base.vae, latent_upsampler=upsampler_model)
 
     parts = (upsampler, decoder)
-    _CACHE[_STAGE_2_CACHE_KEY] = parts
+    cache[_STAGE_2_CACHE_KEY] = parts
     return parts
 
 
@@ -950,7 +952,7 @@ def _require_exact_load(component: str, info: dict) -> None:
         _log().info("%s: ignored the expected extra key(s) %s", component, ", ".join(ignored))
 
 
-def _decoder_part(base, *, dtype=None, device: str | None = None):
+def _decoder_part(base, *, dtype=None, device: str | None = None, cache=None):
     """The diffusion decoder pipeline, built once and shared by every decode.
 
     Off CUDA the decoder keeps its default FlexAttention processor and stays on
@@ -958,8 +960,9 @@ def _decoder_part(base, *, dtype=None, device: str | None = None):
     That path is dense, so its size is bounded (``device.check_stage_2_size``,
     and the single-stage decode policy).
     """
-    if _DECODER_CACHE_KEY in _CACHE:
-        return _CACHE[_DECODER_CACHE_KEY]
+    cache = _CACHE if cache is None else cache
+    if _DECODER_CACHE_KEY in cache:
+        return cache[_DECODER_CACHE_KEY]
     try:
         from diffusers import LTX2VideoDiffusionDecoderModel
         from diffusers.models.autoencoders.ltx2_diffusion_decoder import (
@@ -1015,7 +1018,7 @@ def _decoder_part(base, *, dtype=None, device: str | None = None):
     decoder = LTX2VideoDiffusionDecodePipeline(
         diffusion_decoder=decoder_model, scheduler=base.scheduler
     )
-    _CACHE[_DECODER_CACHE_KEY] = decoder
+    cache[_DECODER_CACHE_KEY] = decoder
     return decoder
 
 
@@ -1572,19 +1575,26 @@ class StageRunner:
         audio_noise_level = kwargs.pop("audio_noise_level", None)
         policy = kwargs.pop("video_decoder", None) or "auto"
         variation = kwargs.pop("video_variation", None)
-        pipeline, audio_kwargs = self._pipeline_for(audio_noise_level)
-        kwargs.update(audio_kwargs)
+        # A real condition pipeline is swapped for its audio-conditioned
+        # derivative per call (see _pipeline_for); a stand-in in the offline
+        # gate is handed the level, and the clip, as given.
+        derives = self._derives_audio_pipeline()
+        if audio_noise_level is not None and not derives:
+            kwargs["audio_noise_level"] = audio_noise_level
+        level = audio_noise_level if derives else None
+
+        def call(stage, *parts):
+            return self._call(stage, _merged(*parts), level)
+
         self.last_run = None
         # A clip variation replaces the first denoise's start: the clip's latents
         # at its level and the schedule's tail, merged last so they win.
         first = {}
         if variation is not None:
-            from . import audio_conditioning
-
-            if audio_conditioning.is_condition_pipeline(self.pipeline):
+            if derives:
                 first = self._variation(variation.source, variation.level, kwargs)
             else:
-                first = {"video_variation": variation}  # a stand-in takes it as given
+                first = {"video_variation": variation}
         if not enable_stage_2:
             decoder, why_conv = self._single_stage_decoder(policy, kwargs)
             self.last_run = run_facts(
@@ -1598,12 +1608,8 @@ class StageRunner:
                 # The distilled recipe applies here too. It used to apply ONLY
                 # on the stage-2 path, which is how eleven of twelve host runs
                 # were generated with a linear schedule and SFT guidance.
-                return pipeline(
-                    **_merged(kwargs, distilled_kwargs(), _sampling_kwargs(progress), first)
-                )
-            single = pipeline(
-                **_merged(kwargs, stage_1_kwargs(), _sampling_kwargs(progress), first)
-            )
+                return call("single", kwargs, distilled_kwargs(), _sampling_kwargs(progress), first)
+            single = call("single", kwargs, stage_1_kwargs(), _sampling_kwargs(progress), first)
             return self._diffusion_decoded(single, kwargs, progress)
         from . import device as device_module
 
@@ -1620,28 +1626,31 @@ class StageRunner:
             stage_2=True,
         )
 
-        stage_1 = pipeline(
-            **_merged(
-                kwargs, stage_1_kwargs(), _sampling_kwargs(progress, index=1, passes=2), first
-            )
+        stage_1 = call(
+            "stage 1",
+            kwargs,
+            stage_1_kwargs(),
+            _sampling_kwargs(progress, index=1, passes=2),
+            first,
         )
         if progress is not None:
             progress.upscaling()
-        upsampled = _latents_of(self.upsampler(**upsample_kwargs(_latents_of(stage_1))))
+        upsampled = _latents_of(
+            self._call_part("upsample", self.upsampler, upsample_kwargs(_latents_of(stage_1)))
+        )
         # Stage 2's own values win: the audio-input modes already carry
         # noise_scale and audio_latents in the request.
-        stage_2 = pipeline(
-            **_merged(
-                {k: v for k, v in kwargs.items() if k not in STAGE_2_STRIPPED_KEYS},
-                stage_2_geometry(
-                    upsampled,
-                    kind=self.kind,
-                    spatial_ratio=self._ratio("spatial"),
-                    temporal_ratio=self._ratio("temporal"),
-                ),
-                stage_2_kwargs(upsampled, audio_latents=_audio_of(stage_1)),
-                _sampling_kwargs(progress, index=2, passes=2),
-            )
+        stage_2 = call(
+            "stage 2",
+            {k: v for k, v in kwargs.items() if k not in STAGE_2_STRIPPED_KEYS},
+            stage_2_geometry(
+                upsampled,
+                kind=self.kind,
+                spatial_ratio=self._ratio("spatial"),
+                temporal_ratio=self._ratio("temporal"),
+            ),
+            stage_2_kwargs(upsampled, audio_latents=_audio_of(stage_1)),
+            _sampling_kwargs(progress, index=2, passes=2),
         )
         self.last_run = run_facts(
             stage_2=True,
@@ -1670,26 +1679,57 @@ class StageRunner:
         latents, generator = _latents_of(staged), kwargs.get("generator")
         if self.device == "mps":
             latents, generator = _for_the_cpu_decoder(latents, generator)
-        decoded = self.decoder(**decode_kwargs(latents, generator=generator))
+        decoded = self._call_part(
+            "decode", self.decoder, decode_kwargs(latents, generator=generator)
+        )
         return self._with_audio(decoded, staged)
 
-    def _pipeline_for(self, audio_noise_level):
-        """The pipeline for this call, and any kwargs it must also be given.
+    # -- the one seam (issue F60) -------------------------------------------
 
-        With an audio level, a real condition pipeline is swapped for its
-        audio-conditioned derivative (shared modules); a stand-in in the
-        offline gate is handed the level instead.
+    @contextlib.contextmanager
+    def _around_call(self, pipeline, call: dict, *, stage: str):
+        """THE seam: wraps every pipeline call and yields the kwargs it is made with.
+
+        ``stage`` is ``"single"``, ``"stage 1"`` or ``"stage 2"`` for a denoise
+        (``pipeline`` is then ``self.pipeline``, for encoding and estimates; the
+        pipeline to call is resolved after the seam, inside it), or
+        ``"upsample"`` / ``"decode"`` for a stage-2 part (``pipeline`` is that
+        part). An override may replace the kwargs and make components resident
+        or release them: the local runner supplies its residency here. The
+        Space runner needs nothing.
         """
-        if audio_noise_level is None:
-            return self.pipeline, {}
+        yield call
+
+    def _call(self, stage: str, call: dict, audio_noise_level):
+        """One denoise through :meth:`_around_call`."""
+        with self._around_call(self.pipeline, call, stage=stage) as prepared:
+            return self._pipeline_for(audio_noise_level)(**prepared)
+
+    def _call_part(self, stage: str, part, call: dict):
+        """One stage-2 part (the upsampler, the decoder) through :meth:`_around_call`."""
+        with self._around_call(part, call, stage=stage) as prepared:
+            return part(**prepared)
+
+    def _derives_audio_pipeline(self) -> bool:
+        """True when an audio level is honoured by deriving a pipeline (a real one)."""
         from . import audio_conditioning
 
-        if not audio_conditioning.is_condition_pipeline(self.pipeline):
-            return self.pipeline, {"audio_noise_level": audio_noise_level}
+        return audio_conditioning.is_condition_pipeline(self.pipeline)
+
+    def _pipeline_for(self, audio_noise_level):
+        """The pipeline to call: with an audio level, the audio-conditioned derivative.
+
+        Derived after the seam has made components resident, so the modules it
+        shares are the ones the call will use.
+        """
+        if audio_noise_level is None:
+            return self.pipeline
+        from . import audio_conditioning
+
         self._audio_pipeline = audio_conditioning.audio_pipeline(
             self.pipeline, audio_noise_level, derived=self._audio_pipeline
         )
-        return self._audio_pipeline, {}
+        return self._audio_pipeline
 
     def _ratio(self, axis: str) -> int:
         """The VAE's compression ratio on ``axis``, read off the pipeline."""
@@ -2175,3 +2215,8 @@ def startup_report(
 def clear_cache() -> None:
     """Drop cached pipelines. Used by tests and by the local smoke tier."""
     _CACHE.clear()
+
+
+# Last: local_runtime subclasses StageRunner, so it is imported once that exists
+# (either import order then works).
+from . import local_runtime  # noqa: E402

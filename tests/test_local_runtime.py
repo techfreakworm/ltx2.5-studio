@@ -620,12 +620,14 @@ def test_staged_and_resident_runs_recompress_the_image_at_the_same_crf(tmp_path,
 # --------------------------------------------------------------------------
 
 
-def test_stage_2_is_refused_in_plain_language():
+def test_a_real_size_stage_2_is_refused_before_anything_loads():
+    """Off CUDA the stage-2 decoder runs on the CPU, at very small sizes only."""
+    from ltx25_studio.device import StageTwoNeedsCudaError
+
     runner = _runner("text2video", "staged")
-    with pytest.raises(local_runtime.StageTwoUnavailableError) as caught:
-        runner(enable_stage_2=True, prompt=PROMPT, width=SIZE, height=SIZE, num_frames=FRAMES)
-    message = str(caught.value)
-    assert "CUDA" in message and "Space" in message
+    with pytest.raises(StageTwoNeedsCudaError) as caught:
+        runner(enable_stage_2=True, prompt=PROMPT, width=704, height=480, num_frames=121)
+    assert "CUDA" in str(caught.value)
     assert runner.pipeline.text_encoder is None and runner.pipeline.transformer is None
 
 
@@ -1390,3 +1392,246 @@ def test_a_failed_resident_build_releases_what_it_loaded(monkeypatch):
 
     assert frees
     assert built and built[0]() is None, "the failed build kept the transformer alive"
+
+
+# --------------------------------------------------------------------------
+# one stage graph: the SAME tests against the Space runner and the local runner
+#
+# The local runner is a pipelines.StageRunner that supplies residency through
+# its one seam, so the decode policy (F07), stage 2 and its refusal (F08), the
+# audio conditioning (F09), the clip variation (mode 04) and the run record (R)
+# are one piece of code. Each behaviour runs through generate() on the tiny
+# checkpoint, on the CPU, for the Space runner and the local runner staged and
+# resident.
+# --------------------------------------------------------------------------
+
+RUNNERS = ("space", "staged", "resident")
+
+
+@pytest.fixture(scope="module")
+def composite(tmp_path_factory):
+    """The tiny checkpoint plus tiny stage-2 models, as one snapshot directory."""
+    _torch()
+    pytest.importorskip("diffusers")
+    from test_real_pipeline_tiny import load_smoke
+
+    path, missing = load_smoke().composite_snapshot(
+        tiny_snapshot(), tmp_path_factory.mktemp("composite") / "snapshot", fetch=False
+    )
+    if missing:
+        pytest.skip(missing)
+    return path
+
+
+def _factory_for(kind, composite, monkeypatch):
+    if kind == "space":
+        from test_real_pipeline_tiny import load_smoke
+
+        stack = load_smoke().tiny_stack(device="cpu")
+        # The pre-dispatch decoder checks read the decoder's config from here.
+        monkeypatch.setenv("LTX25_MODEL_SNAPSHOT_DIR", str(stack["snapshot"]))
+        return lambda *, pipeline, **_: stack[pipeline]
+    # The stage-2 parts resolve through preflight.component_dir.
+    monkeypatch.setenv("LTX25_MODEL_SNAPSHOT_DIR", str(composite))
+
+    def factory(*, pipeline, **_):
+        runner = local_runtime.build_local_runner(
+            kind=pipeline, device="cpu", dtype="float32", snapshot_dir=composite, residency=kind
+        )
+        install_tiny_audio_encode_shim(runner.pipeline.audio_vae)
+        return runner
+
+    return factory
+
+
+def _through_generate(kind, composite, monkeypatch, tmp_path, mode, **fields):
+    from test_real_pipeline_tiny import load_smoke
+
+    from ltx25_studio import generate as generate_module
+
+    media = tmp_path / "media"
+    media.mkdir(exist_ok=True)
+    request = dict(mode=mode, seed=SEED, width=SIZE, height=SIZE, num_frames=FRAMES)
+    request.update(
+        load_smoke()._media_for(
+            mode, media, fields.get("width", SIZE), fields.get("num_frames", FRAMES)
+        )
+    )
+    request.update(fields)
+    return generate_module.generate(
+        **request,
+        pipeline_factory=_factory_for(kind, composite, monkeypatch),
+        output_root=tmp_path / "out",
+        retention_bytes=10**12,
+    )
+
+
+@pytest.fixture
+def sigmas_seen(monkeypatch):
+    """Per transformer call, on every runner: the video and the audio sigma."""
+    _torch()
+    pytest.importorskip("diffusers")
+    from diffusers import LTX2VideoTransformer3DModel
+
+    seen = []
+    forward = LTX2VideoTransformer3DModel.forward
+
+    def spy(self, *args, **kwargs):
+        seen.append(
+            (
+                float(kwargs["sigma"].flatten()[0]) / 1000.0,
+                float(kwargs["audio_sigma"].flatten()[0]) / 1000.0,
+            )
+        )
+        return forward(self, *args, **kwargs)
+
+    monkeypatch.setattr(LTX2VideoTransformer3DModel, "forward", spy)
+    return seen
+
+
+@pytest.mark.parametrize("kind", RUNNERS)
+def test_auto_decodes_with_conv_off_cuda_on_every_runner(kind, composite, monkeypatch, tmp_path):
+    result = _through_generate(
+        kind, composite, monkeypatch, tmp_path, "text_to_video", prompt=PROMPT
+    )
+
+    record = result.record
+    assert (record.decoder, record.stage_2) == ("conv", False)
+    assert (record.width, record.height, record.frames) == (SIZE, SIZE, FRAMES)
+    assert any("NVIDIA" in note for note in result.warnings), result.warnings
+
+
+@pytest.mark.parametrize("kind", RUNNERS)
+def test_an_explicit_diffusion_decode_runs_at_the_cpu_decoders_size_on_every_runner(
+    kind, composite, monkeypatch, tmp_path
+):
+    result = _through_generate(
+        kind,
+        composite,
+        monkeypatch,
+        tmp_path,
+        "text_to_audio_video",
+        prompt=PROMPT,
+        width=128,
+        height=128,
+        decoder="diffusion",
+    )
+
+    assert result.record.decoder == "diffusion"
+    assert (result.record.width, result.record.height) == (128, 128)
+
+
+@pytest.mark.parametrize("kind", RUNNERS)
+def test_stage_2_runs_at_tiny_size_and_doubles_it_on_every_runner(
+    kind, composite, monkeypatch, tmp_path, sigmas_seen
+):
+    from ltx25_studio import pipelines
+
+    result = _through_generate(
+        kind, composite, monkeypatch, tmp_path, "image_to_video", enable_stage_2=True
+    )
+
+    record = result.record
+    assert (record.stage_2, record.decoder) == (True, "diffusion")
+    assert (record.width, record.height) == (2 * SIZE, 2 * SIZE)
+    video = [video for video, _audio in sigmas_seen]
+    assert video == pytest.approx(
+        list(pipelines.DISTILLED_SIGMA_VALUES) + list(pipelines.STAGE_2_DISTILLED_SIGMA_VALUES)
+    )
+
+
+@pytest.mark.parametrize("kind", RUNNERS)
+def test_stage_2_at_a_real_size_is_refused_on_every_runner(kind, composite, monkeypatch):
+    from ltx25_studio.device import StageTwoNeedsCudaError
+
+    runner = _factory_for(kind, composite, monkeypatch)(pipeline="text2video")
+    with pytest.raises(StageTwoNeedsCudaError):
+        runner(enable_stage_2=True, prompt=PROMPT, width=704, height=480, num_frames=121)
+
+
+@pytest.mark.parametrize("kind", RUNNERS)
+def test_audio_to_video_holds_the_audio_frozen_on_every_runner(
+    kind, composite, monkeypatch, tmp_path, sigmas_seen
+):
+    from ltx25_studio import pipelines
+
+    result = _through_generate(kind, composite, monkeypatch, tmp_path, "audio_to_video")
+
+    assert [audio for _video, audio in sigmas_seen] == [0.0] * len(sigmas_seen)
+    assert [video for video, _audio in sigmas_seen] == pytest.approx(
+        list(pipelines.DISTILLED_SIGMA_VALUES)
+    )
+    assert result.record.audio_level == 0.0
+
+
+@pytest.mark.parametrize("kind", RUNNERS)
+def test_audio_to_audio_varies_the_audio_at_its_level_on_every_runner(
+    kind, composite, monkeypatch, tmp_path, sigmas_seen
+):
+    from ltx25_studio import audio_conditioning, pipelines
+
+    result = _through_generate(
+        kind, composite, monkeypatch, tmp_path, "audio_to_audio", noise_scale=0.8
+    )
+
+    level = 0.725
+    assert [audio for _video, audio in sigmas_seen] == pytest.approx(
+        audio_conditioning.audio_sigmas(pipelines.DISTILLED_SIGMA_VALUES, level)
+    )
+    record = result.record
+    assert (record.audio_level, record.decoder, record.stage_2) == (level, "conv", False)
+    assert any("moderately (level 0.73)" in note for note in result.warnings), result.warnings
+
+
+@pytest.mark.parametrize("kind", RUNNERS)
+def test_a_clip_variation_denoises_the_tail_from_its_level_on_every_runner(
+    kind, composite, monkeypatch, tmp_path, sigmas_seen
+):
+    from ltx25_studio import audio_conditioning
+
+    level = 0.725
+    result = _through_generate(
+        kind, composite, monkeypatch, tmp_path, "video_to_video", prompt=PROMPT, noise_scale=level
+    )
+
+    assert [video for video, _audio in sigmas_seen] == pytest.approx(
+        audio_conditioning.sigma_tail(level)
+    )
+    assert result.record.video_level == level
+    assert result.record.frames == FRAMES
+
+
+def test_a_staged_stage_2_run_encodes_the_prompt_once_and_keeps_the_transformer(
+    composite, monkeypatch, tmp_path
+):
+    """The seam swaps the prompt for embeddings per call; stage 2 is a cache hit."""
+    factory = _factory_for("staged", composite, monkeypatch)
+    loads = []
+    for name in ("load_text_encoder", "load_transformer"):
+        real = getattr(local_runtime, name)
+        monkeypatch.setattr(
+            local_runtime,
+            name,
+            lambda *a, _real=real, _name=name, **k: loads.append(_name) or _real(*a, **k),
+        )
+    from ltx25_studio import generate as generate_module
+
+    runner = factory(pipeline="text2video")
+    result = generate_module.generate(
+        mode="text_to_video",
+        prompt="a prompt only this test encodes",
+        seed=SEED,
+        width=SIZE,
+        height=SIZE,
+        num_frames=FRAMES,
+        enable_stage_2=True,
+        pipeline_factory=lambda **_: runner,
+        output_root=tmp_path / "out",
+        retention_bytes=10**12,
+    )
+
+    assert result.record.stage_2
+    assert loads.count("load_text_encoder") == 1, loads
+    assert loads.count("load_transformer") <= 1, loads
+    phases = [entry["phase"] for entry in runner.timings]
+    assert "denoise (stage 1)" in phases and "denoise (stage 2)" in phases
