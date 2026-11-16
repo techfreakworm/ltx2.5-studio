@@ -541,3 +541,27 @@ def test_the_video_decode_gets_the_frame_rate_only_if_it_takes_one(
         assert seen[0]["frame_rate"] == 25.0
     else:
         assert "frame_rate" not in seen[0]
+
+
+# --------------------------------------------------------------------------
+# the gate, by its public name, for the UI's readiness check
+# --------------------------------------------------------------------------
+
+
+def test_the_public_gate_refuses_a_request_missing_a_required_input():
+    request = generate_module.GenerationRequest(mode="image_to_video")
+    with pytest.raises(errors.MissingInputError) as caught:
+        generate_module.prepare_request(request)
+    assert "Image to video" in str(caught.value) and "image" in str(caught.value)
+
+
+def test_the_public_gate_returns_the_scoped_request_and_its_notes():
+    request = generate_module.GenerationRequest(
+        mode="text_to_video", prompt="a lighthouse", image=image_input()
+    )
+    scoped, spec, notes = generate_module.prepare_request(request)
+    assert spec.id == "text_to_video"
+    assert scoped.image is None
+    assert len(notes) == 1 and "Text to video" in notes[0], notes
+    assert "prepare_request" in generate_module.__all__
+    assert generate_module._prepare_request is generate_module.prepare_request

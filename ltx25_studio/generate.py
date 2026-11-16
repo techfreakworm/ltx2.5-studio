@@ -101,6 +101,7 @@ __all__ = [
     "configured_output_root",
     "generate",
     "gpu_dispatch",
+    "prepare_request",
     "set_gpu_dispatch",
     "stage_2_enabled",
 ]
@@ -524,12 +525,19 @@ def _checked_lora_files(request: GenerationRequest) -> None:
             )
 
 
-def _prepare_request(request: GenerationRequest):
-    """Every cheap check, in order, before a GPU is reserved.
+def prepare_request(request: GenerationRequest):
+    """Every cheap check, in order, before a GPU is reserved -- the gate ``generate()`` runs.
 
-    Returns ``(request, spec, notes)``. Runs on the web side of the dispatch
-    and again in the worker; each step is idempotent, so the second pass
-    changes nothing and says nothing.
+    Touches no model and no GPU. It does open an audio input with ``av``
+    (read-only, to measure it) and checks that staged LoRA files exist.
+
+    Raises the typed ``LTXStudioError`` a run would be refused with; its
+    ``str()`` is the message for the user. Otherwise returns
+    ``(scoped_request, spec, notes)``, where ``notes`` are the "... was ignored"
+    and "length set from your audio" lines the run will carry.
+
+    Runs on the web side of the dispatch and again in the worker; each step is
+    idempotent, so the second pass changes nothing and says nothing.
     """
     spec = modes.get_mode(request.mode)
     supplied = _supplied_kinds(request)
@@ -541,6 +549,10 @@ def _prepare_request(request: GenerationRequest):
     _checked_conditions(request, spec)
     _checked_lora_files(request)
     return request, spec, scope_notes + length_notes
+
+
+#: The name ``generate()`` and older callers use.
+_prepare_request = prepare_request
 
 
 def _unwrapped(exc: BaseException) -> BaseException:
