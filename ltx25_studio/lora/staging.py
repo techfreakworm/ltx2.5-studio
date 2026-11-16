@@ -12,8 +12,9 @@ by pickle. Built with :func:`staged_entry`; keys:
 ``report``
     The :class:`~ltx25_studio.lora.validate.LoRAValidation` that accepted it.
 ``content_key``
-    sha256 of the safetensors header; the same adapter has the same key under
-    any file name, so a second copy can be refused.
+    sha256 of the whole adapter file (the Hub's LFS hash); the same adapter has
+    the same key under any file name, so a second copy can be refused, while two
+    adapters that share a layout but not their weights have different keys.
 
 Stdlib only.
 """

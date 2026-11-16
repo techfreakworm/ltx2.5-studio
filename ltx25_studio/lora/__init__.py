@@ -4,7 +4,8 @@ PLAN §4. Split three ways so each stage is a unit testable against synthesised
 safetensors headers, with no real LoRA file, no GPU and no network:
 
 ``inspect``
-    Header-only parse, metadata, key-convention detection. Stdlib only.
+    Header parse, metadata, key-convention detection, the safetensors layout
+    checks, and the content hash. Stdlib only; no tensor is ever built.
 ``validate``
     Stages 1-6.5, including the per-module dimension check against the
     checked-in transformer shape table (``manifest``, run as

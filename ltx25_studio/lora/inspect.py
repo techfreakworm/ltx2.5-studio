@@ -2,10 +2,11 @@
 
 PLAN §4.3 stages 2, 3 and 5, and §4.6.
 
-**Stage 2 is a hard rule: the tensor payload is never read.** Real adapters run
-to ~9 GB and the official one holds 3320 tensors. Materialising one just to
-discover it targets the wrong architecture is not an acceptable way to answer
-that question.
+**Stage 2 is a hard rule: the tensor payload is never materialised.** Real
+adapters run to ~9 GB and the official one holds 3320 tensors. Every
+compatibility answer comes from the header; the payload is only streamed once,
+in fixed-size pieces, through a sha256 that names the adapter by its content
+(two adapters from one trainer config have byte-identical headers).
 
 **Stdlib only -- no torch, no diffusers, no ``safetensors`` package.** The
 container format is trivial::
@@ -112,6 +113,9 @@ VERSION_METADATA_KEYS = (
     "ss_base_model_version",
 )
 
+#: The payload streams through the content hash in pieces this size.
+DIGEST_CHUNK_BYTES = 1 << 20
+
 _HEADER_FIRST_BYTE = b"{"
 
 
@@ -130,9 +134,11 @@ class LoRAInspection:
     #: tensor name -> (dtype, shape). Shapes only -- this is what stage 6.5
     #: compares against the real modules, and it costs nothing to carry.
     shapes: MappingProxyType
-    #: sha256 of the length prefix and header: a cheap content key, so the same
-    #: adapter staged twice can be recognised whatever its file name.
+    #: sha256 of the length prefix and header: identifies the layout only.
     header_sha256: str = ""
+    #: sha256 of the whole file, the Hub's LFS hash: identifies the adapter, so
+    #: the same one staged twice is recognised whatever its file name.
+    content_sha256: str = ""
 
     # -- fork transport ---------------------------------------------------
     #
@@ -355,6 +361,27 @@ def _payload_bytes(entries: dict, *, source: str) -> int:
     return end_of_previous
 
 
+def _file_sha256(path: Path, head: bytes, *, expected: int) -> str:
+    """sha256 of the whole file: ``head`` (its first bytes, already read), then the rest
+    streamed in :data:`DIGEST_CHUNK_BYTES` pieces. Never more than one piece in memory."""
+    digest = hashlib.sha256(head)
+    buffer = bytearray(DIGEST_CHUNK_BYTES)
+    view = memoryview(buffer)
+    total = len(head)
+    try:
+        with open(path, "rb") as handle:
+            handle.seek(len(head))
+            while count := handle.readinto(buffer):
+                digest.update(view[:count])
+                total += count
+    except OSError as exc:
+        raise LoRAFormatError(source=str(path), reason=f"cannot be read ({exc})") from exc
+    if total != expected:
+        # The file changed size between the checks above and this read.
+        raise LoRATruncatedError(source=str(path), declared_bytes=expected, available_bytes=total)
+    return digest.hexdigest()
+
+
 def _prefix_of(key: str) -> str:
     """The leading namespace of a tensor key, always with its trailing dot.
 
@@ -383,7 +410,11 @@ def _classify(prefixes: tuple[str, ...]) -> str | None:
 
 
 def inspect_lora(path: str | Path) -> LoRAInspection:
-    """Read a LoRA's header and report what it is. The payload is never read."""
+    """Read a LoRA's header and report what it is.
+
+    The payload is read once, after every header check has passed, and only
+    to hash it; no tensor is ever built.
+    """
     path = Path(path)
     blob, declared, file_bytes = _read_header_bytes(path)
     header = parse_safetensors_header(blob, source=str(path))
@@ -410,6 +441,7 @@ def inspect_lora(path: str | Path) -> LoRAInspection:
     keys = tuple(entries)
     shapes = {name: (dtype, shape) for name, (dtype, shape, _begin, _end) in entries.items()}
     prefixes = tuple(dict.fromkeys(_prefix_of(key) for key in keys))
+    head = struct.pack("<Q", declared) + blob
 
     return LoRAInspection(
         path=path,
@@ -421,5 +453,6 @@ def inspect_lora(path: str | Path) -> LoRAInspection:
         header_bytes=declared,
         file_bytes=file_bytes,
         shapes=MappingProxyType(shapes),
-        header_sha256=hashlib.sha256(struct.pack("<Q", declared) + blob).hexdigest(),
+        header_sha256=hashlib.sha256(head).hexdigest(),
+        content_sha256=_file_sha256(path, head, expected=expected),
     )

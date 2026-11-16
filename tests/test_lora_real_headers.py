@@ -163,15 +163,17 @@ def test_the_real_ic_lora_is_refused(tmp_path):
 
 
 # --------------------------------------------------------------------------
-# the header-only claim, at real scale
+# the read-once claim, at real scale: the header for the checks, the rest for
+# the content hash (review r1, lora-3), nothing twice
 # --------------------------------------------------------------------------
 
 
-def test_inspecting_a_real_adapter_reads_only_its_header(tmp_path, read_spy):
+def test_inspecting_a_real_adapter_reads_it_once(tmp_path, read_spy):
     path = local_copy(tmp_path, *POSITIVE)
+    size = path.stat().st_size
     read_spy.watch(path)
     result = lora_inspect.inspect_lora(path)
-    assert result.keys
-    assert 0 < read_spy.bytes_read < 1_000_000, (
-        f"read {read_spy.bytes_read} bytes of a {path.stat().st_size}-byte adapter"
+    assert result.keys and len(result.content_sha256) == 64
+    assert size <= read_spy.bytes_read <= size + 64, (
+        f"read {read_spy.bytes_read} bytes of a {size}-byte adapter"
     )

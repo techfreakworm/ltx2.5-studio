@@ -37,6 +37,7 @@ from lora_fixtures import (
     manifest_dims,
     manifest_transformer,
     native_convention_adapter,
+    overwrite_weights,
     partial_coverage_adapter,
     renamed_modules,
     write_adapter,
@@ -400,6 +401,56 @@ def test_the_content_key_ignores_the_file_name_but_not_the_content(tmp_path):
         good_adapter(tmp_path, "c.safetensors", metadata={"model_version": "2.5.1"})
     ).content_key
     assert first == renamed != other
+
+
+# lora-3: one trainer's default config gives different adapters byte-identical
+# headers (the recon's aztro, elix3r and tamm5y5m5 adapters share one), so a key
+# over the header alone called them all the same adapter.
+
+
+def _same_layout_pair(tmp_path):
+    tensors = adapter_tensors(REAL_MODULES)
+    character = write_adapter(tmp_path / "character.safetensors", tensors, {})
+    style = overwrite_weights(write_adapter(tmp_path / "style.safetensors", tensors, {}), b"\x3c")
+    return character, style
+
+
+def test_one_layout_with_different_weights_is_two_adapters(tmp_path):
+    from ltx25_studio import lora
+
+    character, style = _same_layout_pair(tmp_path)
+    first = lora_validate.validate_lora(character, upload=True)
+    second = lora_validate.validate_lora(style, upload=True)
+
+    assert first.inspection.header_sha256 == second.inspection.header_sha256, "same layout"
+    assert first.content_key != second.content_key
+    staged = [lora.staged_entry("character", first)]
+    assert lora.find_duplicate(staged, lora.staged_entry("style", second)) is None
+
+
+def test_the_content_key_is_the_files_sha256_as_the_hub_lists_it(tmp_path):
+    """The Hub's LFS hash of a file is its sha256, so a key that equals it is
+    comparable with what a repo listing says."""
+    import hashlib
+
+    _, style = _same_layout_pair(tmp_path)
+    report = lora_validate.validate_lora(style, upload=True)
+    assert report.content_key == hashlib.sha256(style.read_bytes()).hexdigest()
+
+
+def test_the_lora_bay_stages_both_adapters_of_one_layout(tmp_path, monkeypatch):
+    from ltx25_studio import lora
+    from ltx25_studio.ui import handlers
+
+    monkeypatch.setattr(lora, "lora_cache_dir", lambda: tmp_path / "lora-cache")
+    character, style = _same_layout_pair(tmp_path)
+
+    _verdict, staged, _ = handlers.on_validate_lora("", str(character), [])
+    verdict, staged, _ = handlers.on_validate_lora("", str(style), staged)
+
+    assert len(staged) == 2, f"the second adapter was refused: {verdict}"
+    _verdict, staged, _ = handlers.on_validate_lora("", str(style), staged)
+    assert len(staged) == 2, "the same file checked again is still one adapter"
 
 
 # --------------------------------------------------------------------------

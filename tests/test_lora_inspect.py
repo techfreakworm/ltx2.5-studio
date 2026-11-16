@@ -1,9 +1,10 @@
 """Spec for ``ltx25_studio/lora/inspect.py`` — PLAN §4.3 stages 2, 3 and 5.
 
-Stage 2 is a hard rule, not a preference: **the tensor payload is never read.**
-Real adapters are ~9 GB and the official one holds 3320 tensors; materialising
-one just to discover it targets the wrong architecture is not an acceptable way
-to answer that question.
+Stage 2 is a hard rule, not a preference: **the tensor payload is never
+materialised.** Real adapters are ~9 GB and the official one holds 3320
+tensors. Every answer about compatibility comes from the header; the payload
+is only streamed once, in fixed-size pieces, through a sha256 that identifies
+the adapter by its content (review r1, lora-3).
 
 The contract:
 
@@ -45,50 +46,57 @@ from ltx25_studio.errors import (
 from ltx25_studio.lora import inspect as lora_inspect
 
 # --------------------------------------------------------------------------
-# stage 2 — header only, payload never touched
+# stage 2 — the payload streams through the digest once and is never held
 # --------------------------------------------------------------------------
 
 
-def test_inspection_does_not_read_the_tensor_payload(write_safetensors, read_spy):
-    """PLAN §4.3 stage 2, proved by counting bytes.
+def test_the_payload_is_never_held_whole_while_it_is_hashed(write_safetensors):
+    """PLAN §4.3 stage 2, proved by the peak of Python's own allocations.
 
-    The fixture's payload is 4 MB. A header-only parser reads a few hundred
-    bytes. If this reports zero bytes read, the parser is going through a path
-    the spy cannot see (mmap, a C extension) and the header-only guarantee is
-    unproven — which is also a failure.
+    The fixture's payload is 16 MB. Holding it (or any tensor of it) would put
+    the peak above that; streaming it through the digest keeps the peak at one
+    read buffer.
     """
+    import tracemalloc
+
     path = write_safetensors(
         name="fat-lora.safetensors",
-        tensors={"diffusion_model.blk.lora_A.weight": ("F32", [1024, 1024])},
+        tensors={"diffusion_model.blk.lora_A.weight": ("F32", [2048, 2048])},
         metadata=OFFICIAL_METADATA,
     )
-    payload_bytes = 1024 * 1024 * 4
-    assert path.stat().st_size > payload_bytes
+    assert path.stat().st_size > 16 * 1024 * 1024
 
-    read_spy.watch(path)
-    result = lora_inspect.inspect_lora(path)
+    tracemalloc.start()
+    try:
+        result = lora_inspect.inspect_lora(path)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
 
     assert result.model_version == "2.5.0"
-    assert read_spy.bytes_read > 0, (
-        "no bytes observed through open()/io.open(); header parsing must be a bounded "
-        "Python-level read so the payload-never-loaded guarantee is checkable"
-    )
-    assert read_spy.bytes_read < 100_000, (
-        f"read {read_spy.bytes_read} bytes from a {path.stat().st_size}-byte file — "
-        "PLAN §4.3 stage 2 forbids materialising the payload"
+    assert len(result.content_sha256) == 64, "the payload was not hashed at all"
+    assert peak < 4 * 1024 * 1024, (
+        f"inspecting a {path.stat().st_size}-byte adapter peaked at {peak} bytes of Python "
+        "allocations; PLAN §4.3 stage 2 forbids materialising the payload"
     )
 
 
-def test_inspection_reads_far_less_than_the_file_size(write_safetensors, read_spy):
+def test_inspection_reads_the_file_exactly_once(write_safetensors, read_spy):
+    """Every byte once: the header for the checks, the rest for the digest. If
+    this reports fewer bytes than the file, the digest is going through a path
+    the spy cannot see (mmap, a C extension) and nothing here is checkable."""
     path = write_safetensors(
         name="fat-lora-2.safetensors",
         tensors=lora_tensors(NATIVE_PREFIX, TRANSFORMER_MODULE_PATHS)
         | {"diffusion_model.big.lora_A.weight": ("F32", [1024, 512])},
         metadata=OFFICIAL_METADATA,
     )
+    size = path.stat().st_size
     read_spy.watch(path)
     lora_inspect.inspect_lora(path)
-    assert read_spy.bytes_read < path.stat().st_size / 10
+    assert size <= read_spy.bytes_read <= size + 64, (
+        f"read {read_spy.bytes_read} bytes of a {size}-byte file"
+    )
 
 
 def test_inspection_result_exposes_no_tensor_values(good_lora):
@@ -393,7 +401,8 @@ def test_synthetic_fixtures_are_readable_by_the_real_safetensors_library(good_lo
 
 
 # --------------------------------------------------------------------------
-# F53 — a cheap content key for refusing duplicate staging
+# F53 and review r1 lora-3 — the content key for refusing duplicate staging is
+# the whole file's sha256; the header hash stays beside it
 # --------------------------------------------------------------------------
 
 
@@ -406,18 +415,34 @@ def test_the_header_hash_is_the_sha256_of_the_length_prefix_and_header(good_lora
     assert lora_inspect.inspect_lora(good_lora).header_sha256 == expected
 
 
-def test_the_header_hash_reads_no_payload(good_lora, read_spy):
-    read_spy.watch(good_lora)
-    lora_inspect.inspect_lora(good_lora)
-    data_len = good_lora.stat().st_size
-    assert read_spy.bytes_read < data_len, "hashing must not read the tensor payload"
+def test_the_content_hash_is_the_sha256_of_the_whole_file(good_lora):
+    import hashlib
+
+    expected = hashlib.sha256(good_lora.read_bytes()).hexdigest()
+    assert lora_inspect.inspect_lora(good_lora).content_sha256 == expected
 
 
-def test_the_header_hash_survives_the_fork_transport(good_lora):
+def test_the_header_hash_covers_the_layout_and_the_content_hash_the_weights(write_safetensors):
+    """Two adapters of one layout: the header hashes agree, the content hashes do not."""
+    tensors = lora_tensors(NATIVE_PREFIX, TRANSFORMER_MODULE_PATHS)
+    first = write_safetensors(name="first.safetensors", tensors=tensors)
+    second = write_safetensors(name="second.safetensors", tensors=tensors)
+    with open(second, "r+b") as handle:
+        handle.seek(-1, 2)
+        handle.write(b"\x01")
+
+    one, two = lora_inspect.inspect_lora(first), lora_inspect.inspect_lora(second)
+    assert one.header_sha256 == two.header_sha256
+    assert one.content_sha256 != two.content_sha256
+
+
+def test_both_hashes_survive_the_fork_transport(good_lora):
     import pickle
 
     inspection = lora_inspect.inspect_lora(good_lora)
-    assert pickle.loads(pickle.dumps(inspection)).header_sha256 == inspection.header_sha256
+    restored = pickle.loads(pickle.dumps(inspection))
+    assert restored.header_sha256 == inspection.header_sha256
+    assert restored.content_sha256 == inspection.content_sha256
 
 
 # --------------------------------------------------------------------------

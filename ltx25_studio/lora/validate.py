@@ -155,8 +155,9 @@ class LoRAValidation:
 
     @property
     def content_key(self) -> str:
-        """sha256 of the safetensors header: the same adapter under any file name."""
-        return self.inspection.header_sha256
+        """sha256 of the whole file: the same adapter under any file name, and two
+        adapters that share a layout but not their weights kept apart."""
+        return self.inspection.content_sha256
 
 
 def configured_max_bytes() -> int:

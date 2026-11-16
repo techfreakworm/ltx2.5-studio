@@ -153,6 +153,15 @@ def write_adapter(path, tensors, metadata=None) -> Path:
     return path
 
 
+def overwrite_weights(path, data: bytes, *, at: int = 0) -> Path:
+    """Write ``data`` into the tensor data, ``at`` bytes in: the same header, other weights."""
+    with open(path, "r+b") as handle:
+        (declared,) = struct.unpack("<Q", handle.read(8))
+        handle.seek(8 + declared + at)
+        handle.write(data)
+    return Path(path)
+
+
 # --------------------------------------------------------------------------
 # the five adapters the brief names
 # --------------------------------------------------------------------------
