@@ -323,9 +323,9 @@ def test_a_field_appended_to_the_spec_is_sent_in_its_own_slot(tmp_path, space, m
 
 def test_a_key_the_field_spec_does_not_have_is_refused_before_anything_is_sent(tmp_path, space):
     fake = space()
-    code, lines, _out, _ledger = live(tmp_path, fake, [t2v(decoder="conv")])
+    code, lines, _out, _ledger = live(tmp_path, fake, [t2v(guidance_scale=3.0)])
     assert code == space_matrix.EXIT_ILLEGAL
-    assert any("'decoder' is not a field" in line for line in lines)
+    assert any("'guidance_scale' is not a field" in line for line in lines)
     assert fake.requests == []
 
 
