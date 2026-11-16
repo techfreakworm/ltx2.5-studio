@@ -28,6 +28,12 @@ CLASS_NAMES = tuple(
     for name in dir(errors)
     if name.endswith("Error") and isinstance(getattr(errors, name), type)
 )
+#: Measured on real weights: in Audio to video the mouth does not follow the recorded words,
+#: while speech the model writes itself (Image + text to video with sound) is in time.
+NOT_LIP_SYNCED = (
+    "Speech is not lip-synced. For a face that speaks in time, use Image + text to video "
+    "with sound and put the line in quotes."
+)
 
 
 def visible(markup: str) -> str:
@@ -167,7 +173,7 @@ def test_the_copy_the_verdict_required_is_in_place():
     assert "a 60 s reservation needs 120 s of quota free to start" in quota
     assert "Runs that fail on the GPU are billed too." in quota
     assert render.media_caption(modes.get_mode("audio_to_video"), "audio") == (
-        "The sound to picture; it is also the soundtrack of the result."
+        "The sound to picture; it is also the soundtrack of the result. " + NOT_LIP_SYNCED
     )
     assert render.media_caption(modes.get_mode("image_to_video"), "image") == (
         "Used as the first frame."
@@ -176,6 +182,48 @@ def test_the_copy_the_verdict_required_is_in_place():
     assert "Reserves 180 s more" in enhance.info and "GPU" in enhance.info
     assert "frames" in render.frame_hint(120, ratio=8, lower=113, upper=121, valid=False)
     assert "113" in render.frame_hint(120, ratio=8, lower=113, upper=121, valid=False)
+
+
+def _texts(form, block) -> list[str]:
+    """Every string the page holds for ``block``: its value and its words."""
+    props = form.props[block._id]
+    held = [form.get(block), props.get("label"), props.get("info"), props.get("placeholder")]
+    held += [str(choice) for choice in props.get("choices") or ()]
+    return [text for text in held if isinstance(text, str)]
+
+
+def test_the_lip_sync_line_is_under_the_audio_in_audio_to_video_and_nowhere_else():
+    """Through the built page's own mode switch: the line shows, visibly, under the audio
+    input in Audio to video, is held by no other component there, and by none in any other
+    mode; the mode it sends people to is named by its label."""
+    pytest.importorskip("gradio", reason="gradio is a declared dev dependency")
+    from test_ui_form import Form
+
+    from ltx25_studio.ui import build_ui
+
+    assert modes.get_mode("image_text_to_audio_video").label in NOT_LIP_SYNCED
+    demo = build_ui()
+    form = Form(demo)
+    blocks = sorted(demo.blocks.values(), key=lambda block: block._id)
+    captions = [b for b in blocks if "mr-caption" in (getattr(b, "elem_classes", None) or ())]
+    audio_caption = next(b for b in captions if b._id > form.fields["audio"]._id)
+
+    def holders() -> list:
+        return [b for b in blocks if any(NOT_LIP_SYNCED in t for t in _texts(form, b))]
+
+    assert holders() == [], "the built page, before any mode is picked"
+    for mode_id in MODE_IDS:
+        form.pick_mode(mode_id)
+        if mode_id == "audio_to_video":
+            assert holders() == [audio_caption]
+            assert form.visible(audio_caption) and form.visible(form.fields["audio"])
+        else:
+            assert holders() == [], mode_id
+    form.pick_mode("audio_to_audio")
+    assert holders() == [], "switching away from Audio to video takes the line away"
+    assert form.get(audio_caption) == render.media_caption(
+        modes.get_mode("audio_to_audio"), "audio"
+    )
 
 
 def test_the_start_message_says_enhancing_only_when_the_prompt_will_be_enhanced():

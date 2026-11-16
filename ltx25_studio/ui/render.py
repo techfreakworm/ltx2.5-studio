@@ -270,7 +270,11 @@ _CAPTIONS: dict[tuple[str, str], str] = {
     ("video_to_video", "video"): "The clip to re-render.",
     ("video_to_audio", "video"): "The clip to make sound for.",
     ("audio_to_audio", "audio"): "The sound to transform.",
-    ("audio_to_video", "audio"): "The sound to picture; it is also the soundtrack of the result.",
+    ("audio_to_video", "audio"): (
+        "The sound to picture; it is also the soundtrack of the result. Speech is not "
+        "lip-synced. For a face that speaks in time, use Image + text to video with sound and "
+        "put the line in quotes."
+    ),
     ("audio_to_video", "image"): "Optional. Used as the first frame.",
 }
 
