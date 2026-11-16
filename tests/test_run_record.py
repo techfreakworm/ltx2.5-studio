@@ -172,7 +172,20 @@ def test_a_smaller_gpu_slice_than_asked_for_is_said_out_loud(tmp_path, monkeypat
 
     result = run(tmp_path)
 
-    assert any("xlarge was requested" in note for note in result.warnings), result.warnings
+    assert any("xlarge was requested" in line for line in result.record.diagnostics)
+    assert not any("xlarge was requested" in note for note in result.warnings), result.warnings
+
+
+def test_diagnostics_hold_the_run_folder_and_stay_out_of_the_notes(tmp_path, monkeypatch):
+    install_fake_torch(monkeypatch, a_cuda())
+
+    result = run(tmp_path)
+
+    diagnostics = result.record.diagnostics
+    assert f"run folder: {result.run_dir}" in diagnostics
+    assert any(line.startswith("peak VRAM, whole call") for line in diagnostics)
+    assert set(diagnostics).isdisjoint(result.warnings)
+    assert all(isinstance(line, str) for line in diagnostics)
 
 
 # --------------------------------------------------------------------------

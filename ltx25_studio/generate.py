@@ -234,6 +234,9 @@ class RunRecord:
     elapsed_seconds: float
     #: Peak VRAM reserved over the run, in GiB, where it was measured (CUDA).
     peak_vram_gib: float | None
+    #: Plain lines for the collapsed diagnostics block (VRAM laps, the GPU
+    #: partition note, the run folder). Not in ``warnings``.
+    diagnostics: tuple[str, ...] = ()
 
 
 def _default_pipeline_factory(**kwargs):
@@ -1760,7 +1763,7 @@ def _length_source(request: GenerationRequest) -> str:
 
 
 def _run_record(
-    request, spec, output, *, kwargs, seed, run_facts, lora_reports, elapsed, probe
+    request, spec, output, *, kwargs, seed, run_facts, lora_reports, elapsed, probe, diagnostics=()
 ) -> RunRecord:
     """The facts of a finished run, for ``GenerationResult.record``."""
     facts = run_facts if isinstance(run_facts, dict) else {}
@@ -1795,6 +1798,7 @@ def _run_record(
         adapters=adapters,
         elapsed_seconds=round(float(elapsed), 3),
         peak_vram_gib=probe.peak_gib(),
+        diagnostics=tuple(diagnostics),
     )
 
 
@@ -2102,13 +2106,11 @@ def generate(
                 + length_notes
                 + size_notes
                 + decoder_notes
-                + _partition_notes(probe)
-                # Last, because it is diagnostic rather than something the user has
-                # to act on -- but present on every run, because the one flagship
-                # generation that finally gives this build a headroom number is not
-                # going to be the run somebody remembered to turn a flag on for.
-                + probe.notes()
             )
+            # Present on every run, but for the collapsed block, not the notes:
+            # the flagship run that finally gives a headroom number is not the one
+            # somebody remembered to turn a flag on for.
+            diagnostics = probe.notes() + _partition_notes(probe) + (f"run folder: {run_dir}",)
             record = _run_record(
                 request,
                 spec,
@@ -2119,6 +2121,7 @@ def generate(
                 lora_reports=lora_reports,
                 elapsed=time.monotonic() - started,
                 probe=probe,
+                diagnostics=diagnostics,
             )
 
             result = GenerationResult(

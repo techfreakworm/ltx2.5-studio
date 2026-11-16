@@ -1253,7 +1253,9 @@ def a_cuda(**overrides):
 
 
 def vram_notes(result):
-    return [w for w in result.warnings if w.startswith("peak VRAM")]
+    """The VRAM laps, which live in the record's diagnostics and never in the notes."""
+    assert not [w for w in result.warnings if w.startswith("peak VRAM")], result.warnings
+    return [line for line in result.record.diagnostics if line.startswith("peak VRAM")]
 
 
 def run_on(tmp_path, **overrides):
