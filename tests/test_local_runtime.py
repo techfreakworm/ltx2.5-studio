@@ -654,3 +654,104 @@ def test_the_gguf_transformer_loads_on_mps_with_single_precision_rope(faithful_g
         n: m.double_precision for n, m in model.named_modules() if hasattr(m, "double_precision")
     }
     assert len(flags) == 4 and not any(flags.values())
+
+
+# --------------------------------------------------------------------------
+# scripts/local_generate.py: exit codes and the dry run
+# --------------------------------------------------------------------------
+
+
+def _script(*args, tmp_path):
+    import os
+    import subprocess
+    import sys
+
+    from conftest import REPO_ROOT
+
+    report = tmp_path / "report.json"
+    done = subprocess.run(
+        [
+            sys.executable,
+            str(REPO_ROOT / "scripts" / "local_generate.py"),
+            *args,
+            "--json",
+            str(report),
+        ],
+        cwd=str(tmp_path),
+        capture_output=True,
+        text=True,
+        timeout=300,
+        env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+    )
+    data = json.loads(report.read_text()) if report.is_file() else {}
+    return done, data
+
+
+TINY_ARGS = (
+    "--mode",
+    "text_to_video",
+    "--prompt",
+    PROMPT,
+    "--width",
+    "64",
+    "--height",
+    "64",
+    "--num-frames",
+    "9",
+    "--device",
+    "cpu",
+    "--dtype",
+    "float32",
+)
+
+
+def test_the_dry_run_prints_the_plan_and_the_arithmetic_and_loads_nothing(tmp_path):
+    done, data = _script(
+        *TINY_ARGS, "--snapshot-dir", str(tiny_snapshot()), "--dry-run", tmp_path=tmp_path
+    )
+    assert done.returncode == 0, done.stdout[-2000:] + done.stderr[-2000:]
+    assert "nothing was loaded" in done.stdout
+    phases = [line.split("]")[0].split("[")[1] for line in data["projected_preflight"]]
+    assert phases == ["load small set", "load text encoder", "load transformer", "denoise 64x64x9"]
+    assert "phases" not in data and "artifacts" not in data
+
+
+def test_a_missing_gguf_exits_2_with_the_download_command(tmp_path):
+    gguf = (
+        tmp_path
+        / "hub"
+        / "models--unsloth--LTX-2.5-GGUF"
+        / "snapshots"
+        / "ac3c540c"
+        / "distilled"
+        / "x-Q8_0.gguf"
+    )
+    done, data = _script(
+        *TINY_ARGS,
+        "--snapshot-dir",
+        str(tiny_snapshot()),
+        "--transformer-gguf",
+        str(gguf),
+        tmp_path=tmp_path,
+    )
+    assert done.returncode == 2, done.stdout[-2000:] + done.stderr[-2000:]
+    command = "hf download unsloth/LTX-2.5-GGUF distilled/x-Q8_0.gguf --revision ac3c540c"
+    assert command in done.stdout
+    assert data["missing"] == [{"path": str(gguf), "command": command}]
+
+
+def test_a_memory_refusal_exits_2_before_anything_loads(tmp_path):
+    _torch()
+    pytest.importorskip("diffusers")
+    done, data = _script(
+        *TINY_ARGS,
+        "--snapshot-dir",
+        str(tiny_snapshot()),
+        "--memory-limit-gb",
+        "1",
+        tmp_path=tmp_path,
+    )
+    assert done.returncode == 2, done.stdout[-2000:] + done.stderr[-2000:]
+    assert data["error"]["type"] in ("MemoryPreflightError", "ModelLoadError")
+    assert "Not enough memory for 'load small set'" in data["error"]["message"]
+    assert not data.get("phases")

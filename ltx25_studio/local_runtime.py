@@ -59,6 +59,7 @@ __all__ = [
     "build_local_runner",
     "clear_local_cache",
     "download_command",
+    "frames_for_estimate",
     "load_text_encoder",
     "load_transformer",
     "missing_files",
@@ -536,7 +537,8 @@ class PlanStep:
     need_gb: float
 
 
-def _frames_for_estimate(call: dict, defaults: dict) -> int:
+def frames_for_estimate(call: dict, defaults: dict) -> int:
+    """The call's frame count, or the longest the duration head may choose."""
     frames = call.get("num_frames")
     if frames:
         return int(frames)
@@ -687,12 +689,14 @@ class _LocalWeights:
                     self.snapshot_dir,
                     text_encoder=None,
                     transformer=None,
+                    connectors=None,
                     prompt_enhancer=None,
                     processor=None,
-                    connectors=connectors,
                     torch_dtype=self.dtype,
                     local_files_only=True,
                 )
+                # Attached after the load: passed in, diffusers logs the whole module.
+                base.register_modules(connectors=connectors)
                 base.to(self.device)
             except Exception as exc:
                 raise ModelLoadError(component="small set", reason=str(exc)) from exc
@@ -878,7 +882,7 @@ class _LocalWeights:
         defaults = _call_defaults(pipeline)
         width = int(call.get("width", defaults.get("width", 768)))
         height = int(call.get("height", defaults.get("height", 512)))
-        frames = _frames_for_estimate(call, defaults)
+        frames = frames_for_estimate(call, defaults)
         need = memory.activation_estimate_gb(width, height, frames, dtype_bytes=self.dtype_bytes)
         self._preflight(f"denoise {width}x{height}x{frames}", need)
 
