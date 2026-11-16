@@ -568,3 +568,99 @@ def test_the_public_gate_returns_the_scoped_request_and_its_notes():
     assert len(notes) == 1 and "Text to video" in notes[0], notes
     assert "prepare_request" in generate_module.__all__
     assert generate_module._prepare_request is generate_module.prepare_request
+
+
+# --------------------------------------------------------------------------
+# review findings: refusals that cost a GPU slot (request-path-1, space-path-1,
+# media-io-2) and gate checks over values a run never uses (request-path-3..6)
+# --------------------------------------------------------------------------
+
+
+def _wav(path: Path, *, seconds: float, channels: int = 2, rate: int = 48000) -> str:
+    import wave
+
+    import numpy as np
+
+    count = int(round(seconds * rate))
+    samples = (np.sin(np.arange(count) / 10.0)[:, None] * 8000).repeat(channels, axis=1)
+    with wave.open(str(path), "wb") as handle:
+        handle.setnchannels(channels)
+        handle.setsampwidth(2)
+        handle.setframerate(rate)
+        handle.writeframes(samples.astype("<i2").tobytes())
+    return str(path)
+
+
+@pytest.mark.parametrize("mode_id", ["audio_to_video", "audio_to_audio"])
+def test_audio_shorter_than_a_set_length_is_refused_before_dispatch(mode_id, refused, tmp_path):
+    error = refused(
+        errors.AudioVideoDesyncError,
+        mode=mode_id,
+        audio=_wav(tmp_path / "short.wav", seconds=2.0),
+        num_frames=121,
+    )
+    assert error.gpu_used is False
+    assert error.largest_fitting_num_frames == 41
+    assert "Your audio is 2.00 s long" in str(error) and "audio_latents" not in str(error)
+
+
+def test_audio_just_inside_the_tolerance_is_not_refused(accepted, tmp_path):
+    accepted(mode="audio_to_video", audio=_wav(tmp_path / "ok.wav", seconds=4.995), num_frames=121)
+
+
+def test_audio_with_more_than_two_channels_is_refused_before_dispatch(refused, tmp_path):
+    error = refused(
+        ConstraintError,
+        mode="audio_to_video",
+        audio=_wav(tmp_path / "six.wav", seconds=6.0, channels=6),
+        num_frames=121,
+    )
+    assert "6 audio channels" in str(error)
+
+
+def test_a_missing_video_is_refused_before_dispatch_in_a_condition_mode(refused, tmp_path):
+    error = refused(ConstraintError, mode="video_to_audio", video=str(tmp_path / "gone.mp4"))
+    assert "could not be opened as a video" in str(error)
+
+
+def test_audio_matched_length_ignores_the_hidden_seconds_fields(accepted, tmp_path):
+    """The length comes from the audio; min/max seconds belong to the text modes."""
+    accepted(
+        mode="audio_to_video",
+        audio=_wav(tmp_path / "five.wav", seconds=5.0),
+        auto_duration=True,
+        min_seconds=30.0,
+        max_seconds=25.0,
+    )
+
+
+@pytest.mark.parametrize("mode_id", ["text_to_audio", "audio_to_audio"])
+def test_a_pinned_size_mode_ignores_a_hidden_size_over_the_limit(mode_id, accepted):
+    _result, sent = accepted(mode=mode_id, **inputs_for(mode_id), width=2048, height=2048)
+    assert (sent["width"], sent["height"]) == (modes.MIN_RESOLUTION, modes.MIN_RESOLUTION)
+
+
+def test_a_required_image_given_as_a_keyframe_is_not_a_missing_input(accepted):
+    condition = ConditionSpec(source=image_input(), kind="image", index=16)
+    _result, sent = accepted(mode="image_to_video", conditions=(condition,), num_frames=17)
+    assert [c.kind for c in sent["conditions"]] == ["image"]
+
+
+@pytest.mark.parametrize(
+    "field,value,limit",
+    [("width", 1950, 1920), ("height", 1921, 1920), ("num_frames", 485, 481)],
+)
+def test_past_the_limit_the_refusal_names_only_a_legal_value(refused, field, value, limit):
+    error = refused(errors.OverLimitError, mode="text_to_video", prompt="p", **{field: value})
+    assert error.nearest == limit, error
+    assert str(limit + (32 if field != "num_frames" else 8)) not in str(error)
+
+
+@pytest.mark.parametrize("seed", [2**64, 2**32, -2])
+def test_a_seed_out_of_range_is_refused_before_dispatch(seed):
+    """torch's generator raises an untyped overflow in the worker past 2**64."""
+    with pytest.raises(ConstraintError) as caught:
+        generate_module.prepare_request(
+            generate_module.GenerationRequest(mode="text_to_video", prompt="p", seed=seed)
+        )
+    assert "seed" in str(caught.value) and str(generate_module.MAX_SEED) in str(caught.value)

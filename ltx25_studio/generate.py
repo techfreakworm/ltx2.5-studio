@@ -309,10 +309,16 @@ def _validated(request: GenerationRequest) -> GenerationRequest:
             raise constraints.ConstraintError(
                 f"decoder={request.decoder!r} is not one of {', '.join(DECODER_CHOICES)}."
             )
-    constraints.validate_dimensions(request.width, request.height)
+    _checked_seed(request.seed)
+    # The limit first: a refusal for divisibility must not offer a value past it.
     constraints.validate_dimension_limit(request.width, name="width")
     constraints.validate_dimension_limit(request.height, name="height")
+    constraints.validate_dimensions(request.width, request.height)
     if request.auto_duration:
+        if request.min_seconds is None or request.max_seconds is None:
+            raise constraints.ConstraintError(
+                "Automatic duration needs both a shortest and a longest length in seconds."
+            )
         if request.max_seconds <= request.min_seconds:
             raise constraints.ConstraintError(
                 f"max_seconds ({request.max_seconds}) must be greater than min_seconds "
@@ -320,9 +326,20 @@ def _validated(request: GenerationRequest) -> GenerationRequest:
             )
         constraints.validate_seconds_limit(request.max_seconds)
     else:
-        constraints.validate_num_frames(request.num_frames)
         constraints.validate_num_frames_limit(request.num_frames)
+        constraints.validate_num_frames(request.num_frames)
     return request
+
+
+def _checked_seed(seed) -> None:
+    """A seed the generator accepts: -1 (random) or 0..MAX_SEED."""
+    if seed is None or int(seed) == RANDOM_SEED:
+        return
+    if not 0 <= int(seed) <= MAX_SEED:
+        raise constraints.ConstraintError(
+            f"seed={seed} is out of range: use a whole number from 0 to {MAX_SEED}, or -1 for a "
+            f"random seed."
+        )
 
 
 # --------------------------------------------------------------------------
@@ -436,13 +453,21 @@ def scope_request_to_mode(request: GenerationRequest, spec) -> tuple[GenerationR
         changes["noise_scale"] = defaults.noise_scale
     if spec.skip_stage_2 and request.enable_stage_2:
         changes["enable_stage_2"] = False
+    if spec.min_resolution:
+        # The mode renders at its pinned size; a hidden width/height is not its input.
+        for name in ("width", "height"):
+            if getattr(request, name) != modes.MIN_RESOLUTION:
+                changes[name] = modes.MIN_RESOLUTION
 
     return (replace(request, **changes) if changes else request), tuple(notes)
 
 
 def _supplied_kinds(request: GenerationRequest) -> frozenset[str]:
-    """The input kinds a request carries, whatever the mode."""
+    """The input kinds a request carries, whatever the mode (shot-list sources included)."""
     kinds = {kind for kind in ("image", "video", "audio") if getattr(request, kind) is not None}
+    for entry in _condition_entries(request.conditions):
+        if not isinstance(entry, (list, tuple)) and _condition_source(entry) is not None:
+            kinds.add(modes.condition_kind(entry))
     if request.audio_latents is not None:
         kinds.add("audio")
     if (request.prompt or "").strip():
@@ -488,10 +513,20 @@ def require_inputs(request: GenerationRequest, spec, *, supplied=frozenset()) ->
 
 def _audio_seconds(source) -> float:
     """Open an audio file with ``av`` and measure it. No model, no decode if avoidable."""
+    return _audio_facts(source)[0]
+
+
+#: The most channels the audio encode takes (mono or stereo).
+MAX_AUDIO_CHANNELS = 2
+
+
+def _audio_facts(source) -> tuple[float, int]:
+    """``(seconds, channels)`` of an audio file, read with ``av``; no decode if avoidable."""
     import av
 
     name = Path(str(source)).name
     seconds = None
+    channels = 0
     try:
         with av.open(str(source)) as container:
             if not container.streams.audio:
@@ -500,6 +535,7 @@ def _audio_seconds(source) -> float:
                     f"audio file."
                 )
             stream = container.streams.audio[0]
+            channels = int(getattr(stream.codec_context, "channels", 0) or 0)
             if stream.duration is not None and stream.time_base is not None:
                 seconds = float(stream.duration * stream.time_base)
             elif container.duration is not None:
@@ -518,7 +554,38 @@ def _audio_seconds(source) -> float:
         raise constraints.ConstraintError(
             f"{name} opened, but its length could not be measured. Re-export it as a WAV file."
         )
-    return seconds
+    if channels > MAX_AUDIO_CHANNELS:
+        raise constraints.ConstraintError(
+            f"{name} has {channels} audio channels; this app takes mono or stereo audio. Mix it "
+            f"down to stereo and upload it again."
+        )
+    return seconds, channels
+
+
+#: Allowance for a container's declared length against its decoded samples
+#: (measured at most 0.016 s across WAV/FLAC/AAC/Opus); the worker's
+#: sample-exact check stays the authority.
+_METADATA_MARGIN_SECONDS = 0.02
+
+
+def _checked_audio_length(request: GenerationRequest, spec, seconds: float | None) -> None:
+    """At a set length, audio shorter than the video is refused before dispatch."""
+    if seconds is None or request.auto_duration or not modes.requires(spec, "audio"):
+        return
+    from .audio import DEFAULT_LENGTH_TOLERANCE_SECONDS
+    from .errors import AudioVideoDesyncError
+
+    fps = float(request.frame_rate)
+    video_seconds = int(request.num_frames) / fps
+    if seconds + DEFAULT_LENGTH_TOLERANCE_SECONDS + _METADATA_MARGIN_SECONDS < video_seconds:
+        raise AudioVideoDesyncError(
+            video_seconds=round(video_seconds, 3),
+            audio_seconds=round(seconds, 3),
+            largest_fitting_num_frames=constraints.largest_num_frames_within(
+                seconds, frame_rate=fps
+            ),
+            route="file",
+        )
 
 
 def _length_from_audio(
@@ -691,6 +758,7 @@ def prepare_request(request: GenerationRequest):
     require_inputs(request, spec, supplied=supplied)
     seconds = _audio_seconds(request.audio) if request.audio is not None else None
     request, length_notes = _length_from_audio(request, spec, seconds)
+    _checked_audio_length(request, spec, seconds)
     clip_seconds = _video_seconds(request.video) if request.video is not None else None
     request, clip_notes = _length_from_clip(request, spec, clip_seconds)
     length_notes += clip_notes
