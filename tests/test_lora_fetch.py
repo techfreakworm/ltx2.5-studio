@@ -301,17 +301,33 @@ def test_the_handler_surfaces_a_fetch_refusal_verbatim(tmp_path, monkeypatch):
     assert "was not found on the Hub" in verdict
 
 
-def test_the_upload_direction_still_stages_its_own_path(tmp_path):
-    """The two directions converge (§4.3): an upload is already local, the
-    fetcher is never consulted, and 'path' equals 'source'."""
+def test_the_upload_direction_stages_an_app_owned_copy(tmp_path, monkeypatch):
+    """The two directions converge (§4.3): an upload is already local and the
+    fetcher is never consulted. What is staged is the app's own copy, inside the
+    LoRA cache, so Gradio's upload clean-up cannot remove it before Generate; the
+    label still names what the user uploaded, and the same upload twice is
+    staged once."""
+    from ltx25_studio import lora as lora_package
     from ltx25_studio.ui import handlers
+
+    cache = tmp_path / "lora-cache"
+    monkeypatch.setattr(lora_package, "lora_cache_dir", lambda: cache)
+    fetched = []
+    monkeypatch.setattr(lora_package, "fetch_lora", lambda source: fetched.append(source))
 
     adapter = _valid_adapter(tmp_path)
     verdict, staged, _ = handlers.on_validate_lora("", str(adapter), [])
 
-    assert len(staged) == 1
-    assert staged[0]["path"] == str(adapter)
-    assert staged[0]["source"] == str(adapter)
+    assert fetched == [], "an upload must never reach the Hub fetcher"
+    assert len(staged) == 1, verdict
+    path = Path(staged[0]["path"])
+    assert path != adapter and path.is_file()
+    assert cache in path.parents, "the staged copy lives in the app-owned LoRA cache"
+    assert path.read_bytes() == adapter.read_bytes()
+    assert staged[0]["source"] == str(adapter), "the label names what the user uploaded"
+
+    _, staged_again, _ = handlers.on_validate_lora("", str(adapter), staged)
+    assert len(staged_again) == 1, "the same upload validated twice is staged once"
 
 
 # --------------------------------------------------------------------------
