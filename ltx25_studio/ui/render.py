@@ -23,12 +23,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from .. import audio_conditioning
+from .. import audio_conditioning, errors
 from ..errors import (
-    ConstraintError,
-    DecodeError,
-    EmptyOutputError,
-    EncodeError,
     LoRAConventionError,
     LoRADimensionError,
     LoRAError,
@@ -42,10 +38,6 @@ from ..errors import (
     LoRATooLargeError,
     LoRATruncatedError,
     LoRAVersionError,
-    LTXStudioError,
-    ModelLoadError,
-    PromptEnhancementError,
-    UnknownModeError,
 )
 
 __all__ = [
@@ -524,10 +516,16 @@ def weight_text(weight: Any) -> str:
     return text[:-1] if text.endswith("0") else text
 
 
-def _lora_words(loras: Sequence[tuple[str, float]]) -> str:
+def _lora_words(loras: Sequence[tuple]) -> str:
+    """Adapters and strengths; ``(name, weight[, layers attached])`` each."""
     if not loras:
         return "none, base model only"
-    parts = [f"{_e(name)} at {_num(weight_text(weight))}" for name, weight in loras]
+    parts = []
+    for name, weight, *attached in loras:
+        part = f"{_e(name)} at {_num(weight_text(weight))}"
+        if attached:
+            part += f", on {_num(attached[0])} layers"
+        parts.append(part)
     return "; ".join(parts)
 
 
@@ -863,7 +861,8 @@ class RunFacts:
     returned_size: tuple[int, int] | None
     seconds: float | None
     stage_2: bool
-    loras: tuple[tuple[str, float], ...]
+    #: ``(name, weight)``, or ``(name, weight, layers attached)`` from the run record.
+    loras: tuple[tuple, ...]
     took: float
     #: True when ``took`` is the worker's own GPU time, not the page's wall clock.
     took_is_gpu: bool = False
@@ -929,7 +928,11 @@ def success(result: Any, mode: Any) -> str:
         lines.append('<div class="mr-notes">')
         lines += [f"<p>{_e(n[0].upper() + n[1:])}</p>" for n in notes]
         lines.append("</div>")
-    diagnostics = []
+    record = getattr(result, "record", None)
+    diagnostics = [str(line) for line in (getattr(record, "diagnostics", None) or ())]
+    peak = getattr(record, "peak_vram_gib", None)
+    if peak is not None:
+        diagnostics.append(f"Peak GPU memory reserved: {peak:.2f} GiB")
     run_dir = getattr(result, "run_dir", None)
     if run_dir:
         diagnostics.append(f"Run folder: {run_dir}")
@@ -962,75 +965,35 @@ def empty_output_bug(mode: Any, missing: list[str]) -> str:
     )
 
 
-#: ``(type, headline, next step, ran_on_gpu)``, most specific first.
-_FAILURES: tuple[tuple[type, str, str], ...] = (
-    (
-        PromptEnhancementError,
-        "The prompt enhancer is unavailable",
-        "Turn Enhance off to run with your own prompt.",
-    ),
-    (
-        LoRAError,
-        "An adapter could not be applied",
-        "Remove the adapter, or try a different one, and press Generate again.",
-    ),
-    (
-        ModelLoadError,
-        "The model failed to load",
-        "Press Generate again in a minute. If it keeps failing, report it with the detail below.",
-    ),
-    (
-        DecodeError,
-        "The model stopped while generating",
-        "Try a shorter or smaller run. If it happens again, report it with the detail below.",
-    ),
-    (
-        EncodeError,
-        "The result could not be written to a file",
-        "This is a bug in this app. Report it with the detail below.",
-    ),
-    (
-        EmptyOutputError,
-        "The run finished but produced no file",
-        "This is a bug in this app. Report it with the detail below.",
-    ),
-    (
-        UnknownModeError,
-        "This mode is not available",
-        "Reload the page and pick a mode from the matrix.",
-    ),
-)
-
-
-#: ``exc.category`` (set by the backend) -> ``(headline, next step)``.
+#: ``errors.categorise`` category -> ``(headline, next step)``.
 _CATEGORIES: dict[str, tuple[str, str]] = {
-    "quota": (
+    errors.QUOTA: (
         "Not enough GPU quota for this run",
         "Wait for your daily quota to refill, or make the run smaller or shorter.",
     ),
-    "timeout": (
+    errors.TIMEOUT: (
         "The run ran out of GPU time",
         "Make the run shorter or smaller, or turn off Upscale, then press Generate again.",
     ),
-    "out_of_memory": (
+    errors.OOM: (
         "The GPU ran out of memory",
         "Make the run smaller: a lower size, fewer frames or Upscale off.",
     ),
-    "refused": (
-        "Refused before running: fix the input",
+    errors.INPUT: (
+        "The run was refused: fix the input",
         "Change what the detail below names, then press Generate again.",
     ),
-    "adapter": (
+    errors.ADAPTER: (
         "An adapter doesn't fit this model",
         "Remove the adapter, or try a different one, and press Generate again.",
     ),
-    "enhancer": (
+    errors.ENHANCER: (
         "The prompt enhancer is unavailable",
         "Turn Enhance off to run with your own prompt.",
     ),
-    "bug": (
+    errors.BUG: (
         "Something went wrong in this app",
-        "Report it with the time of the run and the detail below.",
+        "Press Generate again. If it happens again, report it with the detail below.",
     ),
 }
 
@@ -1038,56 +1001,22 @@ _CATEGORIES: dict[str, tuple[str, str]] = {
 def failure(exc: BaseException, *, refused: bool = False) -> str:
     """Any failure, rendered loudly: headline, quota line, one next step, detail.
 
-    ``refused`` is set when the request was turned down before anything was
-    dispatched, which is the only case in which "no GPU time was used" is known
-    to be true.
+    The category and whether GPU time was used come from ``errors.categorise``.
+    ``refused`` is set when this page turned the request down before calling
+    the backend at all, which is known to have used no GPU time.
     """
     detail = str(exc).strip() or "No detail was attached to the error."
-    category = getattr(exc, "category", None)
-    if category in _CATEGORIES and not refused:
-        headline, step = _CATEGORIES[category]
-        used = getattr(exc, "gpu_used", None)
-        quota = (
-            "Nothing ran. No GPU time was used."
-            if used is False or category == "refused"
-            else "Any GPU time this run used is billed."
-        )
-        return (
-            f"### {headline}\n\n{quota} {step}\n\n"
-            f'<details class="mr-detail"><summary>Detail</summary><p>{_e(detail)}</p></details>'
-        )
-    if refused:
-        if isinstance(exc, ConstraintError):
-            headline = "Refused before running: fix the input"
-            step = "Change what the detail below names, then press Generate again."
-        elif isinstance(exc, LoRAError):
-            headline = "Refused before running: an adapter is missing"
-            step = "Check the adapter again, or remove it, then press Generate again."
-        else:
-            headline = "Refused before running"
-            step = "Change what the detail below names, then press Generate again."
-        quota = "Nothing ran. No GPU time was used."
-        opened = " open"
-    else:
-        headline, step = next(
-            ((h, s) for t, h, s in _FAILURES if isinstance(exc, t)),
-            (
-                (
-                    "The run was refused",
-                    "Change what the detail below names, then press Generate again.",
-                )
-                if isinstance(exc, ConstraintError)
-                else (
-                    "The run stopped",
-                    "Read the detail below. If it is about quota or time, wait or make the run "
-                    "smaller; otherwise press Generate again.",
-                )
-                if not isinstance(exc, LTXStudioError)
-                else ("The run failed", "Press Generate again. If it repeats, report the detail.")
-            ),
-        )
-        quota = "Any GPU time this run used is billed."
-        opened = " open" if not isinstance(exc, LTXStudioError) else ""
+    found = errors.categorise(exc)
+    gpu_used = found.gpu_used and not refused
+    headline, step = _CATEGORIES.get(found.category, _CATEGORIES[errors.BUG])
+    if found.category == errors.INPUT and not gpu_used:
+        headline = "Refused before running: fix the input"
+    quota = (
+        "Any GPU time this run used is billed."
+        if gpu_used
+        else ("Nothing ran. No GPU time was used.")
+    )
+    opened = " open" if found.category in (errors.INPUT, errors.QUOTA) else ""
     return (
         f"### {headline}\n\n"
         f"{quota} {step}\n\n"

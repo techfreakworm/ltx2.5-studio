@@ -53,7 +53,6 @@ FAILURES = [
     errors.PromptEnhancementError(
         repo_id="google/gemma", reason="the enhancer could not be fetched"
     ),
-    RuntimeError("You have exceeded your GPU quota (300s requested vs. 112s left)."),
 ]
 
 
@@ -189,17 +188,18 @@ def test_the_start_message_says_enhancing_only_when_the_prompt_will_be_enhanced(
 @pytest.mark.parametrize(
     ("category", "headline"),
     [
-        ("quota", "Not enough GPU quota"),
-        ("timeout", "ran out of GPU time"),
-        ("out_of_memory", "ran out of memory"),
-        ("adapter", "adapter doesn't fit"),
-        ("enhancer", "enhancer is unavailable"),
-        ("bug", "went wrong in this app"),
+        (errors.QUOTA, "Not enough GPU quota"),
+        (errors.TIMEOUT, "ran out of GPU time"),
+        (errors.OOM, "ran out of memory"),
+        (errors.ADAPTER, "adapter doesn't fit"),
+        (errors.ENHANCER, "enhancer is unavailable"),
+        (errors.BUG, "went wrong in this app"),
     ],
 )
-def test_a_failure_the_backend_categorised_reads_its_category(category, headline):
+def test_a_failure_reads_the_category_errors_categorise_gives_it(category, headline):
     exc = errors.DecodeError(mode="text_to_video", reason="x")
     exc.category = category
+    exc.gpu_used = True
     text = render.failure(exc)
     assert headline in text.split("\n", 1)[0]
     assert "Any GPU time this run used is billed." in text
@@ -207,12 +207,35 @@ def test_a_failure_the_backend_categorised_reads_its_category(category, headline
     assert "Nothing ran. No GPU time was used." in render.failure(exc)
 
 
+def test_platform_and_torch_errors_are_categorised_by_errors_categorise():
+    quota = RuntimeError("You have exceeded your GPU quota (300s requested vs. 112s left).")
+    text = render.failure(quota)
+    assert text.startswith("### Not enough GPU quota")
+    assert "Nothing ran. No GPU time was used." in text, "a quota refusal used no GPU time"
+    assert "300s requested vs. 112s left" in text and '<details class="mr-detail" open>' in text
+    oom = RuntimeError("CUDA out of memory. Tried to allocate 2.00 GiB")
+    assert render.failure(oom).startswith("### The GPU ran out of memory")
+    assert render.failure(RuntimeError("no idea")).startswith("### Something went wrong")
+
+
+def test_an_input_problem_raised_inside_the_run_does_not_claim_nothing_ran():
+    exc = errors.ConstraintError("the decoder cannot run here")
+    exc.gpu_used = True
+    text = render.failure(exc)
+    assert text.startswith("### The run was refused") and "billed" in text
+    exc.gpu_used = False
+    assert render.failure(exc).startswith("### Refused before running")
+
+
 def test_run_facts_read_the_results_record_first_and_fall_back_to_the_request():
+    from ltx25_studio import generate as generate_module
+
     params = {spec.key: spec.default for spec in FIELDS} | {
         "width": 704,
         "height": 480,
         "num_frames": 121,
         "enable_stage_2": True,
+        "prompt": "a tram",
         "loras": [{"source": "/tmp/a/style.safetensors", "weight": 0.8}],
     }
 
@@ -231,17 +254,36 @@ def test_run_facts_read_the_results_record_first_and_fall_back_to_the_request():
     facts = handlers.run_facts(bare)
     assert facts.returned_size == (1408, 960) and facts.stage_2 and facts.seed == 9
     assert facts.loras == (("style.safetensors", 0.8),) and not facts.took_is_gpu
+    assert facts.length_source == generate_module.LENGTH_FROM_REQUEST
+    assert facts.prompt_sent is None and facts.decoder is None
     assert "wall-clock" in render.run_summary(facts)
 
-    class Record:
-        width, height, seconds, stage_2 = 704, 480, 4.0, False
-        worker_seconds, prompt_sent, seed = 33.0, "an enhanced prompt", 10
-        adapters = ({"source": "org/style", "weight": 1.2, "modules_attached": 12},)
+    record = generate_module.RunRecord(
+        mode="text_to_audio_video",
+        requested_width=704,
+        requested_height=480,
+        width=704,
+        height=480,
+        frames=97,
+        frame_rate=24.0,
+        seconds=4.04,
+        seed=10,
+        stage_2=False,
+        decoder="diffusion",
+        audio_level=None,
+        length_source=generate_module.LENGTH_FROM_MODEL,
+        prompt="a red vintage tram climbs a cobbled street at golden hour",
+        adapters=(("org/style", 1.2, 12),),
+        elapsed_seconds=33.0,
+        peak_vram_gib=41.5,
+    )
 
     class Recorded:
         seed = 9
-        record = Record()
+        warnings = ()
+        run_dir = "outputs/run-x"
 
+    Recorded.record = record
     facts = handlers.run_facts(
         handlers.RunOutcome(
             video="v",
@@ -253,11 +295,23 @@ def test_run_facts_read_the_results_record_first_and_fall_back_to_the_request():
             took=12.4,
         )
     )
-    assert facts.returned_size == (704, 480) and not facts.stage_2 and facts.seconds == 4.0
-    assert facts.seed == 10 and facts.loras == (("org/style", 1.2),)
-    assert facts.took == 33.0 and facts.took_is_gpu
-    summary = render.run_summary(facts)
-    assert "GPU time" in summary and "an enhanced prompt" in summary
+    assert facts.returned_size == (704, 480) and not facts.stage_2 and facts.seconds == 4.04
+    assert facts.seed == 10 and facts.loras == (("org/style", 1.2, 12),)
+    assert facts.took == 33.0 and facts.took_is_gpu and facts.decoder == "diffusion"
+    assert facts.length_source == generate_module.LENGTH_FROM_MODEL
+    assert facts.prompt_sent == "a red vintage tram climbs a cobbled street at golden hour"
+    summary = " ".join(visible(render.run_summary(facts)).split())
+    for words in (
+        "GPU time",
+        "golden hour",
+        "chosen by the model",
+        "on 12 layers",
+        "diffusion decoder",
+    ):
+        assert words in summary, words
+    report = render.success(Recorded(), modes.get_mode("text_to_audio_video"))
+    assert "Peak GPU memory reserved: 41.50 GiB" in report
+    assert "41.50" not in visible(report), "VRAM lives in the collapsed Diagnostics block"
 
 
 def test_the_decoder_choices_say_what_each_does_and_the_report_names_the_one_that_ran():

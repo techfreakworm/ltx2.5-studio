@@ -828,52 +828,61 @@ def fact(result: Any, name: str, fallback: Any = None) -> Any:
 
 
 def run_facts(outcome: RunOutcome) -> render.RunFacts:
-    """What the report's "what you got" block states, for a finished run."""
+    """What the report's "what you got" block states, for a finished run.
+
+    Each fact is read from ``result.record`` (``generate.RunRecord``) and falls
+    back to the request and the page's wall clock when a result has none.
+    """
+    from .. import generate as generate_module
     from .. import pipelines
 
     mode = modes.get_mode(outcome.mode_id)
     result, params = outcome.result, outcome.params
     request = outcome.prepared
-    stage_2 = bool(params.get("enable_stage_2")) and not mode.skip_stage_2
+    asked_stage_2 = bool(params.get("enable_stage_2")) and not mode.skip_stage_2
     if mode.min_resolution:
         size = (modes.MIN_RESOLUTION, modes.MIN_RESOLUTION)
     else:
         size = (_as_int(params.get("width")) or 0, _as_int(params.get("height")) or 0)
-    scale = pipelines.STAGE_2_SPATIAL_SCALE if stage_2 else 1
+    scale = pipelines.STAGE_2_SPATIAL_SCALE if asked_stage_2 else 1
     auto = bool(getattr(request, "auto_duration", params.get("auto_duration")))
     frames = None if auto else getattr(request, "num_frames", params.get("num_frames"))
     rate = float(getattr(request, "frame_rate", FRAME_RATE) or FRAME_RATE)
-    stage_2 = bool(fact(result, "stage_2", stage_2))
+
     width = fact(result, "width", size[0] * scale)
     height = fact(result, "height", size[1] * scale)
-    seconds = fact(result, "seconds", (int(frames) / rate) if frames else None)
     adapters = fact(result, "adapters", None)
-    loras = (
-        tuple((render.shown_name(str(a["source"])), float(a["weight"])) for a in adapters)
-        if adapters
-        else _staged_names(params.get("loras"))
-    )
+    if adapters:
+        loras = tuple(
+            (render.shown_name(str(label)), float(weight), int(attached))
+            for label, weight, attached in adapters
+        )
+    else:
+        loras = _staged_names(params.get("loras"))
     asked_auto = bool(params.get("auto_duration"))
-    origin = (
-        "audio"
-        if asked_auto and modes.requires(mode, "audio")
-        else ("model" if asked_auto else "requested")
-    )
-    level = (
-        _as_float(params.get("noise_scale")) if mode_view(mode.id).active["noise_scale"] else None
-    )
+    if asked_auto and modes.requires(mode, "audio"):
+        origin = generate_module.LENGTH_FROM_AUDIO
+    elif asked_auto:
+        origin = generate_module.LENGTH_FROM_MODEL
+    else:
+        origin = generate_module.LENGTH_FROM_REQUEST
+    varies_audio = mode_view(mode.id).active["noise_scale"]
+    level = fact(result, "audio_level", _as_float(params.get("noise_scale")))
+    sent = fact(result, "prompt", None)
+    typed = str(params.get("prompt") or "").strip()
+    elapsed = fact(result, "elapsed_seconds", None)
     return render.RunFacts(
         mode=mode,
         seed=int(fact(result, "seed", getattr(result, "seed", 0))),
-        returned_size=(int(width), int(height)),
-        seconds=seconds,
-        stage_2=stage_2,
+        returned_size=(int(width), int(height)) if width and height else None,
+        seconds=fact(result, "seconds", (int(frames) / rate) if frames else None),
+        stage_2=bool(fact(result, "stage_2", asked_stage_2)),
         loras=loras,
-        took=float(fact(result, "worker_seconds", outcome.took)),
-        took_is_gpu=fact(result, "worker_seconds", None) is not None,
-        prompt_sent=fact(result, "prompt_sent", None),
+        took=float(elapsed if elapsed is not None else outcome.took),
+        took_is_gpu=elapsed is not None,
+        prompt_sent=sent if sent and str(sent).strip() != typed else None,
         length_source=fact(result, "length_source", origin),
-        audio_level=fact(result, "audio_level", level),
+        audio_level=level if varies_audio else None,
         decoder=fact(result, "decoder", None),
     )
 
