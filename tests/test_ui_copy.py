@@ -140,7 +140,7 @@ def test_no_visible_string_carries_builder_jargon(mode_id):
         render.monitor_idle(mode),
         render.running(mode),
         render.running(mode, enhancing=True),
-        render.mode_name(mode),
+        mode.label,
         render.monitor_caption(kind="run", mode=mode, seed=1),
     ]
     from conftest import inputs_for
@@ -256,7 +256,8 @@ def test_run_facts_read_the_results_record_first_and_fall_back_to_the_request():
     assert facts.loras == (("style.safetensors", 0.8),) and not facts.took_is_gpu
     assert facts.length_source == generate_module.LENGTH_FROM_REQUEST
     assert facts.prompt_sent is None and facts.decoder is None
-    assert "wall-clock" in render.run_summary(facts)
+    shown = " ".join(visible(render.run_summary(facts)).split())
+    assert "Took 12 s" in shown, "the page's own clock, unlabelled"
 
     record = generate_module.RunRecord(
         mode="text_to_audio_video",
@@ -302,11 +303,11 @@ def test_run_facts_read_the_results_record_first_and_fall_back_to_the_request():
     assert facts.prompt_sent == "a red vintage tram climbs a cobbled street at golden hour"
     summary = " ".join(visible(render.run_summary(facts)).split())
     for words in (
-        "GPU time",
+        "Took 33 s",
         "golden hour",
         "chosen by the model",
         "on 12 layers",
-        "diffusion decoder",
+        "Decoder Best quality",
     ):
         assert words in summary, words
     report = render.success(Recorded(), modes.get_mode("text_to_audio_video"))
@@ -318,13 +319,10 @@ def test_the_decoder_choices_say_what_each_does_and_the_report_names_the_one_tha
     from ltx25_studio.config import DECODER_CHOICES
 
     assert [value for _l, value, _w in render.DECODER_OPTIONS] == list(DECODER_CHOICES)
-    assert render.decoder_line("auto") == (
-        "Uses the model's own decoder when this machine can run it."
-    )
-    assert render.decoder_line("diffusion") == (
-        "The model's diffusion decoder: finer detail, takes longer."
-    )
-    assert render.decoder_line("conv") == "The quick decoder: slightly softer."
+    for label, value, words in render.DECODER_OPTIONS:
+        assert render.decoder_line(value) == words
+        assert words.endswith(".") and len(words) < 80, label
+    assert render.decoder_line("conv", upscaling=True) == render.UPSCALE_DECODER_LINE
     facts = render.RunFacts(
         mode=modes.get_mode("text_to_video"),
         seed=1,
@@ -335,7 +333,7 @@ def test_the_decoder_choices_say_what_each_does_and_the_report_names_the_one_tha
         took=3.0,
         decoder="diffusion",
     )
-    assert "diffusion decoder" in render.run_summary(facts)
+    assert "Best quality" in render.run_summary(facts)
     no_record = render.RunFacts(
         mode=modes.get_mode("text_to_video"),
         seed=1,

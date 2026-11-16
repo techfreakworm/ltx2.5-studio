@@ -143,7 +143,7 @@ def mode_view(mode_id: str) -> ModeView:
     timed = modes.accepts(mode, "video") or modes.requires(mode, "audio")
     return ModeView(
         mode_id=mode.id,
-        name=render.mode_name(mode),
+        name=mode.label,
         purpose=render.purpose_line(mode),
         active=active,
         prompt_required=modes.requires(mode, "text"),
@@ -448,12 +448,24 @@ def on_shape_change(width: Any, height: Any, num_frames: Any) -> tuple[str, str]
     return (_dimension_hint(width, height), _frame_hint(num_frames))
 
 
+def _snapped_size(w: int, h: int) -> tuple[int, int]:
+    limit = constraints.MAX_DIMENSION
+    return tuple(min(value, limit) for value in constraints.snap_dimensions(w, h))
+
+
 def _dimension_hint(width: Any, height: Any) -> str:
     w, h = _as_int(width), _as_int(height)
     if w is None or h is None:
         return "Width and height must both be numbers."
+    over = [
+        (name, value)
+        for name, value in (("Width", w), ("Height", h))
+        if value > constraints.MAX_DIMENSION
+    ]
+    if over:
+        return render.dimension_limit_hint(over, limit=constraints.MAX_DIMENSION)
     return render.dimension_hint(
-        w, h, multiple=constraints.DIMENSION_MULTIPLE, snapped=constraints.snap_dimensions(w, h)
+        w, h, multiple=constraints.DIMENSION_MULTIPLE, snapped=_snapped_size(w, h)
     )
 
 
@@ -461,6 +473,12 @@ def _frame_hint(num_frames: Any) -> str:
     frames = _as_int(num_frames)
     if frames is None:
         return "The frame count must be a number."
+    if frames > constraints.MAX_NUM_FRAMES:
+        return render.frame_limit_hint(
+            frames,
+            limit=constraints.MAX_NUM_FRAMES,
+            seconds=constraints.MAX_NUM_FRAMES / FRAME_RATE,
+        )
     lower, upper = constraints.nearest_valid_num_frames(frames)
     return render.frame_hint(
         frames,
@@ -473,9 +491,11 @@ def _frame_hint(num_frames: Any) -> str:
 
 def on_snap(width: Any, height: Any, num_frames: Any) -> tuple[int, int, int, str, str]:
     """Snap all three to the nearest legal value; the user presses for it."""
-    w = constraints.snap_dimension(_as_int(width) or constraints.DIMENSION_MULTIPLE)
-    h = constraints.snap_dimension(_as_int(height) or constraints.DIMENSION_MULTIPLE)
-    frames = constraints.snap_num_frames(_as_int(num_frames) or 1)
+    w, h = _snapped_size(
+        _as_int(width) or constraints.DIMENSION_MULTIPLE,
+        _as_int(height) or constraints.DIMENSION_MULTIPLE,
+    )
+    frames = min(constraints.snap_num_frames(_as_int(num_frames) or 1), constraints.MAX_NUM_FRAMES)
     return (w, h, frames, _dimension_hint(w, h), _frame_hint(frames))
 
 
@@ -520,37 +540,53 @@ def quota_multiplier() -> int:
     return int(zerogpu.quota_multiplier())
 
 
-def _shape_problems(width: Any, height: Any, num_frames: Any, auto: bool) -> list[str]:
-    """Every size and length problem, each with its nearest legal values."""
+def _shape_problems(
+    width: Any, height: Any, num_frames: Any, auto: bool, *, sizes: bool = True
+) -> list[tuple[str, str, str]]:
+    """Every size and length problem as ``(what, short form, full sentence)``, each with
+    its nearest legal values. ``sizes`` is False where the mode renders at a pinned size:
+    its width and height are not its input."""
     problems = []
     w, h = _as_int(width), _as_int(height)
-    if w is None or h is None:
-        problems.append("Width and height must both be numbers.")
-    else:
+    if sizes and (w is None or h is None):
+        problems.append(("size", "size not a number", "Width and height must both be numbers."))
+    elif sizes:
         for name, value in (("Width", w), ("Height", h)):
             try:
-                constraints.validate_dimension(value, name=name.lower())
                 constraints.validate_dimension_limit(value, name=name.lower())
+                constraints.validate_dimension(value, name=name.lower())
             except constraints.ConstraintError:
                 snapped = min(constraints.snap_dimension(value), constraints.MAX_DIMENSION)
                 problems.append(
-                    f"{name} {value} won't run: use {snapped} (multiples of "
-                    f"{constraints.DIMENSION_MULTIPLE}, up to {constraints.MAX_DIMENSION})."
+                    (
+                        name.lower(),
+                        f"{name.lower()} {value}, use {snapped}",
+                        f"{name} {value} won't run: use {snapped} (multiples of "
+                        f"{constraints.DIMENSION_MULTIPLE}, up to {constraints.MAX_DIMENSION}).",
+                    )
                 )
     if not auto:
         frames = _as_int(num_frames)
         if frames is None:
-            problems.append("The frame count must be a number.")
+            problems.append(("frames", "frames not a number", "The frame count must be a number."))
+        elif frames > constraints.MAX_NUM_FRAMES:
+            problems.append(
+                (
+                    "frames",
+                    f"{frames} frames, use {constraints.MAX_NUM_FRAMES}",
+                    f"{frames} frames is longer than this model makes: use at most "
+                    f"{constraints.MAX_NUM_FRAMES} ({constraints.MAX_SECONDS:g} s).",
+                )
+            )
         elif not constraints.is_valid_num_frames(frames):
             lower, upper = constraints.nearest_valid_num_frames(frames)
             problems.append(
-                f"{frames} frames won't run: use {lower} ({lower / FRAME_RATE:.1f} s) or "
-                f"{upper} ({upper / FRAME_RATE:.1f} s)."
-            )
-        elif frames > constraints.MAX_NUM_FRAMES:
-            problems.append(
-                f"{frames} frames is longer than this model makes: use at most "
-                f"{constraints.MAX_NUM_FRAMES} ({constraints.MAX_SECONDS:g} s)."
+                (
+                    "frames",
+                    f"{frames} frames, use {lower} or {upper}",
+                    f"{frames} frames won't run: use {lower} ({lower / FRAME_RATE:.1f} s) or "
+                    f"{upper} ({upper / FRAME_RATE:.1f} s).",
+                )
             )
     return problems
 
@@ -570,35 +606,47 @@ def _staged_names(loras: Any) -> tuple[tuple[str, float], ...]:
     return tuple(out)
 
 
-def review(mode_id: str, values: dict[str, Any]) -> render.CostFacts:
+def review(
+    mode_id: str, values: dict[str, Any], *, length_source: str | None = None
+) -> render.CostFacts:
     """What this request would render, return and reserve -- or why it won't run.
 
     Readiness is the backend's own answer: ``generate.prepare_request`` is the
     check ``generate()`` runs before it reserves a GPU, so the reason shown under
     a disabled Generate is the refusal the server would give, word for word.
+
+    ``length_source`` is the page's Match my clip / Set the length choice: with
+    Match and no clip loaded yet, the length is "the length of your clip", not
+    the frame count the form happens to hold.
     """
     from .. import generate as generate_module
     from .. import pipelines, zerogpu
     from ..errors import MissingInputError
 
     mode = modes.get_mode(mode_id)
-    name = render.mode_name(mode)
+    name = mode.label
     multiplier = quota_multiplier()
     try:
         request = _request(mode_id, values)
     except Exception as exc:  # noqa: BLE001
         return render.CostFacts(mode_name=name, state="refused", reason=str(exc))
 
-    # The backend validates the size boxes in every mode, pinned ones included.
-    problems = _shape_problems(
-        request.width, request.height, request.num_frames, bool(request.auto_duration)
+    # A mode that renders at its pinned size does not take the size boxes.
+    shape = _shape_problems(
+        request.width,
+        request.height,
+        request.num_frames,
+        bool(request.auto_duration),
+        sizes=not mode.min_resolution,
     )
+    problems = [sentence for _what, _short, sentence in shape]
 
-    state, reason, prepared, notes = "ready", None, request, ()
+    state, reason, prepared, notes, missing = "ready", None, request, (), ()
     try:
         prepared, _spec, notes = generate_module.prepare_request(request)
     except MissingInputError as exc:
         state, reason = "incomplete", str(exc)
+        missing = tuple(getattr(exc, "missing", ()) or ())
         try:
             prepared, _ = generate_module.scope_request_to_mode(request, mode)
         except Exception:  # noqa: BLE001
@@ -614,6 +662,7 @@ def review(mode_id: str, values: dict[str, Any]) -> render.CostFacts:
             state="refused",
             reason=reason,
             problems=tuple(problems) or ((reason,) if reason else ()),
+            short_problems=tuple((what, short) for what, short, _sentence in shape),
             stage_2_offered=not mode.skip_stage_2,
             enhance_offered=modes.accepts(mode, "text"),
             multiplier=multiplier,
@@ -631,6 +680,14 @@ def review(mode_id: str, values: dict[str, Any]) -> render.CostFacts:
     auto = bool(prepared.auto_duration)
     from_audio = auto and modes.requires(mode, "audio")
     frames = None if auto else int(prepared.num_frames)
+    # A clip mode matching its clip, with no clip loaded yet: the length is the clip's.
+    pending = None
+    if (
+        modes.accepts(mode, "video")
+        and request.video is None
+        and (length_source in (None, render.LENGTH_MATCH) and not auto)
+    ):
+        pending, frames = "clip", None
     seconds = None if frames is None else frames / float(prepared.frame_rate)
 
     enhance = bool(prepared.enhance_prompt) and bool((prepared.prompt or "").strip())
@@ -687,6 +744,8 @@ def review(mode_id: str, values: dict[str, Any]) -> render.CostFacts:
         encodes_audio=modes.requires(mode, "audio") and "video" in exports,
         seed=seed,
         notes=tuple(notes),
+        missing=missing,
+        length_pending=pending,
     )
 
 
@@ -933,6 +992,7 @@ def run_facts(outcome: RunOutcome) -> render.RunFacts:
         origin = generate_module.LENGTH_FROM_MODEL
     else:
         origin = generate_module.LENGTH_FROM_REQUEST
+    device, on_zerogpu = _run_device(result)
     varies_audio = mode_view(mode.id).active["noise_scale"]
     level = fact(result, "audio_level", _as_float(params.get("noise_scale")))
     sent = fact(result, "prompt", None)
@@ -951,7 +1011,26 @@ def run_facts(outcome: RunOutcome) -> render.RunFacts:
         length_source=fact(result, "length_source", origin),
         audio_level=level if varies_audio else None,
         decoder=fact(result, "decoder", None),
+        device=device,
+        on_zerogpu=on_zerogpu,
+        quota_multiplier=quota_multiplier(),
     )
+
+
+def _run_device(result: Any) -> tuple[str | None, bool]:
+    """``(device, on ZeroGPU)`` for a finished run.
+
+    The record's own ``device`` when the backend reports one; otherwise this
+    process's resolution, which is the one the GPU entrypoint runs with.
+    """
+    recorded = fact(result, "device", None)
+    try:
+        from .. import device as device_module
+
+        resolution = device_module.current()
+    except Exception:  # noqa: BLE001 -- an unresolvable device leaves the time unlabelled
+        return (str(recorded) if recorded else None), False
+    return (str(recorded) if recorded else resolution.device), bool(resolution.on_zerogpu)
 
 
 def on_generate(mode_id: str, *values: Any, progress: Any = None) -> tuple[Any, Any, str]:

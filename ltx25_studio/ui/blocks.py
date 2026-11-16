@@ -49,6 +49,15 @@ _SHOWN_BY_MODE = (
 
 _DEFAULT_FRAMES = field_by_key("num_frames").default
 
+
+def _enhance_seconds() -> int:
+    from .. import zerogpu
+
+    return int(zerogpu.ENHANCE_DURATION_SECONDS)
+
+
+_ENHANCE_SECONDS = _enhance_seconds()
+
 _TITLE = "LTX-2.5 Studio"
 
 #: Text → video + sound: the model's native output, and every run renders and
@@ -65,8 +74,19 @@ EXAMPLE_SLOTS = 3
 #: Staged LoRA uploads are copied out of it first (``uploads.own_copy``).
 DELETE_CACHE = (3600, 6 * 3600)
 
-#: Upper bound for the LoRA strength slider; never above the LoRA module's own.
-LORA_SLIDER_MAX = 1.5
+#: The LoRA strength slider's step. Its range is the LoRA module's own (more than 0,
+#: at most ``staging.MAX_WEIGHT``), so its lowest stop is one step above 0. The range
+#: is set from the module when a row is shown (``lora_strength_range``): the package
+#: stays lazy until an adapter is checked.
+LORA_STEP = 0.05
+
+
+def lora_strength_range() -> tuple[float, float, float]:
+    """``(lowest, highest, default)`` strength, from ``lora.staging`` itself."""
+    from ..lora import staging
+
+    return (LORA_STEP, float(staging.MAX_WEIGHT), float(staging.DEFAULT_WEIGHT))
+
 
 _PRIVATE = {"api_visibility": "private", "show_progress": "hidden"}
 
@@ -166,9 +186,6 @@ def build_ui() -> gr.Blocks:
     from .. import zerogpu
     from ..config import load_config
 
-    # The LoRA package stays lazy (it loads with the first check or run); the
-    # slider's ceiling is held under the package's own maximum by a test.
-    max_weight = LORA_SLIDER_MAX
     cap_gb = load_config().lora_max_bytes / 1e9
     multiplier = handlers.quota_multiplier()
     view0 = handlers.mode_view(DEFAULT_MODE)
@@ -346,7 +363,7 @@ def build_ui() -> gr.Blocks:
                     bay = components.lora_bay(
                         rows=handlers.MAX_STAGED_LORAS,
                         cap=f"{cap_gb:.0f} GB",
-                        max_weight=max_weight,
+                        step=LORA_STEP,
                     )
                     components.render_fields(pool, "loras")
                 lora_note = gr.Markdown(
@@ -522,12 +539,12 @@ def build_ui() -> gr.Blocks:
         # =================================================================
         review_outputs = [cost, commit_line, generate_button, reason]
 
-        def _review(mode_id: str, is_running: bool, *values: Any) -> list[Any]:
+        def _review(mode_id: str, is_running: bool, source: str, *values: Any) -> list[Any]:
             try:
-                facts = handlers.review(mode_id, _values(values))
+                facts = handlers.review(mode_id, _values(values), length_source=source)
             except Exception as exc:  # noqa: BLE001 -- the panel must still say something
                 facts = render.CostFacts(
-                    mode_name=render.mode_name(modes.get_mode(mode_id)),
+                    mode_name=modes.get_mode(mode_id).label,
                     state="refused",
                     reason=str(exc) or exc.__class__.__name__,
                 )
@@ -540,12 +557,12 @@ def build_ui() -> gr.Blocks:
                 text,
             ]
 
-        review_inputs = [mode_selector, running, *field_inputs]
+        review_inputs = [mode_selector, running, length_source, *field_inputs]
 
         def _wire_review(trigger: Any) -> None:
             trigger(fn=_review, inputs=review_inputs, outputs=review_outputs, **_PRIVATE)
 
-        for component in [mode_selector, *field_inputs]:
+        for component in [mode_selector, length_source, *field_inputs]:
             if isinstance(component, gr.State):
                 continue
             _wire_review(component.change)
@@ -681,6 +698,8 @@ def build_ui() -> gr.Blocks:
                 if key == "prompt":
                     kwargs["label"] = view.prompt_label
                     kwargs["placeholder"] = view.prompt_placeholder
+                if key == "enhance_prompt" and view.active[key]:
+                    kwargs["info"] = render.enhance_info(mode, _ENHANCE_SECONDS)
                 if key in _MEDIA and view.active[key]:
                     kwargs["label"] = handlers.media_label(mode, key)
                 if key == "decoder":
@@ -710,9 +729,7 @@ def build_ui() -> gr.Blocks:
                 gr.update(visible=view.pinned_line is not None, value=view.pinned_line or ""),
                 gr.update(visible=view.upscale, value=upscale),
                 gr.update(visible=view.timed_input, value=source),
-                gr.update(
-                    visible=seconds_visible, value=handlers.seconds_for_frames(frames_value)
-                ),
+                gr.update(visible=seconds_visible, value=handlers.seconds_for_frames(frames_value)),
                 gr.update(visible=view.timed_input, value=length["line"]),
                 gr.update(value=frames_value, visible=lengths["num_frames"]),
                 gr.update(visible=view.sizes_picture),
@@ -858,7 +875,10 @@ def build_ui() -> gr.Blocks:
             return [frames, frames]
 
         def _set_frames(frames: Any) -> list[Any]:
-            return [handlers.seconds_for_frames(frames), handlers._as_int(frames) or _DEFAULT_FRAMES]
+            return [
+                handlers.seconds_for_frames(frames),
+                handlers._as_int(frames) or _DEFAULT_FRAMES,
+            ]
 
         seconds.input(
             fn=_set_seconds,
@@ -943,6 +963,8 @@ def build_ui() -> gr.Blocks:
         def _lora_rows(staged: list) -> list[Any]:
             entries = list(staged or [])
             out = [gr.update(visible=bool(entries))]
+            # Only with an adapter staged, so the LoRA package is already loaded.
+            lowest, highest, _default = lora_strength_range() if entries else (0, 0, 0)
             for index in range(handlers.MAX_STAGED_LORAS):
                 if index < len(entries):
                     entry = entries[index]
@@ -950,7 +972,12 @@ def build_ui() -> gr.Blocks:
                         gr.update(
                             visible=True, value=render.shown_name(str(entry.get("source", "")))
                         ),
-                        gr.update(visible=True, value=float(entry.get("weight", 1.0))),
+                        gr.update(
+                            visible=True,
+                            minimum=lowest,
+                            maximum=highest,
+                            value=float(entry.get("weight", 1.0)),
+                        ),
                         gr.update(visible=True),
                     ]
                 else:
@@ -1093,7 +1120,9 @@ def build_ui() -> gr.Blocks:
             status,
         ]
 
-        def _finish(request: gr.Request, mode_id: str, recent_now: list, *values: Any) -> list:
+        def _finish(
+            request: gr.Request, mode_id: str, recent_now: list, source: str, *values: Any
+        ) -> list:
             outcome = _recall(request)
             # The step before this one returned nothing this page can use: Gradio
             # itself failed it (a file it would not serve, a lost connection).
@@ -1102,7 +1131,7 @@ def build_ui() -> gr.Blocks:
                 gr.update(value=render.lost_run(), visible=True) if outcome is None else gr.update()
             )
             mode = modes.get_mode(mode_id)
-            review_out = _review(mode_id, False, *values)
+            review_out = _review(mode_id, False, source, *values)
             entries = list(recent_now or [])
             ok = (
                 outcome is not None
@@ -1183,7 +1212,7 @@ def build_ui() -> gr.Blocks:
         # brings Generate back is wired to both: exactly one of them runs.
         finish = {
             "fn": _finish,
-            "inputs": [mode_selector, recent, *field_inputs],
+            "inputs": [mode_selector, recent, length_source, *field_inputs],
             "outputs": finish_outputs,
             **_PRIVATE,
         }

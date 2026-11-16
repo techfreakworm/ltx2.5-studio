@@ -118,11 +118,13 @@ def assert_pool_complete(pool: dict[str, Any]) -> None:
 # ---------------------------------------------------------------------------
 
 
-def lora_bay(*, rows: int, cap: str, max_weight: float) -> dict[str, Any]:
+def lora_bay(*, rows: int, cap: str, step: float) -> dict[str, Any]:
     """Both routes (Hub id, upload), the verdict, and ``rows`` staged-adapter rows.
 
     Each row is a name, a strength slider and a Remove button; rows show and
-    hide with the staged list. The slider's ceiling is the LoRA module's own.
+    hide with the staged list. A row is hidden until an adapter is staged, and
+    showing it sets the slider's range from the LoRA module (never a copy kept
+    here), so the range built here is only a placeholder nobody sees.
     """
     widgets: dict[str, Any] = {}
     gr.Markdown(render.lora_heading(cap), elem_classes=["mr-bay-head"])
@@ -156,9 +158,9 @@ def lora_bay(*, rows: int, cap: str, max_weight: float) -> dict[str, Any]:
                 "", visible=False, elem_classes=["mr-lora-name"], min_width=200, scale=2
             )
             weight = gr.Slider(
-                minimum=0.1,
-                maximum=max_weight,
-                step=0.05,
+                minimum=step,
+                maximum=1.0,
+                step=step,
                 value=1.0,
                 label=f"Strength of adapter {index + 1}",
                 visible=False,

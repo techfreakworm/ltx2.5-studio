@@ -44,7 +44,9 @@ class Form:
             self.props[block._id] = {k: getattr(block, k, None) for k in _PROPS}
             if hasattr(block, "value"):
                 value = block.value
-                self.values[block._id] = copy.deepcopy(value) if isinstance(value, (dict, list)) else value
+                self.values[block._id] = (
+                    copy.deepcopy(value) if isinstance(value, (dict, list)) else value
+                )
         generate = next(f for f in self.fns if f.api_name == "on_generate")
         self.radio = generate.inputs[0]
         self.fields = dict(zip(FIELD_KEYS, generate.inputs[1:], strict=True))

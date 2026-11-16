@@ -23,7 +23,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from .. import audio_conditioning, errors
+from .. import audio_conditioning, errors, modes
 from ..errors import (
     LoRAConventionError,
     LoRADimensionError,
@@ -67,7 +67,6 @@ __all__ = [
     "lora_validating",
     "lost_run",
     "media_caption",
-    "mode_name",
     "monitor_caption",
     "monitor_idle",
     "pinned_line",
@@ -168,26 +167,11 @@ _PURPOSE: dict[str, str] = {
 }
 
 
-def _row_label(mode: Any) -> str:
-    required = frozenset(mode.inputs)
-    return next((label for key, label in ROWS if key == required), _and(sorted(required)))
-
-
-def _column_label(mode: Any) -> str:
-    exports = frozenset(mode.exports)
-    return next((label for key, label in COLUMNS if key == exports), " + ".join(sorted(exports)))
-
-
-def mode_name(mode: Any) -> str:
-    """The matrix name of a mode: ``Text → video + sound``."""
-    column = _column_label(mode)
-    return f"{_row_label(mode)} → {column[0].lower()}{column[1:]}"
-
-
 def purpose_line(mode: Any) -> str:
-    """The selected cell, in words, under the matrix."""
-    purpose = _PURPOSE.get(mode.id, mode.label + ".")
-    return f"**{mode_name(mode)}.** {purpose}"
+    """The selected cell, in words, under the matrix. A mode has one name everywhere:
+    the registry's ``label``, the same words as its cell."""
+    purpose = _PURPOSE.get(mode.id, "")
+    return f"**{mode.label}.** {purpose}".rstrip()
 
 
 # ---------------------------------------------------------------------------
@@ -215,21 +199,22 @@ FIELD_COPY: dict[str, tuple[str, str]] = {
     "enable_stage_2": (
         "Upscale ×2",
         "Upsamples and refines after the first pass, for twice the width and height. "
-        "Reserves 1.5 times the GPU time.",
+        "Reserves {upscale_seconds} s more.",
     ),
     "seed": ("Seed", "-1 picks a new seed each run. The seed used is in the run report."),
     "strength": ("Stick to the source clip", "Higher keeps more of your clip. 0.99 at most."),
     "noise_scale": (
         "How much to change your sound",
-        "Your sound is noised to this level and the model rebuilds it; lower keeps more of it. "
-        "Ignore my audio makes new sound, as if none were given.",
+        "A little keeps the most of your sound and A lot the least; the model rebuilds the "
+        "rest. Ignore my audio makes new sound, as if none were given.",
     ),
     "loras": ("LoRA adapters", ""),
     "decoder": ("Decoder", ""),
     "enhance_prompt": (
         "Enhance my prompt",
-        "Gemma rewrites your prompt in detail on the GPU first, and reads your image if there "
-        "is one. Reserves {enhance_seconds} s more; usually uses a few seconds.",
+        "Gemma rewrites your prompt in detail on the GPU before the run. Reserves "
+        "{enhance_seconds} s more; uses a few seconds when loaded, up to about 2 minutes on a "
+        "cold start.",
     ),
 }
 
@@ -265,6 +250,22 @@ def prompt_placeholder(mode: Any) -> str:
     return _PLACEHOLDERS.get(mode.id, "Describe the shot.")
 
 
+def enhance_info(mode: Any, enhance_seconds: int) -> str:
+    """The Enhance line for ``mode``: what it reserves, its cold start, and the image
+    clause only where the mode takes an image (the enhancer reads one, ``enhance.py``)."""
+    if modes.requires(mode, "image"):
+        reads = ", and reads your image"
+    elif modes.accepts(mode, "image"):
+        reads = ", and reads your image if you add one"
+    else:
+        reads = ""
+    return (
+        f"Gemma rewrites your prompt in detail on the GPU before the run{reads}. Reserves "
+        f"{enhance_seconds} s more; uses a few seconds when loaded, up to about 2 minutes on a "
+        f"cold start."
+    )
+
+
 _CAPTIONS: dict[tuple[str, str], str] = {
     ("video_to_video", "video"): "The clip to re-render.",
     ("video_to_audio", "video"): "The clip to make sound for.",
@@ -292,14 +293,16 @@ NOISE_CHOICES: tuple[tuple[str, float], ...] = tuple(
 #: The decoder choices: ``(label, value, what it does)``. The values are
 #: ``config.DECODER_CHOICES``; the reservation does not depend on the choice.
 DECODER_OPTIONS: tuple[tuple[str, str, str], ...] = (
-    ("Auto", "auto", "Uses the model's own decoder when this machine can run it."),
-    ("Best quality", "diffusion", "The model's diffusion decoder: finer detail, takes longer."),
-    ("Fast", "conv", "The quick decoder: slightly softer."),
+    ("Auto", "auto", "Best quality where this machine can run it, Fast where it cannot."),
+    ("Best quality", "diffusion", "Finer detail; takes longer."),
+    ("Fast", "conv", "Slightly softer; takes less time."),
 )
+#: What each decoder that ran is called in the report: the choice's own label.
+DECODER_NAMES = {value: label for label, value, _words in DECODER_OPTIONS}
 
 
 #: Under Upscale ×2 the decoder choice is not a lever (``pipelines.StageRunner``).
-UPSCALE_DECODER_LINE = "Upscale ×2 always finishes with the model's diffusion decoder."
+UPSCALE_DECODER_LINE = "Upscale ×2 always finishes with Best quality, whichever you pick here."
 
 
 def decoder_line(value: Any, *, upscaling: bool = False) -> str:
@@ -381,6 +384,20 @@ def frame_hint(num_frames: Any, *, ratio: int, lower: int, upper: int, valid: bo
         f"{num_frames} frames won't run. Use {lower} ({lower / 24:.1f} s) or "
         f"{upper} ({upper / 24:.1f} s), or press Snap."
     )
+
+
+def frame_limit_hint(num_frames: Any, *, limit: int, seconds: float) -> str:
+    """A frame count past the longest the model makes."""
+    return (
+        f"{num_frames} frames is longer than this model makes: {limit} frames "
+        f"({seconds:.1f} s) at most. Press Snap."
+    )
+
+
+def dimension_limit_hint(over: Sequence[tuple[str, Any]], *, limit: int) -> str:
+    """A width or height past the largest the model takes."""
+    named = _and([f"{name} {value}" for name, value in over])
+    return f"{named} is over the {limit} limit: use {limit} or less. Press Snap."
 
 
 def dimension_hint(width: Any, height: Any, *, multiple: int, snapped: tuple[int, int]) -> str:
@@ -470,6 +487,12 @@ class CostFacts:
     encodes_audio: bool = False
     seed: int | None = None
     notes: tuple[str, ...] = field(default_factory=tuple)
+    #: The input kinds a ``MissingInputError`` named (``incomplete``).
+    missing: tuple[str, ...] = ()
+    #: ``(what, short form)`` per problem, for the phone's commit bar (``refused``).
+    short_problems: tuple[tuple[str, str], ...] = ()
+    #: The length comes from a clip not loaded yet: ``"clip"`` (or None).
+    length_pending: str | None = None
 
 
 def _returns_words(facts: CostFacts) -> str:
@@ -512,6 +535,8 @@ def _lamps(facts: CostFacts) -> str:
 
 
 def _length_words(facts: CostFacts) -> str:
+    if facts.length_pending == "clip":
+        return "the length of your clip"
     if facts.auto_seconds is not None:
         low, high = facts.auto_seconds
         return f"length chosen by the model, {_num(f'{low:g}–{high:g}')} s"
@@ -607,12 +632,31 @@ def cost_panel(facts: CostFacts) -> str:
     )
 
 
+#: How the commit bar names a missing input.
+_MISSING_WORDS = {
+    "text": "a prompt",
+    "image": "an image",
+    "video": "a clip",
+    "audio": "an audio file",
+}
+
+
 def commit_line(facts: CostFacts) -> str:
-    """The phone's commit bar: the cost in one line, or why Generate is off."""
+    """The phone's commit bar: the cost in one short line, or why Generate is off.
+
+    Short enough to read whole on a phone; the cost panel holds the full reasons.
+    """
     if facts.state == "refused":
-        return facts.problems[0] if facts.problems else (facts.reason or "This won’t run.")
-    if facts.state == "incomplete" and facts.reason:
-        return facts.reason
+        shorts = facts.short_problems
+        if len(shorts) > 1:
+            return f"Won’t run: {len(shorts)} problems ({', '.join(what for what, _ in shorts)})"
+        if shorts:
+            return f"Won’t run: {shorts[0][1]}"
+        return "Won’t run. The cost panel says why."
+    if facts.state == "incomplete":
+        if facts.missing:
+            return "Needs " + _and([_MISSING_WORDS.get(kind, kind) for kind in facts.missing])
+        return "Not ready. The cost panel says why."
     parts = []
     if facts.render_size:
         parts.append(_size(*facts.render_size))
@@ -644,12 +688,18 @@ READY = "Ready. Nothing is spent until you press Generate."
 
 
 def monitor_idle(mode: Any) -> str:
-    """The monitor with nothing to play: a designed state, not a stock player."""
+    """The monitor with nothing to play: a designed state, not a stock player.
+
+    Read as its words (the mode's name, where the result will play); the crop marks are
+    decoration and hidden from assistive tech.
+    """
+    marks = "".join(
+        f'<span class="mr-crop {corner}" aria-hidden="true"></span>'
+        for corner in ("tl", "tr", "bl", "br")
+    )
     return (
-        '<div class="mr-monitor-idle" role="img" aria-label="Empty monitor">'
-        '<span class="mr-crop tl"></span><span class="mr-crop tr"></span>'
-        '<span class="mr-crop bl"></span><span class="mr-crop br"></span>'
-        f'<p class="mr-idle-mode">{_e(mode_name(mode))}</p>'
+        f'<div class="mr-monitor-idle">{marks}'
+        f'<p class="mr-idle-mode">{_e(mode.label)}</p>'
         '<p class="mr-idle-hint">Your result plays here.</p></div>'
     )
 
@@ -661,12 +711,12 @@ def monitor_caption(
     if kind == "sample":
         extra = f" {caption}" if caption else ""
         bits = ", ".join(b for b in (settings, f"seed {seed}" if seed is not None else "") if b)
-        detail = f" {mode_name(mode)}" + (f", {bits}" if bits else "") + "."
+        detail = f" {mode.label}" + (f", {bits}" if bits else "") + "."
         return f"**Example output, not your run.**{detail}{extra}"
     if kind == "run":
-        return f"**Your run.** {mode_name(mode)}, seed {seed}."
+        return f"**Your run.** {mode.label}, seed {seed}."
     if kind == "running":
-        return f"**Running.** {mode_name(mode)}. Progress shows on the monitor."
+        return f"**Running.** {mode.label}. Progress shows on the monitor."
     if kind == "failed":
         return "**This run failed.** The report below says why."
     return READY
@@ -726,9 +776,10 @@ def lora_no_trigger() -> str:
 
 def lora_heading(cap: str) -> str:
     return (
-        f"Add a LoRA from the Hub or upload a .safetensors file (up to {cap}). The file is "
-        "checked before any GPU time is used. Whether it fits LTX-2.5 is confirmed when you "
-        "generate; if it doesn't, that run stops and the time used is billed."
+        f"Add a LoRA from the Hub or upload a .safetensors file (up to {cap}). It is checked "
+        "against LTX-2.5's layers before any GPU time is used. The last check, that it "
+        "attaches, runs when you generate; if that fails, the run stops and the time used is "
+        "billed."
     )
 
 
@@ -773,9 +824,9 @@ def lora_accepted(source: str, report: Any) -> str:
     lines = [
         f"#### Accepted: {name}",
         "",
-        "Checks 1 to 6.5 passed: the file reads cleanly and every layer fits its target in "
-        "LTX-2.5. Staged for the next run at strength 1.0; adapters are often made for 0.5 "
-        "to 1.2, so set its strength below.",
+        "Every check before a run passed: the file reads cleanly and every layer fits its "
+        "target in LTX-2.5. Staged for the next run; set its strength below (adapters are "
+        "often made for 0.5 to 1.2).",
         "",
         "| | |",
         "|---|---|",
@@ -822,8 +873,19 @@ def lora_rejected(source: str, exc: BaseException) -> str:
         (text for error_type, text in _LORA_HEADLINES if isinstance(exc, error_type)),
         "Rejected: the adapter could not be checked",
     )
-    detail = str(exc).strip() or "No detail was attached to the error."
+    detail = _without_paths(str(exc).strip(), name) or "No detail was attached to the error."
     return f"### {headline}\n\n{name} was not staged. Nothing was spent.\n\n> {detail}"
+
+
+def _without_paths(text: str, name: str) -> str:
+    """The validator's words with every server path to the file shown as its name.
+
+    The upload is checked from an app-owned copy, so a message quotes that copy's path;
+    the user knows the file by its name.
+    """
+    import re
+
+    return re.sub(r"(?:[A-Za-z]:)?[/\\][^\s'\"]*[/\\]" + re.escape(name), name, text)
 
 
 def applied_loras(applied: list[Any]) -> str:
@@ -885,17 +947,40 @@ class RunFacts:
     audio_level: float | None = None
     #: The decoder that ran: "diffusion" or "conv".
     decoder: str | None = None
+    #: The device the run's time was measured on ("cuda", "mps", "cpu"), when known.
+    device: str | None = None
+    #: On ZeroGPU the GPU time is drawn from the user's quota at ``quota_multiplier``.
+    on_zerogpu: bool = False
+    quota_multiplier: int = 1
+
+
+#: Where a run's time was spent, by device.
+_ON_DEVICE = {"cpu": "on the CPU", "mps": "on this Mac's GPU", "cuda": "on the GPU"}
+
+
+def took_words(facts: RunFacts) -> str:
+    """ "Took N s", labelled by the device that ran it; on ZeroGPU, with the quota it drew."""
+    seconds = round(float(facts.took))
+    if not facts.took_is_gpu:
+        return f"{_num(seconds)} s"
+    if facts.on_zerogpu:
+        quota = seconds * int(facts.quota_multiplier)
+        return f"{_num(seconds)} s of GPU time, about {_num(quota)} s of your quota"
+    where = _ON_DEVICE.get(str(facts.device or ""))
+    return f"{_num(seconds)} s {where}" if where else f"{_num(seconds)} s"
 
 
 def run_summary(facts: RunFacts) -> str:
     """The head of the success report: what you got, in one block."""
-    rows = [("Mode", _e(mode_name(facts.mode)))]
+    rows = [("Mode", _e(facts.mode.label))]
     if facts.returned_size and "video" in facts.mode.exports:
         size = _size_html(facts.returned_size)
         rows.append(("Size", size + (", upscaled ×2" if facts.stage_2 else ", no upscale")))
-    origin = {"model": ", chosen by the model", "audio": ", matched to your audio"}.get(
-        facts.length_source or "", ""
-    )
+    origin = {
+        "model": ", chosen by the model",
+        "audio": ", matched to your audio",
+        "video": ", matched to your clip",
+    }.get(facts.length_source or "", "")
     if facts.seconds is not None:
         rows.append(("Length", _secs_html(facts.seconds) + origin))
     elif origin:
@@ -907,10 +992,8 @@ def run_summary(facts: RunFacts) -> str:
     rows.append(("Seed", _num(facts.seed)))
     rows.append(("LoRA", _lora_words(facts.loras)))
     if facts.decoder:
-        ran = {"diffusion": "the model's diffusion decoder", "conv": "the quick decoder"}
-        rows.append(("Decoder", _e(ran.get(facts.decoder, facts.decoder))))
-    clock = "GPU time" if facts.took_is_gpu else "wall-clock"
-    rows.append(("Took", f"{_num(f'{facts.took:.0f}')} s, {clock}"))
+        rows.append(("Decoder", _e(DECODER_NAMES.get(facts.decoder, facts.decoder))))
+    rows.append(("Took", took_words(facts)))
     grid = "".join(f"<dt>{label}</dt><dd>{value}</dd>" for label, value in rows)
     sent = ""
     if facts.prompt_sent:
@@ -946,7 +1029,7 @@ def success(result: Any, mode: Any) -> str:
     if peak is not None:
         diagnostics.append(f"Peak GPU memory reserved: {peak:.2f} GiB")
     run_dir = getattr(result, "run_dir", None)
-    if run_dir:
+    if run_dir and not any("run folder" in line.lower() for line in diagnostics):
         diagnostics.append(f"Run folder: {run_dir}")
     diagnostics.append(f"Mode id: {mode.id}")
     lines.append(
@@ -977,37 +1060,51 @@ def empty_output_bug(mode: Any, missing: list[str]) -> str:
     )
 
 
-#: ``errors.categorise`` category -> ``(headline, next step)``.
-_CATEGORIES: dict[str, tuple[str, str]] = {
-    errors.QUOTA: (
+#: ``errors.categorise`` category -> ``(headline, next step)``. Keyed on the category's
+#: string, so a category the backend adds ("limit", "queue") renders without an import,
+#: and one the UI has never seen gets :data:`_GENERIC_CARD`.
+_CARDS: dict[str, tuple[str, str]] = {
+    "quota": (
         "Not enough GPU quota for this run",
-        "Wait for your daily quota to refill, or make the run smaller or shorter.",
+        "To reserve less, turn off Upscale, Enhance or LoRA (the cost panel shows what each "
+        "adds), or wait for your daily quota to refill.",
     ),
-    errors.TIMEOUT: (
+    "limit": (
+        "This run asks for more GPU time than the platform allows in one run",
+        "Turn off Enhance or Upscale to reserve less.",
+    ),
+    "queue": ("No GPU was free in time", "Press Generate again in a minute."),
+    "timeout": (
         "The run ran out of GPU time",
-        "Make the run shorter or smaller, or turn off Upscale, then press Generate again.",
+        "Make the video shorter or smaller, or turn off Upscale, then press Generate again.",
     ),
-    errors.OOM: (
+    "oom": (
         "The GPU ran out of memory",
         "Make the run smaller: a lower size, fewer frames or Upscale off.",
     ),
-    errors.INPUT: (
+    "input": (
         "The run was refused: fix the input",
         "Change what the detail below names, then press Generate again.",
     ),
-    errors.ADAPTER: (
+    "adapter": (
         "An adapter doesn't fit this model",
         "Remove the adapter, or try a different one, and press Generate again.",
     ),
-    errors.ENHANCER: (
+    "enhancer": (
         "The prompt enhancer is unavailable",
         "Turn Enhance off to run with your own prompt.",
     ),
-    errors.BUG: (
+    "bug": (
         "Something went wrong in this app",
         "Press Generate again. If it happens again, report it with the detail below.",
     ),
 }
+_GENERIC_CARD = (
+    "The run did not finish",
+    "Press Generate again. If it happens again, report it with the detail below.",
+)
+#: Cards whose detail opens by itself: the detail holds the numbers to change.
+_OPEN_DETAIL = ("input", "quota", "limit")
 
 
 def failure(exc: BaseException, *, refused: bool = False) -> str:
@@ -1019,16 +1116,20 @@ def failure(exc: BaseException, *, refused: bool = False) -> str:
     """
     detail = str(exc).strip() or "No detail was attached to the error."
     found = errors.categorise(exc)
+    category = str(found.category)
     gpu_used = found.gpu_used and not refused
-    headline, step = _CATEGORIES.get(found.category, _CATEGORIES[errors.BUG])
-    if found.category == errors.INPUT and not gpu_used:
+    if category == "timeout" and not gpu_used:
+        # A queue timeout: nothing ran, so it is not "out of GPU time".
+        category = "queue"
+    headline, step = _CARDS.get(category, _GENERIC_CARD)
+    if category == "input" and not gpu_used:
         headline = "Refused before running: fix the input"
     quota = (
         "Any GPU time this run used is billed."
         if gpu_used
-        else ("Nothing ran. No GPU time was used.")
+        else "Nothing ran. No GPU time was used."
     )
-    opened = " open" if found.category in (errors.INPUT, errors.QUOTA) else ""
+    opened = " open" if category in _OPEN_DETAIL else ""
     return (
         f"### {headline}\n\n"
         f"{quota} {step}\n\n"
@@ -1045,7 +1146,7 @@ def recent_run_label(
     seconds: float | None,
     at: str,
 ) -> str:
-    bits = [mode_name(mode)]
+    bits = [mode.label]
     if size and "video" in mode.exports:
         bits.append(_size(*size))
     if seconds is not None:

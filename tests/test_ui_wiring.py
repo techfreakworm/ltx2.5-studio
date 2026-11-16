@@ -149,7 +149,9 @@ def test_the_final_step_brings_generate_back_on_success_and_on_failure(demo, suc
             error=RuntimeError("boom"),
         )
     blocks._remember(Request(), outcome)
-    out = finish.fn(Request(), "text_to_audio_video", [], *(values[k] for k in FIELD_KEYS))
+    out = finish.fn(
+        Request(), "text_to_audio_video", [], "Match my clip", *(values[k] for k in FIELD_KEYS)
+    )
     update = out[finish.outputs.index(button)]
     assert update["value"] == "Generate"
     assert update["interactive"] is True, "a ready form gets Generate back"

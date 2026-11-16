@@ -141,11 +141,16 @@ SHOT_ANCHOR_COLUMN: int = SHOT_HEADERS.index("Anchor (frame)")
 
 
 def _copy(key: str) -> dict[str, str]:
+    """A field's label and info line; any figure in it comes from the estimator."""
     label, info = FIELD_COPY[key]
-    if "{enhance_seconds}" in info:
+    if "{" in info:
         from .. import zerogpu
 
-        info = info.format(enhance_seconds=zerogpu.ENHANCE_DURATION_SECONDS)
+        info = info.format(
+            enhance_seconds=zerogpu.ENHANCE_DURATION_SECONDS,
+            upscale_seconds=zerogpu.estimate_duration(enable_stage_2=True)
+            - zerogpu.estimate_duration(),
+        )
     return {"label": label, "info": info}
 
 

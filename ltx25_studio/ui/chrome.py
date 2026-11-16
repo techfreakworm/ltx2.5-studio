@@ -104,7 +104,8 @@ def _matrix_css() -> str:
     for mode_id, (row, column, number) in matrix_cells().items():
         sel = f'#{MATRIX_ID} label:has(input[value="{mode_id}"])'
         rules.append(f"{sel} {{ grid-row: {row + 1}; grid-column: {column + 1}; }}")
-        rules.append(f'{sel}::after {{ content: "{number:02d}"; }}')
+        # the alternative text "" keeps the number out of the cell's accessible name
+        rules.append(f'{sel}::after {{ content: "{number:02d}"; content: "{number:02d}" / ""; }}')
     return "\n".join(rules)
 
 
@@ -145,7 +146,7 @@ _INK_TICK = (
     "url(\"data:image/svg+xml,%3csvg viewBox='0 0 16 16' fill='%2312161b' "
     "xmlns='http://www.w3.org/2000/svg'%3e%3cpath d='M12.207 4.793a1 1 0 010 1.414l-5 5a1 1 "
     "0 01-1.414 0l-2-2a1 1 0 011.414-1.414L6.5 9.086l4.293-4.293a1 1 0 011.414 0z'/%3e"
-    "%3c/svg%3e\")"
+    '%3c/svg%3e")'
 )
 _INK_DOT = (
     "url(\"data:image/svg+xml,%3csvg viewBox='0 0 16 16' fill='%2312161b' "

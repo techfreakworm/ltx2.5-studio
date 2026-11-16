@@ -138,7 +138,7 @@ def test_the_staged_strengths_appear_in_the_cost_panel():
 def test_the_strength_slider_never_offers_more_than_the_lora_module_accepts():
     from ltx25_studio.ui import blocks
 
-    assert 0 < blocks.LORA_SLIDER_MAX <= lora.staging.MAX_WEIGHT
+    assert 0 < blocks.LORA_STEP < lora.staging.MAX_WEIGHT
 
 
 def test_a_rejected_or_duplicate_upload_leaves_no_copy_behind(tmp_path, upload_dir):

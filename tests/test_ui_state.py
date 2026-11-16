@@ -91,7 +91,8 @@ def test_restore_parks_what_the_restored_mode_does_not_take(form, wired):
     recent = form.fn("_finish").inputs[1]  # _finish(request, mode, recent, *fields)
     form.values[recent._id] = [entry]
     restore = next(
-        b for b in form.demo.blocks.values()
+        b
+        for b in form.demo.blocks.values()
         if isinstance(b, gr.Button) and b.value == "Restore settings"
     )
     form.click(restore)
@@ -103,7 +104,9 @@ def test_restore_parks_what_the_restored_mode_does_not_take(form, wired):
 
     outcome = run_form(form)
     assert outcome.error is None, outcome.status
-    assert not any("was supplied, but" in n or "was ignored" in n for n in outcome.result.warnings), (
+    assert not any(
+        "was supplied, but" in n or "was ignored" in n for n in outcome.result.warnings
+    ), (
         f"a run straight after the restore told the user about a value they cannot see: "
         f"{outcome.result.warnings}"
     )
@@ -119,7 +122,8 @@ def test_restore_never_runs_a_second_switch_that_could_undo_it(form, wired):
     recent = form.fn("_finish").inputs[1]
     form.values[recent._id] = [entry]
     restore = next(
-        b for b in form.demo.blocks.values()
+        b
+        for b in form.demo.blocks.values()
         if isinstance(b, gr.Button) and b.value == "Restore settings"
     )
     form.ran.clear()
@@ -285,7 +289,9 @@ def test_match_my_clip_does_not_hand_its_frame_count_to_the_next_mode(form, tmp_
         stream.width = stream.height = 64
         stream.pix_fmt = "yuv420p"
         for index in range(72):
-            frame = av.VideoFrame.from_ndarray(np.zeros((64, 64, 3), dtype=np.uint8), format="rgb24")
+            frame = av.VideoFrame.from_ndarray(
+                np.zeros((64, 64, 3), dtype=np.uint8), format="rgb24"
+            )
             frame.pts, frame.time_base = index, Fraction(1, 24)
             for packet in stream.encode(frame):
                 container.mux(packet)
@@ -325,7 +331,12 @@ def test_advanced_shows_frames_or_the_model_pick_range_never_both(form):
 def test_a_hidden_size_or_range_is_neither_validated_nor_sent(form, wired):
     form.pick_mode("text_to_video")
     form.user(form.fields["width"], 700)
-    assert handlers.review("text_to_video", dict(zip(FIELD_KEYS, form.form_values(), strict=True))).state == "refused"
+    assert (
+        handlers.review(
+            "text_to_video", dict(zip(FIELD_KEYS, form.form_values(), strict=True))
+        ).state
+        == "refused"
+    )
     form.pick_mode("text_to_audio")  # sizes are pinned: the box is hidden
     assert form.field("width") == 704, "a hidden, illegal width would be validated and sent"
     form.user(form.fields["prompt"], "rain on a tin roof")
@@ -350,11 +361,15 @@ def test_a_hidden_size_or_range_is_neither_validated_nor_sent(form, wired):
 def test_the_refused_state_lights_no_cost_lamp(tmp_path):
     adapter = tmp_path / "a.safetensors"
     adapter.write_bytes(b"x")
-    values = {spec.key: spec.default for spec in FIELDS} | inputs_for("text_to_video") | {
-        "width": 700,
-        "enable_stage_2": True,
-        "loras": [{"source": "org/a", "path": str(adapter), "weight": 1.0, "content_key": "k"}],
-    }
+    values = (
+        {spec.key: spec.default for spec in FIELDS}
+        | inputs_for("text_to_video")
+        | {
+            "width": 700,
+            "enable_stage_2": True,
+            "loras": [{"source": "org/a", "path": str(adapter), "weight": 1.0, "content_key": "k"}],
+        }
+    )
     panel = render.cost_panel(handlers.review("text_to_video", values))
     assert "Won’t run" in panel
     assert "mr-lamp-cost is-lit" not in panel, "a lamp is lit for a run that costs nothing"
