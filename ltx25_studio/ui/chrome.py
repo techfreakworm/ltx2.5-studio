@@ -68,22 +68,20 @@ def _empty_cells() -> list[tuple[int, int]]:
     ]
 
 
-def matrix_frame_html() -> str:
+def matrix_frame_html(*, on_zerogpu: bool = True) -> str:
     """Axis headers, the inert empty cells and the column notes, behind the radio.
 
     The headers and empty cells are drawing (each cell's own name already says what it
     starts from and returns); the column notes are words a screen reader must reach, so
     they stay in the accessibility tree and describe their column's cells (the script
-    points each cell's ``aria-describedby`` at its note).
+    points each cell's ``aria-describedby`` at its note). The notes are in the platform's
+    words (``render.column_notes``).
     """
     cells = matrix_cells()
+    notes = render.column_notes(on_zerogpu=on_zerogpu)
     parts = ['<div class="mx-frame">']
     for c, (_key, label) in enumerate(render.COLUMNS, start=1):
-        cost = (
-            " is-cost"
-            if label in render.COLUMN_NOTES and "pay" in render.COLUMN_NOTES[label]
-            else ""
-        )
+        cost = " is-cost" if label == render.COST_COLUMN else ""
         parts.append(
             f'<div class="mx-col{cost}" style="grid-column:{c + 1};grid-row:1" aria-hidden="true">'
             f"{html.escape(label)}</div>"
@@ -100,7 +98,7 @@ def matrix_frame_html() -> str:
         )
     notes_row = len(render.ROWS) + 2
     for c, (_key, label) in enumerate(render.COLUMNS, start=1):
-        note = render.COLUMN_NOTES.get(label)
+        note = notes.get(label)
         if note:
             column_modes = " ".join(m for m, (_r, col, _n) in cells.items() if col == c)
             parts.append(
@@ -633,8 +631,8 @@ button:disabled { cursor: not-allowed !important; }
 .mr-cost-grid dt, .mr-done-grid dt { color: var(--mr-dust); font-size: 13px; line-height: 21px; }
 .mr-cost-grid dd, .mr-done-grid dd { margin: 0; color: var(--mr-paper); font-size: 14px; line-height: 21px; }
 .mr-cost-grid .mr-num { color: var(--mr-paper); }
-.mr-cost-grid dt:nth-of-type(3) + dd .mr-num, .mr-cost-grid dt:nth-of-type(4) + dd .mr-num {
-  color: var(--mr-tungsten); font-family: var(--mr-mono); }
+/* the reservation and the quota needed, on ZeroGPU: the only figures in tungsten */
+.mr-cost-grid .mr-num.mr-cost-figure { color: var(--mr-tungsten); font-family: var(--mr-mono); }
 .mr-sub { color: var(--mr-dust); font-size: 13px; }
 .mr-cost-note { margin: 10px 0 0; font-size: 13px; line-height: 19px; color: var(--mr-dust); }
 .mr-cost-pending { display: none; margin: 10px 0 0; font-size: 13px; line-height: 19px; color: var(--mr-paper);
@@ -871,13 +869,18 @@ def head_html() -> str:
     )
 
 
-def identity_html(*, quota_text: str) -> str:
-    """The one-line identity bar with the "How quota works" disclosure."""
+def identity_html(*, quota_text: str | None) -> str:
+    """The one-line identity bar, with the "How quota works" disclosure on ZeroGPU only
+    (``quota_text`` is None anywhere else: there is no quota to explain)."""
+    disclosure = (
+        '<details class="mr-quota"><summary>How quota works</summary>'
+        f'<div class="mr-quota-panel"><p>{html.escape(quota_text)}</p></div></details>'
+        if quota_text
+        else ""
+    )
     return (
         '<header class="mr-id">'
         '<h1 class="mr-wordmark">LTX-2.5 Studio</h1>'
         f'<p class="mr-tagline">{html.escape(render.TAGLINE)}</p>'
-        '<details class="mr-quota"><summary>How quota works</summary>'
-        f'<div class="mr-quota-panel"><p>{html.escape(quota_text)}</p></div></details>'
-        "</header>"
+        f"{disclosure}</header>"
     )

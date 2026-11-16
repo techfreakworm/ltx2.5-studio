@@ -118,7 +118,7 @@ def assert_pool_complete(pool: dict[str, Any]) -> None:
 # ---------------------------------------------------------------------------
 
 
-def lora_bay(*, rows: int, cap: str, step: float) -> dict[str, Any]:
+def lora_bay(*, rows: int, cap: str, step: float, on_zerogpu: bool = True) -> dict[str, Any]:
     """Both routes (Hub id, upload), the verdict, and ``rows`` staged-adapter rows.
 
     Each row is a name, a strength slider and a Remove button; rows show and
@@ -127,7 +127,7 @@ def lora_bay(*, rows: int, cap: str, step: float) -> dict[str, Any]:
     here), so the range built here is only a placeholder nobody sees.
     """
     widgets: dict[str, Any] = {}
-    gr.Markdown(render.lora_heading(cap), elem_classes=["mr-bay-head"])
+    gr.Markdown(render.lora_heading(cap, on_zerogpu=on_zerogpu), elem_classes=["mr-bay-head"])
     with gr.Row(elem_classes=["mr-hub-row"]):
         widgets["repo_id"] = gr.Textbox(
             label="Hub repo id",

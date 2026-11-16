@@ -613,6 +613,30 @@ def _request(mode_id: str, values: dict[str, Any]):
     return generate_module.GenerationRequest(mode=mode_id, **values)
 
 
+def _upscale_refusal(mode: Any, request: Any) -> str | None:
+    """Why Upscale ×2 cannot run on this machine for ``request``, or None.
+
+    The backend's own gate decides: ``generate._checked_stage_2_size``, the step of
+    ``prepare_request`` that refuses a stage-2 request this device cannot decode, asked with
+    Upscale on. Called on its own because ``prepare_request`` stops at the first problem (a
+    missing prompt), and the control is parked before the form is complete.
+    """
+    if mode.skip_stage_2 or request is None:
+        return None
+    from dataclasses import replace
+
+    from .. import device as device_module
+    from .. import generate as generate_module
+
+    try:
+        generate_module._checked_stage_2_size(replace(request, enable_stage_2=True), mode)
+    except device_module.StageTwoNeedsCudaError as exc:
+        return render.upscale_needs_cuda(getattr(exc, "device", None))
+    except Exception:  # noqa: BLE001 -- any other refusal is the panel's to state
+        return None
+    return None
+
+
 def _staged_names(loras: Any) -> tuple[tuple[str, float], ...]:
     out = []
     for entry in loras or ():
@@ -642,10 +666,12 @@ def review(
     mode = modes.get_mode(mode_id)
     name = mode.label
     multiplier = quota_multiplier()
+    device_name, on_zerogpu = run_platform()
+    platform = {"on_zerogpu": on_zerogpu, "device": device_name}
     try:
         request = _request(mode_id, values)
     except Exception as exc:  # noqa: BLE001
-        return render.CostFacts(mode_name=name, state="refused", reason=str(exc))
+        return render.CostFacts(mode_name=name, state="refused", reason=str(exc), **platform)
 
     # A mode that renders at its pinned size does not take the size boxes.
     shape = _shape_problems(
@@ -672,6 +698,7 @@ def review(
     if problems:
         state = "refused"
 
+    upscale_refused = _upscale_refusal(mode, prepared)
     if state == "refused":
         return render.CostFacts(
             mode_name=name,
@@ -683,6 +710,8 @@ def review(
             enhance_offered=modes.accepts(mode, "text"),
             multiplier=multiplier,
             loras=_staged_names(request.loras),
+            upscale_refused=upscale_refused,
+            **platform,
         )
 
     stage_2 = generate_module.stage_2_enabled(mode, prepared)
@@ -762,6 +791,8 @@ def review(
         notes=tuple(notes),
         missing=missing,
         length_pending=pending,
+        upscale_refused=upscale_refused,
+        **platform,
     )
 
 
@@ -938,7 +969,7 @@ def unshown_report(outcome: RunOutcome | None, server_message: str | None) -> st
     was used. No outcome at all: it ended without a result.
     """
     if outcome is None:
-        return render.lost_run(server_message)
+        return render.lost_run(server_message, on_zerogpu=run_platform()[1])
     if not has_result(outcome):
         return outcome.status
     return render.result_not_shown(run_facts(outcome), server_message)
@@ -954,6 +985,7 @@ def run(mode_id: str, *values: Any, progress: Any = None) -> RunOutcome:
     """
     params = dict(zip(FIELD_KEYS, values, strict=True))
     started = time.monotonic()
+    on_zerogpu = run_platform()[1]
 
     def done(**kwargs) -> RunOutcome:
         return RunOutcome(mode_id=mode_id, params=params, took=time.monotonic() - started, **kwargs)
@@ -964,7 +996,7 @@ def run(mode_id: str, *values: Any, progress: Any = None) -> RunOutcome:
         return done(
             video=None,
             audio=None,
-            status=render.failure(exc, refused=True),
+            status=render.failure(exc, refused=True, on_zerogpu=on_zerogpu),
             error=exc,
             refused=True,
         )
@@ -977,7 +1009,7 @@ def run(mode_id: str, *values: Any, progress: Any = None) -> RunOutcome:
         return done(
             video=None,
             audio=None,
-            status=render.failure(exc, refused=True),
+            status=render.failure(exc, refused=True, on_zerogpu=on_zerogpu),
             error=exc,
             refused=True,
         )
@@ -985,7 +1017,12 @@ def run(mode_id: str, *values: Any, progress: Any = None) -> RunOutcome:
     try:
         result = generate_module.generate(mode=mode_id, progress=progress, **params)
     except Exception as exc:  # noqa: BLE001 -- typed or not, the user sees it
-        return done(video=None, audio=None, status=render.failure(exc), error=exc)
+        return done(
+            video=None,
+            audio=None,
+            status=render.failure(exc, on_zerogpu=on_zerogpu),
+            error=exc,
+        )
 
     video_path = getattr(result, "video_path", None)
     audio_path = getattr(result, "audio_path", None)
@@ -996,7 +1033,10 @@ def run(mode_id: str, *values: Any, progress: Any = None) -> RunOutcome:
     ]
     if missing:
         return done(
-            video=None, audio=None, status=render.empty_output_bug(mode, missing), result=result
+            video=None,
+            audio=None,
+            status=render.empty_output_bug(mode, missing, on_zerogpu=on_zerogpu),
+            result=result,
         )
 
     return done(

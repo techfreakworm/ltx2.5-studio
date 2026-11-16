@@ -140,17 +140,33 @@ def test_the_enhance_label_states_the_reservation_and_the_cold_start(mode_id):
     )
 
 
-def test_the_enhance_label_follows_the_mode(tmp_path):
+@pytest.mark.parametrize("space", [True, False], ids=["on ZeroGPU", "off ZeroGPU"])
+def test_the_enhance_label_follows_the_mode(tmp_path, monkeypatch, space):
+    import sys
+    import types
+
     from test_ui_form import Form
 
+    from ltx25_studio import config
     from ltx25_studio.ui import build_ui
 
+    monkeypatch.delenv(config.ENV_DEVICE, raising=False)
+    if space:
+        module = types.ModuleType("spaces")
+        module.GPU = lambda *a, **k: lambda f: f
+        monkeypatch.setitem(sys.modules, "spaces", module)
+    else:
+        monkeypatch.delitem(sys.modules, "spaces", raising=False)
+    assert handlers.run_platform()[1] is space
     form = Form(build_ui())
     enhance = form.fields["enhance_prompt"]
     for mode_id in ("text_to_video", "image_text_to_audio_video", "audio_to_video"):
         form.pick_mode(mode_id)
-        expected = render.enhance_info(modes.get_mode(mode_id), zerogpu.ENHANCE_DURATION_SECONDS)
+        expected = render.enhance_info(
+            modes.get_mode(mode_id), zerogpu.ENHANCE_DURATION_SECONDS, on_zerogpu=space
+        )
         assert form.props[enhance._id]["info"] == expected, mode_id
+        assert ("Reserves" in expected) is space
 
 
 # --------------------------------------------------------------------------

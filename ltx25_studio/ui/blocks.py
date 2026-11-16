@@ -274,6 +274,10 @@ def build_ui() -> gr.Blocks:
     multiplier = handlers.quota_multiplier()
     view0 = handlers.mode_view(DEFAULT_MODE)
     mode0 = modes.get_mode(DEFAULT_MODE)
+    # Where runs happen. Only ZeroGPU has a quota, a reservation and a bill: anywhere else
+    # the page says where a run happens and nothing about a meter.
+    _device, on_zerogpu = handlers.run_platform()
+    upscale_seconds = zerogpu.estimate_duration(enable_stage_2=True) - zerogpu.estimate_duration()
 
     pool: dict[str, Any] = {}
     captions: dict[str, Any] = {}
@@ -284,6 +288,8 @@ def build_ui() -> gr.Blocks:
                 quota_text=render.quota_explainer(
                     multiplier=multiplier, example_reserve=zerogpu.estimate_duration()
                 )
+                if on_zerogpu
+                else None
             ),
             head=chrome.head_html(),
             elem_id="identity",
@@ -299,7 +305,7 @@ def build_ui() -> gr.Blocks:
             with gr.Column(elem_id="commission", scale=3):
                 with gr.Column(elem_id="matrix"):
                     gr.HTML(
-                        chrome.matrix_frame_html(),
+                        chrome.matrix_frame_html(on_zerogpu=on_zerogpu),
                         elem_id="matrix-frame",
                         apply_default_css=False,
                         container=False,
@@ -397,6 +403,7 @@ def build_ui() -> gr.Blocks:
                         "enhance_prompt",
                         visible=view0.active["enhance_prompt"],
                         elem_id="enhance",
+                        info=render.enhance_info(mode0, _ENHANCE_SECONDS, on_zerogpu=on_zerogpu),
                     )
                     components.render_fields(pool, "negative_prompt", "conditions", visible=False)
                     for key, caption in captions.items():
@@ -424,6 +431,9 @@ def build_ui() -> gr.Blocks:
                         visible=view0.upscale,
                         elem_id="upscale",
                         label=_upscale_label(704, 480),
+                        info=render.upscale_info(
+                            upscale_seconds=upscale_seconds, on_zerogpu=on_zerogpu
+                        ),
                     )
                     length_source = gr.Radio(
                         choices=[render.LENGTH_MATCH, render.LENGTH_SET],
@@ -464,6 +474,7 @@ def build_ui() -> gr.Blocks:
                         rows=handlers.MAX_STAGED_LORAS,
                         cap=f"{cap_gb:.0f} GB",
                         step=LORA_STEP,
+                        on_zerogpu=on_zerogpu,
                     )
                     components.render_fields(pool, "loras")
                 lora_note = gr.Markdown(
@@ -648,7 +659,7 @@ def build_ui() -> gr.Blocks:
         # =================================================================
         # readiness and cost: one review, fired by anything that moves it
         # =================================================================
-        review_outputs = [cost, commit_line, generate_button, reason]
+        review_outputs = [cost, commit_line, generate_button, reason, pool["enable_stage_2"]]
 
         def _review(mode_id: str, is_running: bool, source: str, *values: Any) -> list[Any]:
             try:
@@ -658,14 +669,28 @@ def build_ui() -> gr.Blocks:
                     mode_name=modes.get_mode(mode_id).label,
                     state="refused",
                     reason=str(exc) or exc.__class__.__name__,
+                    on_zerogpu=on_zerogpu,
                 )
             ready = facts.state == "ready" and not is_running
             text = render.readiness_reason(facts, running=bool(is_running))
+            # Upscale where this machine cannot run it for this request: parked, unticked,
+            # with the backend's reason, so Generate is never pressed into that refusal.
+            info = render.upscale_info(
+                upscale_seconds=upscale_seconds,
+                on_zerogpu=on_zerogpu,
+                refused=facts.upscale_refused,
+            )
+            upscale = (
+                gr.update(interactive=False, value=False, info=info)
+                if facts.upscale_refused
+                else gr.update(interactive=True, info=info)
+            )
             return [
                 render.cost_panel(facts),
                 render.commit_line(facts),
                 gr.update(interactive=ready),
                 text,
+                upscale,
             ]
 
         review_inputs = [mode_selector, running, length_source, *field_inputs]
@@ -823,7 +848,9 @@ def build_ui() -> gr.Blocks:
                     kwargs["label"] = view.prompt_label
                     kwargs["placeholder"] = view.prompt_placeholder
                 if key == "enhance_prompt" and view.active[key]:
-                    kwargs["info"] = render.enhance_info(mode, _ENHANCE_SECONDS)
+                    kwargs["info"] = render.enhance_info(
+                        mode, _ENHANCE_SECONDS, on_zerogpu=on_zerogpu
+                    )
                 if key in _MEDIA and view.active[key]:
                     kwargs["label"] = handlers.media_label(mode, key)
                 if key == "decoder":

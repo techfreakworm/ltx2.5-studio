@@ -8,22 +8,38 @@
   their nearest legal values, no figure, and Generate stays off with the same
   words the server would use (B3, AC-09, readiness);
 * the sound-only modes say they pay for a thrown-away video (AC-11).
+
+These are the Space's words: the module runs as the Space does, with the platform package
+imported (the stand-in ``spaces`` module). Off ZeroGPU the panel speaks of no meter at all;
+``test_ui_device_words.py`` pins that.
 """
 
 from __future__ import annotations
 
 import re
+import sys
+import types
 
 import pytest
 from conftest import image_input, inputs_for
 
+from ltx25_studio import config, modes, zerogpu
 from ltx25_studio import generate as generate_module
-from ltx25_studio import modes, zerogpu
 from ltx25_studio.errors import MissingInputError
 from ltx25_studio.ui import handlers, render
 from ltx25_studio.ui.fields import FIELDS
 
 MODE_IDS = tuple(modes.MODES)
+
+
+@pytest.fixture(autouse=True)
+def on_zerogpu(monkeypatch):
+    """This process on ZeroGPU: the platform package is imported (``app.py`` does it first)."""
+    module = types.ModuleType("spaces")
+    module.GPU = lambda *a, **k: lambda f: f
+    monkeypatch.setitem(sys.modules, "spaces", module)
+    monkeypatch.delenv(config.ENV_DEVICE, raising=False)
+    assert handlers.run_platform() == ("cuda", True)
 
 
 def form(mode_id: str, **overrides) -> dict:

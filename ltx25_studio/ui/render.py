@@ -43,7 +43,9 @@ from ..errors import (
 __all__ = [
     "COLUMN_NOTES",
     "COLUMNS",
+    "COST_COLUMN",
     "FIELD_COPY",
+    "LOCAL_COLUMN_NOTES",
     "NOISE_CHOICES",
     "READY",
     "ROWS",
@@ -52,6 +54,7 @@ __all__ = [
     "RunFacts",
     "applied_loras",
     "card_headline",
+    "column_notes",
     "commit_line",
     "cost_panel",
     "dimension_hint",
@@ -83,6 +86,9 @@ __all__ = [
     "running",
     "shot_anchor_readout",
     "success",
+    "upscale_info",
+    "upscale_needs_cuda",
+    "where_it_runs",
 ]
 
 
@@ -94,6 +100,11 @@ def _e(value: Any) -> str:
 def _num(value: Any) -> str:
     """A figure, set in the numeral face."""
     return f'<span class="mr-num">{_e(value)}</span>'
+
+
+def _figure(value: Any) -> str:
+    """A cost figure (the reservation, the quota needed): tungsten in the cost panel."""
+    return f'<span class="mr-num mr-cost-figure">{_e(value)}</span>'
 
 
 def _size(width: Any, height: Any) -> str:
@@ -148,11 +159,34 @@ COLUMNS: tuple[tuple[frozenset[str], str], ...] = (
     (frozenset({"audio"}), "Sound only"),
 )
 
-#: Stated once, in words, under the column they belong to.
+#: Stated once, in words, under the column they belong to (on ZeroGPU).
 COLUMN_NOTES: dict[str, str] = {
     "Video (silent)": "The sound is rendered, then dropped. Same GPU time as with sound.",
     "Sound only": "Renders a 256 × 256 video that is thrown away; you pay for that GPU time.",
 }
+#: The same notes where no meter runs: what happens, and what it takes.
+LOCAL_COLUMN_NOTES: dict[str, str] = {
+    "Video (silent)": "The sound is rendered, then dropped. The run takes as long as with sound.",
+    "Sound only": (
+        "Renders a 256 × 256 video that is thrown away, and the run takes the time to render it."
+    ),
+}
+#: The column whose runs render a video nobody gets back: marked as a cost on every platform.
+COST_COLUMN = "Sound only"
+
+
+def column_notes(*, on_zerogpu: bool = True) -> dict[str, str]:
+    """The column notes in this platform's words."""
+    return COLUMN_NOTES if on_zerogpu else LOCAL_COLUMN_NOTES
+
+
+#: Where a run's time is spent, by device (the Done card's "Took" uses the same words).
+_ON_DEVICE = {"cpu": "on the CPU", "mps": "on this Mac's GPU", "cuda": "on the GPU"}
+
+
+def where_it_runs(device: str | None) -> str:
+    """``device`` in the page's words: "on the CPU", "on this Mac's GPU", "on the GPU"."""
+    return _ON_DEVICE.get(str(device or ""), "on this machine")
 
 #: One line per mode, shown under the matrix for the selected cell.
 _PURPOSE: dict[str, str] = {
@@ -255,20 +289,43 @@ def prompt_placeholder(mode: Any) -> str:
     return _PLACEHOLDERS.get(mode.id, "Describe the shot.")
 
 
-def enhance_info(mode: Any, enhance_seconds: int) -> str:
-    """The Enhance line for ``mode``: what it reserves, its cold start, and the image
-    clause only where the mode takes an image (the enhancer reads one, ``enhance.py``)."""
+def enhance_info(mode: Any, enhance_seconds: int, *, on_zerogpu: bool = True) -> str:
+    """The Enhance line for ``mode``: on ZeroGPU what it reserves and its cold start;
+    elsewhere where it runs and that its first use loads it. The image clause only where the
+    mode takes an image (the enhancer reads one, ``enhance.py``)."""
     if modes.requires(mode, "image"):
         reads = ", and reads your image"
     elif modes.accepts(mode, "image"):
         reads = ", and reads your image if you add one"
     else:
         reads = ""
+    if not on_zerogpu:
+        return (
+            f"Gemma rewrites your prompt in detail on this machine before the run{reads}. The "
+            f"first run with it also loads Gemma, so it takes longer."
+        )
     return (
         f"Gemma rewrites your prompt in detail on the GPU before the run{reads}. Reserves "
         f"{enhance_seconds} s more; uses a few seconds when loaded, up to about 2 minutes on a "
         f"cold start."
     )
+
+
+#: What Upscale ×2 does, on every platform.
+UPSCALE_DOES = "Upsamples and refines after the first pass, for twice the width and height."
+
+
+def upscale_info(*, upscale_seconds: int, on_zerogpu: bool = True, refused: str | None = None) -> str:
+    """The Upscale line: what it does, with what it reserves on ZeroGPU; or, where this
+    machine cannot run it for this request, why (the control is then parked)."""
+    if refused:
+        return refused
+    return f"{UPSCALE_DOES} Reserves {upscale_seconds} s more." if on_zerogpu else UPSCALE_DOES
+
+
+def upscale_needs_cuda(device: str | None) -> str:
+    """Why Upscale ×2 is parked here: the backend's refusal, in the page's device words."""
+    return f"Upscale ×2 needs a CUDA GPU; this machine runs {where_it_runs(device)}."
 
 
 _CAPTIONS: dict[tuple[str, str], str] = {
@@ -522,6 +579,12 @@ class CostFacts:
     short_problems: tuple[tuple[str, str], ...] = ()
     #: The length comes from a clip not loaded yet: ``"clip"`` (or None).
     length_pending: str | None = None
+    #: Where it runs. On ZeroGPU the panel states the reservation, the quota and the
+    #: billing; anywhere else, the device, and that nothing is metered.
+    on_zerogpu: bool = True
+    device: str | None = None
+    #: Why Upscale ×2 cannot run here for this request (the backend's refusal), or None.
+    upscale_refused: str | None = None
 
 
 def _returns_words(facts: CostFacts) -> str:
@@ -540,8 +603,9 @@ def _lamp(text: str, *, lit: bool, kind: str = "cost") -> str:
 
 def _lamps(facts: CostFacts) -> str:
     """A lamp lights only for a cost that applies; a request that won't run costs nothing,
-    so in the refused state every lamp is dark."""
-    extras = dict(facts.extras)
+    so in the refused state every lamp is dark. The seconds a lever reserves are named only
+    where a reservation exists (ZeroGPU)."""
+    extras = dict(facts.extras) if facts.on_zerogpu else {}
     live = facts.state != "refused"
     lamps = []
     if facts.stage_2_offered:
@@ -606,10 +670,15 @@ def cost_panel(facts: CostFacts) -> str:
         items = "".join(f"<li>{_e(p)}</li>" for p in facts.problems) or (
             f"<li>{_e(facts.reason or 'This request would be refused.')}</li>"
         )
+        held = (
+            " Nothing is reserved for a request that would be refused."
+            if facts.on_zerogpu
+            else " Generate stays off until this is fixed."
+        )
         body = (
             '<div class="mr-wont-run" role="note">'
             '<p class="mr-wont-run-head"><span class="mr-lamp mr-lamp-cut is-lit">Won’t run</span>'
-            " Nothing is reserved for a request that would be refused.</p>"
+            f"{held}</p>"
             f"<ul>{items}</ul></div>"
         )
         return f'<section class="mr-cost is-refused" aria-label="Cost of this run">{head}{body}</section>'
@@ -624,28 +693,37 @@ def cost_panel(facts: CostFacts) -> str:
     if facts.stage_2:
         returns += ", upscaled ×2"
     rows.append(("Returns", returns))
-    if facts.reserve is not None:
-        reserve = f"{_num(facts.reserve)} s of GPU time"
-        if facts.extras:
-            parts = [f"{facts.base} s base"] + [f"{s} s for {n}" for n, s in facts.extras]
-            reserve += f' <span class="mr-sub">({_e(" + ".join(parts))})</span>'
-        rows.append(("Reserves", reserve))
-        rows.append(("Needs", f"{_num(facts.reserve * facts.multiplier)} s of quota free to start"))
-    rows.append(
-        (
-            "Billed",
-            f"for GPU time used × {facts.multiplier}; runs that fail on the GPU are billed too",
+    if not facts.on_zerogpu:
+        rows.append(("Runs", f"{_e(where_it_runs(facts.device))}; nothing is metered"))
+    else:
+        if facts.reserve is not None:
+            reserve = f"{_figure(facts.reserve)} s of GPU time"
+            if facts.extras:
+                parts = [f"{facts.base} s base"] + [f"{s} s for {n}" for n, s in facts.extras]
+                reserve += f' <span class="mr-sub">({_e(" + ".join(parts))})</span>'
+            rows.append(("Reserves", reserve))
+            rows.append(
+                ("Needs", f"{_figure(facts.reserve * facts.multiplier)} s of quota free to start")
+            )
+        rows.append(
+            (
+                "Billed",
+                f"for GPU time used × {facts.multiplier}; runs that fail on the GPU are billed too",
+            )
         )
-    )
     rows.append(("LoRA", _lora_words(facts.loras)))
     if facts.seed is not None and facts.seed >= 0:
         rows.append(("Seed", f"{_num(facts.seed)} (fixed)"))
     grid = "".join(f"<dt>{_e(label)}</dt><dd>{value}</dd>" for label, value in rows)
     notes = ""
     if facts.discards_video:
+        spent = (
+            "you pay for that GPU time."
+            if facts.on_zerogpu
+            else "the run takes the time to render it."
+        )
         notes += (
-            '<p class="mr-cost-note">A 256 × 256 video is rendered and thrown away; you pay for '
-            "that GPU time.</p>"
+            f'<p class="mr-cost-note">A 256 × 256 video is rendered and thrown away; {spent}</p>'
         )
     if facts.encodes_audio:
         notes += (
@@ -693,7 +771,9 @@ def commit_line(facts: CostFacts) -> str:
         parts.append(f"{facts.auto_seconds[0]:g}–{facts.auto_seconds[1]:g} s")
     elif facts.seconds is not None:
         parts.append(_seconds(facts.seconds))
-    if facts.reserve is not None:
+    if not facts.on_zerogpu:
+        parts.append(where_it_runs(facts.device))
+    elif facts.reserve is not None:
         parts.append(f"needs {facts.reserve * facts.multiplier} s quota")
     return ", ".join(parts)
 
@@ -845,7 +925,13 @@ def lora_no_trigger() -> str:
     )
 
 
-def lora_heading(cap: str) -> str:
+def lora_heading(cap: str, *, on_zerogpu: bool = True) -> str:
+    if not on_zerogpu:
+        return (
+            f"Add a LoRA from the Hub or upload a .safetensors file (up to {cap}). It is "
+            "checked against LTX-2.5's layers before anything runs. The last check, that it "
+            "attaches, runs when you generate; if that fails, the run stops there."
+        )
     return (
         f"Add a LoRA from the Hub or upload a .safetensors file (up to {cap}). It is checked "
         "against LTX-2.5's layers before any GPU time is used. The last check, that it "
@@ -998,8 +1084,7 @@ def running(
                 f"**Enhancing your prompt: {mode.label}.** Gemma rewrites it on this machine "
                 f"first, then generation starts. The prompt actually sent is in the report."
             )
-        where = _ON_DEVICE.get(str(device or ""), "on this machine")
-        return f"**Running: {mode.label}.** Loading, sampling and decoding {where}."
+        return f"**Running: {mode.label}.** Loading, sampling and decoding {where_it_runs(device)}."
     if enhancing:
         return (
             f"**Enhancing your prompt: {mode.label}.** Gemma rewrites it on the GPU first, "
@@ -1040,10 +1125,6 @@ class RunFacts:
     #: On ZeroGPU the GPU time is drawn from the user's quota at ``quota_multiplier``.
     on_zerogpu: bool = False
     quota_multiplier: int = 1
-
-
-#: Where a run's time was spent, by device.
-_ON_DEVICE = {"cpu": "on the CPU", "mps": "on this Mac's GPU", "cuda": "on the GPU"}
 
 
 def took_words(facts: RunFacts) -> str:
@@ -1140,15 +1221,17 @@ def _detail(text: str | None) -> str:
     )
 
 
-def lost_run(detail: str | None = None) -> str:
+def lost_run(detail: str | None = None, *, on_zerogpu: bool = True) -> str:
     """The generation step ended without a result this page can show.
 
-    ``detail`` is the server's own message, when it raised one.
+    ``detail`` is the server's own message, when it raised one. The billing sentence is
+    ZeroGPU's alone.
     """
+    billed = "Any GPU time this run used is billed. " if on_zerogpu else ""
     return (
         "### The run ended without a result\n\n"
-        "Any GPU time this run used is billed. Press Generate again. If it happens again, "
-        "report it with the detail below.\n\n" + _detail(detail)
+        f"{billed}Press Generate again. If it happens again, report it with the detail "
+        "below.\n\n" + _detail(detail)
     )
 
 
@@ -1166,14 +1249,15 @@ def result_not_shown(facts: RunFacts, detail: str | None) -> str:
     )
 
 
-def empty_output_bug(mode: Any, missing: list[str]) -> str:
+def empty_output_bug(mode: Any, missing: list[str], *, on_zerogpu: bool = True) -> str:
     """A run reported success and produced no file. That is a bug in this app."""
     tracks = " and ".join(missing)
+    billed = " The GPU time it used is billed." if on_zerogpu else ""
     return (
         "### The run finished but produced no file\n\n"
         f"{mode.label} reported success without a {tracks} file, which this app treats as a "
-        "bug. The GPU time it used is billed. Nothing shown here is from this run. Report it, "
-        "with the time of the run, so it can be fixed."
+        f"bug.{billed} Nothing shown here is from this run. Report it, with the time of the "
+        "run, so it can be fixed."
     )
 
 
@@ -1220,16 +1304,21 @@ _GENERIC_CARD = (
     "The run did not finish",
     "Press Generate again. If it happens again, report it with the detail below.",
 )
+#: Cards about the platform's meter. Off ZeroGPU there is none, so such a failure (it
+#: cannot come from a local run) gets the generic card.
+_METER_CARDS = ("quota", "limit")
 #: Cards whose detail opens by itself: the detail holds the numbers to change.
 _OPEN_DETAIL = ("input", "quota", "limit")
 
 
-def failure(exc: BaseException, *, refused: bool = False) -> str:
+def failure(exc: BaseException, *, refused: bool = False, on_zerogpu: bool = True) -> str:
     """Any failure, rendered loudly: headline, quota line, one next step, detail.
 
     The category and whether GPU time was used come from ``errors.categorise``.
     ``refused`` is set when this page turned the request down before calling
-    the backend at all, which is known to have used no GPU time.
+    the backend at all, which is known to have used no GPU time. The quota line is
+    ZeroGPU's; where nothing is metered a card says only that nothing ran, when it was
+    refused before running.
     """
     detail = str(exc).strip() or "No detail was attached to the error."
     found = errors.categorise(exc)
@@ -1239,17 +1328,22 @@ def failure(exc: BaseException, *, refused: bool = False) -> str:
         # A queue timeout: nothing ran, so it is not "out of GPU time".
         category = "queue"
     headline, step = _CARDS.get(category, _GENERIC_CARD)
+    if not on_zerogpu and category in _METER_CARDS:
+        headline, step = _GENERIC_CARD
     if category == "input" and not gpu_used:
         headline = "Refused before running: fix the input"
-    quota = (
-        "Any GPU time this run used is billed."
-        if gpu_used
-        else "Nothing ran. No GPU time was used."
-    )
+    if on_zerogpu:
+        quota = (
+            "Any GPU time this run used is billed."
+            if gpu_used
+            else "Nothing ran. No GPU time was used."
+        )
+    else:
+        quota = "Nothing ran." if refused or (category == "input" and not gpu_used) else ""
     opened = " open" if category in _OPEN_DETAIL else ""
     return (
         f"### {headline}\n\n"
-        f"{quota} {step}\n\n"
+        f"{quota + ' ' if quota else ''}{step}\n\n"
         f'<details class="mr-detail"{opened}><summary>Detail</summary>'
         f"<p>{_e(detail)}</p></details>"
     )

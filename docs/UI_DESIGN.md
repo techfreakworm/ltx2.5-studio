@@ -171,6 +171,27 @@ says how many seconds it adds, and the Enhance line says what it reserves and th
 cold start can take about 2 minutes (it mentions an image only where the mode takes
 one).
 
+**Off ZeroGPU there is no meter, and the page names none.** The platform is resolved as
+`app.py` resolves it (`device.current()`, read by `handlers.run_platform`). Where the app
+is not on ZeroGPU (a Mac, the CPU, a CUDA box of one's own):
+
+- the Reserves, Needs and Billed rows give way to one row, "Runs: on the CPU; nothing is
+  metered" (or "on this Mac's GPU", "on the GPU": the Done card's device words), and the
+  lamps carry no seconds;
+- "How quota works" is not shown; the column notes, the Enhance, Upscale and LoRA lines,
+  the phone bar's line ("704 × 480, 5.0 s, on the CPU") and the refused panel say what
+  happens without a meter;
+- a failure card has no quota line: a request refused before running says "Nothing
+  ran.", any other card only its step; the cards about the platform's quota and its
+  per-run limit, which a local run cannot raise, fall back to the generic card; the lost
+  run and the empty-file cards have no billing sentence.
+- Upscale ×2 where this machine cannot run it for the request (the backend's own gate,
+  `generate._checked_stage_2_size`: off CUDA, above a small decoder size) is parked:
+  unticked, disabled, and its line says "Upscale ×2 needs a CUDA GPU; this machine runs on
+  the CPU." It frees itself at a size the backend accepts.
+
+On ZeroGPU every one of these sentences is as above.
+
 **Generate** is disabled whenever the form would be refused. The line under it uses
 the backend's own refusal words, from `generate.prepare_request`. Generate is also
 disabled while a run is in flight. The click runs three steps:

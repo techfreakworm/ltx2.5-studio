@@ -295,7 +295,9 @@ def test_a_declared_track_missing_from_a_success_renders_the_loud_error(
         f"mode {mode_id!r} lost its {dropped} track and the handler still populated a player. "
         f"Nothing from a broken run may reach the screen."
     )
-    assert status == render.empty_output_bug(spec, [dropped]), (
+    assert status == render.empty_output_bug(
+        spec, [dropped], on_zerogpu=handlers.run_platform()[1]
+    ), (
         f"mode {mode_id!r} lost its {dropped} track but the handler did not report it:\n\n{status}"
     )
 
@@ -330,7 +332,9 @@ def test_an_empty_string_path_is_as_loud_as_a_missing_one(mode_id, dropped, wire
     video, audio, status = handlers.on_generate(mode_id, *values_for(mode_id))
 
     assert (video, audio) == (None, None)
-    assert status == render.empty_output_bug(spec, [dropped])
+    assert status == render.empty_output_bug(
+        spec, [dropped], on_zerogpu=handlers.run_platform()[1]
+    )
 
 
 @pytest.mark.parametrize("mode_id", MODE_IDS)
