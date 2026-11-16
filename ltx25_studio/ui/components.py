@@ -21,7 +21,7 @@ from .fields import FIELD_KEYS, Field, field_by_key
 
 __all__ = ["assert_pool_complete", "build_field", "lora_bay", "render_fields"]
 
-_ACCEPTS_INFO = frozenset({"text", "number", "slider", "checkbox"})
+_ACCEPTS_INFO = frozenset({"text", "number", "slider", "checkbox", "radio"})
 
 #: Media inputs share one compact height so the inputs column stays short.
 MEDIA_HEIGHT = 200
@@ -42,6 +42,8 @@ def _build(spec: Field, **overrides: Any) -> gr.components.Component:
         return gr.Slider(value=spec.default, **common, **options)
     if spec.kind == "checkbox":
         return gr.Checkbox(value=spec.default, **common, **options)
+    if spec.kind == "radio":
+        return gr.Radio(value=spec.default, **common, **options)
     if spec.kind == "image":
         return gr.Image(
             type="pil",

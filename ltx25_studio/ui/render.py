@@ -233,6 +233,7 @@ FIELD_COPY: dict[str, tuple[str, str]] = {
         "Ignore my audio makes new sound, as if none were given.",
     ),
     "loras": ("LoRA adapters", ""),
+    "decoder": ("Decoder", ""),
     "enhance_prompt": (
         "Enhance my prompt",
         "Gemma rewrites your prompt in detail on the GPU first, and reads your image if there "
@@ -296,6 +297,20 @@ NOISE_CHOICES: tuple[tuple[str, float], ...] = tuple(
         strict=True,
     )
 )
+
+#: The decoder choices: ``(label, value, what it does)``. The values are
+#: ``config.DECODER_CHOICES``; the reservation does not depend on the choice.
+DECODER_OPTIONS: tuple[tuple[str, str, str], ...] = (
+    ("Auto", "auto", "Uses the model's own decoder when this machine can run it."),
+    ("Best quality", "diffusion", "The model's diffusion decoder: finer detail, takes longer."),
+    ("Fast", "conv", "The quick decoder: slightly softer."),
+)
+
+
+def decoder_line(value: Any) -> str:
+    """The selected decoder, in one line."""
+    return next((words for _l, v, words in DECODER_OPTIONS if v == value), DECODER_OPTIONS[0][2])
+
 
 #: Shape presets: ``(name, width, height)``. All multiples of 32.
 SHAPE_PRESETS: tuple[tuple[str, int, int], ...] = (
@@ -857,6 +872,8 @@ class RunFacts:
     length_source: str | None = None
     #: The level actually used to change the user's sound (Audio -> sound).
     audio_level: float | None = None
+    #: The decoder that ran: "diffusion" or "conv".
+    decoder: str | None = None
 
 
 def run_summary(facts: RunFacts) -> str:
@@ -878,6 +895,9 @@ def run_summary(facts: RunFacts) -> str:
         rows.append(("Change", f"{_e(named)} ({level})" if named else level))
     rows.append(("Seed", _num(facts.seed)))
     rows.append(("LoRA", _lora_words(facts.loras)))
+    if facts.decoder:
+        ran = {"diffusion": "the model's diffusion decoder", "conv": "the quick decoder"}
+        rows.append(("Decoder", _e(ran.get(facts.decoder, facts.decoder))))
     clock = "GPU time" if facts.took_is_gpu else "wall-clock"
     rows.append(("Took", f"{_num(f'{facts.took:.0f}')} s, {clock}"))
     grid = "".join(f"<dt>{label}</dt><dd>{value}</dd>" for label, value in rows)

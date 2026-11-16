@@ -874,6 +874,7 @@ def run_facts(outcome: RunOutcome) -> render.RunFacts:
         prompt_sent=fact(result, "prompt_sent", None),
         length_source=fact(result, "length_source", origin),
         audio_level=fact(result, "audio_level", level),
+        decoder=fact(result, "decoder", None),
     )
 
 

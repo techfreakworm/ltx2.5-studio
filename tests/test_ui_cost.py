@@ -217,3 +217,15 @@ def test_an_illegal_api_request_is_refused_before_any_dispatch(monkeypatch):
     assert status.startswith("### "), "a refusal renders the loud panel"
     assert "Nothing ran. No GPU time was used." in status
     assert dispatched == [] and called == [], "the GPU-decorated function must never be called"
+
+
+def test_the_decoder_choice_does_not_move_the_cost_panel():
+    """The reservation does not depend on the decoder, so the panel must not say it does."""
+    base = render.cost_panel(handlers.review("text_to_video", form("text_to_video")))
+    for choice in ("diffusion", "conv"):
+        assert (
+            render.cost_panel(
+                handlers.review("text_to_video", form("text_to_video", decoder=choice))
+            )
+            == base
+        )

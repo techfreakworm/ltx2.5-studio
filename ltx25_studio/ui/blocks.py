@@ -345,7 +345,7 @@ def build_ui() -> gr.Blocks:
 
                 # -- Advanced -------------------------------------------------
                 with gr.Accordion(
-                    "Advanced: exact size and frames, seed",
+                    "Advanced: exact size and frames, seed, decoder",
                     open=False,
                     elem_id="advanced",
                     elem_classes=["mr-acc"],
@@ -369,13 +369,17 @@ def build_ui() -> gr.Blocks:
                         "Snap to legal values", elem_classes=["mr-secondary"], size="sm"
                     )
                     components.render_fields(pool, "seed")
-                    # Slot for the decoder choice (Auto / Best quality / Fast):
-                    # its field will be APPENDED to FIELD_KEYS by the pipeline
-                    # owner and rendered here, under Advanced.
-                    gr.Markdown(
-                        "Decoder: chosen automatically for this build.",
-                        elem_classes=["mr-slot"],
-                        elem_id="decoder-slot",
+                    components.render_fields(
+                        pool,
+                        "decoder",
+                        visible=view0.active["decoder"],
+                        elem_id="decoder",
+                        elem_classes=["mr-chips", "mr-words"],
+                    )
+                    decoder_line = gr.Markdown(
+                        render.decoder_line("auto"),
+                        visible=view0.active["decoder"],
+                        elem_classes=["mr-hint"],
                     )
 
             # =============================================================
@@ -550,6 +554,7 @@ def build_ui() -> gr.Blocks:
             pool["min_seconds"],
             pool["max_seconds"],
             lora_note,
+            decoder_line,
             *example_outputs,
             monitor_idle,
             video_out,
@@ -599,6 +604,7 @@ def build_ui() -> gr.Blocks:
                     "audio",
                     "strength",
                     "auto_duration",
+                    "decoder",
                 ):
                     kwargs["visible"] = view.active[key]
                 if key == "prompt":
@@ -655,6 +661,7 @@ def build_ui() -> gr.Blocks:
                 gr.update(visible=view.active["min_seconds"]),
                 gr.update(visible=view.active["max_seconds"]),
                 gr.update(visible=not view.active["prompt"]),
+                gr.update(visible=view.active["decoder"]),
                 *example_updates,
                 *monitor_updates,
                 monitor_next,
@@ -823,6 +830,9 @@ def build_ui() -> gr.Blocks:
             **_PRIVATE,
         )
 
+        pool["decoder"].change(
+            fn=render.decoder_line, inputs=[pool["decoder"]], outputs=[decoder_line], **_PRIVATE
+        )
         noise_choice.input(
             fn=_noise_value, inputs=[noise_choice], outputs=[pool["noise_scale"]], **_PRIVATE
         )
@@ -1205,6 +1215,7 @@ _RESTORED = (
     "seed",
     "strength",
     "noise_scale",
+    "decoder",
 )
 
 #: Fields an example may write.

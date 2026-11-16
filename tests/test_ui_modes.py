@@ -290,6 +290,7 @@ def test_a_form_full_of_stale_values_runs_exactly_like_a_clean_one(mode_id, capt
         "noise_scale": 0.9,
         "enhance_prompt": True,
         "seed": 7,
+        "decoder": "conv",
     }
     # The user filled every field in some mode that takes them all, then picked
     # this one and supplied what it needs.
@@ -302,6 +303,8 @@ def test_a_form_full_of_stale_values_runs_exactly_like_a_clean_one(mode_id, capt
             # clean form the same visible value so only hidden values differ.
             after[key] = clean.get(key, after[key])
     after |= required
+    if view.active["decoder"]:
+        clean["decoder"] = after["decoder"]  # shown, so the user's choice is not stale
 
     base, leak = capture(mode_id, clean), capture(mode_id, after)
     assert leak["result"] is not None, leak["status"]
@@ -336,3 +339,14 @@ def test_the_change_choices_write_the_levels_the_audio_module_supports():
     levels = [level for _name, level in render.NOISE_CHOICES]
     assert levels == list(audio_conditioning.VARIATION_LEVELS)
     assert all(audio_conditioning.snap_level(level) == level for level in levels)
+
+
+def test_the_decoder_choice_is_offered_only_where_a_picture_comes_back():
+    for mode_id in MODE_IDS:
+        spec = modes.get_mode(mode_id)
+        assert handlers.mode_view(mode_id).active["decoder"] == ("video" in spec.exports)
+    values = defaults() | {"decoder": "diffusion"}
+    hidden, parked = handlers.mode_switch("text_to_video", "text_to_audio", values, {})
+    assert hidden["decoder"] == "auto", "a sound-only run is sent with the default decoder"
+    back, _ = handlers.mode_switch("text_to_audio", "text_to_video", hidden, parked)
+    assert back["decoder"] == "diffusion"

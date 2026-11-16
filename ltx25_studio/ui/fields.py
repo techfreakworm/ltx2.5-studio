@@ -27,7 +27,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .. import modes
-from .render import FIELD_COPY
+from .render import DECODER_OPTIONS, FIELD_COPY
 
 __all__ = [
     "FIELDS",
@@ -109,6 +109,11 @@ def _audio_lever(mode: Any) -> bool:
 def _sizes_the_picture(mode: Any) -> bool:
     """False where the registry pins the size because the picture is thrown away."""
     return not mode.min_resolution
+
+
+def _returns_a_picture(mode: Any) -> bool:
+    """The decoder choice: only where a picture comes back."""
+    return "video" in mode.exports
 
 
 def _offers_upscale(mode: Any) -> bool:
@@ -305,6 +310,18 @@ FIELDS: tuple[Field, ...] = (
         visible_when=_accepts("text"),
         parks=True,
         **_copy("enhance_prompt"),
+    ),
+    # Appended: the decoder that turns the result into frames. Sent as "auto"
+    # where no picture comes back.
+    Field(
+        key="decoder",
+        kind="radio",
+        group="sampling",
+        default="auto",
+        options={"choices": [(label, value) for label, value, _w in DECODER_OPTIONS]},
+        visible_when=_returns_a_picture,
+        parks=True,
+        **_copy("decoder"),
     ),
 )
 

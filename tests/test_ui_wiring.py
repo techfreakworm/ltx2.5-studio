@@ -254,3 +254,14 @@ def test_the_trigger_word_note_shows_only_in_the_modes_without_a_prompt(demo):
             shown.add(mode_id)
     assert shown == {"image_to_video", "image_to_audio_video"}
     assert note.visible is False, "05, the default, has a prompt"
+
+
+def test_the_decoder_is_appended_as_a_radio_that_defaults_to_auto(demo):
+    endpoint = demo.get_api_info()["named_endpoints"]["/on_generate"]
+    assert FIELD_KEYS[-1] == "decoder"
+    last = endpoint["parameters"][-1]
+    assert last["component"] == "Radio"
+    assert last["parameter_default"] == "auto"
+    radio = dict(zip(["mode", *FIELD_KEYS], dependency(demo, "on_generate").inputs, strict=True))
+    assert [value for _label, value in radio["decoder"].choices] == ["auto", "diffusion", "conv"]
+    assert radio["decoder"].visible is True, "05 returns a picture"

@@ -258,3 +258,37 @@ def test_run_facts_read_the_results_record_first_and_fall_back_to_the_request():
     assert facts.took == 33.0 and facts.took_is_gpu
     summary = render.run_summary(facts)
     assert "GPU time" in summary and "an enhanced prompt" in summary
+
+
+def test_the_decoder_choices_say_what_each_does_and_the_report_names_the_one_that_ran():
+    from ltx25_studio.config import DECODER_CHOICES
+
+    assert [value for _l, value, _w in render.DECODER_OPTIONS] == list(DECODER_CHOICES)
+    assert render.decoder_line("auto") == (
+        "Uses the model's own decoder when this machine can run it."
+    )
+    assert render.decoder_line("diffusion") == (
+        "The model's diffusion decoder: finer detail, takes longer."
+    )
+    assert render.decoder_line("conv") == "The quick decoder: slightly softer."
+    facts = render.RunFacts(
+        mode=modes.get_mode("text_to_video"),
+        seed=1,
+        returned_size=(704, 480),
+        seconds=5.0,
+        stage_2=False,
+        loras=(),
+        took=3.0,
+        decoder="diffusion",
+    )
+    assert "diffusion decoder" in render.run_summary(facts)
+    no_record = render.RunFacts(
+        mode=modes.get_mode("text_to_video"),
+        seed=1,
+        returned_size=(704, 480),
+        seconds=5.0,
+        stage_2=False,
+        loras=(),
+        took=3.0,
+    )
+    assert "Decoder" not in render.run_summary(no_record), "never claim a decoder nobody reported"
