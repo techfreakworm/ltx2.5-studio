@@ -1,5 +1,27 @@
 # Standing the app up on a real GPU host (hinode)
 
+> ## Status on 2026-11-16
+>
+> **hinode is retired.** This is the record of what was measured there in August 2026; its body
+> is kept as written, and nothing in it can be re-run. The scripts it describes
+> (`scripts/sync_to_hinode.sh`, `scripts/hinode_run.sh` and every `scripts/host_*.py`) were
+> removed on 2026-11-16; `git show 2f356b5:scripts/<name>` restores one. Superseded since:
+>
+> - **"Output quality sign-off, and the one exception"**: the operator has ruled that his sign-off
+>   ("visuals are good, audios are good") was given on artifacts served from his own Mac (local
+>   MPS, bf16, made with tooling outside this repo), before hinode was proposed. **No artifact in
+>   this file was reviewed by a person.**
+> - **"124 GB here vs ~68 GB empirical on ZeroGPU"**: the ~68 GB figure is falsified; the Space's
+>   ceiling is above 93.56 GB ([`SPACE_GENERATION_FINDING.md`](SPACE_GENERATION_FINDING.md) §6).
+> - **"`xlarge` promotion is structural rather than optional"**: nothing promotes. The Space ran
+>   on the 47.375 GiB `large` partition until the size was passed explicitly
+>   ([`MIG_ALLOCATOR_SIGHTINGS.md`](MIG_ALLOCATOR_SIGHTINGS.md) §1); the code now defaults to
+>   `xlarge`.
+>
+> Where the current truth is: [`SPACE_MODE_MATRIX.md`](SPACE_MODE_MATRIX.md) §10 (what has been
+> verified since, including the local real-weights runs on Apple silicon) and
+> [`../README.md`](../README.md).
+
 `wakeuser@hinode` is an SSH box with the **same silicon as ZeroGPU** — RTX PRO 6000
 Blackwell Server Edition — but **unpartitioned**, with no quota meter. It exists to
 answer one question and it cannot answer the other:

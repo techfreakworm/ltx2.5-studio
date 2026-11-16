@@ -1,5 +1,27 @@
 # The Space: a killed worker, a falsified ceiling, and a working generation
 
+> ## Status on 2026-11-16
+>
+> This is the August 2026 record of the first Space runs; its body is kept as written.
+> Superseded since:
+>
+> - **§2 annotation "`LTX25_TRANSFORMER_PRECISION=bf16` still PRESENT"**: the Space's variables,
+>   read on 2026-11-16, no longer include it (nor `LTX25_TEXT_ENCODER_PRECISION`).
+> - **§2 "`spaces` 0.51.1"**: the Space reports `spaces` 0.51.3.
+> - **§5's startup report** (`zerogpu_size=auto duration=60s`, `dtype : bf16 (fixed; no
+>   precision switch)`, `82.2 GB … + image ~10`) is that day's format. The Space now sets
+>   `xlarge` and 180 s through its variables, and the report was rewritten on 2026-11-16; the
+>   new one has not run on the Space yet.
+> - **§11 #4 "packed 51.1 GB … `xlarge` bills at 2×"**: on the 2026-11-13 boot the platform's own
+>   progress bar packed 40.6 GB, and the run in this file was on `large`, not `xlarge`.
+> - **§11 #1 "our error text tells users to read a traceback that does not exist"**: that sentence
+>   is no longer in the UI.
+>
+> Still true: no steady-state RSS has been measured (§11 #6), and billed seconds cannot be read
+> back (§11 #4). Where the current truth is: [`SPACE_MODE_MATRIX.md`](SPACE_MODE_MATRIX.md) §10
+> and [`../README.md`](../README.md). The Space has not been redeployed since 2026-08-26, so
+> nothing about the Space after the 2026-11-16 fixes is known yet.
+
 > ## ⛔ INVALIDATED (2026-08-25, evening) — "a real video" was COLOUR STATIC
 >
 > The 39,146-byte artifact this document resolves on, and every Space artifact

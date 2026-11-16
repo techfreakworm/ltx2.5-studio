@@ -1,5 +1,29 @@
 # The 2026-08-25 session: byte identity settled, a shippable resolution proven, and the stage-2 ceiling found
 
+> ## Status on 2026-11-16
+>
+> This is the record of one day; its body is kept as written. Superseded since:
+>
+> - **The stage-2 "ceiling between 25 and 49 frames"** (title, headline 3, §5, §9): this session
+>   ran on the 47.375 GiB `large` partition. 704×480×49 passes on `xlarge` (55.906 GiB reserved,
+>   [`MIG_ALLOCATOR_SIGHTINGS.md`](MIG_ALLOCATOR_SIGHTINGS.md) §2); the ceiling on `xlarge` is
+>   not measured.
+> - **The "(xlarge) wall × 2" cost labels** (the headline block, §8): every run here was on
+>   `large`. The figures stay valid as upper bounds; what was billed cannot be read back.
+> - **§8 "today (UTC 2026-08-25), all of it ≤ ~675.5 GPU-s"**: the quota ledger for that UTC day
+>   reads ≤ 1528.672 GPU-s over 20 runner calls (the evening's post-fix runs included). Adding
+>   the ≤ ~93.3 GPU-s of manual calls bounded in §8 puts the day's wall × 2 bound at ~1622 GPU-s,
+>   about 84 % of the 1920 stop line, and the evening's manual calls, never recorded, come on top.
+>   "≤ ~28 % consumed" and "never approached" do not hold.
+> - **"Three containers and two code shas"** (the block below, §3): §3 itself names three code
+>   shas.
+> - **"The post-fix matrix … goes in `SPACE_MODE_MATRIX.md` §10"**: it ran that evening but was
+>   never written up, and its video and audio files are gone.
+>
+> Where the current truth is: [`SPACE_MODE_MATRIX.md`](SPACE_MODE_MATRIX.md) §10. The Space has
+> not been redeployed since 2026-08-26, so nothing about the Space after the 2026-11-16 fixes is
+> known yet.
+
 > # ⛔ INVALIDATED (2026-08-25) — every generation result in this document was produced by a BROKEN TRANSFORMER
 >
 > **Read this before any number below, including all four headline results.**

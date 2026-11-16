@@ -1,5 +1,27 @@
 # ZeroGPU disk — PARKED. Findings to date.
 
+> ## Status on 2026-11-16
+>
+> This file is the August 2026 record; its body is kept as written. It never received the
+> retraction of 2026-08-25 (evening), so read these first:
+>
+> - **"82.2 GB of 150 [OK]"** (the unparked annotation, §1, §5, §7): a reading taken before ZeroGPU
+>   packs, with a packed term of 0.0. On the 2026-11-13 boot the platform's own progress bar
+>   packed 40.6 GB and its cleanup freed 65.25 GB. The disk peak has never been measured.
+> - **§4.2 quoted as "the" int8 peak (B, transformer only, 133.4–137.4 GB)**: the deployed config
+>   also quantises the text encoder; the code's own derivation for it is 41.237 GB packed and a
+>   121.4–125.4 GB peak (`ltx25_studio/pipelines.py`, `_quantization_config`). Neither bound
+>   has been measured.
+> - **"All eleven modes generate" / "eleven modes generating" / "correct enough to generate all
+>   eleven modes"** (the unparked annotation, §5, §7): withdrawn. Every Space output up to
+>   `ff142d9` was colour static (fixed at `eb1aa9f`, Space `e3b5333`); the modes *executed*.
+> - **§3 "no 25-minute cold-start download"**: the measured cold start of 2026-11-13 took
+>   13 min 59 s, about 11.5 min of it the 72.19 GB download.
+>
+> Where the current truth is: [`SPACE_MODE_MATRIX.md`](SPACE_MODE_MATRIX.md) §10 and
+> [`../README.md`](../README.md). The Space has not been redeployed since 2026-08-26, so nothing
+> about the Space after the 2026-11-16 fixes is known yet.
+
 > ## ⏸️ This is not an active workstream.
 >
 > **ZeroGPU is parked.** The sequence is: prove the app works on a dedicated GPU

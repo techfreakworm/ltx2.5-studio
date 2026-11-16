@@ -1,5 +1,35 @@
 # LTX-2.5 Studio — Test Plan
 
+> ## Status on 2026-11-16
+>
+> This plan is the August 2026 record; its body is kept as written. It never received the
+> retraction of 2026-08-25 (evening), so read these first:
+>
+> - **"All eleven modes generate on the Space, content-verified, at sha `287ba9c`"** (the
+>   annotations at the top, in A.7 and in Part B): withdrawn. Every Space output up to `ff142d9`
+>   was colour static, because the int8 build quantised the transformer's conditioning path
+>   (fixed at `eb1aa9f`, deployed as Space `e3b5333`). The modes *executed*; their outputs were
+>   not pictures.
+> - **Part B's annotation "LoRA in both directions with a passing inertness check, and stage 2 …
+>   FAIL at ×49"**: the inertness check compared two broken renders and is withdrawn. The ×49
+>   failure was the 47.375 GiB `large` partition; 704×480×49 passes on `xlarge`
+>   ([`MIG_ALLOCATOR_SIGHTINGS.md`](MIG_ALLOCATOR_SIGHTINGS.md) §2).
+> - **Part B's seven-run matrix was never run as designed.** What ran is in
+>   [`SPACE_SESSION_2026-08-25.md`](SPACE_SESSION_2026-08-25.md) and
+>   [`SPACE_MODE_MATRIX.md`](SPACE_MODE_MATRIX.md).
+> - **A.0's precondition "`dtype : bf16 (fixed; no precision switch)`"**: the startup report no
+>   longer prints that line. It prints the resolved precision (int8 on ZeroGPU by default).
+> - **B.1 "verified: `pro_quota_minutes = 40` … Fixed 24 h window from first use"**: that constant
+>   is a message string marked `# TODO: Dynamic value` in the `spaces` client, not a reading of
+>   the allowance. 2400 GPU-s/day is the documented PRO allowance; the reset window is not
+>   verified (B.8 says per UTC date). The ×2 billing on `xlarge` is still documented, not
+>   measured. B.1's "Known, from `spaces` 0.51.1": the Space reports `spaces` 0.51.3.
+> - **Part A** ran on hinode, which is retired; its scripts were removed on 2026-11-16.
+>
+> Where the current truth is: [`SPACE_MODE_MATRIX.md`](SPACE_MODE_MATRIX.md) §10 (what has been
+> verified since, and how) and [`../README.md`](../README.md). The Space has not been redeployed
+> since 2026-08-26, so nothing about the Space after the 2026-11-16 fixes is known yet.
+
 Two matrices, for two different questions. **Neither answers the other's.**
 
 | | **Part A — hinode** | **Part B — ZeroGPU** |

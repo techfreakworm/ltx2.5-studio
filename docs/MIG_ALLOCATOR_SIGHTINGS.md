@@ -1,5 +1,24 @@
 # The NVML allocator asserts: one root cause, and the scoreboard that is honest about how much of it is proved
 
+> ## Status on 2026-11-16
+>
+> This is the August 2026 record; its body is kept as written. Superseded since:
+>
+> - **§1 "`auto` is the default (`config.DEFAULT_ZEROGPU_SIZE`)"**: the default is now `xlarge`
+>   in code, so the size is passed explicitly even where the Space variable is missing. The Space
+>   itself still runs the 2026-08-26 build with `LTX25_ZEROGPU_SIZE=xlarge` set as a variable.
+> - **§1 "`spaces` 0.51.1"**: the Space reports `spaces` 0.51.3. Its source, read on 2026-11-16,
+>   takes the same four hops (`client.py:110` and `:112-113`, one line lower than in 0.51.1;
+>   `api.py:112-113`), so `auto` still sends no size there.
+> - **§2/§3 "sighting 3 … pending the residency change in this commit"**: the residency change is
+>   `52a0f56`, the commit before this file's last edit, and it was deployed on 2026-08-26 (Space
+>   `2495a6b`). No enhanced run has been recorded since, so sighting 3 is still open.
+>
+> Still standing: the R4b retirement (704×480×49 passes on `xlarge`, 55.906 GiB reserved) and
+> the R3 verdict. Where the current truth is: [`SPACE_MODE_MATRIX.md`](SPACE_MODE_MATRIX.md) §10
+> and [`../README.md`](../README.md). The Space has not been redeployed since 2026-08-26, so
+> nothing about the Space after the 2026-11-16 fixes is known yet.
+
 > ## ✅ THE ROOT CAUSE IS FOUND. THE ACCOUNT IS **SUPPORTED, NOT PROVEN.**
 >
 > This file began as a register of three `RuntimeError`s that looked alike and

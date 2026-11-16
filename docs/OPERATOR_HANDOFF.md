@@ -1,5 +1,45 @@
 # Operator handoff — LTX-2.5 Studio
 
+> ## Status on 2026-11-16
+>
+> This handoff is the August 2026 record. Its body is kept as written; it no longer says where
+> the project stands. Superseded since:
+>
+> - **Stage 2's "ceiling between 25 and 49 frames"** (the two blocks below): the 49-frame failure
+>   was the 47.375 GiB `large` partition. 704×480×49 passes on `xlarge` (55.906 GiB reserved,
+>   [`MIG_ALLOCATOR_SIGHTINGS.md`](MIG_ALLOCATOR_SIGHTINGS.md) §2). The ceiling on `xlarge` and
+>   stage 2's picture quality are not measured.
+> - **"Total day ≤ ~675.5 GPU-s"**: the quota ledger for UTC 2026-08-25 reads ≤ 1528.672 GPU-s
+>   over 20 runner calls. Adding the ≤ ~93.3 GPU-s of manual calls bounded by hand in
+>   [`SPACE_SESSION_2026-08-25.md`](SPACE_SESSION_2026-08-25.md) §8 puts the day's bound at
+>   ~1622 GPU-s (wall × 2 upper bounds, not billed seconds), about 84 % of the 1920 stop line.
+>   The evening's manual calls and all of 2026-08-26/27 were never recorded.
+> - **"The post-fix eleven-mode matrix goes in `SPACE_MODE_MATRIX.md` §10"**: it ran that
+>   evening but was never written up, and its video and audio files are gone.
+> - **§3 "82.2 GB of 150 [OK]"**: read before ZeroGPU packs (the packed term was 0.0). On the
+>   2026-11-13 boot the platform's own progress bar packed 40.6 GB; the disk peak has never been
+>   measured.
+> - **§5 "On a Space"**: "deploying is a push to that remote's `main`" is wrong as stated. The
+>   Space repo has its own root commit, so pushing a work commit is rejected as non-fast-forward;
+>   every deploy so far was a merge commit on the live Space head
+>   (`git commit-tree <work>^{tree} -p <work> -p <Space head>`) pushed as a fast-forward. Never
+>   `--force`. The 72.19 GB download happens at startup, not at build time: the 2026-11-13 cold
+>   start took 13 min 59 s, about 11.5 min of it the download. `tests/test_deploy_drift.py`
+>   does not assert `startup_duration_timeout`.
+> - **§5 "On hinode"**: hinode is retired. `scripts/sync_to_hinode.sh`, `scripts/hinode_run.sh`
+>   and every `scripts/host_*.py` were removed on 2026-11-16 (`git show 2f356b5:scripts/<name>`
+>   restores one).
+> - **`auto` as the GPU size**: `LTX25_ZEROGPU_SIZE` now defaults to `xlarge` in code.
+> - **"local MPS bf16" sign-off**: those artifacts came from tooling outside this repo, which had
+>   no Apple-silicon path. One was added on 2026-11-16 and verified on real weights (see
+>   `README.md`).
+>
+> Where the project stands: [`../README.md`](../README.md) (what the app does, how to run it,
+> what it costs) and [`SPACE_MODE_MATRIX.md`](SPACE_MODE_MATRIX.md) §10 (what has been
+> verified, and how). The Space has not been redeployed since 2026-08-26 (sha `f809472`, the
+> tree of `445abcb`) and has run no generation since, so nothing about the Space after the
+> 2026-11-16 fixes is known yet.
+
 > **What you have, what you do not have, and what to do next.** Written for
 > someone who was not here. [`PLAN.md`](PLAN.md) records how things were
 > decided; [`TEST_PLAN.md`](TEST_PLAN.md) records what was run; this tells you
