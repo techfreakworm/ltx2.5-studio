@@ -1,6 +1,6 @@
 # LTX-2.5 Studio — Design Plan
 
-**Status (2026-11-16):** implemented. After the 2026-11-16 fixes, ten of the eleven modes are
+**Status (2026-11-16):** implemented. After the 2026-11-16 fixes, all eleven modes are
 verified on real weights on a Mac (Apple silicon); none has been re-run on the Space, which still
 runs the 2026-08-26 build. What has been verified, and how, is in
 [`SPACE_MODE_MATRIX.md`](SPACE_MODE_MATRIX.md) §10. *(Originally: "implemented; not yet run on a
@@ -541,8 +541,14 @@ discards the input entirely.
 > picture is generated to it, and exports **video with that audio** (`exports=("audio",
 > "video")`); **10** changes the supplied audio by one of the model's own levels (0.42, 0.73,
 > 0.91, or 1.0, which ignores it). Row **4**'s mechanism was replaced on 2026-11-16 as well
-> (`modes.py`, `video_conditioning="variation"`).
-<!-- follow-up pass: describe row 4's new lever once the mode-04 change has been verified on real weights. -->
+> (`modes.py`, `video_conditioning="variation"`): the clip is encoded, noised to one of the
+> distilled schedule's own levels — 0.42, 0.73 or 0.91 ("a little", "moderately", "a lot",
+> the default) — and denoised along the rest of the schedule, so the result is a variation of
+> the clip, at the clip's length. Verified on real weights on a Mac: SSIM to the clip 0.78 /
+> 0.65 / 0.36–0.40 at the three levels, and the prompt acts only at 0.91
+> ([`SPACE_MODE_MATRIX.md`](SPACE_MODE_MATRIX.md) §10.2). The clip as a condition with a
+> strength, as in the row above, was a switch: the clip came back nearly unchanged (SSIM
+> 0.72–0.83) at three strengths, and the prompt replaced it at the two lowest.
 
 **Mandatory mitigation for modes 8–10:** run at the **minimum legal resolution**, **skip the
 stage-2 spatial upscale**, export only the requested track. The UI must say in words that
@@ -1428,7 +1434,7 @@ in [`docs/TEST_PLAN.md`](TEST_PLAN.md).
 
 > ⛔ **Corrected 2026-11-16: it runs on Apple silicon now.** With a separate PyTorch 2.15
 > environment, the Q8_0 GGUF transformer and staged residency (the text encoder and the
-> transformer are never resident together), ten of the eleven modes are verified on real
+> transformer are never resident together), all eleven modes are verified on real
 > weights on a 128 GB Mac ([`SPACE_MODE_MATRIX.md`](SPACE_MODE_MATRIX.md) §10.2; how to run it:
 > the README). Upscale ×2, the diffusion decoder and int8 still need CUDA, so they are checked
 > on the Space only.
@@ -1914,7 +1920,7 @@ a code path that works on ZeroGPU works on MPS, or vice versa.
 > preflight before every heavy step (`memory.py`), and an MPS numerics self-test that refuses
 > a PyTorch which computes wrongly on this GPU (2.11 does; 2.15.0 is what was verified).
 > Capability-limited as predicted: Upscale ×2, the diffusion decoder and bitsandbytes int8 need
-> CUDA. Verified on real weights for ten of eleven modes (`SPACE_MODE_MATRIX.md` §10.2).
+> CUDA. Verified on real weights for all eleven modes (`SPACE_MODE_MATRIX.md` §10.2).
 
 ---
 

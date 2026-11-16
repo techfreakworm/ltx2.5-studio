@@ -73,10 +73,9 @@ Built on `diffusers`, pinned to an exact commit. Deploys to a private Hugging Fa
 on ZeroGPU: [`techfreakworm/LTX2.5-Studio`](https://huggingface.co/spaces/techfreakworm/LTX2.5-Studio).
 It also runs on an Apple-silicon Mac with enough memory ([below](#run-it-locally-apple-silicon)).
 
-> **Where things stand, 2026-11-16.** After that day's fixes, ten of the eleven modes are
-> verified on real weights on a Mac; video to video changed how it works that day and is not
-> verified yet. The Space still runs the build of 2026-08-26 and has not been run since the
-> fixes, so nothing in this README about the Space's behaviour after them is verified yet.
+> **Where things stand, 2026-11-16.** After that day's fixes, all eleven modes are verified on
+> real weights on a Mac. The Space still runs the build of 2026-08-26 and has not been run since
+> the fixes, so nothing in this README about the Space's behaviour after them is verified yet.
 > The record, run by run: [`docs/SPACE_MODE_MATRIX.md`](docs/SPACE_MODE_MATRIX.md) §10.
 
 ---
@@ -121,9 +120,14 @@ and the widgets on screen cannot drift apart.
 A run that is missing a required input is refused before a GPU is reserved, and an input a
 mode does not take is dropped with a note rather than used.
 
-<!-- follow-up pass: describe mode 04's lever here once its new mechanism is verified on real weights. -->
-**Video to video** makes a variation of your clip, steered by the prompt if you give one. Its
-mechanism changed on 2026-11-16 and is not verified on real weights yet.
+**Video to video** makes a variation of your clip, steered by the prompt if you give one. The
+clip is noised to one of three of the model's own levels and denoised from there; **How much to
+change your clip** picks the level: *A little* (0.42), *Moderately* (0.73) or *A lot* (0.91, the
+default). Verified on real weights on a Mac: the result's similarity to the clip (SSIM) was
+0.78, 0.65 and 0.36–0.40 at the three levels, and the prompt visibly changes the picture only
+at *A lot*; at the lower two the clip comes back re-rendered with small changes. It runs without
+a prompt too. The length is always the clip's. A phone clip stored sideways comes out upright,
+and a 60 fps clip is read in real time.
 
 **Audio is not a first-class argument** — there is no `audio=` kwarg anywhere in the API. Your
 audio is encoded to `audio_latents`, and then:
@@ -282,7 +286,7 @@ generation device: Generate explains how to opt in (next section).
 
 The app's own code — the same `generate()` the Space runs — can generate on an Apple-silicon
 Mac's GPU (MPS), with the distilled transformer as a Q8_0 GGUF file and every other component
-from the pinned snapshot. This is how ten of the eleven modes were verified on 2026-11-16, on a
+from the pinned snapshot. This is how all eleven modes were verified on 2026-11-16, on a
 Mac with **128 GB** of unified memory. Smaller machines are not verified.
 
 **What you need.**
