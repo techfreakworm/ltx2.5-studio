@@ -216,6 +216,32 @@ def test_a_result_gradio_will_not_serve_ends_with_generate_back_and_a_card(demo,
     assert "Cannot move" in detail(card)
 
 
+def test_with_the_folder_main_allows_gradio_serves_the_same_run(outside, demo):
+    """What ``app.main()`` passes for this folder (``served_outputs``) is what Gradio's own
+    check needs: the same run's file now reaches the page and the finish step shows it.
+    ``outside`` comes first so the demo's cache is under the test's own temp dir."""
+    from gradio.state_holder import SessionState
+
+    demo = launched(demo)
+    demo.allowed_paths = blocks.served_outputs(outside)["allowed_paths"]
+    run = generation_step(demo)
+    (finish,) = listeners_after(demo, run, failure=False)
+    state, session = SessionState(demo), "allowed"
+    values = page_values(demo, run)
+    run_step(demo, demo.fns[run.trigger_after], values, state, session)
+    out = run_step(demo, run, values, state, session)["data"]
+    assert files_in(out), "the run's file reached the page"
+    assert blocks._recall_failure(gr.Request(session_hash=session)) is None
+
+    values |= {finish.inputs[1]._id: [], finish.inputs[2]._id: render.LENGTH_MATCH}
+    done = run_step(demo, finish, values, state, session)["data"]
+    got = {c._id: v for c, v in zip(finish.outputs, done, strict=True)}
+    video = got[by_elem_id(demo, "video-out")._id]
+    assert video["visible"] is True and video["autoplay"] is True and files_in(video)
+    assert got[by_elem_id(demo, "generate-btn")._id]["value"] == "Generate"
+    assert got[by_elem_id(demo, "monitor-caption")._id].startswith("**Your run.**")
+
+
 def test_when_the_handler_itself_raises_the_page_still_comes_back(demo, outside, monkeypatch):
     from gradio.state_holder import SessionState
 

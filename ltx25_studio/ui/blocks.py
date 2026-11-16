@@ -18,6 +18,9 @@ Contracts kept here:
 
 from __future__ import annotations
 
+import logging
+import os
+import tempfile
 import threading
 import time
 from collections import OrderedDict
@@ -30,7 +33,9 @@ from .. import modes
 from . import chrome, components, handlers, render, showcase
 from .fields import FIELD_KEYS, PARKED_FIELDS, field_by_key
 
-__all__ = ["DEFAULT_MODE", "build_ui"]
+__all__ = ["DEFAULT_MODE", "build_ui", "served_outputs"]
+
+_log = logging.getLogger("ltx25_studio")
 
 #: The media kinds, in the order the switch's caption outputs list them.
 _MEDIA = ("image", "video", "audio")
@@ -86,6 +91,25 @@ def lora_strength_range() -> tuple[float, float, float]:
     from ..lora import staging
 
     return (LORA_STEP, float(staging.MAX_WEIGHT), float(staging.DEFAULT_WEIGHT))
+
+
+def served_outputs(output_root: str | Path) -> dict[str, list[str]]:
+    """The ``launch`` arguments Gradio needs to serve the results written to ``output_root``.
+
+    Gradio serves a file a step returns only from the working directory, the system temp
+    dir, its own cache or ``allowed_paths``. The default output folder is under the
+    working directory and needs nothing; a folder outside both is passed, and only it.
+    """
+    root = Path(output_root).resolve()
+    for served in (os.getcwd(), tempfile.gettempdir()):
+        if root.is_relative_to(Path(served).resolve()):
+            return {}
+    _log.info(
+        "results are written to %s, outside the working directory and the temp dir, so it "
+        "is passed to launch as allowed_paths",
+        root,
+    )
+    return {"allowed_paths": [str(root)]}
 
 
 _PRIVATE = {"api_visibility": "private", "show_progress": "hidden"}

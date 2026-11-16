@@ -32,6 +32,7 @@ from ltx25_studio import enhance as enhance_module
 from ltx25_studio import generate as generate_module
 from ltx25_studio.config import load_config
 from ltx25_studio.ui import build_ui
+from ltx25_studio.ui.blocks import served_outputs
 
 logging.basicConfig(level=logging.INFO)
 _log = logging.getLogger("ltx25_studio")
@@ -186,7 +187,10 @@ MAX_UPLOAD_BYTES = int(CONFIG.lora_max_bytes * 1.05)
 
 
 def main() -> None:
-    demo.launch(max_file_size=MAX_UPLOAD_BYTES)
+    # Gradio serves a returned file only from the working directory, the temp dir or
+    # `allowed_paths`: an output folder outside both is passed (served_outputs).
+    output_root = generate_module.configured_output_root()
+    demo.launch(max_file_size=MAX_UPLOAD_BYTES, **served_outputs(output_root))
 
 
 if __name__ == "__main__":
