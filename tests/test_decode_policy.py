@@ -318,3 +318,107 @@ def test_a_single_stage_diffusion_decode_is_labelled_and_the_bar_never_retreats(
 
     assert labels.index("sampling") < labels.index("decoding the frames"), labels
     assert fractions == sorted(fractions), fractions
+
+
+# --------------------------------------------------------------------------
+# refused before dispatch: an explicit diffusion decode, or stage 2, the decoder
+# cannot take (the decoder's minimum; off CUDA, the CPU path's size)
+# --------------------------------------------------------------------------
+
+
+@pytest.fixture
+def pinned_decoder(monkeypatch, tmp_path):
+    """The pinned decoder's config.json where the check looks for it."""
+    import json
+
+    from ltx25_studio import preflight
+
+    monkeypatch.delenv(config.ENV_MODEL_SNAPSHOT_DIR, raising=False)
+    monkeypatch.setenv("HF_HUB_CACHE", str(tmp_path / "hub"))
+    target = preflight.component_dir("diffusion_decoder") / "config.json"
+    target.parent.mkdir(parents=True)
+    target.write_text(json.dumps(REAL_DECODER_CONFIG))
+
+
+def _on(monkeypatch, name):
+    import dataclasses
+
+    from ltx25_studio import device
+
+    resolution = dataclasses.replace(device.resolve(None), device=name)
+    monkeypatch.setattr(device, "current", lambda: resolution)
+
+
+def _dispatched(monkeypatch):
+    calls = []
+    monkeypatch.setattr(generate_module, "_GPU_DISPATCH", lambda **kw: calls.append(kw))
+    return calls
+
+
+@pytest.mark.usefixtures("pinned_decoder")
+def test_an_explicit_diffusion_below_the_minimum_is_refused_before_dispatch(monkeypatch):
+    from ltx25_studio.errors import categorise
+
+    _on(monkeypatch, "cuda")
+    calls = _dispatched(monkeypatch)
+
+    with pytest.raises(DecoderTooSmallError) as caught:
+        generate_module.generate(
+            mode="text_to_video", prompt="p", decoder="diffusion", **SMALL, seed=7
+        )
+    assert not calls
+    assert categorise(caught.value).gpu_used is False
+
+
+@pytest.mark.usefixtures("pinned_decoder")
+def test_stage_2_below_the_decoders_minimum_is_refused_before_dispatch(monkeypatch):
+    _on(monkeypatch, "cuda")
+    calls = _dispatched(monkeypatch)
+
+    with pytest.raises(DecoderTooSmallError) as caught:
+        generate_module.generate(
+            mode="text_to_video",
+            prompt="p",
+            enable_stage_2=True,
+            width=96,
+            height=64,
+            num_frames=17,
+            seed=7,
+        )
+    assert not calls and caught.value.stage_2 is True
+
+
+@pytest.mark.usefixtures("pinned_decoder")
+def test_an_explicit_diffusion_off_cuda_beyond_the_cpu_path_is_refused_before_dispatch(
+    monkeypatch,
+):
+    _on(monkeypatch, "mps")
+    calls = _dispatched(monkeypatch)
+
+    with pytest.raises(DecoderUnavailableError):
+        generate_module.prepare_request(
+            generate_module.GenerationRequest(
+                mode="text_to_video", prompt="p", decoder="diffusion", **OK
+            )
+        )
+    assert not calls
+
+
+@pytest.mark.usefixtures("pinned_decoder")
+@pytest.mark.parametrize("device_name", ["cuda", "mps"])
+def test_auto_is_never_refused_before_dispatch(monkeypatch, device_name):
+    _on(monkeypatch, device_name)
+
+    generate_module.prepare_request(
+        generate_module.GenerationRequest(mode="text_to_video", prompt="p", **SMALL)
+    )
+
+
+@pytest.mark.usefixtures("pinned_decoder")
+def test_an_explicit_diffusion_that_fits_passes_the_gate(monkeypatch):
+    _on(monkeypatch, "cuda")
+    generate_module.prepare_request(
+        generate_module.GenerationRequest(
+            mode="text_to_video", prompt="p", decoder="diffusion", **OK
+        )
+    )

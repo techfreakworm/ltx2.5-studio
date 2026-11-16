@@ -65,6 +65,8 @@ __all__ = [
     "BASE_KIND",
     "assert_compression_ratios",
     "assert_frame_rate_default",
+    "check_cpu_decoder_size",
+    "check_decoder_minimum",
     "check_decoder_size",
     "clear_cache",
     "configure_vae_tiling",
@@ -72,6 +74,7 @@ __all__ = [
     "derive_pipeline",
     "get_pipeline",
     "mmap_backing_report",
+    "pinned_decoder_config",
     "VAE_TILE_MIN_HEIGHT",
     "VAE_TILE_MIN_WIDTH",
     "VAE_TILE_MIN_NUM_FRAMES",
@@ -1267,7 +1270,18 @@ def check_decoder_size(decoder, *, width, height, num_frames, scale: int, stage_
     ``scale`` is how much the graph enlarges the request before decoding (2 for
     stage 2, 1 for a single-stage diffusion decode).
     """
-    config = _decoder_config(decoder)
+    check_decoder_minimum(
+        _decoder_config(decoder),
+        width=width,
+        height=height,
+        num_frames=num_frames,
+        scale=scale,
+        stage_2=stage_2,
+    )
+
+
+def check_decoder_minimum(config, *, width, height, num_frames, scale: int, stage_2: bool) -> None:
+    """:func:`check_decoder_size` against a decoder config (the loaded one, or its file)."""
     if config is None or not (width and height and num_frames):
         return
     from .constraints import DIMENSION_MULTIPLE
@@ -1288,6 +1302,43 @@ def check_decoder_size(decoder, *, width, height, num_frames, scale: int, stage_
         max(int(num_frames), minimum[2]),
     )
     raise DecoderTooSmallError(output=output, minimum=minimum, smallest=smallest, stage_2=stage_2)
+
+
+def check_cpu_decoder_size(*, width, height, num_frames) -> None:
+    """Off CUDA a single-stage diffusion decode runs on the CPU, at very small sizes only."""
+    from . import device as device_module
+    from .errors import DecoderUnavailableError
+
+    tokens = (
+        int(num_frames) * (int(height) // 4) * (int(width) // 4)
+        if width and height and num_frames
+        else None
+    )
+    limit = device_module.OFF_CUDA_DECODER_TOKEN_LIMIT
+    if tokens is None or tokens > limit:
+        raise DecoderUnavailableError(
+            reason=(
+                f"without an NVIDIA (CUDA) GPU it runs only on the CPU, for very small "
+                f"videos (up to {limit} decoder positions; this one needs {tokens})"
+            )
+        )
+
+
+def pinned_decoder_config() -> dict | None:
+    """The diffusion decoder's config read from its file, or None where it is absent.
+
+    For checks before a run (no model loaded); the loaded decoder is checked again.
+    """
+    import json
+
+    from . import preflight
+    from .errors import LTXStudioError
+
+    try:
+        path = preflight.component_dir("diffusion_decoder") / "config.json"
+        return json.loads(path.read_text()) if path.is_file() else None
+    except (OSError, ValueError, LTXStudioError):
+        return None
 
 
 def stage_2_kwargs(latents, *, audio_latents=None) -> dict:
@@ -1434,21 +1485,7 @@ class StageRunner:
         if self.device != "cuda":
             if policy == "auto":
                 return "conv", OFF_CUDA_DECODER_NOTE
-            from . import device as device_module
-
-            tokens = (
-                int(frames) * (int(height) // 4) * (int(width) // 4)
-                if width and height and frames
-                else None
-            )
-            limit = device_module.OFF_CUDA_DECODER_TOKEN_LIMIT
-            if tokens is None or tokens > limit:
-                raise DecoderUnavailableError(
-                    reason=(
-                        f"without an NVIDIA (CUDA) GPU it runs only on the CPU, for very small "
-                        f"videos (up to {limit} decoder positions; this one needs {tokens})"
-                    )
-                )
+            check_cpu_decoder_size(width=width, height=height, num_frames=frames)
         try:
             self._decoder_ready()
         except ModelLoadError as exc:

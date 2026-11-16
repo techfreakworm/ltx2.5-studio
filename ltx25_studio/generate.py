@@ -615,7 +615,45 @@ def prepare_request(request: GenerationRequest):
     _checked_conditions(request, spec)
     _checked_lora_files(request)
     _checked_stage_2_size(request, spec)
+    _checked_decoder(request, spec)
     return request, spec, scope_notes + length_notes
+
+
+def _checked_decoder(request: GenerationRequest, spec) -> None:
+    """An explicit diffusion decode, or stage 2, the decoder could not take: refused now.
+
+    Below the decoder's minimum, or off CUDA beyond what its CPU path can hold.
+    ``auto`` is never refused (it falls back to conv with a note).
+    """
+    stage_2 = stage_2_enabled(spec, request)
+    explicit = decoder_policy(spec, request) == "diffusion"
+    if not (stage_2 or explicit):
+        return
+    from . import device as device_module
+    from . import pipelines
+
+    frames = None
+    if not request.auto_duration:
+        frames = request.num_frames
+    else:
+        frames, _longest = constraints.duration_head_frame_range(
+            min_seconds=request.min_seconds,
+            max_seconds=request.max_seconds,
+            frame_rate=float(request.frame_rate),
+        )
+    pipelines.check_decoder_minimum(
+        pipelines.pinned_decoder_config(),
+        width=request.width,
+        height=request.height,
+        num_frames=frames,
+        scale=pipelines.STAGE_2_SPATIAL_SCALE if stage_2 else 1,
+        stage_2=stage_2,
+    )
+    where = device_module.current().device
+    if explicit and not stage_2 and where not in (None, "cuda"):
+        pipelines.check_cpu_decoder_size(
+            width=request.width, height=request.height, num_frames=frames
+        )
 
 
 def _checked_stage_2_size(request: GenerationRequest, spec) -> None:

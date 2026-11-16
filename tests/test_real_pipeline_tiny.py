@@ -13,6 +13,7 @@ cache: tests never download (``python scripts/local_smoke.py --fetch`` does).
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import subprocess
@@ -213,12 +214,32 @@ def run_tiny(tiny, mode_id, out, **overrides):
         **smoke._media_for(mode_id, media, width, frames),
     )
     request.update(overrides)
-    return generate.generate(
-        **request,
-        pipeline_factory=lambda pipeline: tiny[pipeline],
-        output_root=out / "outputs",
-        retention_bytes=10**9,
-    )
+    with tiny_snapshot_env(tiny):
+        return generate.generate(
+            **request,
+            pipeline_factory=lambda pipeline: tiny[pipeline],
+            output_root=out / "outputs",
+            retention_bytes=10**9,
+        )
+
+
+@contextlib.contextmanager
+def tiny_snapshot_env(tiny):
+    """``LTX25_MODEL_SNAPSHOT_DIR`` at the tiny stack's snapshot, for the length of a run.
+
+    The gate reads the decoder's config before a run; with the tiny stack it must
+    read the tiny decoder's, not whatever real checkpoint the HF cache holds.
+    """
+    name = "LTX25_MODEL_SNAPSHOT_DIR"
+    before = os.environ.get(name)
+    os.environ[name] = str(tiny["snapshot"])
+    try:
+        yield
+    finally:
+        if before is None:
+            os.environ.pop(name, None)
+        else:
+            os.environ[name] = before
 
 
 @pytest.mark.parametrize("mode_id", STAGE_2_MODES)

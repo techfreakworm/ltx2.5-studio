@@ -27,6 +27,7 @@ tiny checkpoint at its pinned revision and two stage-2 ``config.json`` files.
 from __future__ import annotations
 
 import argparse
+import atexit
 import json
 import os
 import shutil
@@ -247,7 +248,16 @@ def tiny_stack(*, device: str = "cpu", dtype: str = "float32") -> dict:
     decoder = LTX2VideoDiffusionDecodePipeline(
         diffusion_decoder=decoder_model, scheduler=base.scheduler
     )
-    stack = {"base": base}
+    # A snapshot directory with the same tiny stage-2 configs, for the checks that
+    # read the decoder's config before a run (LTX25_MODEL_SNAPSHOT_DIR points at it).
+    work = Path(tempfile.mkdtemp(prefix="ltx25_tiny_stack_"))
+    atexit.register(shutil.rmtree, work, ignore_errors=True)
+    snapshot, missing = composite_snapshot(
+        tiny_snapshot(fetch=False), work / "snapshot", fetch=False
+    )
+    if missing:
+        raise RuntimeError(missing)
+    stack = {"base": base, "snapshot": snapshot}
     for kind, pipe in (
         ("condition", base),
         ("text2video", pipelines.derive_pipeline(base, LTX2Pipeline)),
