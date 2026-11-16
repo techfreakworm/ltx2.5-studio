@@ -1086,3 +1086,93 @@ def test_an_absurdly_short_upload_still_gets_a_legal_suggestion():
     from ltx25_studio import constraints
 
     assert constraints.is_valid_num_frames(excinfo.value.largest_fitting_num_frames)
+
+
+# --------------------------------------------------------------------------
+# review r1 media-io-5 -- a long upload is decoded only as far as the run can
+# use it, and the trimmed waveform does not keep the whole decode alive
+# --------------------------------------------------------------------------
+
+
+def test_a_trimmed_upload_does_not_keep_the_whole_decode_alive():
+    import numpy as np
+
+    wave = waveform_of(2, samples=16000 * 120)  # two minutes against a 4.84 s video
+    out, _note = _recon(wave)
+    assert out.shape[-1] == 77440
+    assert not np.shares_memory(out, wave), "the 4.84 s kept pins all 120 s decoded"
+
+
+def test_a_trimmed_torch_waveform_does_not_keep_the_whole_decode_alive():
+    torch = pytest.importorskip("torch")
+    wave = torch.zeros(2, 16000 * 120)
+    out, _note = _recon(wave)
+    assert out.untyped_storage().nbytes() == out.numel() * out.element_size()
+
+
+def test_the_trim_note_can_name_the_uploads_real_length():
+    _out, note = audio.reconcile_waveform_with_video(
+        waveform_of(2, samples=96000),
+        sampling_rate=16000,
+        params=_RECON_PARAMS,
+        num_frames=121,
+        frame_rate=25.0,
+        source_seconds=3600.0,
+    )
+    assert note == "audio input trimmed from 3600.00s to 4.84s to match 121 frames"
+
+
+def _long_wav(path, *, seconds, rate=16000):
+    import wave
+
+    import numpy as np
+
+    t = np.arange(int(seconds * rate)) / rate
+    left, right = np.sin(2 * np.pi * 440 * t), np.sin(2 * np.pi * 660 * t)
+    samples = (0.4 * 32767 * np.stack([left, right], axis=1)).astype("<i2")
+    with wave.open(str(path), "wb") as handle:
+        handle.setnchannels(2)
+        handle.setsampwidth(2)
+        handle.setframerate(rate)
+        handle.writeframes(samples.tobytes())
+    return path
+
+
+def test_a_bounded_load_decodes_no_further_than_asked(tmp_path):
+    pytest.importorskip("torch")
+    path = _long_wav(tmp_path / "podcast.wav", seconds=60)
+
+    waveform, rate = audio.load_waveform(path, max_seconds=6.0)
+
+    assert rate == 16000
+    assert waveform.shape == (2, 6 * 16000)
+    assert waveform.untyped_storage().nbytes() == waveform.numel() * 4, "it holds only itself"
+
+
+def test_a_bounded_load_gives_the_run_exactly_the_same_audio(tmp_path):
+    """Bounded by ``upload_seconds_needed``, the trimmed waveform is the one a
+    full decode would have given."""
+    torch = pytest.importorskip("torch")
+    path = _long_wav(tmp_path / "podcast.wav", seconds=30)
+    needed = audio.upload_seconds_needed(num_frames=121, frame_rate=25.0)
+
+    full, rate = audio.load_waveform(path)
+    bounded, _ = audio.load_waveform(path, max_seconds=needed)
+
+    assert bounded.shape[-1] < full.shape[-1]
+    from_full, _ = _recon(full, sampling_rate=rate)
+    from_bounded, _ = _recon(bounded, sampling_rate=rate)
+    assert torch.equal(from_full, from_bounded)
+
+
+def test_a_short_upload_is_still_refused_after_a_bounded_load(tmp_path):
+    pytest.importorskip("torch")
+    from ltx25_studio.errors import AudioVideoDesyncError
+
+    path = _long_wav(tmp_path / "line.wav", seconds=3)
+    needed = audio.upload_seconds_needed(num_frames=121, frame_rate=25.0)
+
+    bounded, rate = audio.load_waveform(path, max_seconds=needed)
+
+    with pytest.raises(AudioVideoDesyncError):
+        _recon(bounded, sampling_rate=rate)

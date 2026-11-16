@@ -42,6 +42,7 @@ present (PLAN §9.1).
 from __future__ import annotations
 
 import logging
+import math
 from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
@@ -76,6 +77,7 @@ __all__ = [
     "build_mel_front_end",
     "encoder_layout",
     "reconcile_waveform_with_video",
+    "upload_seconds_needed",
     "batched",
     "mel_parameters",
     "MEL_PARAM_SOURCES",
@@ -334,6 +336,26 @@ def validate_audio_latents_against_video(
     return audio_seconds
 
 
+#: Audio decoded past what a run can use, so a bounded decode still reads as long.
+_DECODE_MARGIN_SECONDS = 1.0
+
+
+def upload_seconds_needed(
+    num_frames: int,
+    frame_rate: float,
+    *,
+    tolerance_seconds: float = DEFAULT_LENGTH_TOLERANCE_SECONDS,
+) -> float:
+    """How much of an audio upload :func:`reconcile_waveform_with_video` can use.
+
+    The video's length, the tolerance and a second to spare. Decoding no
+    further (``load_waveform(source, max_seconds=...)``) gives the run exactly
+    the waveform a full decode would: a short upload is still refused, a long
+    one still trimmed to the same samples.
+    """
+    return float(num_frames) / float(frame_rate) + float(tolerance_seconds) + _DECODE_MARGIN_SECONDS
+
+
 def reconcile_waveform_with_video(
     waveform,
     *,
@@ -342,6 +364,7 @@ def reconcile_waveform_with_video(
     num_frames: int,
     frame_rate: float,
     tolerance_seconds: float = DEFAULT_LENGTH_TOLERANCE_SECONDS,
+    source_seconds: float | None = None,
 ):
     """Trim a LONG upload to the video length; refuse a SHORT one. Never pad.
 
@@ -350,6 +373,10 @@ def reconcile_waveform_with_video(
     what was cut. Raises :class:`AudioVideoDesyncError` -- naming both lengths
     *and* the largest ``num_frames`` the audio covers -- when the upload is
     short beyond tolerance.
+
+    A trimmed waveform is a copy of what is kept, so the full decode it came
+    from is freed rather than held through the run. ``source_seconds`` is the
+    upload's real length, for the note, when the decode was bounded.
 
     **The asymmetry is the policy, not an accident.** Trimming discards excess
     input the user can see and undo; padding fabricates input the user never
@@ -394,9 +421,13 @@ def reconcile_waveform_with_video(
     )
     kept_seconds = params.seconds_for_latent_frames(target_latent_frames)
     keep = int(round(kept_seconds * sampling_rate))
+    kept = waveform[..., :keep]
+    # A slice is a view, and a view keeps the whole upload alive (torch: clone).
+    kept = kept.clone() if hasattr(kept, "clone") else kept.copy()
+    shown = audio_seconds if source_seconds is None else float(source_seconds)
     return (
-        waveform[..., :keep],
-        f"audio input trimmed from {audio_seconds:.2f}s to {kept_seconds:.2f}s "
+        kept,
+        f"audio input trimmed from {shown:.2f}s to {kept_seconds:.2f}s "
         f"to match {num_frames} frames",
     )
 
@@ -648,8 +679,13 @@ def _as_float_samples(data):
     return data.astype(np.float32) / half
 
 
-def load_waveform(source):
+def load_waveform(source, *, max_seconds: float | None = None):
     """A user-supplied audio file -> ``(waveform, sampling_rate)``.
+
+    ``max_seconds`` stops the decode once that much audio is in hand (at the
+    stream's own rate) and returns no more than that: an hour-long upload to a
+    five-second run is not decoded whole inside the GPU window. Pass
+    :func:`upload_seconds_needed` to get exactly what the run would use.
 
     **Decoded with ``av``, not ``torchaudio.load``.** At torchaudio 2.11.0 --
     our pin -- ``torchaudio.load`` dispatches to TorchCodec, which raises
@@ -684,7 +720,13 @@ def load_waveform(source):
         rate = int(stream.rate)
         channels = int(getattr(stream.layout, "nb_channels", 0) or stream.channels)
         planar = bool(stream.format.is_planar)
-        chunks = [frame.to_ndarray() for frame in container.decode(stream)]
+        limit = None if max_seconds is None else max(1, math.ceil(float(max_seconds) * rate))
+        chunks, decoded = [], 0
+        for frame in container.decode(stream):
+            chunks.append(frame.to_ndarray())
+            decoded += frame.samples
+            if limit is not None and decoded >= limit:
+                break
 
     if not chunks:
         raise LTXStudioError(
@@ -692,6 +734,8 @@ def load_waveform(source):
         )
 
     data = _as_float_samples(deinterleaved(chunks, channels=channels, planar=planar))
+    if limit is not None and data.shape[-1] > limit:
+        data = data[:, :limit]
     return torch.from_numpy(np.ascontiguousarray(data)), rate
 
 
