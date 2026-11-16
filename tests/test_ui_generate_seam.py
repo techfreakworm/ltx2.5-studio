@@ -361,11 +361,18 @@ def test_a_track_outside_exports_being_absent_is_not_an_error(mode_id, wired, mo
 
 @pytest.mark.parametrize("mode_id", MODE_IDS)
 def test_a_typed_failure_reaches_the_user_rather_than_an_empty_form(mode_id, monkeypatch):
-    """PLAN §5.3: the failure the predecessor rendered as a silent form reset."""
+    """PLAN §5.3: the failure the predecessor rendered as a silent form reset.
+
+    The card's headline belongs to the UI; what this seam needs is that the
+    error's own words reach the user (verbatim or HTML-escaped)."""
+    import html
+
     from ltx25_studio.errors import EmptyOutputError
 
+    error = EmptyOutputError(mode=mode_id, expected_path="/nowhere")
+
     def exploding(**params):
-        raise EmptyOutputError(mode=mode_id, expected_path="/nowhere")
+        raise error
 
     monkeypatch.setattr(generate_module, "generate", exploding)
 
@@ -373,7 +380,7 @@ def test_a_typed_failure_reaches_the_user_rather_than_an_empty_form(mode_id, mon
 
     assert (video, audio) == (None, None)
     assert status.strip(), "a failed generation returned an empty status string"
-    assert "Generation failed" in status
+    assert str(error) in status or html.escape(str(error)) in status, status
 
 
 # --------------------------------------------------------------------------

@@ -34,6 +34,7 @@ Everything in this file is offline and costs zero GPU (PLAN §9.1).
 
 from __future__ import annotations
 
+import html
 import inspect
 import pickle
 
@@ -205,6 +206,12 @@ def test_root_arity_semantics_match_plain_exception_exactly():
     assert errors.LTXStudioError("a", "b").args == ("a", "b")
 
 
+def shows(message: str, rendered: str) -> bool:
+    """The message reaches the user as written: verbatim, or HTML-escaped (the
+    browser shows the same text either way)."""
+    return message in rendered or html.escape(message) in rendered
+
+
 @pytest.mark.parametrize("name", sorted(PRE_CHANGE_STR))
 def test_render_failure_carries_the_message_and_survives_the_round_trip(name):
     """``ui/render.py::failure`` must show the error's own message verbatim, and
@@ -215,7 +222,7 @@ def test_render_failure_carries_the_message_and_survives_the_round_trip(name):
     and are pinned in its own tests."""
     exc = _construct(name)
     rendered = render.failure(exc)
-    assert PRE_CHANGE_STR[name] in rendered
+    assert shows(PRE_CHANGE_STR[name], rendered), rendered
     assert render.failure(pickle.loads(pickle.dumps(exc))) == rendered
 
 
@@ -225,7 +232,7 @@ def test_a_foreign_gradio_error_renders_its_own_text():
     platform's text must reach the user verbatim, before and after a round trip."""
     exc = gr.Error("GPU task aborted")
     rendered = render.failure(exc)
-    assert "GPU task aborted" in rendered
+    assert shows("GPU task aborted", rendered), rendered
     assert render.failure(pickle.loads(pickle.dumps(exc))) == rendered
 
 
