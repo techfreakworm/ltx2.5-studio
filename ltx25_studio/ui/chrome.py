@@ -119,6 +119,8 @@ _TOKENS = """
   --mr-slate-2: #242d37;
   --mr-well: #0e1216;
   --mr-line: #39434f;
+  /* control edges: 3.8:1 on the well, 3.2:1 on slate */
+  --mr-line-strong: #66727f;
   --mr-paper: #e9ecef;
   --mr-dust: #9aa6b2;
   --mr-tungsten: #f2a33c;
@@ -131,8 +133,24 @@ _TOKENS = """
   --mr-mono: "Spline Sans Mono", ui-monospace, "SF Mono", Menlo, monospace;
   --mr-gutter: 16px;
   --mr-bar-h: 104px;
+  /* the rail's top at scroll 0 plus its bottom margin; the script measures it */
+  --mr-rail-offset: 92px;
+  --mr-rail-gutter: 10px;
 }
 """
+
+#: Gradio paints the checkbox tick and the radio dot white; on the paper fill
+#: that is 1.1:1. These are the same glyphs in ink.
+_INK_TICK = (
+    "url(\"data:image/svg+xml,%3csvg viewBox='0 0 16 16' fill='%2312161b' "
+    "xmlns='http://www.w3.org/2000/svg'%3e%3cpath d='M12.207 4.793a1 1 0 010 1.414l-5 5a1 1 "
+    "0 01-1.414 0l-2-2a1 1 0 011.414-1.414L6.5 9.086l4.293-4.293a1 1 0 011.414 0z'/%3e"
+    "%3c/svg%3e\")"
+)
+_INK_DOT = (
+    "url(\"data:image/svg+xml,%3csvg viewBox='0 0 16 16' fill='%2312161b' "
+    "xmlns='http://www.w3.org/2000/svg'%3e%3ccircle cx='8' cy='8' r='3'/%3e%3c/svg%3e\")"
+)
 
 #: Gradio's theme variables, pinned to the tokens in BOTH schemes. Gradio's own
 #: sheet loads after this one, hence ``!important`` on every declaration.
@@ -164,9 +182,9 @@ _THEME_VARS = {
     "input-background-fill": "var(--mr-well)",
     "input-background-fill-focus": "var(--mr-well)",
     "input-background-fill-hover": "var(--mr-well)",
-    "input-border-color": "var(--mr-line)",
+    "input-border-color": "var(--mr-line-strong)",
     "input-border-color-focus": "var(--mr-paper)",
-    "input-border-color-hover": "var(--mr-line)",
+    "input-border-color-hover": "var(--mr-dust)",
     "input-border-width": "1px",
     "input-placeholder-color": "#8b97a3",
     "input-radius": "6px",
@@ -191,6 +209,8 @@ _THEME_VARS = {
     "checkbox-label-text-color": "var(--mr-paper)",
     "checkbox-label-text-color-selected": "var(--mr-paper)",
     "checkbox-label-shadow": "none",
+    "checkbox-check": _INK_TICK,
+    "radio-circle": _INK_DOT,
     "slider-color": "var(--mr-paper)",
     "loader-color": "var(--mr-paper)",
     "button-primary-background-fill": "var(--mr-tungsten)",
@@ -271,11 +291,13 @@ body { color: var(--mr-paper); color-scheme: dark; }
 @media (min-width: 1024px) { :root { --mr-gutter: 32px; } }
 .gradio-container .contain { max-width: 1520px; margin: 0 auto; }
 footer { color: var(--mr-dust) !important; }
-footer a, footer button { color: var(--mr-dust) !important; }
+footer :is(a, button):not(.hidden) { color: var(--mr-dust) !important; white-space: nowrap !important; }
 footer img, footer svg { filter: grayscale(1) brightness(1.5); }
 footer { flex-wrap: wrap !important; justify-content: center; gap: 4px 14px !important; }
-footer a, footer button { white-space: nowrap !important; }
-.mr-num { font-family: var(--mr-mono); font-weight: 500; font-variant-numeric: tabular-nums; }
+/* Gradio's own run history competes with Recent runs */
+footer .run-history, footer .run-history + .divider { display: none !important; }
+/* inline figures: the body face with tabular figures; Mono stays for inputs */
+.mr-num { font-family: var(--mr-body); font-weight: 500; font-variant-numeric: tabular-nums; }
 
 /* one focus ring, everywhere */
 :is(button, a, input, textarea, select, summary, [tabindex]):focus-visible {
@@ -288,8 +310,9 @@ footer a, footer button { white-space: nowrap !important; }
 :is(#identity, #matrix-frame, #cost, #monitor-idle, #run-summary) .html-container { padding: 0 !important; }
 .mr-id { display: flex; align-items: center; gap: 16px; min-height: 56px; max-height: 64px;
   padding: 0; position: relative; }
-.mr-wordmark { font-family: var(--mr-display); font-weight: 600; font-size: 20px;
-  letter-spacing: 0.02em; color: var(--mr-paper); margin: 0; white-space: nowrap; }
+/* Gradio's ".gradio-container-6-24-0 h1" reset (0,1,1) flattens a bare class */
+#identity h1.mr-wordmark { font-family: var(--mr-display); font-weight: 600; font-size: 20px;
+  line-height: 28px; letter-spacing: 0.02em; color: var(--mr-paper); margin: 0; white-space: nowrap; }
 .mr-tagline { color: var(--mr-dust); margin: 0; font-size: 14px; flex: 1 1 auto;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 .mr-quota { position: static; flex: 0 0 auto; }
@@ -313,10 +336,30 @@ footer a, footer button { white-space: nowrap !important; }
 #commission { flex: 1 1 auto !important; min-width: 0 !important; gap: 0 !important;
   background: var(--mr-slate); border: 1px solid var(--mr-line); border-radius: 10px;
   padding: 16px !important; }
-#rail { flex: 0 0 clamp(400px, 38vw, 560px) !important; min-width: 0 !important;
-  position: sticky; top: 12px; align-self: flex-start; max-height: calc(100vh - 24px);
-  overflow-y: auto; overscroll-behavior: contain; gap: 12px !important;
-  scrollbar-width: thin; scrollbar-color: var(--mr-line) transparent; padding: 0 2px 4px; }
+/* Gradio gives every Row child flex-wrap: wrap; a column that wraps sends its
+   overflow into an off-screen second column instead of scrolling. */
+#rail { min-width: 0 !important; gap: 12px !important; flex-wrap: nowrap !important; }
+#rail > * { flex-shrink: 0 !important; }
+@media (min-width: 1024px) {
+  /* Sized to fit the viewport from where it starts; scrolls inside itself with a
+     real scrollbar, in a gutter outside the aligned edge. The 4 px padding keeps
+     focus rings unclipped; the negative margins keep the content edges aligned. */
+  #rail { flex: 0 0 clamp(400px, 38vw, 560px) !important; position: sticky; top: 12px;
+    align-self: flex-start; max-height: calc(100vh - var(--mr-rail-offset));
+    overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain;
+    scrollbar-gutter: stable; padding: 4px !important;
+    margin: -4px calc(-4px - var(--mr-rail-gutter)) -4px -4px !important; }
+  #rail::-webkit-scrollbar { width: var(--mr-rail-gutter); }
+  #rail::-webkit-scrollbar-track { background: transparent; }
+  #rail::-webkit-scrollbar-thumb { background: var(--mr-line-strong); border-radius: 6px;
+    border: 2px solid var(--mr-ink); }
+  /* Generate never leaves the rail's visible area */
+  #rail > #commit { position: sticky; bottom: 0; z-index: 3; background: var(--mr-ink);
+    padding: 8px 0 4px !important; margin-top: -8px !important; }
+}
+@supports not selector(::-webkit-scrollbar) {
+  #rail { scrollbar-width: thin; scrollbar-color: var(--mr-line-strong) transparent; }
+}
 .mr-divide { border-top: 1px solid var(--mr-line) !important; margin-top: 14px !important;
   padding-top: 14px !important; }
 
@@ -335,13 +378,37 @@ footer a, footer button { white-space: nowrap !important; }
 #commission .info, #commission [data-testid="block-info"] + .info { color: var(--mr-dust) !important; }
 #commission textarea, #commission input[type="text"], #commission input[type="number"] {
   background: var(--mr-well) !important; color: var(--mr-paper) !important;
-  border: 1px solid var(--mr-line) !important; border-radius: 6px !important; }
+  border: 1px solid var(--mr-line-strong) !important; border-radius: 6px !important; }
+/* the slider's number box sits in a bordered strip of its own */
+#commission .tab-like-container { border-color: var(--mr-line-strong) !important; }
+#commission .tab-like-container input[type="number"] { border: none !important; border-radius: 0 !important; }
 #commission textarea::placeholder, #commission input::placeholder { color: #8b97a3 !important; }
 #commission textarea:focus, #commission input:focus { border-color: var(--mr-paper) !important; }
 input[type="number"] { font-family: var(--mr-mono) !important; font-variant-numeric: tabular-nums; }
 input:disabled, textarea:disabled { background: var(--mr-slate) !important; color: var(--mr-dust) !important;
   border-style: dashed !important; }
 input[type="range"] { accent-color: var(--mr-paper); }
+/* The slider: Gradio paints a near-white bar (#e4e4e7 track, #fff thumb). Filled
+   paper against an unfilled line-strong track is 4.1:1; the track reads 3.2:1
+   on slate. */
+#commission input[type="range"]::-webkit-slider-runnable-track { height: 4px !important;
+  border-radius: 2px !important; background: linear-gradient(to right, var(--mr-paper)
+  var(--range_progress, 0%), var(--mr-line-strong) var(--range_progress, 0%)) !important; }
+#commission input[type="range"]::-webkit-slider-thumb { width: 16px !important; height: 16px !important;
+  margin-top: -6px !important; background-color: var(--mr-paper) !important;
+  box-shadow: 0 0 0 2px var(--mr-ink) !important; }
+#commission input[type="range"]::-moz-range-track { height: 4px !important; border-radius: 2px;
+  background: var(--mr-line-strong) !important; }
+#commission input[type="range"]::-moz-range-progress { height: 4px !important;
+  background-color: var(--mr-paper) !important; }
+#commission input[type="range"]::-moz-range-thumb { background-color: var(--mr-paper) !important;
+  box-shadow: 0 0 0 2px var(--mr-ink) !important; }
+#commission input[type="range"][disabled]::-webkit-slider-thumb { background-color: var(--mr-dust) !important; }
+/* the radio chips' inner dot is white on paper in Gradio; ink here */
+.gradio-container .gradio-style input[type="radio"]:checked::after { background-color: var(--mr-ink) !important; }
+/* help text at a readable measure */
+#commission .info-text, #commission .mr-caption p, #commission .mr-hint p, #commission .mr-line p,
+#commission .mr-bay-head p, #commission #lora-verdict p { max-width: 70ch; }
 
 /* == the matrix ========================================================== */
 #matrix { display: grid !important; grid-template-areas: "stack"; gap: 0 !important; }
@@ -447,13 +514,22 @@ button:disabled { cursor: not-allowed !important; }
   background: transparent !important; padding: 0 !important; margin-top: 4px; }
 #commission .mr-acc > button, #commission .mr-acc .label-wrap { padding: 12px 14px !important;
   min-height: 48px; font-family: var(--mr-body) !important; font-weight: 500; font-size: 14px;
-  color: var(--mr-paper) !important; }
+  color: var(--mr-paper) !important; text-align: left !important; align-items: center; gap: 12px; }
 #commission .mr-acc .label-wrap span { font-family: var(--mr-body) !important; font-size: 14px;
   letter-spacing: 0; text-transform: none; }
+/* Gradio's filled triangle becomes the same chevron as "How quota works" */
+#commission .mr-acc .label-wrap .icon { font-size: 0 !important; flex: 0 0 16px; width: 16px; height: 16px;
+  display: inline-flex; align-items: center; justify-content: center; transform: none !important; }
+#commission .mr-acc .label-wrap .icon::after { content: ""; width: 7px; height: 7px;
+  border-right: 1.5px solid var(--mr-dust); border-bottom: 1.5px solid var(--mr-dust);
+  transform: rotate(45deg) translateY(-2px); }
+#commission .mr-acc .label-wrap.open .icon::after { transform: rotate(-135deg) translateY(-2px); }
 #commission .mr-acc > div:not(.label-wrap) { padding: 0 14px 14px !important; }
 .mr-bay-head p { font-size: 13px; line-height: 19px; color: var(--mr-dust); margin: 0 0 10px; max-width: 70ch; }
+/* the Hub box and its button share a baseline: the button sits level with the input */
+.mr-hub-row { align-items: flex-end !important; }
 .mr-lora-row { align-items: center !important; gap: 10px !important; }
-.mr-lora-name p { margin: 0; font-size: 14px; color: var(--mr-paper); overflow-wrap: anywhere; }
+.mr-lora-name p { margin: 0; font-size: 14px; color: var(--mr-paper); overflow-wrap: break-word; }
 #commission .mr-drop.block .wrap, #commission .mr-drop.block button { min-height: 0 !important; }
 .mr-lora-name p::before { content: ""; display: inline-block; width: 6px; height: 6px; border-radius: 50%;
   background: var(--mr-roll); margin-right: 8px; vertical-align: middle; }
@@ -481,7 +557,7 @@ button:disabled { cursor: not-allowed !important; }
   border-radius: 10px; aspect-ratio: 16 / 9; overflow: hidden; gap: 0 !important; padding: 0 !important; }
 #monitor > * { position: absolute !important; inset: 0; margin: 0 !important; }
 #monitor .block { height: 100% !important; }
-#monitor video { width: 100%; height: 100%; object-fit: contain; background: #000; }
+#monitor video { width: 100%; height: 100%; object-fit: contain; background: var(--mr-well); }
 #monitor [data-testid="video"], #monitor .video-container, #monitor .wrap { height: 100%; }
 #monitor #audio-out { display: flex !important; align-items: center; padding: 0 24px !important;
   background: var(--mr-well) !important; }
@@ -508,8 +584,8 @@ button:disabled { cursor: not-allowed !important; }
   padding: 14px 16px; }
 .mr-cost-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between;
   gap: 8px 12px; margin-bottom: 10px; }
-.mr-cost-title { font-family: var(--mr-display); font-weight: 600; font-size: 16px; margin: 0;
-  color: var(--mr-paper); }
+#cost h2.mr-cost-title { font-family: var(--mr-display); font-weight: 600; font-size: 16px;
+  line-height: 22px; margin: 0; color: var(--mr-paper); }
 .mr-lamps { display: flex; flex-wrap: wrap; gap: 6px; }
 .mr-lamp { font-family: var(--mr-display); font-weight: 600; font-size: 12px; line-height: 16px;
   letter-spacing: 0.02em; padding: 3px 7px; border-radius: 3px;
@@ -523,7 +599,8 @@ button:disabled { cursor: not-allowed !important; }
 .mr-cost-grid dt, .mr-done-grid dt { color: var(--mr-dust); font-size: 13px; line-height: 21px; }
 .mr-cost-grid dd, .mr-done-grid dd { margin: 0; color: var(--mr-paper); font-size: 14px; line-height: 21px; }
 .mr-cost-grid .mr-num { color: var(--mr-paper); }
-.mr-cost-grid dt:nth-of-type(3) + dd .mr-num, .mr-cost-grid dt:nth-of-type(4) + dd .mr-num { color: var(--mr-tungsten); }
+.mr-cost-grid dt:nth-of-type(3) + dd .mr-num, .mr-cost-grid dt:nth-of-type(4) + dd .mr-num {
+  color: var(--mr-tungsten); font-family: var(--mr-mono); }
 .mr-sub { color: var(--mr-dust); font-size: 13px; }
 .mr-cost-note { margin: 10px 0 0; font-size: 13px; line-height: 19px; color: var(--mr-dust); }
 .mr-cost-pending { display: none; margin: 10px 0 0; font-size: 13px; line-height: 19px; color: var(--mr-paper);
@@ -556,7 +633,13 @@ button:disabled { cursor: not-allowed !important; }
 .mr-prompt-sent blockquote { margin: 4px 0 0; padding: 8px 10px; border-left: 2px solid var(--mr-line);
   background: var(--mr-well); color: var(--mr-paper); font-size: 13px; line-height: 19px;
   user-select: text; white-space: pre-wrap; }
+/* Reuse seed and Use this prompt belong to the Done card: the actions row closes it */
 #report-actions { gap: 8px !important; }
+#run-summary:has(+ #report-actions button:not(.hidden)) .mr-done {
+  border-bottom: 0; border-bottom-left-radius: 0; border-bottom-right-radius: 0; padding-bottom: 4px; }
+#report-actions:has(button:not(.hidden)) { margin-top: -12px !important; padding: 2px 8px 8px !important;
+  border: 1px solid var(--mr-line); border-top: 0; border-left: 4px solid var(--mr-roll);
+  border-radius: 0 0 10px 10px; background: var(--mr-slate); }
 #rail #run-status.block { border: 1px solid var(--mr-line) !important; border-radius: 10px !important;
   padding: 12px 14px !important; background: var(--mr-slate) !important; }
 #run-status p { font-size: 14px; line-height: 21px; color: var(--mr-paper); margin: 0 0 6px; max-width: 70ch; }
@@ -594,7 +677,6 @@ button:disabled { cursor: not-allowed !important; }
 @media (max-width: 1023px) {
   #shell { flex-direction: column !important; }
   #commission, #rail { flex: 1 1 auto !important; width: 100% !important; }
-  #rail { position: static; max-height: none; overflow: visible; }
   #monitor { order: 2; } #monitor-caption { order: 3; } #cost { order: 1; }
   #run-summary { order: 4; } #report-actions { order: 5; } #run-status { order: 6; } #recent { order: 7; }
   #commit { position: fixed; left: 0; right: 0; bottom: 0; z-index: 40; margin: 0 !important;
@@ -605,18 +687,31 @@ button:disabled { cursor: not-allowed !important; }
     display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
   #generate-reason { display: none !important; }
   .mr-cost-pending { display: block; }
-  #generate-btn { min-height: 48px; }
   .gradio-container { padding-bottom: calc(var(--mr-bar-h) + env(safe-area-inset-bottom) + 16px) !important; }
-  .mr-tagline { display: none; }
   .mr-id { justify-content: space-between; }
   #commission button, #rail button, #commission button.secondary, #rail button.secondary,
-  #commission .mr-secondary, footer button, footer a { min-height: 44px !important; }
-  #commission button.reset-button, #commission .reset-button { min-width: 44px !important; }
+  #commission .mr-secondary { min-height: 44px !important; }
+  #rail #generate-btn { min-height: 48px !important; }
+  /* Gradio's slider number strip is 24 px tall with overflow hidden, which clipped a
+     44 px reset button; the strip grows instead (46 = 44 + its two borders). */
+  #commission .tab-like-container { height: 46px !important; }
+  #commission button.reset-button { min-width: 44px !important; min-height: 44px !important;
+    height: 44px !important; }
   #monitor button, #monitor a[download] { min-width: 44px !important; min-height: 44px !important;
     display: inline-flex; align-items: center; justify-content: center; }
-  footer button, footer a { display: inline-flex !important; align-items: center; }
+  #monitor :is(.icon-button-wrapper, .icon-buttons) { background: transparent !important;
+    border: none !important; box-shadow: none !important; }
+  #monitor :is(.icon-button-wrapper, .icon-buttons) :is(button, a) { border: none !important;
+    background: rgba(14, 18, 22, 0.72) !important; border-radius: 6px !important;
+    color: var(--mr-paper) !important; box-shadow: none !important; }
+  footer :is(button, a):not(.hidden) { display: inline-flex !important; align-items: center;
+    min-height: 44px !important; }
+  footer .divider { display: none !important; }
   .mr-chips label { min-height: 44px; }
+  /* Gradio drops a slider's minimum and maximum labels at 480 px and below */
+  #commission .min_value, #commission .max_value { display: inline-block !important; }
 }
+@media (max-width: 760px) { .mr-tagline { display: none; } }
 @media (max-width: 560px) {
   #matrix-frame, #mode-matrix { --mx-head: 82px; --mx-cell: 46px; --mx-colhead: 44px; }
   .mx-col, .mx-row { font-size: 13px; line-height: 16px; }
@@ -626,6 +721,12 @@ button:disabled { cursor: not-allowed !important; }
   .mx-note-col { display: inline; color: var(--mr-paper); }
   #commission { padding: 12px !important; }
   .mr-cost-grid, .mr-done-grid { grid-template-columns: 70px minmax(0, 1fr); }
+  /* a staged adapter stacks: its name on one line, the strength under it, then Remove */
+  .mr-lora-row { flex-wrap: wrap !important; row-gap: 4px !important; }
+  .mr-lora-row > * { flex: 1 1 100% !important; min-width: 0 !important; }
+  .mr-lora-row > button { flex: 0 0 auto !important; }
+  /* a recent run's line takes the full width, its buttons wrap under it */
+  .mr-recent-row > .mr-recent-text { flex: 1 1 100% !important; min-width: 0 !important; }
 }
 
 /* == restraint ============================================================ */
@@ -642,7 +743,19 @@ _SCRIPT = """
     obs.observe(document.body, { childList: true, subtree: true });
     run();
   };
+  // The rail fits the viewport from where the columns start: its height is the
+  // viewport less that offset (the CSS default is the offset measured at 1440).
+  const railOffset = () => {
+    const column = document.getElementById('commission');
+    if (!column) return false;
+    const top = Math.round(column.getBoundingClientRect().top + window.scrollY);
+    document.documentElement.style.setProperty('--mr-rail-offset', (top + 8) + 'px');
+    return true;
+  };
+  let railMeasured = false;
+  window.addEventListener('resize', railOffset);
   ready(() => {
+    if (!railMeasured) railMeasured = railOffset();
     const status = document.getElementById('run-status');
     if (status && !status.dataset.mrLive) {
       status.dataset.mrLive = '1';

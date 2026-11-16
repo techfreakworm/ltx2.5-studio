@@ -137,6 +137,7 @@ def lora_bay(*, rows: int, cap: str, max_weight: float) -> dict[str, Any]:
             "Check and add",
             variant="secondary",
             elem_classes=["mr-secondary"],
+            size="sm",
             scale=1,
             min_width=140,
         )
@@ -165,7 +166,12 @@ def lora_bay(*, rows: int, cap: str, max_weight: float) -> dict[str, Any]:
                 min_width=160,
             )
             remove = gr.Button(
-                "Remove", visible=False, elem_classes=["mr-quiet"], scale=0, min_width=90
+                "Remove",
+                visible=False,
+                elem_classes=["mr-quiet"],
+                size="sm",
+                scale=0,
+                min_width=90,
             )
         widgets["rows"].append({"name": name, "weight": weight, "remove": remove})
     widgets["clear"] = gr.Button("Remove all", elem_classes=["mr-quiet"], size="sm", visible=False)
