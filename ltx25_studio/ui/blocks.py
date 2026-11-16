@@ -380,7 +380,7 @@ def build_ui() -> gr.Blocks:
                 with gr.Column(elem_id="monitor"):
                     monitor_idle = gr.HTML(
                         render.monitor_idle(mode0),
-                        visible=not (sample0 and sample0.is_video),
+                        visible=sample0 is None,
                         apply_default_css=False,
                         container=False,
                         padding=False,
@@ -1147,7 +1147,6 @@ def build_ui() -> gr.Blocks:
                 seconds,
                 noise_choice,
                 length_source,
-                match_line,
             ]
             for index, button in enumerate(example_buttons):
                 button.click(
@@ -1311,7 +1310,7 @@ def _monitor_for_mode(show: showcase.Showcase, mode: Any, monitor: dict) -> tupl
         )
     return (
         [
-            gr.update(value=render.monitor_idle(mode), visible=not sample.is_video),
+            gr.update(value=render.monitor_idle(mode), visible=False),
             gr.update(
                 value=str(sample.path) if sample.is_video else None,
                 visible=sample.is_video,
@@ -1342,48 +1341,11 @@ def _example_updates(show: showcase.Showcase, mode_id: str, slots: int, note: An
 
 
 def _fill_example(show: showcase.Showcase, mode_id: str, index: int) -> list:
+    """Write the example's own values; leave every other control untouched."""
     examples = show.for_mode(mode_id)
-    if index >= len(examples):
-        return [gr.update() for _ in range(len(_EXAMPLE_FIELDS) + 5)]
-    example = examples[index]
-    view = handlers.mode_view(mode_id)
-    settings = example.settings
-    out: dict[str, Any] = {}
-    if view.active["prompt"]:
-        out["prompt"] = example.prompt
-        out["enhance_prompt"] = bool(settings.get("enhance", False))
-    for kind in ("image", "video", "audio"):
-        if view.active[kind]:
-            path = example.media.get(kind)
-            out[kind] = str(path) if path else None
-    preset = settings.get("shape", "3:2")
-    size = handlers.preset_size(preset)
-    if view.sizes_picture and size:
-        out["width"], out["height"] = size
-    frames = None
-    if "seconds" in settings:
-        frames = handlers.frames_for_seconds(settings["seconds"])
-        out["num_frames"] = frames
-    if view.active["auto_duration"]:
-        out["auto_duration"] = bool(settings.get("auto", False))
-    if view.upscale:
-        out["enable_stage_2"] = bool(settings.get("upscale", False))
-    if "seed" in settings:
-        out["seed"] = int(settings["seed"])
-    if view.active["strength"] and "strength" in settings:
-        out["strength"] = float(settings["strength"])
-    noise = settings.get("noise")
-    if view.active["noise_scale"] and noise:
-        out["noise_scale"] = _noise_value(noise)
-    updates = [gr.update(value=out[k]) if k in out else gr.update() for k in _EXAMPLE_FIELDS]
-    return [
-        *updates,
-        gr.update(value=preset) if view.sizes_picture and size else gr.update(),
-        gr.update(value=handlers.seconds_for_frames(frames)) if frames else gr.update(),
-        gr.update(value=noise) if view.active["noise_scale"] and noise else gr.update(),
-        gr.update(value=render.LENGTH_MATCH) if view.timed_input else gr.update(),
-        gr.update(),
-    ]
+    out = handlers.example_values(examples[index], mode_id) if index < len(examples) else {}
+    keys = [*_EXAMPLE_FIELDS, "preset", "seconds", "noise_choice", "length_source"]
+    return [gr.update(value=out[k]) if k in out else gr.update() for k in keys]
 
 
 def _recent_entry(

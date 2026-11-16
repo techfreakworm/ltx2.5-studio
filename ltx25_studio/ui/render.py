@@ -830,6 +830,10 @@ class RunFacts:
     #: True when ``took`` is the worker's own GPU time, not the page's wall clock.
     took_is_gpu: bool = False
     prompt_sent: str | None = None
+    #: "requested" | "model" | "audio": where the length came from.
+    length_source: str | None = None
+    #: The level actually used to change the user's sound (Audio -> sound).
+    audio_level: float | None = None
 
 
 def run_summary(facts: RunFacts) -> str:
@@ -838,8 +842,17 @@ def run_summary(facts: RunFacts) -> str:
     if facts.returned_size and "video" in facts.mode.exports:
         size = _size_html(facts.returned_size)
         rows.append(("Size", size + (", upscaled ×2" if facts.stage_2 else ", no upscale")))
+    origin = {"model": ", chosen by the model", "audio": ", matched to your audio"}.get(
+        facts.length_source or "", ""
+    )
     if facts.seconds is not None:
-        rows.append(("Length", _secs_html(facts.seconds)))
+        rows.append(("Length", _secs_html(facts.seconds) + origin))
+    elif origin:
+        rows.append(("Length", origin.lstrip(", ").capitalize()))
+    if facts.audio_level is not None:
+        named = next((n for n, v in NOISE_CHOICES if abs(v - facts.audio_level) < 1e-6), None)
+        level = _num(f"{facts.audio_level:g}")
+        rows.append(("Change", f"{_e(named)} ({level})" if named else level))
     rows.append(("Seed", _num(facts.seed)))
     rows.append(("LoRA", _lora_words(facts.loras)))
     clock = "GPU time" if facts.took_is_gpu else "wall-clock"

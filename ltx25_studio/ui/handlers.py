@@ -34,6 +34,7 @@ __all__ = [
     "ModeView",
     "RunOutcome",
     "clip_seconds",
+    "example_values",
     "export_flags",
     "frames_for_seconds",
     "match_size",
@@ -318,6 +319,57 @@ def frames_matching_clip(seconds: float | None) -> int | None:
     if seconds is None:
         return None
     return constraints.largest_num_frames_within(seconds, frame_rate=FRAME_RATE)
+
+
+def example_values(example: Any, mode_id: str) -> dict[str, Any]:
+    """What clicking an example writes, and nothing more.
+
+    Only the fields the example names are written: its prompt, its media, and
+    each setting it lists. Everything else on the form -- the user's other
+    media, staged adapters, settings the example does not mention -- stays as
+    it is. Keys are field keys, plus ``"preset"``, ``"seconds"``,
+    ``"noise_choice"`` and ``"length_source"`` for the controls that write them.
+    """
+    view = mode_view(mode_id)
+    settings = dict(getattr(example, "settings", {}) or {})
+    out: dict[str, Any] = {}
+    if getattr(example, "prompt", "") and view.active["prompt"]:
+        out["prompt"] = example.prompt
+    if "enhance" in settings and view.active["enhance_prompt"]:
+        out["enhance_prompt"] = bool(settings["enhance"])
+    for kind, path in (getattr(example, "media", {}) or {}).items():
+        if view.active.get(kind):
+            out[kind] = str(path)
+    if view.sizes_picture:
+        size = None
+        if "width" in settings and "height" in settings:
+            size = (int(settings["width"]), int(settings["height"]))
+        elif "shape" in settings:
+            size = preset_size(str(settings["shape"]))
+        if size:
+            out["width"], out["height"] = size
+            out["preset"] = preset_for(*size)
+    if "seconds" in settings:
+        frames = frames_for_seconds(settings["seconds"])
+        out["num_frames"] = frames
+        out["seconds"] = seconds_for_frames(frames)
+        if view.active["auto_duration"]:
+            out["auto_duration"] = False
+        if view.timed_input:
+            out["length_source"] = render.LENGTH_SET
+    if "auto" in settings and view.active["auto_duration"]:
+        out["auto_duration"] = bool(settings["auto"])
+    if "upscale" in settings and view.upscale:
+        out["enable_stage_2"] = bool(settings["upscale"])
+    if "seed" in settings:
+        out["seed"] = int(settings["seed"])
+    if "strength" in settings and view.active["strength"]:
+        out["strength"] = float(settings["strength"])
+    noise = dict(render.NOISE_CHOICES).get(settings.get("noise"))
+    if noise is not None and view.active["noise_scale"]:
+        out["noise_scale"] = noise
+        out["noise_choice"] = settings["noise"]
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -801,6 +853,15 @@ def run_facts(outcome: RunOutcome) -> render.RunFacts:
         if adapters
         else _staged_names(params.get("loras"))
     )
+    asked_auto = bool(params.get("auto_duration"))
+    origin = (
+        "audio"
+        if asked_auto and modes.requires(mode, "audio")
+        else ("model" if asked_auto else "requested")
+    )
+    level = (
+        _as_float(params.get("noise_scale")) if mode_view(mode.id).active["noise_scale"] else None
+    )
     return render.RunFacts(
         mode=mode,
         seed=int(fact(result, "seed", getattr(result, "seed", 0))),
@@ -811,6 +872,8 @@ def run_facts(outcome: RunOutcome) -> render.RunFacts:
         took=float(fact(result, "worker_seconds", outcome.took)),
         took_is_gpu=fact(result, "worker_seconds", None) is not None,
         prompt_sent=fact(result, "prompt_sent", None),
+        length_source=fact(result, "length_source", origin),
+        audio_level=fact(result, "audio_level", level),
     )
 
 

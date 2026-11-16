@@ -13,6 +13,8 @@ The directory is ``LTX25_EXAMPLES_DIR`` (default ``examples/``) and the file is
              "settings": {"shape": "16:9", "seconds": 5.0, "upscale": false,
                           "seed": 42, "enhance": false, "strength": 0.8,
                           "noise": "Moderately", "auto": false}}
+             # "width"/"height" give an exact size and win over "shape".
+             # An example writes only what it names; nothing else changes.
           ],
           "sample": {"file": "samples/t2av.mp4", "caption": "...",
                      "settings": "704 × 480, 5 s", "seed": 42}
@@ -45,7 +47,18 @@ DEFAULT_DIR = "examples"
 MANIFEST = "manifest.json"
 
 _MEDIA = ("image", "video", "audio")
-_SETTINGS = {"shape", "seconds", "upscale", "seed", "enhance", "strength", "noise", "auto"}
+_SETTINGS = {
+    "shape",
+    "width",
+    "height",
+    "seconds",
+    "upscale",
+    "seed",
+    "enhance",
+    "strength",
+    "noise",
+    "auto",
+}
 
 
 @dataclass(frozen=True)

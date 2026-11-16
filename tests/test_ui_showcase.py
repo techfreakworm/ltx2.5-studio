@@ -126,3 +126,91 @@ def test_with_a_manifest_the_examples_say_nothing_runs(tmp_path, monkeypatch):
         if "mr-example" in (getattr(b, "elem_classes", None) or [])
     ]
     assert "Harbour" in labels
+
+
+def test_an_example_writes_only_what_it_names(tmp_path):
+    from pathlib import Path
+
+    from ltx25_studio.ui import handlers
+
+    image = tmp_path / "captain.jpg"
+    image.write_bytes(b"jpg")
+    example = showcase.Example(
+        label="The captain speaks",
+        prompt="He shouts: all hands on deck!",
+        media={"image": image},
+        settings={"shape": "3:2", "seconds": 5.0, "seed": 16},
+    )
+    out = handlers.example_values(example, "image_text_to_audio_video")
+    assert out == {
+        "prompt": "He shouts: all hands on deck!",
+        "image": str(Path(image)),
+        "width": 704,
+        "height": 480,
+        "preset": "3:2",
+        "num_frames": 121,
+        "seconds": 5.04,
+        "auto_duration": False,
+        "seed": 16,
+    }, "enhance, upscale, other media, strength and the noise level stay as the user left them"
+
+
+def test_an_exact_size_wins_over_the_shape_and_clears_the_preset():
+    from ltx25_studio.ui import handlers
+
+    example = showcase.Example(
+        label="Portrait", prompt="p", settings={"shape": "9:16", "width": 480, "height": 704}
+    )
+    out = handlers.example_values(example, "image_text_to_audio_video")
+    assert (out["width"], out["height"]) == (480, 704)
+    assert out["preset"] is None, "480 × 704 is not one of the shape presets"
+
+
+def test_a_pinned_or_promptless_mode_ignores_what_it_cannot_use():
+    from ltx25_studio.ui import handlers
+
+    example = showcase.Example(label="x", prompt="p", settings={"shape": "16:9", "upscale": True})
+    assert handlers.example_values(example, "image_to_video") == {
+        "width": 960,
+        "height": 544,
+        "preset": "16:9",
+        "enable_stage_2": True,
+    }
+    assert handlers.example_values(example, "text_to_audio") == {"prompt": "p"}
+
+
+def test_the_summary_says_where_the_length_came_from_and_how_much_the_sound_changed():
+    from ltx25_studio import modes
+    from ltx25_studio.ui import handlers, render
+    from ltx25_studio.ui.fields import FIELDS
+
+    params = {f.key: f.default for f in FIELDS} | {"auto_duration": True, "noise_scale": 0.73}
+
+    class Result:
+        seed = 3
+
+    facts = handlers.run_facts(
+        handlers.RunOutcome(
+            video=None,
+            audio="a.wav",
+            status="",
+            mode_id="audio_to_audio",
+            params=params,
+            result=Result(),
+        )
+    )
+    assert facts.length_source == "audio" and facts.audio_level == 0.73
+    summary = render.run_summary(facts)
+    assert "Matched to your audio" in summary and "Moderately" in summary
+    facts = handlers.run_facts(
+        handlers.RunOutcome(
+            video="v",
+            audio=None,
+            status="",
+            mode_id="text_to_video",
+            params=params,
+            result=Result(),
+        )
+    )
+    assert facts.length_source == "model" and facts.audio_level is None
+    assert modes.get_mode("text_to_video").label

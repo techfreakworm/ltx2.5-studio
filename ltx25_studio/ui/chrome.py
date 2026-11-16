@@ -483,7 +483,8 @@ button:disabled { cursor: not-allowed !important; }
 #monitor .block { height: 100% !important; }
 #monitor video { width: 100%; height: 100%; object-fit: contain; background: #000; }
 #monitor [data-testid="video"], #monitor .video-container, #monitor .wrap { height: 100%; }
-#audio-out { display: flex; align-items: center; }
+#monitor #audio-out { display: flex !important; align-items: center; padding: 0 24px !important;
+  background: var(--mr-well) !important; }
 #audio-out > div { width: 100%; }
 .mr-monitor-idle { position: absolute; inset: 0; display: flex; flex-direction: column;
   align-items: center; justify-content: center; gap: 6px; text-align: center; }
