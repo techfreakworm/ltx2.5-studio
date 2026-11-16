@@ -1283,6 +1283,16 @@ class LocalStageRunner(pipelines.StageRunner):
         """Check attaching the adapter at ``source`` fits, before it is loaded."""
         self._weights.preflight_adapter(source)
 
+    def held_adapters(self) -> tuple[str, ...]:
+        """Adapters kept for a released transformer, to be put back when it loads again.
+
+        Removing one through ``pipeline.delete_adapters`` forgets it.
+        """
+        captured = self._weights._adapters
+        if not captured:
+            return ()
+        return tuple(name for name, _config, _state in captured["adapters"])
+
     # -- the seam ----------------------------------------------------------
 
     @contextmanager

@@ -813,6 +813,108 @@ def test_a_pipeline_that_cannot_delete_adapters_is_refused(tmp_path):
 
 
 # --------------------------------------------------------------------------
+# a run never inherits someone else's adapter (F57)
+# --------------------------------------------------------------------------
+#
+# A failed detach is loud for the run that fails, but its adapter stays on the
+# resident pipeline -- on a shared Space, another user's upload. So every run
+# starts by checking the model for adapters it did not stage: any found are
+# removed, and a run whose leftover cannot be removed is refused, never sampled.
+
+
+class _StuckDetachPipe(LoRAFakePipe):
+    """``delete_adapters`` fails ``stuck`` times, then works; remembers each adapter's file."""
+
+    def __init__(self, stuck):
+        super().__init__()
+        self.stuck = stuck
+        self.sources: dict[str, str] = {}
+        self.sources_at_call = None
+        self.layers_at_call = None
+
+    def load_lora_weights(self, path, adapter_name=None):
+        super().load_lora_weights(path, adapter_name=adapter_name)
+        self.sources[adapter_name] = str(path)
+
+    def delete_adapters(self, names):
+        if self.stuck:
+            self.stuck -= 1
+            raise RuntimeError("peft refused")
+        for name in [names] if isinstance(names, str) else list(names):
+            self.sources.pop(name, None)
+        super().delete_adapters(names)
+
+    def __call__(self, *args, **kwargs):
+        # What the denoise actually runs with: the layers, not the bookkeeping.
+        self.layers_at_call = sorted(
+            {name for _, module in self.transformer.named_modules() for name in module.lora_A}
+        )
+        self.sources_at_call = {name: self.sources[name] for name in self.layers_at_call}
+        return super().__call__(*args, **kwargs)
+
+
+def _run_with(pipe, tmp_path, *adapters):
+    return generate(
+        a_request(loras=tuple(_staged(tmp_path / name) for name in adapters)),
+        pipeline_factory=factory_for(pipe),
+        encoder=good_encoder,
+        output_root=tmp_path,
+    )
+
+
+def test_after_a_stuck_detach_a_run_with_no_adapter_is_refused_and_never_sampled(tmp_path):
+    from ltx25_studio.errors import ADAPTER, LoRAError, categorise
+
+    pipe = _StuckDetachPipe(stuck=10**6)
+    with pytest.raises(GenerationError):
+        _run_with(pipe, tmp_path, "a.safetensors")
+    sampled = len(pipe.calls)
+
+    with pytest.raises(LoRAError) as caught:
+        _run_with(pipe, tmp_path)
+
+    assert len(pipe.calls) == sampled, "the run was sampled through the earlier run's adapter"
+    failure = categorise(caught.value)
+    assert (failure.category, failure.gpu_used) == (ADAPTER, True)
+    message = str(caught.value)
+    assert "earlier run" in message and "user_lora_0" not in message, message
+    from test_user_words import offences
+
+    assert not offences(message), offences(message)
+    # Raised inside the GPU worker, so it must cross the fork with its words.
+    import pickle
+
+    crossed = pickle.loads(pickle.dumps(caught.value))
+    assert type(crossed) is type(caught.value) and str(crossed) == message
+
+
+def test_after_a_detach_that_failed_once_the_next_run_samples_a_clean_model(tmp_path):
+    pipe = _StuckDetachPipe(stuck=1)
+    with pytest.raises(GenerationError):
+        _run_with(pipe, tmp_path, "a.safetensors")
+    assert pipe.adapters == ["user_lora_0"], "the failed detach left the adapter attached"
+
+    result = _run_with(pipe, tmp_path)
+
+    assert pipe.layers_at_call == [], "the denoise ran through the earlier run's adapter"
+    assert pipe.adapters_at_call == []
+    assert result.record.adapters == ()
+
+
+def test_a_run_with_its_own_adapter_after_a_stuck_one_gets_exactly_its_own(tmp_path):
+    pipe = _StuckDetachPipe(stuck=1)
+    with pytest.raises(GenerationError):
+        _run_with(pipe, tmp_path, "a.safetensors")
+
+    _run_with(pipe, tmp_path, "b.safetensors")
+
+    assert pipe.sources_at_call == {"user_lora_0": str(tmp_path / "b.safetensors")}, (
+        pipe.sources_at_call
+    )
+    assert pipe.adapters == [], "and it is detached after its own run"
+
+
+# --------------------------------------------------------------------------
 # supplied audio_latents are checked against the video length -- §5.7 row 11
 # --------------------------------------------------------------------------
 #

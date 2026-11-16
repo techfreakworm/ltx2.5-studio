@@ -48,7 +48,9 @@ __all__ = [
     "DEFAULT_ADAPTER_NAME",
     "LoRAAttachReport",
     "LoRADuplicateAdapterError",
+    "LoRALeftoverError",
     "apply_lora",
+    "attached_adapters",
     "unfuse_lora",
 ]
 
@@ -80,6 +82,25 @@ class LoRADuplicateAdapterError(LoRAError):
             f"LoRA {source} could not be attached as {adapter_name!r}: an adapter with that "
             f"name is already loaded on this worker, left over from an earlier run. Run the "
             f"generation again; if it repeats, restart the Space."
+        )
+
+
+class LoRALeftoverError(LoRAError):
+    """An adapter from an earlier run is still on the model and could not be removed.
+
+    Raised at the start of a run, before anything is attached, so the run is
+    refused rather than sampled through an adapter it did not stage. The names
+    stay on the instance for the logs; the message does not show another run's
+    adapter.
+    """
+
+    def __init__(self, *, adapters, reason=""):
+        self.adapters = tuple(adapters)
+        self.reason = reason
+        super().__init__(
+            "A LoRA from an earlier run is still attached to the model and could not be "
+            "removed, so this run was stopped before it started rather than made with that "
+            "LoRA. Run it again; if this keeps happening, the app needs a restart."
         )
 
 
@@ -129,6 +150,30 @@ def _attached_modules(component, adapter_name: str) -> list[str]:
         if lora_a is not None and adapter_name in lora_a:
             found.append(name)
     return found
+
+
+def attached_adapters(pipeline) -> tuple[str, ...]:
+    """Every adapter name on the pipeline's loadable components, sorted.
+
+    Both of peft's records count: a component's ``peft_config`` (a name that is
+    registered, even one that attached to nothing) and the ``lora_A`` layers (a
+    name that really wraps a layer).
+    """
+    names: set[str] = set()
+    for component_name in _loadable_components(pipeline):
+        component = getattr(pipeline, component_name)
+        config = getattr(component, "peft_config", None)
+        if isinstance(config, dict):
+            names.update(str(name) for name in config)
+        named_modules = getattr(component, "named_modules", None)
+        if not callable(named_modules):
+            continue
+        for _name, module in named_modules():
+            layers = getattr(module, "lora_A", None)
+            keys = getattr(layers, "keys", None)
+            if callable(keys):
+                names.update(str(name) for name in keys())
+    return tuple(sorted(names))
 
 
 def _first_line(exc: BaseException) -> str:

@@ -25,6 +25,7 @@ The contract:
 from __future__ import annotations
 
 import inspect as py_inspect
+import types
 
 import pytest
 from conftest import (
@@ -515,3 +516,128 @@ def test_real_peft_duplicate_name_is_reported_as_one(tmp_path):
     lora_apply.apply_lora(tiny.pipe, path, adapter_name="user_lora_0")
     with pytest.raises(lora_apply.LoRADuplicateAdapterError):
         lora_apply.apply_lora(tiny.pipe, path, adapter_name="user_lora_0")
+
+
+# --------------------------------------------------------------------------
+# F57: an adapter a failed detach left behind, on the Space's resident runner
+# --------------------------------------------------------------------------
+
+
+def _adapters_on(transformer) -> set[str]:
+    """What peft holds on ``transformer``, read off peft's own records."""
+    held = set(getattr(transformer, "peft_config", None) or ())
+    for _name, module in transformer.named_modules():
+        layers = getattr(module, "lora_A", None)
+        if layers is not None:
+            held.update(layers.keys())
+    return held
+
+
+def _resident_runner(tiny):
+    """``pipelines.StageRunner`` over the tiny pipeline; the denoise records its adapters."""
+    from ltx25_studio import pipelines
+
+    seen = []
+
+    def denoise(self, **kwargs):
+        seen.append(_adapters_on(self.transformer))
+        return types.SimpleNamespace(frames=("frame",), audio=None)
+
+    type(tiny.pipe).__call__ = denoise
+    return pipelines.StageRunner(tiny.pipe, kind="text2video", device="cpu"), seen
+
+
+def _generate_with(runner, tmp_path, *adapters):
+    from test_exports_contract import one_muxed_file_encoder
+
+    from ltx25_studio import generate as generate_module
+
+    return generate_module.generate(
+        mode="text_to_video",
+        prompt="a lighthouse in fog",
+        seed=7,
+        width=64,
+        height=64,
+        num_frames=9,
+        loras=tuple({"source": str(path), "weight": 1.0, "report": object()} for path in adapters),
+        pipeline_factory=lambda **_: runner,
+        encoder=one_muxed_file_encoder,
+        output_root=tmp_path / "out",
+        retention_bytes=10**9,
+    )
+
+
+@pytest.mark.parametrize("stuck", ["once", "always"])
+def test_real_peft_a_stuck_adapter_never_reaches_the_next_runs_denoise(tmp_path, monkeypatch, stuck):
+    from ltx25_studio.errors import GenerationError
+
+    tiny = _tiny_pipeline()
+    runner, seen = _resident_runner(tiny)
+    first = tiny.adapter(tmp_path / "first.safetensors")
+    real_delete = tiny.pipe.delete_adapters
+    attempts = []
+
+    def delete_adapters(names):
+        attempts.append(names)
+        if stuck == "always" or len(attempts) == 1:
+            raise RuntimeError("peft refused (stand-in)")
+        return real_delete(names)
+
+    monkeypatch.setattr(tiny.pipe, "delete_adapters", delete_adapters)
+    with pytest.raises(GenerationError):
+        _generate_with(runner, tmp_path, first)
+    assert seen == [{"user_lora_0"}]
+    assert _adapters_on(tiny.pipe.transformer) == {"user_lora_0"}, "the detach really failed"
+
+    if stuck == "always":
+        with pytest.raises(LoRAError) as caught:
+            _generate_with(runner, tmp_path)
+        assert len(seen) == 1, "the refused run was sampled anyway"
+        assert isinstance(caught.value, lora_apply.LoRALeftoverError), caught.value
+        return
+    result = _generate_with(runner, tmp_path)
+    assert seen[-1] == set(), "the second run was sampled through the first run's adapter"
+    assert result.record.adapters == ()
+
+
+def test_real_peft_a_run_after_a_stuck_adapter_gets_exactly_its_own(tmp_path, monkeypatch):
+    tiny = _tiny_pipeline()
+    import torch
+    from safetensors.torch import load_file, save_file
+
+    from ltx25_studio.errors import GenerationError
+
+    runner, seen = _resident_runner(tiny)
+    first = tiny.adapter(tmp_path / "first.safetensors")
+    second = tmp_path / "second.safetensors"
+    save_file(
+        {key: torch.full_like(value, 0.25) for key, value in load_file(first).items()}, str(second)
+    )
+    real_delete = tiny.pipe.delete_adapters
+    attempts = []
+
+    def delete_adapters(names):
+        attempts.append(names)
+        if len(attempts) == 1:
+            raise RuntimeError("peft refused (stand-in)")
+        return real_delete(names)
+
+    monkeypatch.setattr(tiny.pipe, "delete_adapters", delete_adapters)
+    with pytest.raises(GenerationError):
+        _generate_with(runner, tmp_path, first)
+
+    weights = []
+    real_call = type(tiny.pipe).__call__
+
+    def denoise(self, **kwargs):
+        module = self.transformer.transformer_blocks[0].attn1.to_q
+        weights.append(float(module.lora_A["user_lora_0"].weight.detach().flatten()[0]))
+        return real_call(self, **kwargs)
+
+    monkeypatch.setattr(type(tiny.pipe), "__call__", denoise)
+    result = _generate_with(runner, tmp_path, second)
+
+    assert seen[-1] == {"user_lora_0"}
+    assert weights == [0.25], "the denoise ran with the first run's weights, not its own"
+    ((label, _weight, attached),) = result.record.adapters
+    assert label == "second" and attached == 2

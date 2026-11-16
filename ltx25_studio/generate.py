@@ -1574,6 +1574,46 @@ def _apply_loras(pipe, request: GenerationRequest):
     return tuple(reports)
 
 
+def _leftover_adapters(pipe) -> tuple[str, ...]:
+    """Adapters on the model before this run attached any: on its components, or kept
+    by a staged runner for a released transformer (its ``held_adapters``)."""
+    from .lora import apply as lora_apply
+
+    names = set(lora_apply.attached_adapters(getattr(pipe, "pipeline", pipe)))
+    held = getattr(pipe, "held_adapters", None)
+    if callable(held):
+        names.update(held())
+    return tuple(sorted(names))
+
+
+def _clear_leftover_adapters(pipe) -> None:
+    """Remove every adapter an earlier run left on the model, or refuse this run.
+
+    Runs at the start of every run, before anything is attached. A failed detach
+    leaves its adapter on the resident pipeline, and a run that stages none would
+    otherwise be sampled through it. Whether the removal worked is judged by
+    looking again, not by whether ``delete_adapters`` raised.
+    """
+    found = _leftover_adapters(pipe)
+    if not found:
+        return
+    logger.warning("removing LoRA adapter(s) left by an earlier run: %s", ", ".join(found))
+    target = getattr(pipe, "pipeline", pipe)
+    delete = getattr(target, "delete_adapters", None)
+    failure: Exception | None = None
+    for name in found if callable(delete) else ():
+        try:
+            delete(name)
+        except Exception as exc:  # noqa: BLE001 -- judged by the second look below
+            failure = failure or exc
+    remaining = _leftover_adapters(pipe)
+    if remaining:
+        from .lora.apply import LoRALeftoverError
+
+        reason = str(failure) if failure else "the pipeline has no delete_adapters"
+        raise LoRALeftoverError(adapters=remaining, reason=reason) from failure
+
+
 def _adapter_label(source) -> str:
     """How an adapter is named in the run report: what the user gave, a path by its name."""
     text = str(source or "")
@@ -2417,6 +2457,8 @@ def generate(
                     mode=spec.label, stage="loading the model", reason=str(exc)[:200]
                 ) from exc
             raise ModelLoadError(component=spec.pipeline, reason=str(exc)) from exc
+        # Before anything is attached: no adapter from an earlier run (F57).
+        _clear_leftover_adapters(pipe)
 
         # Everything between the load and the first denoise step: the pixel-to-latent
         # condition conversion, the peft walk over ~3320 transformer modules for a

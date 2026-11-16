@@ -1213,6 +1213,111 @@ def test_the_first_lora_run_on_a_fresh_staged_runner_attaches(tmp_path):
     assert weight == 1.0 and attached > 0
 
 
+# --------------------------------------------------------------------------
+# F57: an adapter a failed detach left behind never reaches the next run
+# --------------------------------------------------------------------------
+
+
+def _adapters_seen_by_the_denoise(monkeypatch):
+    """Every transformer forward records the adapters peft holds on that transformer."""
+    from diffusers import LTX2VideoTransformer3DModel
+
+    seen = []
+    forward = LTX2VideoTransformer3DModel.forward
+
+    def watched(self, *args, **kwargs):
+        held = set(getattr(self, "peft_config", None) or ())
+        for _name, module in self.named_modules():
+            layers = getattr(module, "lora_A", None)
+            if layers is not None:
+                held.update(layers.keys())
+        seen.append(held)
+        return forward(self, *args, **kwargs)
+
+    monkeypatch.setattr(LTX2VideoTransformer3DModel, "forward", watched)
+    return seen
+
+
+def _detach_fails(runner, monkeypatch, *, times):
+    """The runner's ``delete_adapters`` raises ``times`` times, then works."""
+    guarded = runner.pipeline.delete_adapters
+    attempts = []
+
+    def delete_adapters(names):
+        attempts.append(names)
+        if len(attempts) <= times:
+            raise RuntimeError("peft refused (stand-in)")
+        return guarded(names)
+
+    monkeypatch.setattr(runner.pipeline, "delete_adapters", delete_adapters)
+
+
+@pytest.mark.parametrize("residency", ["staged", "resident"])
+def test_an_adapter_whose_detach_failed_is_gone_before_the_next_run_samples(
+    tmp_path, monkeypatch, residency
+):
+    pytest.importorskip("peft")
+    from ltx25_studio.errors import GenerationError
+
+    lora = _tiny_adapter(tmp_path)
+    runner = _runner("text2video", residency)
+    seen = _adapters_seen_by_the_denoise(monkeypatch)
+    _detach_fails(runner, monkeypatch, times=1)
+    with pytest.raises(GenerationError):
+        _run(runner, tmp_path, "a", prompt="a first prompt", loras=(lora,))
+    assert seen and all(names == {"user_lora_0"} for names in seen), seen
+
+    seen.clear()
+    result = _run(runner, tmp_path, "b", prompt="a second prompt")
+
+    assert seen and not any(seen), f"the run was sampled through the earlier adapter: {seen}"
+    assert result.record.adapters == ()
+
+
+def test_an_adapter_kept_for_a_released_transformer_is_not_put_back_into_the_next_run(
+    tmp_path, monkeypatch
+):
+    """The staged runner keeps a released transformer's adapters to put them back."""
+    pytest.importorskip("peft")
+    from ltx25_studio.errors import GenerationError
+
+    lora = _tiny_adapter(tmp_path)
+    runner = _runner("text2video", "staged")
+    seen = _adapters_seen_by_the_denoise(monkeypatch)
+    _detach_fails(runner, monkeypatch, times=1)
+    with pytest.raises(GenerationError):
+        _run(runner, tmp_path, "a", prompt="a first prompt", loras=(lora,))
+    runner._weights.ensure_text_encoder()  # releases the transformer, keeping its adapter
+    kept = runner._weights._adapters
+    assert kept and [name for name, _config, _state in kept["adapters"]] == ["user_lora_0"]
+
+    seen.clear()
+    _run(runner, tmp_path, "b", prompt="a second prompt")
+
+    assert seen and not any(seen), f"the kept adapter was put back into the run: {seen}"
+    assert runner.held_adapters() == ()
+
+
+def test_a_run_after_an_adapter_that_cannot_be_removed_is_refused_unsampled(
+    tmp_path, monkeypatch
+):
+    pytest.importorskip("peft")
+    from ltx25_studio.errors import GenerationError, LoRAError
+
+    lora = _tiny_adapter(tmp_path)
+    runner = _runner("text2video", "staged")
+    seen = _adapters_seen_by_the_denoise(monkeypatch)
+    _detach_fails(runner, monkeypatch, times=10**6)
+    with pytest.raises(GenerationError):
+        _run(runner, tmp_path, "a", prompt="a first prompt", loras=(lora,))
+    seen.clear()
+
+    with pytest.raises(LoRAError) as caught:
+        _run(runner, tmp_path, "b", prompt="a second prompt")
+    assert seen == [], "the refused run was sampled"
+    assert type(caught.value).__name__ == "LoRALeftoverError", caught.value
+
+
 def test_a_converting_load_promises_the_converted_copy_and_the_read_pages():
     from local_fakes import tiny_snapshot as tiny
 
