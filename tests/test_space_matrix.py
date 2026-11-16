@@ -1288,7 +1288,7 @@ def test_every_call_leaves_its_evidence(tmp_path, space):
     assert "conditions" in verify["content"]["video"]["picture_health"]
     (track,) = verify["content"]["audio"]["tracks"]
     assert {"level_dbfs", "peak", "clipped_samples", "silence_ratio", "spectral_flatness",
-            "spectral_centroid_hz", "band_energy_share"} <= set(track)
+            "spectral_centroid_hz", "band_energy_share", "band_level_dbfs", "onsets"} <= set(track)
     result = json.loads((folder / "result.json").read_text())
     assert set(result["artifacts"]) == {"video", "audio"}
     assert result["artifacts"]["video"]["path"] == result["artifacts"]["audio"]["path"], "downloaded once"
@@ -1679,6 +1679,33 @@ def test_audio_is_measured_not_judged(tmp_path):
     assert silent["level_dbfs"] < space_matrix.SILENT_DBFS and silent["spectral_flatness"] is None
     for track in (tonal, hiss, clipped, silent):
         assert not any(key in track for key in ("verdict", "checks"))
+
+
+def test_noise_at_a_normal_level_no_longer_looks_like_sound(tmp_path):
+    """The level alone cannot tell noise at -19 dBFS from sound; flatness, the bands and the onset
+    count can, and are reported beside it. Measurements: nothing here passes or fails a call."""
+    rate, n = 48000, 5 * 48000
+    t = np.arange(n) / rate
+    noise = np.random.default_rng(7).normal(0.0, 10 ** (-19 / 20), n)
+    gate = ((t % 0.25) >= 0.13).astype(float)  # 20 bursts of 120 ms, each after 130 ms of silence
+    bursts = 0.4 * np.sin(2 * np.pi * 440.0 * t) * gate
+    steady = 0.158 * np.sin(2 * np.pi * 440.0 * t)
+
+    hiss = track_of(write_samples(tmp_path / "hiss.wav", np.stack([noise, noise])))
+    chimes = track_of(write_samples(tmp_path / "chimes.wav", np.stack([bursts, bursts])))
+    tone = track_of(write_samples(tmp_path / "tone.wav", np.stack([steady, steady])))
+
+    assert -19.5 < hiss["level_dbfs"] < -18.5 and -19.5 < tone["level_dbfs"] < -18.5, "the same level"
+    assert hiss["spectral_flatness"] > 0.8 and tone["spectral_flatness"] < 0.05
+    assert hiss["onsets"] == 0 and tone["onsets"] == 0 and chimes["onsets"] == 20
+    assert chimes["onsets_per_second"] == pytest.approx(4.0, abs=0.01)
+    assert hiss["band_energy_share"]["6000-nyquist"] > 0.6 and tone["band_energy_share"]["250-2000"] > 0.95
+    assert hiss["band_level_dbfs"]["6000-nyquist"] > tone["band_level_dbfs"]["6000-nyquist"] + 40
+    line = space_matrix._audio_line({"tracks": [hiss]})
+    assert "-19.0 dBFS" in line and "flatness 0." in line and "onsets 0" in line and "6000-nyquist" in line
+    assert space_matrix.count_onsets(np.zeros(rate), rate) == 0
+    rise = np.concatenate([np.zeros(rate // 2), 0.3 * np.sin(2 * np.pi * 220.0 * t[: rate // 2])])
+    assert space_matrix.count_onsets(rise, rate) == 1, "a sound out of silence is one onset"
 
 
 def test_only_digital_silence_fails_a_call_on_audio_content(tmp_path, space):

@@ -90,6 +90,7 @@ __all__ = [
     "app_gate",
     "as_the_space",
     "classify",
+    "count_onsets",
     "default_plan",
     "generate_contract_problems",
     "load_plan",
@@ -1543,6 +1544,13 @@ CLIP_LEVEL = 0.999
 SPECTRUM_FFT = 2048
 SPECTRUM_MAX_FRAMES = 4096
 ENERGY_BANDS_HZ = ((0, 250), (250, 2000), (2000, 6000), (6000, None))
+#: An onset: the level of a short window rises at least ONSET_RISE_DB above the lowest level of
+#: the windows just before it. Steady noise moves well under 2 dB window to window at this size;
+#: speech, hits and chimes rise far more.
+ONSET_WINDOW_SECONDS = 0.01
+ONSET_LOOKBACK_SECONDS = 0.05
+ONSET_RISE_DB = 8.0
+ONSET_MIN_GAP_SECONDS = 0.1
 
 
 def _dbfs(rms: float) -> float:
@@ -1587,23 +1595,51 @@ def _spectral(mono, rate: int) -> dict:
     total = float(mean.sum())
     if total <= 0.0:
         return {"spectral_flatness": None, "spectral_flatness_frame_median": None,
-                "spectral_centroid_hz": None, "band_energy_share": None}
+                "spectral_centroid_hz": None, "band_energy_share": None, "band_level_dbfs": None}
     tiny = 1e-20
 
     def flatness(spectrum):
         return float(np.exp(np.mean(np.log(spectrum + tiny))) / (np.mean(spectrum) + tiny))
 
     live = power[power.sum(axis=1) > total * 1e-6]
-    bands = {}
+    mean_square = float(np.mean(mono.astype("float64") ** 2))
+    bands, levels = {}, {}
     for low, high in ENERGY_BANDS_HZ:
         mask = (freqs >= low) & (freqs < high) if high else (freqs >= low)
-        bands[f"{low}-{high or 'nyquist'}"] = round(float(mean[mask].sum()) / total, 4)
+        name = f"{low}-{high or 'nyquist'}"
+        share = float(mean[mask].sum()) / total
+        bands[name] = round(share, 4)
+        levels[name] = round(10.0 * np.log10(share * mean_square + 1e-12), 2)
     return {
         "spectral_flatness": round(flatness(mean), 4),
         "spectral_flatness_frame_median": round(float(np.median([flatness(f) for f in live])), 4) if len(live) else None,
         "spectral_centroid_hz": round(float((freqs * mean).sum() / total), 1),
         "band_energy_share": bands,
+        "band_level_dbfs": levels,
     }
+
+
+def count_onsets(mono, rate: int) -> int:
+    """Rises of the short-window level of at least :data:`ONSET_RISE_DB` over the lowest level of
+    the preceding :data:`ONSET_LOOKBACK_SECONDS`, out of silence or not, at least
+    :data:`ONSET_MIN_GAP_SECONDS` apart."""
+    import numpy as np
+
+    window = max(1, int(round(ONSET_WINDOW_SECONDS * rate)))
+    count = mono.size // window
+    if count < 2:
+        return 0
+    frames = mono[: count * window].reshape(count, window).astype("float64")
+    level = 10.0 * np.log10(np.mean(frames**2, axis=1) + 1e-12)
+    back = max(1, int(round(ONSET_LOOKBACK_SECONDS / ONSET_WINDOW_SECONDS)))
+    gap = max(1, int(round(ONSET_MIN_GAP_SECONDS / ONSET_WINDOW_SECONDS)))
+    onsets, last = 0, -gap
+    for index in range(1, count):
+        floor = level[max(0, index - back) : index].min()
+        if level[index] >= SILENCE_WINDOW_DBFS and level[index] - floor >= ONSET_RISE_DB and index - last >= gap:
+            onsets += 1
+            last = index
+    return onsets
 
 
 def measure_audio(path) -> dict:
@@ -1639,6 +1675,8 @@ def measure_audio(path) -> dict:
         else:
             silence = None
         clipped = int(np.count_nonzero(np.abs(samples) >= CLIP_LEVEL))
+        mono = samples.mean(axis=0)
+        onsets = count_onsets(mono, rate)
         tracks.append({
             "index": index,
             "sample_rate": rate,
@@ -1652,7 +1690,9 @@ def measure_audio(path) -> dict:
             "clipped_samples": clipped,
             "clipped_ratio": clipped / float(samples.size),
             "silence_ratio": silence,
-            **_spectral(samples.mean(axis=0), rate),
+            "onsets": onsets,
+            "onsets_per_second": round(onsets / (length / rate), 3),
+            **_spectral(mono, rate),
         })
     return {
         "tracks": tracks,
@@ -1660,11 +1700,15 @@ def measure_audio(path) -> dict:
             "level_dbfs": "RMS over every sample of every channel",
             "clipped_samples": f"samples with |x| >= {CLIP_LEVEL} of full scale",
             "silence_ratio": f"share of {SILENCE_WINDOW_SECONDS * 1000:g} ms windows below {SILENCE_WINDOW_DBFS:g} dBFS",
-            "spectral_flatness": "geometric / arithmetic mean of the mean power spectrum (about 1 for noise, "
-                                 "far below 1 for speech or music)",
+            "onsets": f"rises of the {ONSET_WINDOW_SECONDS * 1000:g} ms level by >= {ONSET_RISE_DB:g} dB over the lowest "
+                      f"level of the preceding {ONSET_LOOKBACK_SECONDS * 1000:g} ms, >= "
+                      f"{ONSET_MIN_GAP_SECONDS * 1000:g} ms apart (steady noise has none; speech and hits many)",
+            "spectral_flatness": "geometric / arithmetic mean of the mean power spectrum of the channels' mean "
+                                 "(about 1 for white noise, far below 1 for speech or music)",
             "spectral_flatness_frame_median": f"the same per {SPECTRUM_FFT}-sample frame, median over frames",
             "spectral_centroid_hz": "power-weighted mean frequency",
             "band_energy_share": "share of spectral energy per band, Hz",
+            "band_level_dbfs": "each band's energy as a level, dBFS (the bands add up to the channels' mean)",
         },
         "note": "Measurements only: nothing here is a verdict. Only digital silence fails a call.",
     }
@@ -1679,11 +1723,13 @@ def _audio_line(measured: dict) -> str:
         flat = track.get("spectral_flatness")
         centroid = track.get("spectral_centroid_hz")
         silence = track.get("silence_ratio")
+        bands = track.get("band_energy_share") or {}
         parts.append(
             f"{track['level_dbfs']:.1f} dBFS · peak {track.get('peak_dbfs', 0):.1f} · clipped "
             f"{track.get('clipped_samples', 0)} · silence {0 if silence is None else 100 * silence:.0f}% · flatness "
             f"{'n/a' if flat is None else f'{flat:.3f}'} · centroid "
-            f"{'n/a' if centroid is None else f'{centroid:.0f} Hz'}"
+            f"{'n/a' if centroid is None else f'{centroid:.0f} Hz'} · onsets {track.get('onsets', 'n/a')}"
+            + (" · bands " + " ".join(f"{name} {100 * share:.0f}%" for name, share in bands.items()) if bands else "")
         )
     return " | ".join(parts)
 
