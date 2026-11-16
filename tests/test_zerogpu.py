@@ -174,6 +174,46 @@ def test_an_unmeasured_partition_says_nothing():
     assert zerogpu.partition_note(None, "xlarge") is None
 
 
+# --------------------------------------------------------------------------
+# the quota factor the UI's cost panel reads
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("size,factor", [("xlarge", 2), ("large", 1), ("auto", 1)])
+def test_quota_multiplier_per_size(size, factor):
+    """``auto`` sends no size, so the platform default (large) is what is billed."""
+    assert zerogpu.quota_multiplier(size) == factor
+
+
+def test_quota_multiplier_defaults_to_the_configured_size(monkeypatch):
+    from ltx25_studio import config
+
+    monkeypatch.delenv(config.ENV_ZEROGPU_SIZE, raising=False)
+    assert zerogpu.quota_multiplier() == 2, "the default size is xlarge"
+    monkeypatch.setenv(config.ENV_ZEROGPU_SIZE, "large")
+    assert zerogpu.quota_multiplier() == 1
+
+
+def test_an_unknown_size_is_refused_by_name():
+    from ltx25_studio.errors import ConfigError
+
+    with pytest.raises(ConfigError) as excinfo:
+        zerogpu.quota_multiplier("medium")
+    assert "LTX25_ZEROGPU_SIZE" in str(excinfo.value) and "medium" in str(excinfo.value)
+
+
+def test_the_estimator_takes_the_cost_panel_kwargs_at_top_level(monkeypatch):
+    """The UI calls it with these three keywords and no request object."""
+    from ltx25_studio import config
+
+    monkeypatch.delenv(config.ENV_GPU_DURATION_SECONDS, raising=False)
+    base = zerogpu.estimate_duration()
+    full = zerogpu.estimate_duration(enable_stage_2=True, loras=("a",), enhance_prompt=True)
+
+    assert base == 180
+    assert full == int(180 * 1.5) + zerogpu.LORA_DURATION_SECONDS + zerogpu.ENHANCE_DURATION_SECONDS
+
+
 def test_an_unknown_kwarg_is_dropped_rather_than_exploding():
     def gpu(*, duration=None):
         return None

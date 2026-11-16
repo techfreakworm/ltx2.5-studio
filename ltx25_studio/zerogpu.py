@@ -95,6 +95,7 @@ __all__ = [
     "check_duration_signature",
     "describe_gpu_kwargs",
     "partition_note",
+    "quota_multiplier",
     "unbacked_parameters",
     "read_process_maps",
     "parse_maps",
@@ -349,9 +350,33 @@ LORA_DURATION_SECONDS = 60
 #: kills the run at the boundary after the user has already waited through it.
 #: 180 keeps ~50% headroom over the measured cold path. It is not free -- the
 #: pre-check compares the *requested* duration against remaining quota, and on
-#: xlarge that comparison is doubled -- but a queued run is recoverable and
-#: reports why, while a run killed at the boundary is not.
+#: xlarge that comparison is scaled by :func:`quota_multiplier` -- but a queued
+#: run is recoverable and reports why, while a run killed at the boundary is not.
 ENHANCE_DURATION_SECONDS = 180
+
+#: Quota/billing factor per ZeroGPU size. Source: the Hugging Face ZeroGPU docs
+#: (xlarge draws quota at twice large's rate); absent from the spaces client
+#: (docs/TEST_PLAN.md B.1), so documented rather than measured. ``auto`` sends no
+#: size, and the platform default is ``large``.
+_QUOTA_MULTIPLIERS = {"large": 1, "xlarge": 2, "auto": 1}
+
+
+def quota_multiplier(size: str | None = None) -> int:
+    """How many quota seconds one GPU second costs at ``size``.
+
+    ``None`` reads the configured ``LTX25_ZEROGPU_SIZE``. Torch-free and
+    import-safe: the UI's cost panel calls it in the web process.
+    """
+    from .config import ENV_ZEROGPU_SIZE, ZEROGPU_SIZES, load_config
+    from .errors import ConfigError
+
+    if size is None:
+        size = load_config().zerogpu_size
+    try:
+        return _QUOTA_MULTIPLIERS[size]
+    except KeyError:
+        raise ConfigError(variable=ENV_ZEROGPU_SIZE, value=size, legal=ZEROGPU_SIZES) from None
+
 
 def _request_field(params, name):
     """Read a field from the call as the LIVE dispatch actually shapes it.
@@ -380,7 +405,7 @@ def estimate_duration(**params) -> int:
 
     Reservation and billing are different meters: the pre-check compares the
     **requested** duration against remaining quota, while billing is on the
-    **effective** duration times the size multiplier. So an over-generous
+    **effective** duration times :func:`quota_multiplier`. So an over-generous
     request costs nothing in billing and everything in schedulability.
     """
     from .config import DEFAULT_GPU_DURATION_SECONDS, load_config
