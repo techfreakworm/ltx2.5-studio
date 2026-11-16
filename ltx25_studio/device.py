@@ -84,7 +84,9 @@ class GenerationDisabledError(LTXStudioError):
             "Generation is not enabled on this machine: it has no NVIDIA (CUDA) GPU, and "
             "running the model on Apple silicon or on the CPU is something you switch on "
             "yourself. Set LTX25_DEVICE=mps (Apple silicon) or LTX25_DEVICE=cpu and restart "
-            "the app. The full model needs roughly 70 GB of memory either way."
+            "the app. The full model needs roughly 70 GB of memory at 16-bit precision (Apple "
+            "silicon), and about twice that on the CPU at its default 32-bit precision "
+            "(LTX25_CPU_DTYPE=bf16 runs the CPU at 16-bit)."
         )
 
 

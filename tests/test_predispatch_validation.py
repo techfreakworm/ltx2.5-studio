@@ -690,6 +690,14 @@ def test_a_missing_video_is_refused_before_dispatch_in_a_condition_mode(refused,
     assert "could not be opened as a video" in str(error)
 
 
+@pytest.mark.parametrize("mode_id", ["video_to_video", "video_to_audio"])
+def test_a_sound_file_given_as_the_video_is_refused_before_dispatch(mode_id, refused, tmp_path):
+    """Review request-path-2: a WAV in the video slot opens, and has no picture."""
+    error = refused(ConstraintError, mode=mode_id, video=_wav(tmp_path / "talk.wav", seconds=2.0))
+    assert str(error).startswith("talk.wav has no picture in it"), str(error)
+    assert error.gpu_used is False
+
+
 def test_audio_matched_length_ignores_the_hidden_seconds_fields(accepted, tmp_path):
     """The length comes from the audio; min/max seconds belong to the text modes."""
     accepted(

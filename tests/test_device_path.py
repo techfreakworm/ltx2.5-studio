@@ -178,6 +178,8 @@ def test_get_pipeline_refuses_on_a_ui_only_host_and_builds_nothing(monkeypatch, 
     assert not built, "a pipeline was constructed on a machine with no generation device"
     message = str(excinfo.value)
     assert "LTX25_DEVICE=mps" in message and "LTX25_DEVICE=cpu" in message, message
+    # The CPU's default 32-bit load is twice the 16-bit one (review local-runtime-3).
+    assert "either way" not in message and "LTX25_CPU_DTYPE=bf16" in message, message
 
 
 def _override_snapshot(monkeypatch, tmp_path):
