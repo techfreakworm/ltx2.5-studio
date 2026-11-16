@@ -141,16 +141,21 @@ def test_a_cuda_shaped_run_keeps_its_vram_figures_inside_diagnostics(wired, monk
     monkeypatch.setattr(generate_module._VramProbe, "__init__", on_cuda)
     outcome = run("text_to_audio_video")
     record = outcome.result.record
-    assert record.peak_vram_gib and any("VRAM" in line for line in record.diagnostics), (
+    assert record.peak_vram_gib and record.diagnostics, (
         "the fake CUDA allocator did not reach the record"
     )
     report = render.success(outcome.result, modes.get_mode("text_to_audio_video"))
+    # Placement, whatever the backend's words: every diagnostics line (the VRAM laps
+    # among them) is inside the collapsed block, none above it, and so is the peak figure.
     shown = visible(report)
-    assert "VRAM" not in shown and "GiB" not in shown, shown
     inside = diagnostics(report)
-    assert "VRAM" in inside and "GiB" in inside
     for line in record.diagnostics:
         assert render._e(line) in inside, f"a diagnostics line is missing: {line}"
+        assert render._e(line) not in shown and line not in shown, (
+            f"shown above Diagnostics: {line}"
+        )
+    peak = f"{record.peak_vram_gib:.2f}"
+    assert peak in inside and peak not in shown, shown
     assert_ui_words(visible(render.run_summary(handlers.run_facts(outcome))), "what you got")
 
 
