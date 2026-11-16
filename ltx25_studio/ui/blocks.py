@@ -91,10 +91,12 @@ def lora_strength_range() -> tuple[float, float, float]:
 _PRIVATE = {"api_visibility": "private", "show_progress": "hidden"}
 
 # ---------------------------------------------------------------------------
-# the run outcome, handed from /on_generate to the chained finish step
+# the run outcome, handed from /on_generate to the chained finish step, and
+# the message of an exception Gradio raised running either of them
 # ---------------------------------------------------------------------------
 
 _OUTCOMES: OrderedDict[str, handlers.RunOutcome] = OrderedDict()
+_FAILURES: OrderedDict[str, str] = OrderedDict()
 _OUTCOMES_LOCK = threading.Lock()
 _OUTCOMES_KEPT = 64
 
@@ -103,23 +105,69 @@ def _session(request: Any) -> str | None:
     return getattr(request, "session_hash", None) if request is not None else None
 
 
-def _remember(request: Any, outcome: handlers.RunOutcome) -> None:
-    key = _session(request)
+def _keep(store: OrderedDict, key: str | None, value: Any) -> None:
     if key is None:
         return
     with _OUTCOMES_LOCK:
-        _OUTCOMES[key] = outcome
-        _OUTCOMES.move_to_end(key)
-        while len(_OUTCOMES) > _OUTCOMES_KEPT:
-            _OUTCOMES.popitem(last=False)
+        store[key] = value
+        store.move_to_end(key)
+        while len(store) > _OUTCOMES_KEPT:
+            store.popitem(last=False)
 
 
-def _recall(request: Any) -> handlers.RunOutcome | None:
+def _take(store: OrderedDict, request: Any) -> Any:
     key = _session(request)
     if key is None:
         return None
     with _OUTCOMES_LOCK:
-        return _OUTCOMES.pop(key, None)
+        return store.pop(key, None)
+
+
+def _remember(request: Any, outcome: handlers.RunOutcome) -> None:
+    _keep(_OUTCOMES, _session(request), outcome)
+
+
+def _recall(request: Any) -> handlers.RunOutcome | None:
+    return _take(_OUTCOMES, request)
+
+
+def _note_failure(session_hash: str | None, exc: BaseException) -> None:
+    _keep(_FAILURES, session_hash, str(exc).strip() or type(exc).__name__)
+
+
+def _recall_failure(request: Any) -> str | None:
+    return _take(_FAILURES, request)
+
+
+def _forget(request: Any) -> None:
+    """A new run starts: nothing left from an earlier one is read as its own."""
+    _recall(request)
+    _recall_failure(request)
+
+
+def _keep_failures(demo: gr.Blocks, steps: tuple) -> None:
+    """Keep, per session, the message of an exception Gradio raises running one of
+    ``steps`` (the dependencies an event listener returned): preparing its inputs, in
+    its function, or processing what it returned.
+
+    Gradio prints that exception and sends the page only "Error" (``show_error`` is
+    off), and the ``.failure`` listener it then fires is given no detail. The report
+    that listener shows quotes the message kept here.
+    """
+    watched = {step["id"] for step in steps}
+    process_api = demo.process_api
+
+    async def process_api_keeping_failures(*args: Any, **kwargs: Any) -> Any:
+        try:
+            return await process_api(*args, **kwargs)
+        except Exception as exc:
+            block_fn = kwargs.get("block_fn", args[0] if args else None)
+            fn_id = block_fn if isinstance(block_fn, int) else getattr(block_fn, "_id", None)
+            if fn_id in watched:
+                _note_failure(kwargs.get("session_hash"), exc)
+            raise
+
+    demo.process_api = process_api_keeping_failures
 
 
 def _on_generate(progress: Any = gr.Progress(), request: gr.Request = None, *values: Any):  # noqa: B008
@@ -1134,7 +1182,10 @@ def build_ui() -> gr.Blocks:
             sample_jump,
         ]
 
-        def _start(mode_id: str, enhance: Any, prompt: Any) -> list[Any]:
+        def _start(
+            mode_id: str, enhance: Any, prompt: Any, request: gr.Request = None
+        ) -> list[Any]:
+            _forget(request)
             mode = modes.get_mode(mode_id)
             return [
                 gr.update(interactive=False, value="Generating…"),
@@ -1177,38 +1228,32 @@ def build_ui() -> gr.Blocks:
             sample_jump,
         ]
 
-        def _finish(
-            request: gr.Request, mode_id: str, recent_now: list, source: str, *values: Any
+        def _ended(
+            mode_id: str,
+            recent_now: list,
+            source: str,
+            values: tuple,
+            shown: handlers.RunOutcome | None,
+            status_update: Any,
+            caption: str | None = None,
         ) -> list:
-            outcome = _recall(request)
-            # The step before this one returned nothing this page can use: Gradio
-            # itself failed it (a file it would not serve, a lost connection).
-            # Say so loudly rather than leave "Running" on screen.
-            status_update = (
-                gr.update(value=render.lost_run(), visible=True) if outcome is None else gr.update()
-            )
+            """Every finish output once a run has ended, with Generate back. ``shown`` is a
+            run whose result goes on the monitor; without one the monitor is idle and
+            holds no file."""
             mode = modes.get_mode(mode_id)
             review_out = _review(mode_id, False, source, *values)
             entries = list(recent_now or [])
-            ok = (
-                outcome is not None
-                and outcome.result is not None
-                and outcome.error is None
-                and (outcome.video is not None or outcome.audio is not None)
-            )
-            if ok:
-                result = outcome.result
-                params = outcome.params
-                facts = handlers.run_facts(outcome)
-                entries.insert(0, _recent_entry(mode_id, result, params, facts, outcome))
+            if shown is not None:
+                result = shown.result
+                params = shown.params
+                facts = handlers.run_facts(shown)
+                entries.insert(0, _recent_entry(mode_id, result, params, facts, shown))
                 entries = entries[:RECENT_LIMIT]
-                has_video = outcome.video is not None
+                has_video = shown.video is not None
                 monitor = [
                     gr.update(visible=False),
-                    gr.update(value=outcome.video, visible=has_video, autoplay=True),
-                    gr.update(
-                        value=outcome.audio if not has_video else None, visible=not has_video
-                    ),
+                    gr.update(value=shown.video, visible=has_video, autoplay=True),
+                    gr.update(value=shown.audio if not has_video else None, visible=not has_video),
                     render.monitor_caption(kind="run", mode=mode, seed=result.seed),
                 ]
                 summary = gr.update(value=render.run_summary(facts), visible=True)
@@ -1222,9 +1267,9 @@ def build_ui() -> gr.Blocks:
             else:
                 monitor = [
                     gr.update(value=render.monitor_idle(mode), visible=True),
-                    gr.update(visible=False),
-                    gr.update(visible=False),
-                    render.monitor_caption(kind="failed"),
+                    gr.update(value=None, visible=False),
+                    gr.update(value=None, visible=False),
+                    caption or render.monitor_caption(kind="failed"),
                 ]
                 summary = gr.update(visible=False)
                 seed_button = gr.update(visible=False)
@@ -1252,6 +1297,38 @@ def build_ui() -> gr.Blocks:
                 gr.update(visible=False),
             ]
 
+        def _finish(
+            request: gr.Request, mode_id: str, recent_now: list, source: str, *values: Any
+        ) -> list:
+            """After ``/on_generate`` completed: its result on the monitor, or the idle
+            monitor under the report it returned."""
+            outcome = _recall(request)
+            # Nothing was remembered for this page: say so rather than leave "Running".
+            status_update = (
+                gr.update(value=render.lost_run(), visible=True) if outcome is None else gr.update()
+            )
+            shown = outcome if handlers.has_result(outcome) else None
+            return _ended(mode_id, recent_now, source, values, shown, status_update)
+
+        def _finish_failed(
+            request: gr.Request, mode_id: str, recent_now: list, source: str, *values: Any
+        ) -> list:
+            """After Gradio failed the run's step (or the finish step): the handler raised,
+            or Gradio could not process what it returned (a result file it will not serve),
+            or the page could not apply it. Generate comes back, the monitor goes idle and
+            the report says what is known, with the server's message as its Detail. It
+            sends no file, so it cannot fail the way the step before it did."""
+            outcome, message = _recall(request), _recall_failure(request)
+            try:
+                report = handlers.unshown_report(outcome, message)
+            except Exception as exc:  # noqa: BLE001 -- Generate comes back whatever the report
+                report = render.lost_run(message or str(exc))
+            caption = render.monitor_caption(
+                kind="unshown" if handlers.has_result(outcome) else "failed"
+            )
+            status_update = gr.update(value=report, visible=True)
+            return _ended(mode_id, recent_now, source, values, None, status_update, caption)
+
         generation = generate_button.click(
             fn=_start,
             inputs=[mode_selector, pool["enhance_prompt"], pool["prompt"]],
@@ -1265,17 +1342,20 @@ def build_ui() -> gr.Blocks:
             api_name="on_generate",
             show_progress_on=[video_out],
         )
-        # Gradio 6.24 fires `.then` listeners only when the step completes and
-        # `.failure` listeners only when Gradio itself fails it, so the step that
-        # brings Generate back is wired to both: exactly one of them runs.
-        finish = {
-            "fn": _finish,
+        # Gradio 6.24's page runs a step's `.then` listeners only when the step
+        # completes; when the server fails it (the function raised, or processing
+        # its outputs did) or the page cannot apply its outputs, it runs the
+        # `.failure` listeners alone. So the step that brings Generate back after a
+        # run is wired to both, and so is the one after the finish step itself.
+        finish_io = {
             "inputs": [mode_selector, recent, length_source, *field_inputs],
             "outputs": finish_outputs,
             **_PRIVATE,
         }
-        generation.then(**finish)
-        generation.failure(**finish)
+        finished = generation.then(fn=_finish, **finish_io)
+        generation.failure(fn=_finish_failed, **finish_io)
+        finished.failure(fn=_finish_failed, **finish_io)
+        _keep_failures(demo, (generation, finished))
 
         use_prompt.click(
             fn=lambda sent: sent if sent else gr.update(),

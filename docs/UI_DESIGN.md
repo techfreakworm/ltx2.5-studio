@@ -177,12 +177,20 @@ disabled while a run is in flight. The click runs three steps:
 
 1. A start step disables Generate and clears the monitor.
 2. `/on_generate` runs, with its inputs and outputs frozen.
-3. A final step re-enables Generate.
+3. A final step re-enables Generate and puts the result on the monitor.
 
-The final step is wired twice, as `.then` and as `.failure`, because Gradio 6.24 runs
-`.then` listeners only when the step completes. A request that would be refused never
-reaches `generate()`, so its red panel can truthfully say "Nothing ran. No GPU time
-was used."
+Gradio 6.24's page runs a step's `.then` listeners only when the step completes. When
+the server fails it (the function raised, or Gradio could not process what it returned,
+such as a result file it will not serve) or the page cannot apply its outputs, the page
+runs the `.failure` listeners alone. So the final step is `.then`, and a failure step of
+its own is wired as `.failure`, after `/on_generate` and after the final step too. The
+failure step sends no file, so it cannot fail the way the step before it did. It brings
+Generate back, puts the monitor back to its idle frame and shows a card: for a run that
+finished, "The run finished, but its result could not be shown", what the run used (on
+ZeroGPU, that it is billed), Press Generate again, and the server's own message as its
+Detail. Gradio tells the page only "Error", so the app keeps that message per session
+from the step that failed. A request that would be refused never reaches `generate()`,
+so its red panel can truthfully say "Nothing ran. No GPU time was used."
 
 **The report** is the `/on_generate` Markdown, in `#run-status`. That region is in the
 page from the first paint (empty, visually hidden), with `role="status"`, so its first

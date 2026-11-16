@@ -91,14 +91,15 @@ def test_generate_is_disabled_by_the_first_step_and_restored_by_a_final_one(demo
     assert not finish.trigger_only_on_success and not finish.trigger_only_on_failure
     # Gradio 6.24 runs `.then` listeners only when the step completes; a step
     # Gradio itself fails fires `.failure` listeners alone. Both must bring
-    # Generate back.
+    # Generate back, and the failure one must not re-send the result the step
+    # failed on (it would fail the same way): it is a step of its own.
     on_failure = [
         f
         for f in demo.fns.values()
         if f.trigger_after == run._id and f.trigger_only_on_failure and button in f.outputs
     ]
     assert on_failure, "nothing re-enables Generate when Gradio fails the generation step"
-    assert on_failure[0].fn is finish.fn
+    assert on_failure[0].fn is not finish.fn and on_failure[0].outputs == finish.outputs
     assert run.show_progress_on and by_elem_id(demo, "video-out") in run.show_progress_on
 
     start_values = start.fn("text_to_audio_video", False, "a harbour")

@@ -76,6 +76,7 @@ __all__ = [
     "quota_explainer",
     "readiness_reason",
     "recent_run_label",
+    "result_not_shown",
     "run_summary",
     "running",
     "shot_anchor_readout",
@@ -769,6 +770,8 @@ def monitor_caption(
         return f"**Running.** {mode.label}. Progress shows on the monitor."
     if kind == "failed":
         return "**This run failed.** The report below says why."
+    if kind == "unshown":
+        return "**The result could not be shown.** The report below says why."
     return READY
 
 
@@ -1093,12 +1096,40 @@ def success(result: Any, mode: Any) -> str:
     return "\n".join(lines)
 
 
-def lost_run() -> str:
-    """The generation step ended without a result this page can show."""
+#: The Detail of a card for a run the page could not show, when the server raised nothing.
+NO_SERVER_MESSAGE = "The server reported no error; this page could not show what it sent."
+
+
+def _detail(text: str | None) -> str:
+    return (
+        '<details class="mr-detail"><summary>Detail</summary>'
+        f"<p>{_e((text or '').strip() or NO_SERVER_MESSAGE)}</p></details>"
+    )
+
+
+def lost_run(detail: str | None = None) -> str:
+    """The generation step ended without a result this page can show.
+
+    ``detail`` is the server's own message, when it raised one.
+    """
     return (
         "### The run ended without a result\n\n"
-        "Any GPU time this run used is billed. Press Generate again; if it happens again, "
-        "reload the page and report the time of the run."
+        "Any GPU time this run used is billed. Press Generate again. If it happens again, "
+        "report it with the detail below.\n\n" + _detail(detail)
+    )
+
+
+def result_not_shown(facts: RunFacts, detail: str | None) -> str:
+    """A run that finished, whose result the page could not show.
+
+    What it used, by the device that ran it (billed on ZeroGPU), one next step, and
+    ``detail``: the server's own message, when it raised one.
+    """
+    billed = ", which is billed" if facts.on_zerogpu else ""
+    return (
+        "### The run finished, but its result could not be shown\n\n"
+        f"It used {took_words(facts)}{billed}. Press Generate again. If it happens again, "
+        "report it with the detail below.\n\n" + _detail(detail)
     )
 
 

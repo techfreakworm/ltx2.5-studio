@@ -37,6 +37,7 @@ __all__ = [
     "example_values",
     "export_flags",
     "frames_for_seconds",
+    "has_result",
     "match_size",
     "media_size",
     "mode_switch",
@@ -58,6 +59,7 @@ __all__ = [
     "review",
     "run",
     "seconds_for_frames",
+    "unshown_report",
 ]
 
 #: The bay pre-builds this many adapter rows.
@@ -887,6 +889,31 @@ class RunOutcome:
 
     def as_tuple(self) -> tuple[Any, Any, str]:
         return (self.video, self.audio, self.status)
+
+
+def has_result(outcome: RunOutcome | None) -> bool:
+    """True for a run that finished with a file to show."""
+    return (
+        outcome is not None
+        and outcome.result is not None
+        and outcome.error is None
+        and (outcome.video is not None or outcome.audio is not None)
+    )
+
+
+def unshown_report(outcome: RunOutcome | None, server_message: str | None) -> str:
+    """The report for a run whose step Gradio failed: the handler raised, or Gradio could
+    not process or deliver what it returned.
+
+    A run with a result: it finished, what it used, and the server's message. A run whose
+    own report is a failure or a refusal: that report, which already says whether GPU time
+    was used. No outcome at all: it ended without a result.
+    """
+    if outcome is None:
+        return render.lost_run(server_message)
+    if not has_result(outcome):
+        return outcome.status
+    return render.result_not_shown(run_facts(outcome), server_message)
 
 
 def run(mode_id: str, *values: Any, progress: Any = None) -> RunOutcome:
