@@ -55,16 +55,13 @@ already lives somewhere else -- and a container written at the wrong rate is a
 video that plays at the wrong speed, which again reports as nothing. Absent,
 they raise.
 
-**The frames are measured on the way out, and never refused.** A file can be
+**The frames are looked at on the way out, and never refused.** A file can be
 well-formed, the right length, the right size, full of distinct frames -- and be
-colour static. One was, and every content check this project had scored it a
-PASS, because distinctness, byte count, geometry and brightness range are all
-properties of noise. :func:`measure_structure` asks the one question they cannot:
-is there anything at a scale above one pixel? The answer rides back on the
-result's warnings channel and **nothing here raises on it**, because by the time
-these frames exist the user has already paid 35+ GPU-seconds for them and this
-is a heuristic that is wrong about real murky output by design. Emit the file,
-attach the note, let a human look.
+flat grey, a picture under a grey veil, or colour static. :func:`assess_picture`
+names those three from a few frames; what it finds rides back on the result's
+warnings channel as a plain-language hint and **nothing here raises on it**,
+because by the time these frames exist the user has paid for them and a
+statistic is not a verdict. Emit the file, attach the note, let a human look.
 
 ``av`` is the one media stack: it is already a pinned dependency for decoding
 conditioning video and uploaded audio, and using it here means the audio-only
@@ -108,6 +105,7 @@ _log = logging.getLogger(__name__)
 __all__ = [
     "AUDIO_FILENAME",
     "AUDIO_ONLY_CODEC",
+    "FLAT_MAX_LUMA_STD",
     "LOW_BLOCK_STD",
     "LOW_LUMA_BAND",
     "MAX_AUDIO_CHANNELS",
@@ -115,7 +113,14 @@ __all__ = [
     "MIN_STRUCTURE_RATIO",
     "MUXED_AUDIO_CHANNELS",
     "MUXED_AUDIO_CODEC",
+    "PICTURE_CONDITIONS",
+    "STATIC_MAX_CORRELATION",
+    "STATIC_MIN_COLOURFULNESS",
+    "STRUCTURE_ANALYSIS_SIZE",
     "STRUCTURE_SAMPLE_FRAMES",
+    "VEILED_MAX_COLOURFULNESS",
+    "VEILED_MAX_WHITE_LEVEL",
+    "VEILED_MIN_BLACK_LEVEL",
     "VIDEO_CODEC",
     "VIDEO_COLOUR_MATRIX",
     "VIDEO_COLOUR_RANGE",
@@ -126,7 +131,11 @@ __all__ = [
     "VIDEO_PIXEL_FORMAT",
     "VIDEO_PRESET",
     "FrameStructure",
+    "PictureCheck",
+    "PictureCondition",
+    "PictureMeasurements",
     "SuppliedAudio",
+    "assess_picture",
     "directory_size",
     "dropped_audio_warning",
     "enforce_retention",
@@ -589,141 +598,200 @@ def _conformed_supplied_audio(supplied: SuppliedAudio, *, sampling_rate: int, ta
 
 
 # ---------------------------------------------------------------------------
-# structure -- is there a picture in there, or only colour?
+# picture check -- is there a usable picture in there?
 # ---------------------------------------------------------------------------
 #
-# Every content check this project had could be passed by structureless
-# garbage. The artifact that proved it had 121 of 121 distinct frames, the
-# geometry the request asked for, non-zero bytes and a full luma range -- and
-# was colour static. Distinctness, byte count, geometry and brightness range
-# are all properties of *noise*, so a checker built from them scores noise as a
-# pass and always will.
+# Three conditions, each with its own reason:
 #
-# What separates a picture from static is that a picture has structure at a
-# scale ABOVE one pixel and static does not. Two ratios say that, and both are
-# divided by the frame's own luma standard deviation so that they measure shape
-# rather than contrast -- a dim shot and a bright shot of the same scene land in
-# the same place:
+# * flat: no picture. Brightness barely varies across the frame.
+# * veiled: a picture under a grey veil. The veil pulls both ends of the tonal
+#   range toward grey: no blacks, no bright highlights, almost no colour. A dark,
+#   low-key shot keeps its blacks and a bright, overcast one its highlights.
+# * static: coloured speckle. Brightness at one point says nothing about the
+#   brightness an eighth of a frame away, where any real scene has shapes,
+#   light and horizon; and it is strongly coloured, so grey texture (snow,
+#   gravel, a starfield) is left alone.
 #
-# * ``structure_ratio`` (SR) = std of the 8x8 box means / std of the pixels.
-#   Averaging 8x8 blocks of a real picture keeps most of its variation, because
-#   neighbouring pixels agree; averaging 8x8 blocks of noise cancels it. Measured
-#   0.918..0.994 across every banked real artifact, 0.530 on the failure.
-# * ``high_frequency_ratio`` (HF) = std of the 4-neighbour Laplacian / std of the
-#   pixels. The Laplacian is what is left after the picture is subtracted, so it
-#   is small on a picture and larger than the signal itself on noise. Measured
-#   0.147..0.386 across the banked set, 3.146 on the failure.
-#
-# **Temporal difference is deliberately NOT the signal here, and this module has
-# never carried a temporal refusal -- do not add one.** The offline runner did:
-# an absolute ``mean |Δ| < 0.5`` gate. It did reject the operator's failure
-# (0.403), but by accident and with no usable margin -- the banked ``r7b``
-# artifact, then believed to be a legitimate near-static 9-frame render, measures
-# 0.864, only 2.0x above the thing being rejected. A gate whose true and false cases are a factor
-# of two apart is a coin toss waiting to happen, and this one has since been
-# caught landing wrong: it refused a real 512x960x121 render at 0.4071, and that
-# render has a sibling at 0.3859 -- a legitimate artifact BELOW the failure the
-# threshold was calibrated against. The populations overlap, so the axis cannot
-# separate them, so it is a warning there now. SR's are 1.31x and 1.32x either
-# side of 0.70, which is the geometric middle of the two populations, and HF's
-# are 2.6x and 3.1x either side of 1.0.
-#
-# On this path the question does not even arise: **nothing measured about the
-# frames may refuse a write.** By the time they exist the user has paid the
-# GPU-seconds, and `structure_notes` demotes even the refusal-grade structure
-# finding to a note for exactly that reason.
-#
-# **Saturation is measured and never asserted on.** A deliberately monochrome
-# render measures 0.00 and is not a defect; making colour a requirement would
-# refuse a legitimate black-and-white shot, which is the false-defect direction
-# that has already cost this build days.
+# Up to STRUCTURE_SAMPLE_FRAMES evenly spaced frames are resized to one analysis
+# size before anything is measured, so a picture gets the same answer at any
+# resolution. Each statistic is the median over those frames. Nothing here
+# refuses a write: a condition becomes a plain-language hint on the result.
 
-#: Below this the 8x8 box means have cancelled out -- there is nothing at the
-#: block scale. On its own it is not enough (a legitimately soft, defocused shot
-#: could sit low), which is why the refusal needs the noise term too.
-MIN_STRUCTURE_RATIO = 0.70
+#: Long side, in pixels, that every sampled frame is resized to first.
+STRUCTURE_ANALYSIS_SIZE = 256
 
-#: Above this the residual after removing the picture is bigger than the picture.
-#: Real footage cannot do that; per-pixel noise does it by definition.
-MAX_HIGH_FREQUENCY_RATIO = 1.0
-
-#: Absolute, not a ratio: the 8x8 box means barely move at all. WARN only --
-#: ``r4a`` in the banked set measures 5.33 and is a real (if murky) render.
-LOW_BLOCK_STD = 8.0
-
-#: p99 - p1 of luma. Below this the whole frame lives in a narrow brightness
-#: band. WARN only, for the same reason.
-LOW_LUMA_BAND = 32.0
-
-#: Frames to measure on the app path. Evenly spaced, median-aggregated; on the
-#: banked set the 16-frame estimate tracks the full decode to within 1.6% on
-#: every metric, for a twentieth of the work.
+#: Frames looked at per video, evenly spaced, both ends included.
 STRUCTURE_SAMPLE_FRAMES = 16
 
-#: The side of the box filter. 8 because that is the scale at which "adjacent
-#: pixels agree" starts to mean something and still well below any real subject.
+# Thresholds from a labelled set of 38 outputs, every one looked at, measured
+# 2026-11-16: 23 good, 3 flat grey, 9 veiled, 3 colour static. Brackets: the
+# worst good and worst bad value at the analysis size. Colourfulness is
+# Hasler & Süsstrunk's (15 "slightly", 33 "moderately colourful").
+FLAT_MAX_LUMA_STD = 6.0  # luma std, 0..255 (good >= 22.0, grey <= 4.3)
+VEILED_MIN_BLACK_LEVEL = 40.0  # luma p1 (veiled >= 57.6)
+VEILED_MAX_WHITE_LEVEL = 135.0  # luma p99 (good >= 155.0, veiled <= 115.1)
+VEILED_MAX_COLOURFULNESS = 20.0  # (veiled <= 13.8)
+STATIC_MAX_CORRELATION = 0.10  # luma correlation at 1/8 frame (good >= 0.188, static <= 0.033)
+STATIC_MIN_COLOURFULNESS = 33.0  # (static >= 62.9)
+
+# The retired structure-ratio gate's names and values, kept importable for older
+# callers. No condition reads them.
+MIN_STRUCTURE_RATIO = 0.70
+MAX_HIGH_FREQUENCY_RATIO = 1.0
+LOW_BLOCK_STD = 8.0
+LOW_LUMA_BAND = 32.0
+
+#: Correlation lag in analysis pixels: an eighth of the long side.
+_CORRELATION_LAG = STRUCTURE_ANALYSIS_SIZE // 8
+
+#: Box side for the report-only block statistics.
 _BLOCK = 8
 
-#: A frame whose luma std is below this has no contrast to normalise by, so SR
-#: and HF are 0/0. Such frames are counted and EXCLUDED from the ratios rather
-#: than folded in as zeros -- "could not measure" must not read as "measured and
-#: bad", and the flatness itself is what :data:`LOW_BLOCK_STD` and the runner's
-#: own flat-frame check are for.
+#: Below this luma std a frame has no variation to normalise a ratio by.
 _MIN_CONTRAST = 1e-3
+
+_HINT = (
+    "If that is not what you asked for, try another seed or prompt. This is an automatic "
+    "check and only a hint: your video was saved as usual."
+)
 
 
 @dataclass(frozen=True)
-class FrameStructure:
-    """What the frames contain, as numbers. Medians over the sampled frames.
+class PictureCondition:
+    """One named way a picture goes wrong. ``rule`` is for logs; ``note`` is what the user reads."""
 
-    ``structure_ratio`` and ``high_frequency_ratio`` are ``None`` when no
-    sampled frame had enough contrast (or enough pixels) to measure them. That
-    is a third state on purpose: it is neither a pass nor a fail, and every
-    caller here treats it as "not checked" rather than "checked and fine".
+    name: str
+    rule: str
+    note: str
+
+
+PICTURE_CONDITIONS = (
+    PictureCondition(
+        name="flat",
+        rule=f"luma std < {FLAT_MAX_LUMA_STD:g}",
+        note=f"This picture looks almost completely flat: one even tone with no shapes or "
+        f"detail in it. {_HINT}",
+    ),
+    PictureCondition(
+        name="veiled",
+        rule=(
+            f"luma p1 >= {VEILED_MIN_BLACK_LEVEL:g}, luma p99 < {VEILED_MAX_WHITE_LEVEL:g} and "
+            f"colourfulness < {VEILED_MAX_COLOURFULNESS:g}"
+        ),
+        note=f"This picture is very low in contrast and almost colourless, as if seen through "
+        f"a grey haze, so it may be washed out. {_HINT}",
+    ),
+    PictureCondition(
+        name="static",
+        rule=(
+            f"luma correlation at 1/8 frame < {STATIC_MAX_CORRELATION:g} and colourfulness >= "
+            f"{STATIC_MIN_COLOURFULNESS:g}"
+        ),
+        note=f"This picture looks like coloured speckle with no larger shapes in it, so it may "
+        f"be noise rather than a scene. {_HINT}",
+    ),
+)
+
+_CONDITIONS = {condition.name: condition for condition in PICTURE_CONDITIONS}
+
+
+@dataclass(frozen=True)
+class PictureMeasurements:
+    """Medians over the sampled frames, each resized to the analysis size first.
+
+    ``None`` means "could not measure" (no frames, or nothing varies), never
+    "fine". The last five are reported for continuity with older runs; no
+    condition reads them.
     """
 
     frames: int
     sampled: int
+    flat_frames: int
+    luma_std: float | None
+    black_level: float | None
+    white_level: float | None
+    colourfulness: float | None
+    long_range_correlation: float | None
+    luma_band: float | None
     structure_ratio: float | None
     high_frequency_ratio: float | None
     block_std: float | None
-    luma_band: float | None
-    luma_std: float | None
     saturation: float | None
-    flat_frames: int
-
-    def render(self) -> str:
-        def number(value, spec=".4f"):
-            return "n/a" if value is None else format(value, spec)
-
-        line = (
-            f"structure {number(self.structure_ratio)} (>= {MIN_STRUCTURE_RATIO}) · "
-            f"high-freq {number(self.high_frequency_ratio)} "
-            f"(<= {MAX_HIGH_FREQUENCY_RATIO}) · "
-            f"block std {number(self.block_std, '.3f')} · "
-            f"luma band {number(self.luma_band, '.2f')} · "
-            f"luma std {number(self.luma_std, '.3f')} · "
-            f"saturation {number(self.saturation, '.4f')} (reported, never asserted)"
-        )
-        if self.flat_frames:
-            line += f" · {self.flat_frames}/{self.sampled} frame(s) too flat to measure a ratio"
-        return f"{line}  [median of {self.sampled} of {self.frames} frames]"
 
 
-def _luma(frame):
-    """0.299R + 0.587G + 0.114B, float32, on one ``[H, W, 3]`` uint8 frame."""
+#: The measurement record's older name.
+FrameStructure = PictureMeasurements
+
+
+@dataclass(frozen=True)
+class PictureCheck:
+    """What :func:`assess_picture` found: the numbers, the conditions that fired, the notes."""
+
+    measurements: PictureMeasurements
+    conditions: tuple[str, ...]
+    notes: tuple[str, ...]
+
+
+def _resample_weights(size_in: int, size_out: int):
+    """``[size_out, size_in]`` weights: area averages going down, linear going up."""
+    import numpy as np
+
+    if size_out < size_in:
+        scale = size_in / size_out
+        start = np.arange(size_out, dtype=np.float64)[:, None] * scale
+        pixel = np.arange(size_in, dtype=np.float64)[None, :]
+        overlap = np.minimum(start + scale, pixel + 1.0) - np.maximum(start, pixel)
+        return (np.clip(overlap, 0.0, None) / scale).astype(np.float32)
+    position = np.clip((np.arange(size_out) + 0.5) * size_in / size_out - 0.5, 0, size_in - 1)
+    low = np.floor(position).astype(np.int64)
+    high = np.minimum(low + 1, size_in - 1)
+    fraction = (position - low).astype(np.float32)
+    weights = np.zeros((size_out, size_in), dtype=np.float32)
+    rows = np.arange(size_out)
+    np.add.at(weights, (rows, low), 1.0 - fraction)
+    np.add.at(weights, (rows, high), fraction)
+    return weights
+
+
+def _analysis_shape(height: int, width: int) -> tuple[int, int]:
+    scale = STRUCTURE_ANALYSIS_SIZE / max(height, width)
+    return max(1, round(height * scale)), max(1, round(width * scale))
+
+
+def _at_analysis_size(frame, weights: dict):
+    """One ``[H, W, 3]`` frame as float32 at the analysis size, aspect kept.
+
+    ``weights`` caches the resampling matrices across the frames of one call.
+    """
     import numpy as np
 
     values = np.asarray(frame, dtype=np.float32)
-    return values[..., 0] * 0.299 + values[..., 1] * 0.587 + values[..., 2] * 0.114
+    height, width = values.shape[:2]
+    out_height, out_width = _analysis_shape(height, width)
+
+    def matrix(size_in, size_out):
+        if (size_in, size_out) not in weights:
+            weights[size_in, size_out] = _resample_weights(size_in, size_out)
+        return weights[size_in, size_out]
+
+    def rows(array):
+        if out_height == height:
+            return array
+        return np.tensordot(matrix(height, out_height), array, axes=(1, 0))
+
+    def columns(array):
+        if out_width == width:
+            return array
+        return np.tensordot(array, matrix(width, out_width), axes=(1, 1)).transpose(0, 2, 1)
+
+    # Shrinking the axis that ends up smaller first costs fewer multiplications.
+    if out_height <= out_width:
+        return np.ascontiguousarray(columns(rows(values)))
+    return np.ascontiguousarray(rows(columns(values)))
 
 
 def _block_means(luma):
-    """The 8x8 box means. Ragged right/bottom edges are dropped, not padded.
-
-    Padding would invent pixels and give the edge blocks an artificial variance
-    of their own; dropping costs at most seven rows and columns.
-    """
+    """The 8x8 box means; ragged right/bottom edges are dropped, not padded."""
     height, width = luma.shape
     rows, columns = height // _BLOCK, width // _BLOCK
     if rows == 0 or columns == 0:
@@ -740,14 +808,59 @@ def _laplacian4(luma):
     return 4.0 * middle - luma[:-2, 1:-1] - luma[2:, 1:-1] - luma[1:-1, :-2] - luma[1:-1, 2:]
 
 
-def _saturation(frame):
-    """Mean ``(max - min) / max`` over the pixels. Reported, never asserted on."""
+def _correlation(luma, lag: int):
+    """Mean of the horizontal and vertical luma autocorrelation at ``lag`` pixels."""
     import numpy as np
 
-    values = np.asarray(frame, dtype=np.float32)
-    high = values.max(axis=-1)
-    low = values.min(axis=-1)
-    return float(np.mean(np.where(high > 0.0, (high - low) / np.maximum(high, 1.0), 0.0)))
+    centred = luma - luma.mean()
+    variance = float(np.mean(centred * centred))
+    pairs = []
+    if centred.shape[1] > lag:
+        pairs.append(float(np.mean(centred[:, lag:] * centred[:, :-lag])))
+    if centred.shape[0] > lag:
+        pairs.append(float(np.mean(centred[lag:] * centred[:-lag])))
+    if not pairs or variance <= 0.0:
+        return None
+    return sum(pairs) / len(pairs) / variance
+
+
+def _frame_statistics(frame, weights: dict) -> dict:
+    import numpy as np
+
+    rgb = _at_analysis_size(frame, weights)
+    red, green, blue = rgb[..., 0], rgb[..., 1], rgb[..., 2]
+    luma = red * 0.299 + green * 0.587 + blue * 0.114
+    luma_std = float(luma.std())
+    black, white = (float(value) for value in np.percentile(luma, (1.0, 99.0)))
+    red_green = red - green
+    yellow_blue = 0.5 * (red + green) - blue
+    high, low = rgb.max(axis=-1), rgb.min(axis=-1)
+    blocks = _block_means(luma)
+    stats = {
+        "luma_std": luma_std,
+        "luma_band": white - black,
+        "black_level": black,
+        "white_level": white,
+        "colourfulness": float(
+            np.hypot(red_green.std(), yellow_blue.std())
+            + 0.3 * np.hypot(red_green.mean(), yellow_blue.mean())
+        ),
+        "long_range_correlation": None,
+        "structure_ratio": None,
+        "high_frequency_ratio": None,
+        "block_std": None if blocks is None else float(blocks.std()),
+        "saturation": float(
+            np.mean(np.where(high > 0.0, (high - low) / np.maximum(high, 1.0), 0.0))
+        ),
+    }
+    if luma_std >= _MIN_CONTRAST:
+        stats["long_range_correlation"] = _correlation(luma, _CORRELATION_LAG)
+        if stats["block_std"] is not None:
+            stats["structure_ratio"] = stats["block_std"] / luma_std
+        laplacian = _laplacian4(luma)
+        if laplacian is not None:
+            stats["high_frequency_ratio"] = float(laplacian.std()) / luma_std
+    return stats
 
 
 def _sampled_indices(count: int, sample):
@@ -759,149 +872,125 @@ def _sampled_indices(count: int, sample):
     return [int(index) for index in np.unique(np.linspace(0, count - 1, sample).round())]
 
 
-def measure_structure(frames, *, sample=None) -> FrameStructure:
-    """Measure spatial structure over ``frames`` (``[F, H, W, 3]`` uint8 RGB).
+def measure_structure(frames, *, sample=STRUCTURE_SAMPLE_FRAMES) -> PictureMeasurements:
+    """The numbers :func:`assess_picture` judges, over ``frames`` (``[F, H, W, 3]`` uint8 RGB).
 
-    ``sample=None`` measures every frame -- 380 ms for 121 frames of 1216x704,
-    which is what the offline runner does. ``sample=16`` is the app path.
-
-    Aggregation is the MEDIAN, not the mean: one legitimately flat frame (a fade
-    to black, a cut) must not drag a whole healthy shot toward a warning, and one
-    accidentally structured frame must not rescue a stack of static.
+    Reads at most :data:`STRUCTURE_SAMPLE_FRAMES` frames whatever ``sample``
+    says (``None`` included), so the work is bounded for any length of video.
+    ``frames`` may be an array or any sequence; only the sampled items are read.
     """
     import numpy as np
 
     count = len(frames)
-    if count == 0:
-        return FrameStructure(
-            frames=0,
-            sampled=0,
-            structure_ratio=None,
-            high_frequency_ratio=None,
-            block_std=None,
-            luma_band=None,
-            luma_std=None,
-            saturation=None,
-            flat_frames=0,
-        )
+    limit = STRUCTURE_SAMPLE_FRAMES if sample is None else int(sample)
+    limit = max(1, min(limit, STRUCTURE_SAMPLE_FRAMES))
+    indices = _sampled_indices(count, limit) if count else []
+    weights: dict = {}
+    per_frame = [_frame_statistics(frames[index], weights) for index in indices]
 
-    indices = _sampled_indices(count, sample)
-    ratios: list[float] = []
-    high_frequencies: list[float] = []
-    block_stds: list[float] = []
-    bands: list[float] = []
-    luma_stds: list[float] = []
-    saturations: list[float] = []
-    flat = 0
-
-    for index in indices:
-        frame = frames[index]
-        luma = _luma(frame)
-        luma_std = float(luma.std())
-        luma_stds.append(luma_std)
-        low, high = (float(value) for value in np.percentile(luma, (1.0, 99.0)))
-        bands.append(high - low)
-        saturations.append(_saturation(frame))
-
-        blocks = _block_means(luma)
-        block_std = None if blocks is None else float(blocks.std())
-        if block_std is not None:
-            block_stds.append(block_std)
-
-        if luma_std < _MIN_CONTRAST:
-            flat += 1
-            continue
-        if block_std is not None:
-            ratios.append(block_std / luma_std)
-        laplacian = _laplacian4(luma)
-        if laplacian is not None:
-            high_frequencies.append(float(laplacian.std()) / luma_std)
-
-    def median(values):
+    def median(name):
+        values = [stats[name] for stats in per_frame if stats[name] is not None]
         return float(np.median(values)) if values else None
 
-    return FrameStructure(
+    return PictureMeasurements(
         frames=count,
         sampled=len(indices),
-        structure_ratio=median(ratios),
-        high_frequency_ratio=median(high_frequencies),
-        block_std=median(block_stds),
-        luma_band=median(bands),
-        luma_std=median(luma_stds),
-        saturation=median(saturations),
-        flat_frames=flat,
+        flat_frames=sum(1 for stats in per_frame if stats["luma_std"] < _MIN_CONTRAST),
+        luma_std=median("luma_std"),
+        black_level=median("black_level"),
+        white_level=median("white_level"),
+        colourfulness=median("colourfulness"),
+        long_range_correlation=median("long_range_correlation"),
+        luma_band=median("luma_band"),
+        structure_ratio=median("structure_ratio"),
+        high_frequency_ratio=median("high_frequency_ratio"),
+        block_std=median("block_std"),
+        saturation=median("saturation"),
     )
 
 
-def structure_failure(structure: FrameStructure) -> str | None:
-    """The one diagnosis strong enough to condemn an artifact, or ``None``.
+def _fired(measured: PictureMeasurements) -> tuple[str, ...]:
+    """At most one condition: flat, else veiled, else static."""
 
-    **Both** conditions, never either alone. Low SR by itself is a soft or
-    defocused shot; high HF by itself is a sharp, grainy one. Only together do
-    they say "there is nothing at the block scale AND the pixel-to-pixel
-    residual is larger than the signal", which is what structureless colour
-    static measures like and what no real render in the banked set comes close
-    to.
+    def below(value, limit):
+        return value is not None and value < limit
 
-    Returns a neutral statement of what was measured. The offline runner raises
-    on it; the app attaches it to the result as a warning and emits the file
-    anyway -- see :func:`structure_notes`.
+    def at_least(value, limit):
+        return value is not None and value >= limit
+
+    if below(measured.luma_std, FLAT_MAX_LUMA_STD):
+        return ("flat",)
+    if (
+        at_least(measured.black_level, VEILED_MIN_BLACK_LEVEL)
+        and below(measured.white_level, VEILED_MAX_WHITE_LEVEL)
+        and below(measured.colourfulness, VEILED_MAX_COLOURFULNESS)
+    ):
+        return ("veiled",)
+    if below(measured.long_range_correlation, STATIC_MAX_CORRELATION) and at_least(
+        measured.colourfulness, STATIC_MIN_COLOURFULNESS
+    ):
+        return ("static",)
+    return ()
+
+
+def assess_picture(frames, *, sample=STRUCTURE_SAMPLE_FRAMES) -> PictureCheck:
+    """Measure up to 16 frames and name what is wrong with the picture, if anything.
+
+    numpy only, bounded work. A good picture comes back with no conditions and
+    no notes.
     """
-    ratio = structure.structure_ratio
-    high_frequency = structure.high_frequency_ratio
-    if ratio is None or high_frequency is None:
+    measured = measure_structure(frames, sample=sample)
+    conditions = _fired(measured)
+    return PictureCheck(
+        measurements=measured,
+        conditions=conditions,
+        notes=tuple(_CONDITIONS[name].note for name in conditions),
+    )
+
+
+def _measurements(checked) -> PictureMeasurements:
+    return checked.measurements if isinstance(checked, PictureCheck) else checked
+
+
+def structure_notes(checked: PictureCheck | PictureMeasurements) -> tuple[str, ...]:
+    """The notes every result carries: one per condition that fired, none for a good picture.
+
+    Notes only, never a refusal -- by the time these frames exist the user has
+    paid for them, and a statistic is a hint, not a verdict.
+    """
+    if isinstance(checked, PictureCheck):
+        return checked.notes
+    return tuple(_CONDITIONS[name].note for name in _fired(checked))
+
+
+#: Older name of :func:`structure_notes`; the offline harness still calls it.
+structure_warnings = structure_notes
+
+
+def structure_failure(checked: PictureCheck | PictureMeasurements) -> str | None:
+    """The fired condition with its rule and the numbers behind it, or ``None``.
+
+    For the offline harness and logs, not for the user (the user gets
+    :func:`structure_notes`).
+    """
+    measured = _measurements(checked)
+    fired = _fired(measured)
+    if not fired:
         return None
-    if ratio >= MIN_STRUCTURE_RATIO or high_frequency <= MAX_HIGH_FREQUENCY_RATIO:
-        return None
-    return (
-        f"structure ratio {ratio:.4f} < {MIN_STRUCTURE_RATIO} AND high-frequency ratio "
-        f"{high_frequency:.4f} > {MAX_HIGH_FREQUENCY_RATIO}: the 8x8 box means have cancelled "
-        f"out and the pixel-to-pixel residual is larger than the picture. These frames carry no "
-        f"spatial structure -- that is colour static, not a scene. Real renders in the banked "
-        f"set measure 0.918..0.994 structure and 0.147..0.386 high-frequency"
-    )
-
-
-def structure_warnings(structure: FrameStructure) -> tuple[str, ...]:
-    """Things worth a human's attention that must never fail a run.
-
-    Both are absolute measures of how much there is to look at, and a real,
-    murky, low-contrast render trips them: the banked ``r4a`` measures 5.33 and
-    24.76 here. Refusing on either would destroy a legitimate artifact, so they
-    annotate and nothing more.
-    """
-    notes: list[str] = []
-    if structure.block_std is not None and structure.block_std < LOW_BLOCK_STD:
-        notes.append(
-            f"low detail: 8x8 block std {structure.block_std:.3f} < {LOW_BLOCK_STD}. The frames "
-            f"vary very little at the block scale -- worth looking at, not proof of a defect"
+    (name,) = fired
+    if name == "flat":
+        seen = f"luma std {measured.luma_std:.2f}"
+    elif name == "veiled":
+        seen = (
+            f"luma p1 {measured.black_level:.1f}, p99 {measured.white_level:.1f}, "
+            f"colourfulness {measured.colourfulness:.1f}"
         )
-    if structure.luma_band is not None and structure.luma_band < LOW_LUMA_BAND:
-        notes.append(
-            f"low contrast: luma p99-p1 {structure.luma_band:.2f} < {LOW_LUMA_BAND} on a 0..255 "
-            f"scale. The whole frame sits in a narrow brightness band -- worth looking at, not "
-            f"proof of a defect"
+    else:
+        seen = (
+            f"correlation {measured.long_range_correlation:.3f}, "
+            f"colourfulness {measured.colourfulness:.1f}"
         )
-    return tuple(notes)
-
-
-def structure_notes(structure: FrameStructure) -> tuple[str, ...]:
-    """Every finding as a WARNING, refusing nothing. The app's entry point.
-
-    The app must never raise on any of this. By the time these frames exist the
-    user has already paid 35+ GPU-seconds for them, and the detector is a
-    statistical pre-filter that is wrong about ``r4a``-class output by design.
-    A pre-filter may demote an artifact; it may not destroy one. So the file is
-    written, the note rides along on the result, and a human decides.
-    """
-    failure = structure_failure(structure)
-    if failure is None:
-        return structure_warnings(structure)
-    return (
-        f"this output may be structureless -- {failure}. The file was written anyway: "
-        f"this is a statistical check and it is not a verdict. Please look at it",
-        *structure_warnings(structure),
-    )
+    return f"{name} ({_CONDITIONS[name].rule}): measured {seen}"
 
 
 def dropped_audio_warning(mode: str) -> str:

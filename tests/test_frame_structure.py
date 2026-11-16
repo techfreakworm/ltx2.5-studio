@@ -1,66 +1,34 @@
-"""Spec for the structure detector — ``ltx25_studio/outputs.py``.
+"""Spec for the picture check: ``outputs.assess_picture`` and the notes every result carries.
 
-**Every content check this project had could be passed by structureless
-garbage.** The artifact that proved it came back from the Space with 121 of 121
-distinct frames, the geometry the request asked for, non-zero bytes and a full
-luma range — and it was colour static. ``scripts/space_matrix.py`` scored
-artifacts like it as PASS, and the app inspected the frames not at all: one
-``len(frames) == 0`` check and one ``st_size != 0`` check between the model and
-the user.
+Every finished video passes through a cheap check that tells the creator when the picture is
+probably broken. It names three conditions, each from statistics measured on up to 16 evenly
+spaced frames after resizing them to one analysis size (so the same picture gives the same answer
+at any resolution):
 
-The reason a checker built from those numbers can never work is that
-distinctness, byte count, geometry and brightness range are **properties of
-noise**. Noise has all of them, in abundance. What noise does not have is
-structure at a scale above one pixel, and that is the only thing worth
-measuring here.
+* ``flat``: no picture at all, one even tone (the operator's grey failure);
+* ``veiled``: a real picture under a grey veil: no blacks, no bright highlights, almost no
+  colour (the audio-to-video path before its fix);
+* ``static``: coloured speckle with no shape larger than a blob (the broken Space build).
 
-Two ratios say it, both divided by the frame's own luma std so they describe
-shape rather than contrast:
+The check is a hint, never a refusal: the file is always written, a good picture gets no note,
+and the note says what was seen without quoting numbers.
 
-* **SR** — 8x8 box-mean std over pixel std. Real pictures survive box-averaging
-  because neighbouring pixels agree; noise cancels.
-* **HF** — 4-neighbour Laplacian std over pixel std. The Laplacian is what is
-  left once the picture is subtracted, so on static it is *larger* than the
-  signal.
-
-The operator's standing ruling is the shape of this whole file: **a statistical
-gate is a pre-filter, never a verdict. It demotes artifacts; it never promotes
-one.** Three consequences, each with tests below:
-
-1. **Only one conjunction condemns** — low SR *and* high HF together. Either
-   alone describes a legitimate render (soft/defocused, or sharp/grainy).
-2. **The weaker findings only WARN.** ``block_std`` and ``luma_band`` are
-   absolute measures of how much there is to look at, and a real murky render
-   trips them: the banked ``r4a`` artifact measures 5.33 and 24.76 and is a
-   genuine (if poor) generation. Refusing on those destroys real work.
-3. **The app never raises on any of it.** By the time the frames exist the user
-   has paid 35+ GPU-seconds for them. The file is written, the note rides on
-   ``GenerationResult.warnings``, a human decides.
-
-Measured on the banked set, full decode, this implementation:
-
-    artifact          WxHxN            SR      HF   blk std    band     sat
-    run1/r8/repro     256x256x9     0.9259  0.2377   62.142  246.83  0.4868
-    r2_704            704x480x49    0.9201  0.2192   63.252  246.22  0.4781
-    r3_retry         1216x704x121   0.9199  0.2232   65.113  246.10  0.5131
-    r4a              1408x960x25    0.9756  0.3852    5.334   24.76  0.1670   WARN
-    r7a               256x256x9     0.9236  0.2029   64.574  248.06  0.4625
-    r7b               256x256x9     0.9939  0.1471   45.749  136.16  0.1415
-    d1_noauto         512x960x121   0.9183  0.2254   65.688  247.48  0.4896
-    r6_lora/r9        256x256x9     0.9271  0.2295   63.460  248.09  0.4944
-    THE FAILURE       512x960x121   0.5298  3.1455    1.360   13.00  0.0885   FAIL
-
-Worst real SR 0.9183, failure 0.5298; ``sqrt(0.9183 * 0.5298) = 0.6975``, so the
-0.70 gate sits at the geometric middle with 1.31x under the worst real render
-and 1.32x over the failure. HF: worst real 0.3852, failure 3.1455, gate 1.0 —
-2.6x and 3.1x. **Saturation is never gated on**: half the banked set is nearly
-monochrome and a deliberately black-and-white render measures 0.00.
-
-No GPU, no weights, no network: numpy arrays and ``av``, both pinned.
+Fixtures in ``tests/fixtures/structure/`` are real frames from local runs; their README lists the
+sources. The only real colour-static frames are Space outputs that are not copied into the repo,
+so static is synthesised below as random colour blobs and checked against what was measured on
+those frames (correlation at an eighth of the frame at most 0.033, colourfulness at least 62.9).
 """
 
 from __future__ import annotations
 
+import base64
+import io
+import json
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -69,390 +37,401 @@ from ltx25_studio import generate as generate_module
 from ltx25_studio import outputs
 
 np = pytest.importorskip("numpy")
+Image = pytest.importorskip("PIL.Image")
 
-SIZE = 64
-FRAMES = 9
+REPO = Path(__file__).resolve().parents[1]
+FIXTURES = Path(__file__).resolve().parent / "fixtures" / "structure"
+FRAMES = FIXTURES / "frames.json"
 SAMPLING_RATE = 48000
+STATIC_SIZE = 256
+
+EXPECTED = {"good": (), "bad_grey": ("flat",), "bad_washed": ("veiled",)}
+
+
+def fixture_entries():
+    return {entry["name"]: entry for entry in json.loads(FRAMES.read_text())["fixtures"]}
+
+
+def fixture_names():
+    return sorted(fixture_entries())
+
+
+def label_of(name):
+    return name.rsplit("_", 1)[0]
+
+
+def load(name):
+    data = base64.b64decode(fixture_entries()[name]["jpeg_base64"])
+    with Image.open(io.BytesIO(data)) as image:
+        return np.asarray(image.convert("RGB"))
+
+
+def stack(frame, count=4):
+    return np.repeat(frame[None], count, axis=0)
+
+
+def blob_static(height, width, *, seed=0, token=32, frames=1):
+    """Blobby colour static: random colours per 32-px block (the model's latent cell), a finer
+    16-px layer on top, softened edges. No two blocks agree, so nothing spans the frame."""
+    rng = np.random.default_rng(seed)
+    kernel = np.ones(4, np.float32) / 4
+
+    def soften(row):
+        return np.convolve(row, kernel, mode="same")
+
+    out = []
+    for _ in range(frames):
+
+        def layer(size):
+            rows, cols = -(-height // size) + 1, -(-width // size) + 1
+            grid = rng.random((rows, cols, 3)).astype(np.float32)
+            big = np.repeat(np.repeat(grid, size, 0), size, 1)
+            dy, dx = rng.integers(0, size, 2)
+            return big[dy : dy + height, dx : dx + width]
+
+        coarse, fine = layer(token), layer(token // 2)
+        luma = 255 * (0.7 * coarse[..., 0] + 0.3 * fine[..., 0])
+        hue = (coarse[..., 1:] - 0.5) * 2 * 255 * 0.22
+        rgb = np.stack(
+            [luma + hue[..., 0], luma - 0.5 * hue[..., 0] - 0.5 * hue[..., 1], luma + hue[..., 1]],
+            axis=-1,
+        )
+        for axis in (0, 1):
+            rgb = np.apply_along_axis(soften, axis, rgb)
+        out.append(np.clip(rgb, 0, 255).astype(np.uint8))
+    return np.stack(out)
+
+
+def resized(frame, long_side):
+    height, width = frame.shape[:2]
+    scale = long_side / max(height, width)
+    size = (max(1, round(width * scale)), max(1, round(height * scale)))
+    return np.asarray(Image.fromarray(frame).resize(size, Image.BICUBIC))
 
 
 # ---------------------------------------------------------------------------
-# frame stacks, built to measure like the artifacts they stand in for
+# the fixtures
 # ---------------------------------------------------------------------------
 
 
-def _grid():
-    return np.mgrid[0:SIZE, 0:SIZE].astype(np.float32)
+def test_the_fixtures_are_small_and_each_one_is_documented():
+    entries = fixture_entries()
+    readme = (FIXTURES / "README.md").read_text()
+    assert 0 < len(entries) <= 24
+    assert FRAMES.stat().st_size <= 400 * 1024
+    binary = {".jpg", ".jpeg", ".png", ".npy", ".npz", ".mp4"}
+    assert not [path.name for path in FIXTURES.iterdir() if path.suffix.lower() in binary]
+    for name, entry in entries.items():
+        assert f"| {name} |" in readme, f"{name} is not in the fixtures README"
+        assert entry["label"] == label_of(name) and entry["label"] in EXPECTED, name
+        assert entry["source"], name
+    assert {label_of(name) for name in entries} == set(EXPECTED)
 
 
-def _grey(planes):
-    """``[F, H, W]`` luma -> ``[F, H, W, 3]`` uint8. Saturation exactly 0.0."""
-    return np.repeat(np.clip(planes, 0, 255)[..., None], 3, axis=-1).astype(np.uint8)
+@pytest.mark.parametrize("name", fixture_names())
+def test_every_fixture_is_classified_as_labelled(name):
+    check = outputs.assess_picture(stack(load(name)))
+    assert check.conditions == EXPECTED[label_of(name)], check.measurements
+    assert bool(check.notes) == bool(EXPECTED[label_of(name)])
 
 
-def structureless_frames(count=FRAMES, seed=11):
-    """Colour static. Distinct, full-range, moving — and nothing is in it.
-
-    This is the operator's failure, reduced: every pre-existing check passes on
-    it, which is the point of the fixture.
-    """
-    return np.random.default_rng(seed).integers(0, 256, (count, SIZE, SIZE, 3), dtype=np.uint8)
+# ---------------------------------------------------------------------------
+# static, synthesised (see the module docstring)
+# ---------------------------------------------------------------------------
 
 
-def _base_pattern():
-    rows, columns = _grid()
-    return 40 + 90 * np.sin(columns / 11.0) * np.cos(rows / 17.0) + 60 * (rows / SIZE)
+@pytest.mark.parametrize("height,width", [(256, 256), (480, 704), (704, 1216), (960, 512)])
+def test_blobby_colour_static_is_named_static(height, width):
+    check = outputs.assess_picture(blob_static(height, width, frames=3))
+    measured = check.measurements
+    assert measured.long_range_correlation < 0.06, (
+        "the stand-in must decorrelate like the real frames"
+    )
+    assert 45 < measured.colourfulness < 100, "and be about as colourful as them"
+    assert check.conditions == ("static",)
 
 
-def near_static_frames(count=FRAMES):
-    """``r7b``-class: real structure, almost no motion. Must never FAIL.
-
-    The banked ``r7b`` — a 9-frame render whose mean frame-to-frame |Δ| is 0.864,
-    only 2.0x above the operator's failure at 0.403 — is the artifact that
-    disqualified temporal difference as the signal, so it gets a stand-in here.
-    (``r7b`` predates the int8 conditioning fix and 898dad2 invalidates its
-    content; what it stands for here is the near-static *shape*, and the fixture
-    below is synthetic in any case.) The runner's absolute ``mean |Δ|`` gate has since been demoted
-    to a warning for exactly this reason, after it was caught refusing a real
-    512x960x121 render at 0.4071 whose sibling measures 0.3859 — a legitimate
-    artifact BELOW the failure the threshold was calibrated against.
-    """
-    base = _base_pattern()
-    return _grey(np.stack([base + index * 1.4 for index in range(count)]))
+def test_pixel_noise_is_static_too():
+    noise = np.random.default_rng(11).integers(0, 256, (3, 128, 128, 3), dtype=np.uint8)
+    assert outputs.assess_picture(noise).conditions == ("static",)
 
 
-def monochrome_frames(count=FRAMES):
-    """Saturation 0.00 and perfectly healthy. Must never FAIL, must never WARN."""
-    rows, columns = _grid()
-    base = _base_pattern()
-    frames = []
-    for index in range(count):
-        distance = (columns - (12 + index * 4)) ** 2 + (rows - SIZE / 2) ** 2
-        frames.append(base + 120 * np.exp(-distance / 120.0))
-    return _grey(np.stack(frames))
+def test_grey_speckle_is_not_called_coloured():
+    """Snow, gravel, a starfield: texture with no colour is not the coloured mush."""
+    frames = blob_static(256, 256, frames=2)
+    grey = np.repeat(frames.mean(axis=-1, keepdims=True), 3, axis=-1).astype(np.uint8)
+    assert outputs.assess_picture(grey).conditions == ()
 
 
-def murky_frames(count=FRAMES):
-    """``r4a``-class: a real render with very little contrast. WARN, never FAIL."""
-    rows, columns = _grid()
-    base = 120 + 6 * np.sin(columns / 9.0) * np.cos(rows / 13.0)
-    return _grey(
-        np.stack([base + 3 * np.sin((columns + index * 5) / 9.0) for index in range(count)])
+# ---------------------------------------------------------------------------
+# the same picture at any resolution gives the same answer
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("name", ["good_7", "good_9", "good_10", "bad_grey_1", "bad_washed_2"])
+def test_a_fixture_at_1024_px_measures_like_it_does_at_256(name):
+    small = load(name)
+    large = resized(small, 1024)
+    assert max(large.shape[:2]) == 1024
+    at_256 = outputs.assess_picture(stack(small))
+    at_1024 = outputs.assess_picture(stack(large))
+    assert at_1024.conditions == at_256.conditions
+    # Within 1 % of the 0..255 scale or 5 %: bicubic enlargement rings a little at edges.
+    for field in ("luma_std", "black_level", "white_level", "colourfulness"):
+        assert getattr(at_1024.measurements, field) == pytest.approx(
+            getattr(at_256.measurements, field), rel=0.05, abs=2.5
+        ), field
+    assert at_1024.measurements.long_range_correlation == pytest.approx(
+        at_256.measurements.long_range_correlation, abs=0.03
     )
 
 
-def drifting_flat_frames(count=FRAMES):
-    """Each frame one flat colour; the brightness ramps across the stack.
-
-    The stack-wide std of this is 62. Its per-frame std is 0. That gap is the
-    mislabelled-``pixel_std`` bug, made visible.
-    """
-    return np.stack(
-        [np.full((SIZE, SIZE, 3), 20 + index * 24, dtype=np.uint8) for index in range(count)]
-    )
-
-
-def verdict(frames, **kwargs):
-    measured = outputs.measure_structure(frames, **kwargs)
-    return measured, outputs.structure_failure(measured), outputs.structure_warnings(measured)
+def test_static_at_256_px_and_its_1024_px_enlargement_are_both_static():
+    small = blob_static(256, 256)[0]
+    large = np.repeat(np.repeat(small, 4, axis=0), 4, axis=1)
+    assert outputs.assess_picture(stack(small)).conditions == ("static",)
+    assert outputs.assess_picture(stack(large)).conditions == ("static",)
 
 
 # ---------------------------------------------------------------------------
-# the thresholds are the measured ones
+# legitimate pictures that sit near a condition get no note
 # ---------------------------------------------------------------------------
 
 
-def test_the_thresholds_are_the_ones_the_banked_set_justifies():
-    """Pinned, because a threshold nudged without a re-measurement is how a gate
-    stops separating the two populations it was fitted to."""
-    assert outputs.MIN_STRUCTURE_RATIO == 0.70
-    assert outputs.MAX_HIGH_FREQUENCY_RATIO == 1.0
-    assert outputs.LOW_BLOCK_STD == 8.0
-    assert outputs.LOW_LUMA_BAND == 32.0
+@pytest.mark.parametrize("name", ["good_9", "good_10", "good_6"])
+def test_a_dark_contrasty_frame_yields_no_note(name):
+    frame = load(name)
+    check = outputs.assess_picture(stack(frame))
+    assert float(frame.mean()) < 90, "the fixture really is dark"
+    assert check.notes == () and check.conditions == ()
 
 
-def test_the_structure_gate_sits_between_the_two_measured_populations():
-    """1.31x under the worst real render, 1.32x over the failure. A gate with a
-    factor of two either side is a coin toss; this one is not."""
-    worst_real, the_failure = 0.9183, 0.5298
-    assert the_failure < outputs.MIN_STRUCTURE_RATIO < worst_real
-    assert worst_real / outputs.MIN_STRUCTURE_RATIO > 1.3
-    assert outputs.MIN_STRUCTURE_RATIO / the_failure > 1.3
+@pytest.mark.parametrize("name", ["good_7", "good_8"])
+def test_a_low_texture_sky_and_water_frame_yields_no_note(name):
+    check = outputs.assess_picture(stack(load(name)))
+    assert check.notes == () and check.conditions == ()
 
 
-def test_the_high_frequency_gate_sits_between_the_two_measured_populations():
-    worst_real, the_failure = 0.3852, 3.1455
-    assert worst_real < outputs.MAX_HIGH_FREQUENCY_RATIO < the_failure
-    assert outputs.MAX_HIGH_FREQUENCY_RATIO / worst_real > 2.5
-    assert the_failure / outputs.MAX_HIGH_FREQUENCY_RATIO > 3.0
+def test_a_dark_low_key_picture_is_not_called_washed_out():
+    """The dark portrait at 45 % brightness has no highlights and almost no colour, like a
+    veiled frame; what it lacks is the veil's lifted blacks."""
+    frame = (load("good_10").astype(np.float32) * 0.45).astype(np.uint8)
+    check = outputs.assess_picture(stack(frame))
+    measured = check.measurements
+    assert measured.white_level < outputs.VEILED_MAX_WHITE_LEVEL
+    assert measured.colourfulness < outputs.VEILED_MAX_COLOURFULNESS
+    assert measured.black_level < outputs.VEILED_MIN_BLACK_LEVEL
+    assert check.conditions == ()
+
+
+@pytest.mark.parametrize("name", ["good_12", "good_13"])
+def test_a_bright_overcast_picture_is_not_called_washed_out(name):
+    """The overcast beach is low in contrast, its blacks are lifted and it has little colour,
+    like a veiled frame; what it lacks is the veil's dimmed highlights."""
+    check = outputs.assess_picture(stack(load(name)))
+    measured = check.measurements
+    assert measured.black_level >= outputs.VEILED_MIN_BLACK_LEVEL
+    assert measured.colourfulness < outputs.VEILED_MAX_COLOURFULNESS
+    assert measured.white_level >= outputs.VEILED_MAX_WHITE_LEVEL
+    assert check.conditions == () and check.notes == ()
+
+
+def test_a_black_and_white_picture_yields_no_note():
+    real = load("good_14")
+    frame = load("good_1")
+    grey = np.repeat(frame.mean(axis=-1, keepdims=True), 3, axis=-1).astype(np.uint8)
+    for picture in (real, grey):
+        check = outputs.assess_picture(stack(picture))
+        assert check.measurements.colourfulness < 5.0
+        assert check.conditions == ()
+
+
+def test_one_odd_frame_cannot_swing_the_answer():
+    """A fade to black or a cut: the aggregate is a median over the sampled frames."""
+    good = stack(load("good_2"), 8)
+    spoiled = np.concatenate([good, np.zeros((2, *good.shape[1:]), dtype=np.uint8)])
+    assert outputs.assess_picture(spoiled).conditions == ()
+    static = blob_static(256, 256, frames=6)
+    rescued = np.concatenate([static, resized(load("good_11"), 256)[None]])
+    assert outputs.assess_picture(rescued).conditions == ("static",)
+
+
+def test_a_flat_video_is_named_flat_however_it_drifts():
+    frames = np.stack([np.full((64, 64, 3), 20 + index * 24, dtype=np.uint8) for index in range(9)])
+    check = outputs.assess_picture(frames)
+    assert check.conditions == ("flat",)
+    assert check.measurements.long_range_correlation is None, "no variation, nothing to correlate"
+
+
+def test_an_empty_stack_measures_nothing_and_says_nothing():
+    check = outputs.assess_picture(np.zeros((0, 64, 64, 3), dtype=np.uint8))
+    assert check.measurements.frames == 0 and check.measurements.sampled == 0
+    assert check.measurements.luma_std is None
+    assert check.conditions == () and check.notes == ()
 
 
 # ---------------------------------------------------------------------------
-# it catches the thing every other check missed
+# the notes
 # ---------------------------------------------------------------------------
 
-
-def test_colour_static_is_condemned():
-    measured, failure, _warnings = verdict(structureless_frames())
-    assert failure is not None, measured.render()
-    assert measured.structure_ratio < outputs.MIN_STRUCTURE_RATIO
-    assert measured.high_frequency_ratio > outputs.MAX_HIGH_FREQUENCY_RATIO
-    assert "colour static" in failure
-
-
-def test_every_pre_existing_check_passes_on_that_same_static():
-    """The reason this detector had to exist at all.
-
-    Distinct frames, a full pixel std, and motion two orders of magnitude above
-    the level that would even raise an eyebrow. Not one of them is evidence of a
-    picture — they are all properties of noise, and noise has them in abundance.
-    """
-    frames = structureless_frames().astype("float32")
-    distinct = len({frame.tobytes() for frame in structureless_frames()})
-    per_frame_std = float(np.median([frame.std() for frame in frames]))
-    delta = float(np.mean([np.abs(frames[i + 1] - frames[i]).mean() for i in range(FRAMES - 1)]))
-
-    assert distinct == FRAMES, "9 of 9 distinct — exactly what the failure reported"
-    assert per_frame_std > 1.0, "nowhere near flat"
-    assert delta > 0.5, "and it moves, by a factor of 100 over the near-static warning"
-
-
-# ---------------------------------------------------------------------------
-# and it does not catch anything else — the direction that costs real work
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize(
-    "name,builder",
-    [
-        ("near-static, r7b-class", near_static_frames),
-        ("monochrome", monochrome_frames),
-        ("murky, r4a-class", murky_frames),
-    ],
+FORBIDDEN = (
+    "luma",
+    "band",
+    "std",
+    "correlation",
+    "colourfulness",
+    "ratio",
+    "threshold",
+    "percentile",
+    "p99",
+    "p1",
+    "banked",
+    "artifact",
+    "dataset",
+    "statistic",
+    "structure",
+    "measured",
+    "median",
+    "failed",
+    "failure",
+    "error",
+    "broken",
 )
-def test_a_real_render_is_never_condemned(name, builder):
-    measured, failure, _warnings = verdict(builder())
-    assert failure is None, f"{name} was refused: {measured.render()}"
-    assert measured.structure_ratio >= outputs.MIN_STRUCTURE_RATIO
 
 
-def test_a_monochrome_render_is_neither_failed_nor_warned():
-    """Saturation 0.00 is a legitimate artistic choice, not a defect. Gating on
-    colour would refuse a black-and-white render — the false-defect direction
-    that has already cost this build days."""
-    measured, failure, warnings = verdict(monochrome_frames())
-    assert measured.saturation == pytest.approx(0.0, abs=1e-6)
-    assert failure is None
-    assert warnings == (), measured.render()
+def every_note():
+    notes = {condition.name: condition.note for condition in outputs.PICTURE_CONDITIONS}
+    assert set(notes) == {"flat", "veiled", "static"}
+    return notes
 
 
-def test_saturation_is_measured_and_never_asserted_on():
-    """Both directions of the same property, so the check cannot quietly become
-    a colour requirement."""
-    colourful = outputs.measure_structure(structureless_frames())
-    monochrome = outputs.measure_structure(monochrome_frames())
-    assert colourful.saturation > monochrome.saturation
-    assert "never asserted" in monochrome.render()
+@pytest.mark.parametrize("name", ["flat", "veiled", "static"])
+def test_a_note_says_what_was_seen_and_that_it_is_a_hint(name):
+    note = every_note()[name]
+    lowered = note.lower()
+    assert not re.search(r"\d", note), f"no numbers or ranges: {note}"
+    for word in FORBIDDEN:
+        assert not re.search(rf"\b{re.escape(word)}\b", lowered), f"{word!r} in {note}"
+    assert "hint" in lowered and "saved" in lowered
+    assert "if that is not what you asked for" in lowered
 
 
-def test_a_near_static_render_survives_where_the_temporal_gate_barely_would():
-    """``r7b`` measures 0.864 mean |Δ| against the 0.5 the runner used to refuse
-    on, and the operator's static measures 0.403 — a factor of 2.0 between what
-    was then a pass and a fail. The structure ratio separates the same two
-    artifacts by 1.31x and 1.32x either side of its gate, which is why it, not
-    motion, is the load-bearing check — and why motion is now only reported."""
-    frames = near_static_frames().astype("float32")
-    delta = float(np.mean([np.abs(frames[i + 1] - frames[i]).mean() for i in range(FRAMES - 1)]))
-    measured, failure, _warnings = verdict(near_static_frames())
-    assert delta < 2.0, "this fixture really is nearly still"
-    assert failure is None
-    assert measured.structure_ratio > 0.9
+def test_each_condition_says_something_different():
+    notes = every_note()
+    assert "flat" in notes["flat"].lower()
+    assert "contrast" in notes["veiled"].lower() and "colour" in notes["veiled"].lower()
+    assert "speckle" in notes["static"].lower()
+
+
+def test_the_notes_a_result_carries_are_the_checks_own():
+    frame = load("bad_washed_1")
+    check = outputs.assess_picture(stack(frame))
+    assert outputs.structure_notes(check) == check.notes == (every_note()["veiled"],)
+    measured = outputs.measure_structure(stack(frame))
+    assert outputs.structure_notes(measured) == check.notes
+    assert outputs.structure_notes(outputs.assess_picture(stack(load("good_3")))) == ()
 
 
 # ---------------------------------------------------------------------------
-# the WARN tier annotates and nothing more
+# bounded and torch-free
 # ---------------------------------------------------------------------------
 
 
-def test_a_low_contrast_render_warns_on_both_counts_and_fails_on_neither():
-    """``r4a`` measures block std 5.33 and luma band 24.76 and is real output.
-    This is the tier that exists so those numbers can be said out loud without
-    destroying the artifact."""
-    measured, failure, warnings = verdict(murky_frames())
-    assert failure is None
-    assert measured.block_std < outputs.LOW_BLOCK_STD
-    assert measured.luma_band < outputs.LOW_LUMA_BAND
-    assert any("low detail" in note for note in warnings)
-    assert any("low contrast" in note for note in warnings)
-    assert all("not proof of a defect" in note for note in warnings)
+class CountingFrames:
+    """A 481-frame video that records which frames were read."""
+
+    def __init__(self, frame, count):
+        self.frame, self.count, self.read = frame, count, []
+
+    def __len__(self):
+        return self.count
+
+    def __getitem__(self, index):
+        self.read.append(index)
+        return self.frame
 
 
-def test_a_healthy_render_warns_about_nothing():
-    """The other direction. A warner that always warns is noise, and noise gets
-    ignored — which is how the one warning that mattered would be missed."""
-    _measured, failure, warnings = verdict(monochrome_frames())
-    assert failure is None and warnings == ()
+def test_a_481_frame_video_is_judged_on_at_most_16_frames():
+    frames = CountingFrames(load("good_4"), 481)
+    check = outputs.assess_picture(frames)
+    assert len(set(frames.read)) <= outputs.STRUCTURE_SAMPLE_FRAMES == 16
+    assert 0 in frames.read and 480 in frames.read, "evenly spaced, both ends"
+    assert check.measurements.frames == 481 and check.measurements.sampled == 16
+    frames.read.clear()
+    outputs.measure_structure(frames, sample=None)
+    assert len(set(frames.read)) <= 16, "the older name is bounded the same way"
 
 
-def test_the_two_warn_thresholds_sit_above_the_real_artifact_that_trips_them():
-    """r4a is *supposed* to trip these. That is the tier working, not a bug."""
-    assert outputs.LOW_BLOCK_STD > 5.334
-    assert outputs.LOW_LUMA_BAND > 24.76
-    assert outputs.LOW_BLOCK_STD < 45.749, "r7b, the next lowest real render, is clear of it"
-    assert outputs.LOW_LUMA_BAND < 136.16
+def test_a_large_frame_is_measured_at_the_analysis_size():
+    frame = resized(load("good_2"), 1920)
+    check = outputs.assess_picture(stack(frame, 2))
+    assert outputs.STRUCTURE_ANALYSIS_SIZE == 256
+    assert check.conditions == ()
 
 
-# ---------------------------------------------------------------------------
-# the conjunction, both halves of it
-# ---------------------------------------------------------------------------
-
-
-def test_a_low_structure_ratio_alone_does_not_condemn():
-    """A soft or defocused shot loses block-scale variation without being noise.
-    Only the noise term alongside it makes the diagnosis."""
-    measured = outputs.FrameStructure(
-        frames=9,
-        sampled=9,
-        structure_ratio=0.10,
-        high_frequency_ratio=0.30,
-        block_std=40.0,
-        luma_band=200.0,
-        luma_std=60.0,
-        saturation=0.4,
-        flat_frames=0,
+def test_the_check_needs_neither_torch_nor_a_media_stack():
+    """numpy only. (PIL is already loaded by gradio through ``errors``; the call adds nothing.)"""
+    code = (
+        "import sys, numpy\n"
+        "from ltx25_studio import outputs\n"
+        "def roots(): return {m.split('.')[0] for m in sys.modules}\n"
+        "before = roots()\n"
+        "outputs.assess_picture(numpy.zeros((2, 64, 64, 3), numpy.uint8))\n"
+        "heavy = {'torch', 'diffusers', 'transformers', 'av', 'PIL', 'cv2', 'scipy'}\n"
+        "print(sorted((roots() - before) & heavy), sorted(roots() & {'torch', 'diffusers', 'av'}))\n"
     )
-    assert outputs.structure_failure(measured) is None
-
-
-def test_a_high_frequency_ratio_alone_does_not_condemn():
-    """A sharp, grainy, correctly-generated shot. Structure is still there."""
-    measured = outputs.FrameStructure(
-        frames=9,
-        sampled=9,
-        structure_ratio=0.95,
-        high_frequency_ratio=3.00,
-        block_std=40.0,
-        luma_band=200.0,
-        luma_std=60.0,
-        saturation=0.4,
-        flat_frames=0,
+    env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
+    result = subprocess.run(
+        [sys.executable, "-c", code], cwd=REPO, env=env, capture_output=True, text=True, check=True
     )
-    assert outputs.structure_failure(measured) is None
-
-
-def detailed_frames(count=FRAMES):
-    """Coarse structure plus a fine ripple — something for both ratios to see."""
-    rows, columns = _grid()
-    base = (
-        128
-        + 70 * np.sin(columns / 11.0) * np.cos(rows / 17.0)
-        + 25 * np.sin(columns / 1.7) * np.sin(rows / 2.3)
-    )
-    return _grey(np.stack([base + index * 4 for index in range(count)]))
-
-
-def test_the_ratios_are_contrast_invariant():
-    """Dimming every pixel scales both stds together and must not move the
-    ratios — otherwise the gate is a brightness gate wearing a disguise, and a
-    dim shot and a bright shot of the same scene land in different places. That
-    is the entire reason both numbers are divided by the frame's own luma std.
-
-    SR holds to four decimals. HF drifts by about a tenth, and the cause is
-    named rather than tuned away: uint8 quantization adds a fixed ±0.5-level
-    error that the Laplacian sees in full while the signal it is divided by has
-    shrunk. It moves the ratio the *safe* way (up, toward the gate, on a dim
-    frame) and 0.21 against a 1.0 gate is not a number this can reach.
-    """
-    bright = detailed_frames()
-    dim = (bright.astype("float32") * 0.25).astype(np.uint8)
-    full = outputs.measure_structure(bright)
-    faded = outputs.measure_structure(dim)
-    assert faded.luma_std < full.luma_std / 3, "the fixture really is much darker"
-    assert faded.structure_ratio == pytest.approx(full.structure_ratio, rel=1e-3)
-    assert faded.high_frequency_ratio == pytest.approx(full.high_frequency_ratio, rel=0.30)
-    assert outputs.structure_failure(faded) is None
+    assert result.stdout.strip() == "[] []", result.stdout + result.stderr
 
 
 # ---------------------------------------------------------------------------
-# "could not measure" is not "measured and fine"
+# thresholds, and the numbers that put them there
 # ---------------------------------------------------------------------------
 
-
-def test_a_frame_with_no_contrast_yields_no_ratio_rather_than_a_zero():
-    """SR and HF are 0/0 on a uniform frame. Reporting 0.0 would be a fabricated
-    measurement that happens to sit below the gate; the honest answer is that
-    the ratio does not exist, and the flatness itself is what the runner's own
-    flat-frame check is for."""
-    measured, failure, warnings = verdict(drifting_flat_frames())
-    assert measured.structure_ratio is None
-    assert measured.high_frequency_ratio is None
-    assert measured.flat_frames == FRAMES
-    assert failure is None, "unmeasurable must never read as condemned"
-    assert warnings, "but it is still worth saying out loud"
-    assert "too flat to measure" in measured.render()
+# Worst value per class on the labelled dataset (38 files), as measured by this check.
+WORST_GOOD_LUMA_STD = 22.03
+WORST_GREY_LUMA_STD = 4.30
+WORST_VEILED_BLACK_LEVEL = 57.6
+WORST_GOOD_WHITE_LEVEL = 155.0
+WORST_VEILED_WHITE_LEVEL = 115.1
+WORST_VEILED_COLOURFULNESS = 13.8
+WORST_GOOD_CORRELATION = 0.188
+WORST_STATIC_CORRELATION = 0.033
+WORST_STATIC_COLOURFULNESS = 62.9
 
 
-def test_an_empty_frame_stack_measures_nothing_and_condemns_nothing():
-    measured, failure, warnings = verdict(np.zeros((0, SIZE, SIZE, 3), dtype=np.uint8))
-    assert measured.frames == 0 and measured.sampled == 0
-    assert failure is None and warnings == ()
+def test_the_thresholds_sit_between_the_measured_classes_with_room_either_side():
+    assert WORST_GREY_LUMA_STD * 1.3 < outputs.FLAT_MAX_LUMA_STD < WORST_GOOD_LUMA_STD / 3.5
+    assert outputs.VEILED_MIN_BLACK_LEVEL * 1.4 < WORST_VEILED_BLACK_LEVEL
+    assert WORST_VEILED_WHITE_LEVEL * 1.15 < outputs.VEILED_MAX_WHITE_LEVEL
+    assert outputs.VEILED_MAX_WHITE_LEVEL * 1.1 < WORST_GOOD_WHITE_LEVEL
+    assert WORST_VEILED_COLOURFULNESS * 1.4 < outputs.VEILED_MAX_COLOURFULNESS
+    assert WORST_STATIC_CORRELATION + 0.05 < outputs.STATIC_MAX_CORRELATION
+    assert outputs.STATIC_MAX_CORRELATION + 0.05 < WORST_GOOD_CORRELATION
+    assert outputs.STATIC_MIN_COLOURFULNESS * 1.8 < WORST_STATIC_COLOURFULNESS
 
 
-def test_frames_too_small_to_hold_a_block_are_not_condemned():
-    """A 4x4 frame has no 8x8 block and no Laplacian interior worth the name.
-    Refusing it would be refusing for lack of evidence."""
-    tiny = np.random.default_rng(3).integers(0, 256, (4, 4, 4, 3), dtype=np.uint8)
-    measured, failure, _warnings = verdict(tiny)
-    assert measured.structure_ratio is None
-    assert failure is None
-
-
-# ---------------------------------------------------------------------------
-# sampling
-# ---------------------------------------------------------------------------
-
-
-def test_the_sampled_estimate_tracks_the_full_decode():
-    """The app measures 16 evenly-spaced frames, the offline runner measures all
-    of them. On the banked set the two agree to within 1.6% on every metric;
-    they must not diverge here either, or the app and the runner would disagree
-    about the same file."""
-    frames = np.concatenate([monochrome_frames(), murky_frames(), monochrome_frames()])
-    full = outputs.measure_structure(frames)
-    sampled = outputs.measure_structure(frames, sample=outputs.STRUCTURE_SAMPLE_FRAMES)
-    assert sampled.sampled == outputs.STRUCTURE_SAMPLE_FRAMES
-    assert full.sampled == len(frames)
-    assert sampled.structure_ratio == pytest.approx(full.structure_ratio, rel=0.05)
-    assert sampled.block_std == pytest.approx(full.block_std, rel=0.25)
-
-
-def test_sampling_spans_the_whole_stack_rather_than_its_head():
-    """Evenly spaced, endpoints included. Measuring the first 16 frames of a 121
-    frame video would miss a decode that degrades partway through."""
-    indices = outputs._sampled_indices(121, 16)
-    assert indices[0] == 0 and indices[-1] == 120
-    assert len(indices) == 16
-
-
-def test_a_short_stack_is_measured_whole():
-    assert outputs._sampled_indices(9, 16) == list(range(9))
-
-
-def test_the_aggregate_is_a_median_so_one_odd_frame_cannot_swing_it():
-    """A fade to black, a cut, a single dropped frame: the mean would drag the
-    whole shot toward a warning, and a single accidentally-structured frame
-    would rescue a stack of static. Neither may happen."""
-    healthy = monochrome_frames()
-    spoiled = np.concatenate([healthy, np.zeros((2, SIZE, SIZE, 3), dtype=np.uint8)])
-    measured, failure, warnings = verdict(spoiled)
-    assert failure is None and warnings == ()
-    assert measured.flat_frames == 2
-    assert measured.structure_ratio == pytest.approx(
-        outputs.measure_structure(healthy).structure_ratio, rel=1e-6
-    )
+def test_the_older_names_still_resolve():
+    for name in (
+        "MIN_STRUCTURE_RATIO",
+        "MAX_HIGH_FREQUENCY_RATIO",
+        "LOW_BLOCK_STD",
+        "LOW_LUMA_BAND",
+    ):
+        assert isinstance(getattr(outputs, name), float)
+    static = outputs.measure_structure(blob_static(256, 256, frames=2))
+    assert "static" in outputs.structure_failure(static)
+    assert outputs.structure_warnings(static) == outputs.structure_notes(static)
+    good = outputs.measure_structure(stack(load("good_5")))
+    assert outputs.structure_failure(good) is None
+    assert good.structure_ratio is not None and good.high_frequency_ratio is not None
 
 
 # ---------------------------------------------------------------------------
-# the app: WARN, never refuse
+# the app: a note, never a refusal
 # ---------------------------------------------------------------------------
 
 
@@ -467,18 +446,14 @@ class StaticPipe:
 
 
 class StaticOutput:
-    """A pipeline output that is colour static, and stereo audio to go with it."""
+    """A pipeline output that is colour static, with stereo audio to go with it."""
 
     def __init__(self, frames=None, audio=True):
-        self.frames = structureless_frames() if frames is None else frames
+        self.frames = blob_static(STATIC_SIZE, STATIC_SIZE, frames=9) if frames is None else frames
         self.audio = np.zeros((2, SAMPLING_RATE // 10), dtype=np.float32) if audio else None
 
 
-def test_the_writer_emits_a_structureless_artifact_and_says_so(tmp_path):
-    """**The app must never refuse on this.** The user has already paid 35+
-    GPU-seconds for these frames, and the detector is a heuristic that is wrong
-    about r4a-class output by design. Emit the file, attach the note, let a
-    human look."""
+def test_the_writer_saves_a_static_video_and_says_what_it_saw(tmp_path):
     notes: list[str] = []
     written = outputs.write_output(
         StaticOutput(audio=False),
@@ -490,15 +465,14 @@ def test_the_writer_emits_a_structureless_artifact_and_says_so(tmp_path):
         warnings=notes,
     )
     artifact = written["video"]
-    assert artifact.exists() and artifact.stat().st_size > 0, "the file must survive the warning"
-    assert any("may be structureless" in note for note in notes), notes
-    assert any("not a verdict" in note for note in notes), notes
+    assert artifact.exists() and artifact.stat().st_size > 0, "the file must survive the note"
+    assert notes == [every_note()["static"]]
 
 
-def test_the_writer_stays_silent_about_a_healthy_artifact(tmp_path):
+def test_the_writer_stays_silent_about_a_good_video(tmp_path):
     notes: list[str] = []
     outputs.write_output(
-        StaticOutput(frames=monochrome_frames(), audio=False),
+        StaticOutput(frames=stack(load("good_9")[:160, :256], 9), audio=False),
         run_dir=tmp_path / "run",
         mode="text_to_video",
         exports=("video",),
@@ -509,15 +483,8 @@ def test_the_writer_stays_silent_about_a_healthy_artifact(tmp_path):
     assert notes == []
 
 
-def test_a_structure_warning_does_not_cost_the_run_its_audio_track(tmp_path):
-    """A regression that would have been introduced by this very change.
-
-    ``write_output`` used to infer "the audio was muxed" from "the notes list is
-    empty" — true only while the dropped-audio note was the one thing that could
-    ever be in there. A second, unrelated note would have reported a muxed
-    track as absent, and ``generate._artifacts_for`` would have raised
-    ``EmptyOutputError`` on a file that was perfectly fine.
-    """
+def test_a_note_does_not_cost_the_run_its_audio_track(tmp_path):
+    """``write_output`` once inferred "the audio was muxed" from an empty notes list."""
     notes: list[str] = []
     written = outputs.write_output(
         StaticOutput(),
@@ -530,25 +497,22 @@ def test_a_structure_warning_does_not_cost_the_run_its_audio_track(tmp_path):
         warnings=notes,
     )
     assert set(written) == {"video", "audio"}, f"the audio track went missing: {notes}"
-    assert any("may be structureless" in note for note in notes)
+    assert every_note()["static"] in notes
 
 
 def test_the_note_reaches_the_result_the_user_is_handed(tmp_path):
-    """End to end through the production encoder. A warning that stops at the
-    Space's logs is a warning the user never sees — which is most of what it
-    was for."""
     from conftest import inputs_for
 
     result = generate_module.generate(
         mode="text_to_video",
         seed=7,
         **inputs_for("text_to_video"),
-        width=SIZE,
-        height=SIZE,
+        width=STATIC_SIZE,
+        height=STATIC_SIZE,
         pipeline_factory=lambda **kwargs: StaticPipe(),
         encoder=None,
         output_root=tmp_path,
         retention_bytes=10**9,
     )
     assert result.output_path.exists()
-    assert any("may be structureless" in note for note in result.warnings), result.warnings
+    assert every_note()["static"] in result.warnings, result.warnings
