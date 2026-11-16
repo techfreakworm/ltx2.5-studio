@@ -1073,6 +1073,18 @@ def build_ui() -> gr.Blocks:
                 gr.update(visible=lengths["max_seconds"]),
             ]
 
+        # The model-chosen length: Longest stops at the model's longest and Shortest stays
+        # below Longest; the field not just edited moves (handlers.ordered_seconds).
+        seconds_range = [pool["min_seconds"], pool["max_seconds"]]
+        for edited in ("shortest", "longest"):
+            field = pool["min_seconds"] if edited == "shortest" else pool["max_seconds"]
+            field.input(
+                fn=lambda low, high, e=edited: list(handlers.ordered_seconds(low, high, edited=e)),
+                inputs=seconds_range,
+                outputs=seconds_range,
+                **_PRIVATE,
+            )
+
         pool["auto_duration"].change(
             fn=_on_auto,
             inputs=[pool["auto_duration"], mode_selector, length_source],
@@ -1269,7 +1281,10 @@ def build_ui() -> gr.Blocks:
                 ),
                 True,
                 gr.update(visible=False),
-                gr.update(value=None, visible=True),
+                # Told to play before the file arrives: the player starts on loading only
+                # when autoplay is already set (setting it with the file came too late, now
+                # and then).
+                gr.update(value=None, visible=True, autoplay=True),
                 gr.update(value=None, visible=False),
                 render.monitor_caption(kind="running", mode=mode),
                 gr.update(value=starting, visible=True),
@@ -1314,13 +1329,24 @@ def build_ui() -> gr.Blocks:
             status_update: Any,
             caption: str | None = None,
             report: str | None = None,
+            listed: handlers.RunOutcome | None = None,
         ) -> list:
             """Every finish output once a run has ended, with Generate back. ``shown`` is a
             run whose result goes on the monitor; without one the monitor is idle and
-            holds no file, and ``report`` is the card the status holds."""
+            holds no file, and ``report`` is the card the status holds. ``listed`` is a
+            finished run that is not shown: it goes into Recent runs, where Show can serve
+            its file."""
             mode = modes.get_mode(mode_id)
             review_out = _review(mode_id, False, source, *values)
             entries = list(recent_now or [])
+            if listed is not None:
+                entries.insert(
+                    0,
+                    _recent_entry(
+                        mode_id, listed.result, listed.params, handlers.run_facts(listed), listed
+                    ),
+                )
+                entries = entries[:RECENT_LIMIT]
             if shown is not None:
                 result = shown.result
                 params = shown.params
@@ -1420,8 +1446,11 @@ def build_ui() -> gr.Blocks:
                 kind = "refused" if handlers.ran_nothing(outcome) else "failed"
             caption = render.monitor_caption(kind=kind)
             status_update = gr.update(value=report, visible=True)
+            # A run that finished with its file kept is listed, so Show can serve it
+            # without a paid rerun (the card's step points there).
+            listed = outcome if kind == "unshown" and handlers.file_kept(outcome) else None
             return _ended(
-                mode_id, recent_now, source, values, None, status_update, caption, report
+                mode_id, recent_now, source, values, None, status_update, caption, report, listed
             )
 
         generation = generate_button.click(

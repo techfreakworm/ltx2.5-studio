@@ -54,6 +54,7 @@ __all__ = [
     "on_snap",
     "on_validate_lora",
     "on_validate_start",
+    "ordered_seconds",
     "preset_for",
     "quota_multiplier",
     "ran_nothing",
@@ -353,30 +354,47 @@ def media_size(image: Any = None, video: Any = None) -> tuple[int, int] | None:
 
 
 def clip_seconds(path: Any, *, kind: str = "video") -> float | None:
-    """A clip's length in seconds, measured with ``av``. ``None`` when unreadable."""
+    """A clip's length in seconds as the backend plans the run: an audio file by its sound,
+    a video by its picture (``generate._audio_seconds`` / ``generate._video_seconds``), so
+    "Matches your N s clip" says what will run. ``None`` for a file the backend refuses
+    (the review names the problem)."""
     if not path:
         return None
-    if kind == "audio":
-        from .. import generate as generate_module
+    from .. import generate as generate_module
 
-        try:
-            return generate_module._audio_seconds(path)
-        except Exception:  # noqa: BLE001 -- the review names the problem
-            return None
+    measure = generate_module._audio_seconds if kind == "audio" else generate_module._video_seconds
     try:
-        import av
-
-        with av.open(str(path)) as container:
-            stream = container.streams.video[0]
-            if stream.duration is not None and stream.time_base is not None:
-                return float(stream.duration * stream.time_base)
-            if container.duration is not None:
-                return container.duration / av.time_base
-            frames = sum(1 for _ in container.decode(stream))
-            rate = float(stream.average_rate or FRAME_RATE)
-            return frames / rate
-    except Exception:  # noqa: BLE001
+        seconds = measure(path)
+    except constraints.ConstraintError:
         return None
+    return float(seconds) if seconds else None
+
+
+#: The page's step for the shortest and longest seconds (their boxes step by 0.1).
+SECONDS_STEP = 0.1
+
+
+def ordered_seconds(shortest: Any, longest: Any, *, edited: str) -> tuple[Any, Any]:
+    """Shortest and Longest as the page keeps them, for the model-chosen length.
+
+    Longest stops at the longest clip the model makes (``constraints.MAX_SECONDS``) and
+    Shortest stays below Longest; when they cross, the field the user did not just edit
+    (``edited`` is ``"shortest"`` or ``"longest"``) moves by one step. So neither of the
+    backend's two refusals in field names ("max_seconds=25.0 is above the maximum",
+    "max_seconds must be greater than min_seconds") can be reached from the page.
+    """
+    low, high = _as_float(shortest), _as_float(longest)
+    top = float(constraints.MAX_SECONDS)
+    if high is not None:
+        high = min(high, top)
+    if low is not None:
+        low = min(low, round(top - SECONDS_STEP, 1))
+    if low is not None and high is not None and low >= high:
+        if edited == "longest":
+            low = round(high - SECONDS_STEP, 1)
+        else:
+            high = round(min(low + SECONDS_STEP, top), 1)
+    return (shortest if low is None else low), (longest if high is None else high)
 
 
 def frames_for_seconds(seconds: Any) -> int:
@@ -972,7 +990,15 @@ def unshown_report(outcome: RunOutcome | None, server_message: str | None) -> st
         return render.lost_run(server_message, on_zerogpu=run_platform()[1])
     if not has_result(outcome):
         return outcome.status
-    return render.result_not_shown(run_facts(outcome), server_message)
+    return render.result_not_shown(run_facts(outcome), server_message, kept=file_kept(outcome))
+
+
+def file_kept(outcome: RunOutcome | None) -> bool:
+    """True when the run's result file is still on disk (Recent runs can show it)."""
+    from pathlib import Path
+
+    path = outcome and (outcome.video or outcome.audio)
+    return bool(path) and Path(str(path)).exists()
 
 
 def run(mode_id: str, *values: Any, progress: Any = None) -> RunOutcome:

@@ -210,7 +210,17 @@ def test_a_result_gradio_will_not_serve_ends_with_generate_back_and_a_card(demo,
     words = visible(card)
     assert words.startswith("### The run finished, but its result could not be shown")
     assert re.search(r"It used \d+ s", words), "what the run used is stated"
-    assert "Press Generate again. If it happens again, report it with the detail below." in words
+    # The run finished and its file is kept: it is listed in Recent runs, and Show (which
+    # costs nothing) is the step, not a paid rerun (review round 3, section 9 (a)).
+    assert (
+        "Its file is kept: press Show in Recent runs. If that fails too, report it with the "
+        "detail below." in words
+    )
+    assert "Press Generate again" not in words
+    recent = next(c for c in failed.outputs if isinstance(c, gr.State) and isinstance(state[c._id], list))
+    assert [str(entry["video"]) for entry in state[recent._id]] == [str(written[0])]
+    show = next(c for c in failed.outputs if isinstance(c, gr.Button) and c.value == "Show")
+    assert got[show._id]["visible"] is True
     assert str(outside) not in words, "no server path outside the Detail"
     assert "allowed_paths" in detail(card), "the Detail carries the server's message"
     assert "Cannot move" in detail(card)

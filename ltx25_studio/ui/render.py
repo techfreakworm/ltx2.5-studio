@@ -23,7 +23,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from .. import audio_conditioning, errors, modes
+from .. import audio_conditioning, constraints, errors, modes
 from ..errors import (
     LoRAConventionError,
     LoRADimensionError,
@@ -236,7 +236,10 @@ FIELD_COPY: dict[str, tuple[str, str]] = {
     ),
     "num_frames": ("Frames", "Lengths come in steps of 8 frames: 113, 121, 129…"),
     "min_seconds": ("Shortest (seconds)", "Used when the model picks the length."),
-    "max_seconds": ("Longest (seconds)", "Used when the model picks the length."),
+    "max_seconds": (
+        "Longest (seconds)",
+        f"Used when the model picks the length; {constraints.MAX_SECONDS:g} s at most.",
+    ),
     "enable_stage_2": (
         "Upscale ×2",
         "Upsamples and refines after the first pass, for twice the width and height. "
@@ -532,10 +535,9 @@ def shot_anchor_readout(anchors: list[dict], *, out_of_range: list[int]) -> str:
         )
     if out_of_range:
         body += (
-            f"\n\n⚠️ Anchor(s) {', '.join(str(v) for v in out_of_range)} fall outside the clip. "
-            f"Upstream **skips an out-of-range condition with only a log line and generates "
-            f"anyway**, so that shot would silently have no effect. Fix the anchor or raise the "
-            f"frame count."
+            f"\n\n⚠️ Anchor(s) {', '.join(str(v) for v in out_of_range)} fall outside the clip, "
+            f"so a run with them is refused before it starts. Move the anchor inside the clip "
+            f"or raise the frame count."
         )
     return body
 
@@ -1255,17 +1257,24 @@ def lost_run(detail: str | None = None, *, on_zerogpu: bool = True) -> str:
     )
 
 
-def result_not_shown(facts: RunFacts, detail: str | None) -> str:
+def result_not_shown(facts: RunFacts, detail: str | None, *, kept: bool = False) -> str:
     """A run that finished, whose result the page could not show.
 
     What it used, by the device that ran it (billed on ZeroGPU), one next step, and
-    ``detail``: the server's own message, when it raised one.
+    ``detail``: the server's own message, when it raised one. When its file is kept the
+    run is in Recent runs, and Show (which costs nothing) is the step; running again is
+    the step only when the file is gone.
     """
     billed = ", which is billed" if facts.on_zerogpu else ""
+    step = (
+        "Its file is kept: press Show in Recent runs. If that fails too, report it with the "
+        "detail below."
+        if kept
+        else "Press Generate again. If it happens again, report it with the detail below."
+    )
     return (
         "### The run finished, but its result could not be shown\n\n"
-        f"It used {took_words(facts)}{billed}. Press Generate again. If it happens again, "
-        "report it with the detail below.\n\n" + _detail(detail)
+        f"It used {took_words(facts)}{billed}. {step}\n\n" + _detail(detail)
     )
 
 
