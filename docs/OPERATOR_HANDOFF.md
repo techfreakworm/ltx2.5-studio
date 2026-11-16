@@ -17,7 +17,7 @@
 > - **"The post-fix eleven-mode matrix goes in `SPACE_MODE_MATRIX.md` §10"**: it ran that
 >   evening but was never written up, and its video and audio files are gone.
 > - **§3 "82.2 GB of 150 [OK]"**: read before ZeroGPU packs (the packed term was 0.0). On the
->   2026-11-13 boot the platform's own progress bar packed 40.6 GB; the disk peak has never been
+>   2026-11-13 boot the platform's own progress bar read `40.6G` packed; the disk peak has never been
 >   measured.
 > - **§5 "On a Space"**: "deploying is a push to that remote's `main`" is wrong as stated. The
 >   Space repo has its own root commit, so pushing a work commit is rejected as non-fast-forward;

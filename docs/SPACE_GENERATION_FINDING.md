@@ -13,7 +13,7 @@
 >   `xlarge` and 180 s through its variables, and the report was rewritten on 2026-11-16; the
 >   new one has not run on the Space yet.
 > - **§11 #4 "packed 51.1 GB … `xlarge` bills at 2×"**: on the 2026-11-13 boot the platform's own
->   progress bar packed 40.6 GB, and the run in this file was on `large`, not `xlarge`.
+>   progress bar read `40.6G` packed, and the run in this file was on `large`, not `xlarge`.
 > - **§11 #1 "our error text tells users to read a traceback that does not exist"**: that sentence
 >   is no longer in the UI.
 >

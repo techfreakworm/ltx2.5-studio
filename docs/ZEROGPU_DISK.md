@@ -7,7 +7,7 @@
 >
 > - **"82.2 GB of 150 [OK]"** (the unparked annotation, §1, §5, §7): a reading taken before ZeroGPU
 >   packs, with a packed term of 0.0. On the 2026-11-13 boot the platform's own progress bar
->   packed 40.6 GB and its cleanup freed 65.25 GB. The disk peak has never been measured.
+>   read `40.6G` packed, and its cleanup freed 65.25 GB. The disk peak has never been measured.
 > - **§4.2 quoted as "the" int8 peak (B, transformer only, 133.4–137.4 GB)**: the deployed config
 >   also quantises the text encoder; the code's own derivation for it is 41.237 GB packed and a
 >   121.4–125.4 GB peak (`ltx25_studio/pipelines.py`, `_quantization_config`). Neither bound
