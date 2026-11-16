@@ -686,6 +686,9 @@ def readiness_reason(facts: CostFacts, *, running: bool = False) -> str:
 
 READY = "Ready. Nothing is spent until you press Generate."
 
+#: Below 1024 px the monitor sits under the inputs: a jump to the mode's sample.
+SAMPLE_JUMP = "See an example output"
+
 
 def monitor_idle(mode: Any) -> str:
     """The monitor with nothing to play: a designed state, not a stock player.
@@ -715,6 +718,8 @@ def monitor_caption(
         return f"**Example output, not your run.**{detail}{extra}"
     if kind == "run":
         return f"**Your run.** {mode.label}, seed {seed}."
+    if kind == "earlier":
+        return f"**Earlier run.** {mode.label}, seed {seed}."
     if kind == "running":
         return f"**Running.** {mode.label}. Progress shows on the monitor."
     if kind == "failed":

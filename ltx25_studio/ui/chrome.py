@@ -69,8 +69,15 @@ def _empty_cells() -> list[tuple[int, int]]:
 
 
 def matrix_frame_html() -> str:
-    """Axis headers, the inert empty cells and the column notes, behind the radio."""
-    parts = ['<div class="mx-frame" aria-hidden="true">']
+    """Axis headers, the inert empty cells and the column notes, behind the radio.
+
+    The headers and empty cells are drawing (each cell's own name already says what it
+    starts from and returns); the column notes are words a screen reader must reach, so
+    they stay in the accessibility tree and describe their column's cells (the script
+    points each cell's ``aria-describedby`` at its note).
+    """
+    cells = matrix_cells()
+    parts = ['<div class="mx-frame">']
     for c, (_key, label) in enumerate(render.COLUMNS, start=1):
         cost = (
             " is-cost"
@@ -78,21 +85,27 @@ def matrix_frame_html() -> str:
             else ""
         )
         parts.append(
-            f'<div class="mx-col{cost}" style="grid-column:{c + 1};grid-row:1">'
+            f'<div class="mx-col{cost}" style="grid-column:{c + 1};grid-row:1" aria-hidden="true">'
             f"{html.escape(label)}</div>"
         )
     for r, (_key, label) in enumerate(render.ROWS, start=1):
         parts.append(
-            f'<div class="mx-row" style="grid-row:{r + 1};grid-column:1">{html.escape(label)}</div>'
+            f'<div class="mx-row" style="grid-row:{r + 1};grid-column:1" aria-hidden="true">'
+            f"{html.escape(label)}</div>"
         )
     for r, c in _empty_cells():
-        parts.append(f'<div class="mx-empty" style="grid-row:{r + 1};grid-column:{c + 1}"></div>')
+        parts.append(
+            f'<div class="mx-empty" style="grid-row:{r + 1};grid-column:{c + 1}" '
+            'aria-hidden="true"></div>'
+        )
     notes_row = len(render.ROWS) + 2
     for c, (_key, label) in enumerate(render.COLUMNS, start=1):
         note = render.COLUMN_NOTES.get(label)
         if note:
+            column_modes = " ".join(m for m, (_r, col, _n) in cells.items() if col == c)
             parts.append(
-                f'<p class="mx-note" style="grid-row:{notes_row};grid-column:{c + 1}">'
+                f'<p class="mx-note" id="mx-note-{c}" data-modes="{column_modes}" '
+                f'style="grid-row:{notes_row};grid-column:{c + 1}">'
                 f'<span class="mx-note-col">{html.escape(label)}:</span> {html.escape(note)}</p>'
             )
     parts.append("</div>")
@@ -457,6 +470,9 @@ input[type="range"] { accent-color: var(--mr-paper); }
 #purpose { margin-top: 12px !important; }
 #purpose p { margin: 0; font-size: 14px; color: var(--mr-dust); max-width: 70ch; }
 #purpose strong { color: var(--mr-paper); font-weight: 600; }
+/* the jump to the sample output: only where the monitor sits far below (one column) */
+#sample-jump { align-self: flex-start; width: auto !important; flex: 0 0 auto !important; }
+@media (min-width: 1024px) { #sample-jump { display: none !important; } }
 
 /* == examples ============================================================ */
 #examples { gap: 8px !important; align-items: center !important; flex-wrap: wrap !important;
@@ -644,7 +660,12 @@ button:disabled { cursor: not-allowed !important; }
 #rail #run-status.block { border: 1px solid var(--mr-line) !important; border-radius: 10px !important;
   padding: 12px 14px !important; background: var(--mr-slate) !important; }
 #run-status p { font-size: 14px; line-height: 21px; color: var(--mr-paper); margin: 0 0 6px; max-width: 70ch; }
-#run-status .mr-report-head { display: none; }
+/* read by assistive tech (the live region's "Done" line), not shown: the Done card is */
+#run-status .mr-report-head, #rail #run-status.block:not(:has(p, h3, details, li)) {
+  position: absolute !important; width: 1px !important; height: 1px !important;
+  padding: 0 !important; margin: -1px !important; overflow: hidden !important;
+  clip: rect(0 0 0 0) !important; clip-path: inset(50%) !important; white-space: nowrap !important;
+  border: 0 !important; }
 #run-status .mr-notes p { color: var(--mr-paper); }
 #run-status details { margin-top: 6px; }
 #run-status summary { cursor: pointer; color: var(--mr-dust); font-size: 13px; }
@@ -770,6 +791,14 @@ _SCRIPT = """
     if (gen && !gen.getAttribute('aria-describedby')) {
       gen.setAttribute('aria-describedby', 'cost generate-reason');
     }
+    document.querySelectorAll('.mx-note[data-modes]').forEach((note) => {
+      note.dataset.modes.split(' ').forEach((mode) => {
+        const input = document.querySelector(`#mode-matrix input[value="${mode}"]`);
+        if (input && input.getAttribute('aria-describedby') !== note.id) {
+          input.setAttribute('aria-describedby', note.id);
+        }
+      });
+    });
     const group = document.querySelector('#mode-matrix > div.wrap:not([data-testid])');
     if (group && group.getAttribute('role') !== 'radiogroup') {
       group.setAttribute('role', 'radiogroup');

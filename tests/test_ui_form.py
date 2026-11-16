@@ -97,12 +97,14 @@ class Form:
             self.run(f)
 
     # -- what the page does with a listener ---------------------------------------------------
-    def run(self, f, depth: int = 0) -> None:
+    def run(self, f, depth: int = 0, *, request: Any = None) -> None:
+        """Run one listener; ``request`` stands in for the ``gr.Request`` Gradio injects."""
         assert depth < 12, "an event cascade did not settle"
         if f.fn is None:
             return
         self.ran.append(getattr(f.fn, "__name__", repr(f.fn)))
-        out = f.fn(*[self.values.get(c._id) for c in f.inputs])
+        leading = (request,) if request is not None else ()
+        out = f.fn(*leading, *[self.values.get(c._id) for c in f.inputs])
         outs = [out] if len(f.outputs) == 1 else list(out)
         changed = []
         for component, value in zip(f.outputs, outs, strict=True):

@@ -229,6 +229,13 @@ def build_ui() -> gr.Blocks:
                         container=False,
                     )
                 purpose = gr.Markdown(view0.purpose, elem_id="purpose")
+                sample_jump = gr.Button(
+                    render.SAMPLE_JUMP,
+                    visible=show.sample_for(DEFAULT_MODE) is not None,
+                    elem_id="sample-jump",
+                    elem_classes=["mr-quiet"],
+                    size="sm",
+                )
 
                 example_buttons: list[Any] = []
                 example_note = None
@@ -489,7 +496,7 @@ def build_ui() -> gr.Blocks:
                         scale=0,
                         min_width=140,
                     )
-                status = gr.Markdown(render.READY, elem_id="run-status", visible=False)
+                status = gr.Markdown("", elem_id="run-status")
                 with gr.Column(elem_id="recent"):
                     recent_head = gr.Markdown(
                         "Recent runs", visible=False, elem_classes=["mr-recent-head"]
@@ -498,6 +505,14 @@ def build_ui() -> gr.Blocks:
                     for _ in range(RECENT_LIMIT):
                         with gr.Row(elem_classes=["mr-recent-row"], equal_height=True):
                             text = gr.Markdown("", visible=False, elem_classes=["mr-recent-text"])
+                            show_run = gr.Button(
+                                "Show",
+                                visible=False,
+                                elem_classes=["mr-quiet"],
+                                size="sm",
+                                scale=0,
+                                min_width=70,
+                            )
                             restore = gr.Button(
                                 "Restore settings",
                                 visible=False,
@@ -514,7 +529,7 @@ def build_ui() -> gr.Blocks:
                                 scale=0,
                                 min_width=100,
                             )
-                        recent_rows.append((text, restore, reuse))
+                        recent_rows.append((text, show_run, restore, reuse))
 
         components.assert_pool_complete(pool)
 
@@ -596,6 +611,7 @@ def build_ui() -> gr.Blocks:
             audio_out,
             monitor_caption,
             monitor_state,
+            sample_jump,
         ]
         #: What a switch reads besides the mode it goes to; the first is the mode it leaves.
         switch_state = [
@@ -739,6 +755,7 @@ def build_ui() -> gr.Blocks:
                 *example_updates,
                 *monitor_updates,
                 monitor_next,
+                gr.update(visible=monitor_next.get("kind") == "sample"),
             ]
 
         def _switch(mode_id: str, *state: Any) -> list[Any]:
@@ -1077,6 +1094,7 @@ def build_ui() -> gr.Blocks:
             reuse_seed,
             use_prompt,
             monitor_state,
+            sample_jump,
         ]
 
         def _start(mode_id: str, enhance: Any, prompt: Any) -> list[Any]:
@@ -1096,6 +1114,7 @@ def build_ui() -> gr.Blocks:
                 gr.update(visible=False),
                 gr.update(visible=False),
                 {"kind": "running", "mode": mode_id},
+                gr.update(visible=False),
             ]
 
         finish_outputs = [
@@ -1118,6 +1137,7 @@ def build_ui() -> gr.Blocks:
             recent_head,
             *[c for row in recent_rows for c in row],
             status,
+            sample_jump,
         ]
 
         def _finish(
@@ -1192,6 +1212,7 @@ def build_ui() -> gr.Blocks:
                 gr.update(visible=bool(entries)),
                 *_recent_rows(entries),
                 status_update,
+                gr.update(visible=False),
             ]
 
         generation = generate_button.click(
@@ -1252,7 +1273,7 @@ def build_ui() -> gr.Blocks:
             seed = gr.update(value=settings["seed"]) if "seed" in settings else gr.update()
             return [*out, entry["mode"], seed]
 
-        for index, (_text, restore, reuse) in enumerate(recent_rows):
+        for index, (_text, _show, restore, reuse) in enumerate(recent_rows):
             restore.click(
                 fn=lambda entries, *state, i=index: _restore(i, entries, *state),
                 inputs=[recent, *switch_state],
@@ -1267,6 +1288,46 @@ def build_ui() -> gr.Blocks:
                 outputs=[pool["seed"]],
                 **_PRIVATE,
             )
+
+        show_outputs = [monitor_idle, video_out, audio_out, monitor_caption, monitor_state]
+
+        def _show(index: int, entries: list, monitor: dict) -> list[Any]:
+            entries = list(entries or [])
+            entry = entries[index] if index < len(entries) else None
+            path = entry and (entry.get("video") or entry.get("audio"))
+            if not path or not Path(path).exists():
+                # The run folder has been evicted: say nothing new, show the row's state.
+                return [
+                    gr.update(),
+                    gr.update(),
+                    gr.update(),
+                    gr.update(),
+                    monitor,
+                    gr.update(visible=False),
+                    gr.update(),
+                ]
+            mode = modes.get_mode(entry["mode"])
+            has_video = entry.get("video") is not None
+            return [
+                gr.update(visible=False),
+                gr.update(value=entry.get("video"), visible=has_video, autoplay=False),
+                gr.update(value=None if has_video else entry.get("audio"), visible=not has_video),
+                render.monitor_caption(kind="earlier", mode=mode, seed=entry["seed"]),
+                {"kind": "run", "mode": entry["mode"]},
+                gr.update(),
+                gr.update(visible=False),
+            ]
+
+        for index, row in enumerate(recent_rows):
+            show_run = row[1]
+            show_run.click(
+                fn=lambda entries, monitor, i=index: _show(i, entries, monitor),
+                inputs=[recent, monitor_state],
+                outputs=[*show_outputs, show_run, sample_jump],
+                **_PRIVATE,
+            )
+
+        sample_jump.click(fn=None, js=_SCROLL_TO_SAMPLE, **_PRIVATE)
 
         # =================================================================
         # examples: fill the form, run nothing
@@ -1307,6 +1368,13 @@ def build_ui() -> gr.Blocks:
 # ---------------------------------------------------------------------------
 # helpers for build_ui
 # ---------------------------------------------------------------------------
+
+_SCROLL_TO_SAMPLE = """
+() => {
+  const still = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  document.getElementById('monitor')?.scrollIntoView({behavior: still ? 'auto' : 'smooth', block: 'center'});
+}
+"""
 
 _SCROLL_TO_MONITOR = """
 (...args) => {
@@ -1513,11 +1581,13 @@ def _recent_rows(entries: list) -> list:
                 seconds=entry["seconds"],
                 at=entry["at"],
             )
+            kept = entry.get("video") or entry.get("audio")
             out += [
                 gr.update(value=label, visible=True),
+                gr.update(visible=bool(kept) and Path(kept).exists()),
                 gr.update(visible=True),
                 gr.update(value="Reuse seed", visible=True),
             ]
         else:
-            out += [gr.update(visible=False), gr.update(visible=False), gr.update(visible=False)]
+            out += [gr.update(visible=False) for _ in range(4)]
     return out
