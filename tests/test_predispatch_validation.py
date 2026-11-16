@@ -365,10 +365,103 @@ def test_audio_longer_than_the_maximum_is_capped_and_says_so(accepted, loads_as_
     assert note.startswith("length set from your audio: 20.0 s.") and "maximum" in note, note
 
 
-def test_very_short_audio_is_clamped_to_the_minimum_length(accepted, loads_as_probed):
-    loads_as_probed(0.03)
-    _result, sent = accepted(mode="audio_to_video", audio=audio_file(0.03), auto_duration=True)
-    assert sent["num_frames"] == 1
+#: Modes 10 and 11, the two that take their length from a recording ("Match my clip").
+AUDIO_MODES = [("audio_to_audio", "Audio to audio"), ("audio_to_video", "Audio to video")]
+
+
+def _too_short(seconds: str, label: str) -> str:
+    return (
+        f"Your audio is {seconds}, too short for {label}: the shortest recording it can use "
+        f"is 0.4 s."
+    )
+
+
+@pytest.mark.parametrize(("mode_id", "label"), AUDIO_MODES)
+def test_match_my_clip_refuses_a_recording_too_short_for_the_mode(refused, mode_id, label):
+    """Never a one-frame video: refused before dispatch, in the words a set length gets."""
+    matched = refused(
+        errors.AudioVideoDesyncError, mode=mode_id, audio=audio_file(0.03), auto_duration=True
+    )
+    at_a_set_length = refused(
+        errors.AudioVideoDesyncError, mode=mode_id, audio=audio_file(0.03), num_frames=121
+    )
+
+    assert str(matched) == str(at_a_set_length) == _too_short("0.03 s", label)
+    assert errors.categorise(matched) == errors.Failure(errors.INPUT, False)
+
+
+@pytest.mark.parametrize("mode_id", [mode_id for mode_id, _ in AUDIO_MODES])
+def test_match_my_clip_runs_the_shortest_usable_recording_at_nine_frames(
+    accepted, loads_as_probed, mode_id
+):
+    loads_as_probed(9 / 24.0)
+    result, sent = accepted(mode=mode_id, audio=audio_file(9 / 24.0), auto_duration=True)
+
+    assert sent["num_frames"] == 9
+    assert "length set from your audio: 0.4 s." in result.warnings
+
+
+@pytest.mark.parametrize(("mode_id", "label"), AUDIO_MODES)
+def test_match_my_clip_refuses_a_recording_one_frame_shorter(refused, mode_id, label):
+    error = refused(
+        errors.AudioVideoDesyncError, mode=mode_id, audio=audio_file(8 / 24.0), auto_duration=True
+    )
+
+    assert str(error) == _too_short("0.3 s", label)
+
+
+@pytest.fixture
+def refused_in_the_worker(monkeypatch, tmp_path, audio_input_ready):
+    """``generate()`` through an in-process dispatch; return what the worker refused with."""
+
+    def go(**fields):
+        real = generate_module.generate
+
+        def dispatch(**kwargs):
+            token = generate_module._IN_GPU_WORKER.set(True)
+            try:
+                return real(**kwargs)
+            finally:
+                generate_module._IN_GPU_WORKER.reset(token)
+
+        monkeypatch.setattr(generate_module, "_GPU_DISPATCH", dispatch)
+        with pytest.raises(LTXStudioError) as caught:
+            generate_module.generate(
+                seed=7,
+                pipeline_factory=factory_returning(FakePipe()),
+                encoder=one_muxed_file_encoder,
+                output_root=tmp_path,
+                retention_bytes=10**9,
+                **fields,
+            )
+        return caught.value
+
+    return go
+
+
+@pytest.mark.parametrize(("mode_id", "label"), AUDIO_MODES)
+def test_the_workers_backstop_refuses_a_short_decode_in_the_same_words(
+    refused_in_the_worker, loads_as_probed, mode_id, label
+):
+    """The file says nine frames' worth (0.375 s); it decodes to 0.32 s, past the
+    0.05 s the worker allows, so the worker refuses it as the gate would have."""
+    loads_as_probed(0.32)
+    error = refused_in_the_worker(mode=mode_id, audio=audio_file(9 / 24.0), auto_duration=True)
+
+    assert type(error) is errors.AudioVideoDesyncError
+    assert str(error) == _too_short("0.3 s", label)
+    assert errors.categorise(error) == errors.Failure(errors.INPUT, True), "it ran in the worker"
+
+
+@pytest.mark.parametrize("mode_id", [mode_id for mode_id, _ in AUDIO_MODES])
+def test_a_decode_one_frame_short_is_within_the_workers_tolerance_and_runs(
+    accepted, loads_as_probed, mode_id
+):
+    """0.333 s decoded against nine frames (0.375 s) is 0.042 s short: within 0.05 s."""
+    loads_as_probed(8 / 24.0)
+    _result, sent = accepted(mode=mode_id, audio=audio_file(9 / 24.0), auto_duration=True)
+
+    assert sent["num_frames"] == 9
 
 
 def test_auto_duration_with_pre_encoded_audio_latents_is_refused(refused):

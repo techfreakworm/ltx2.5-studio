@@ -620,7 +620,8 @@ def _length_from_audio(
 
     The duration head reads only the text, so it cannot hear the upload; it
     never chooses the length here. The frame count is derived from the file
-    instead and the request becomes a fixed-length one.
+    instead and the request becomes a fixed-length one. A recording too short
+    for any usable length is refused as at a set length.
     """
     if not (request.auto_duration and modes.requires(spec, "audio")):
         return request, ()
@@ -632,6 +633,12 @@ def _length_from_audio(
         )
     fps = float(request.frame_rate)
     num_frames = constraints.largest_num_frames_within(seconds, frame_rate=fps)
+    shortest = _shortest_usable_num_frames(fps)
+    if num_frames < shortest:
+        # Refused in the words a set length gets, never run as a single frame.
+        raise _short_audio_refusal(
+            video_seconds=shortest / fps, audio_seconds=seconds, frame_rate=fps, label=spec.label
+        )
     # The video's own length (the longest legal one the audio covers), in seconds.
     note = f"length set from your audio: {num_frames / fps:.1f} s."
     if seconds * fps > constraints.MAX_NUM_FRAMES:

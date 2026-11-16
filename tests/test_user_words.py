@@ -414,6 +414,21 @@ def test_a_recording_no_length_fits_is_called_too_short_with_the_shortest_that_w
     )
 
 
+@pytest.mark.parametrize(
+    ("mode_id", "label"),
+    [("audio_to_video", "Audio to video"), ("audio_to_audio", "Audio to audio")],
+)
+def test_match_my_clip_calls_a_recording_too_short_in_the_same_words(mode_id, label):
+    """With "Match my clip" such a recording once ran as one frame; now it is refused alike."""
+    matched = _refusal(mode=mode_id, audio=audio_file(seconds=0.34), auto_duration=True)
+
+    assert matched == _refusal(mode=mode_id, audio=audio_file(seconds=0.34), num_frames=121)
+    assert matched == (
+        f"Your audio is 0.3 s, too short for {label}: the shortest recording it can use is 0.4 s."
+    )
+    assert_in_the_uis_words([matched], "Match my clip with a recording too short")
+
+
 def test_the_shortest_usable_recording_is_one_that_runs():
     """The 0.4 s it names is enough: refused with no length below it, run with one at it."""
     assert "or set 0.3 s or less" in _refusal(
