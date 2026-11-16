@@ -94,20 +94,19 @@ def test_the_rewritten_prompt_comes_back_when_the_toggle_is_on():
     assert seam.calls == [{"prompt": ORIGINAL, "image": None}]
 
 
-def test_the_user_is_told_what_was_actually_sent():
+def test_the_prompt_actually_sent_is_returned_and_not_repeated_as_a_note():
     """An enhancer that silently rewrites the prompt is worse than none.
 
-    The prompt box still shows what the user typed; without this the video is
-    the only evidence that something else was generated, and a user comparing
-    two runs has no way to know which prompt produced which.
+    The prompt box still shows what the user typed, so the prompt sent must reach
+    the user: it is returned here and carried by the run record's ``prompt``,
+    which the UI shows (UI review 2, B-1: what the record says is not repeated
+    as a note).
     """
-    _, notes = enhance_module.enhance_if_requested(
+    enhanced, notes = enhance_module.enhance_if_requested(
         a_request(enhance_prompt=True), enhancer=Recorder()
     )
-    assert notes, "an enhanced run reported nothing at all"
-    assert any(REWRITTEN in note for note in notes), (
-        f"the enhanced prompt is not quoted anywhere in {notes}"
-    )
+    assert enhanced == REWRITTEN
+    assert not any(REWRITTEN in note for note in notes), notes
 
 
 def test_an_empty_prompt_is_not_enhanced_and_says_so():
@@ -220,7 +219,8 @@ def test_the_run_report_carries_the_prompt_that_was_used(tmp_path):
         output_root=tmp_path,
         retention_bytes=10**9,
     )
-    assert any(REWRITTEN in note for note in result.warnings), result.warnings
+    assert result.record.prompt == REWRITTEN, result.record
+    assert not any(REWRITTEN in note for note in result.warnings), result.warnings
 
 
 def test_an_unenhanced_run_reports_nothing_about_enhancement(tmp_path):
@@ -328,9 +328,9 @@ def test_enhancement_happens_inside_the_gpu_worker(tmp_path, monkeypatch):
         "enhancement is still happening in the web process -- which is the ~538 s CPU decode "
         "this move exists to end"
     )
-    assert any(REWRITTEN in note for note in result.warnings), (
-        "the note is now computed INSIDE the worker, so it has to survive the return leg in "
-        "GenerationResult.warnings; without that the user never sees which prompt ran"
+    assert result.record.prompt == REWRITTEN, (
+        "the rewrite happens INSIDE the worker, so the prompt sent has to survive the return "
+        "leg in the run record; without that the user never sees which prompt ran"
     )
 
 
@@ -358,7 +358,7 @@ def test_the_gpu_worker_is_where_enhancement_actually_runs(tmp_path, monkeypatch
     finally:
         generate_module._IN_GPU_WORKER.reset(token)
     assert [call["prompt"] for call in seam.calls] == [ORIGINAL]
-    assert any(REWRITTEN in note for note in result.warnings)
+    assert result.record.prompt == REWRITTEN
 
 
 def test_the_injected_enhancer_survives_the_dispatch(tmp_path, monkeypatch):
@@ -495,8 +495,12 @@ def test_no_user_facing_copy_still_says_enhancement_is_free():
     assert "GPU" in caption, "the caption no longer says where the rewrite runs"
 
 
-def test_the_status_panel_shows_the_prompt_that_was_actually_sent(tmp_path, monkeypatch):
-    """End to end through the real handler, which is what the user reads."""
+def test_the_handler_hands_the_ui_the_prompt_that_was_actually_sent(tmp_path, monkeypatch):
+    """End to end through the real handler: the run record carries the prompt sent.
+
+    UI review 2 (B-1) moved it out of the notes and into the record, which the
+    UI renders; the notes above Diagnostics no longer repeat it.
+    """
     from ltx25_studio.ui import handlers
     from ltx25_studio.ui.fields import FIELD_KEYS, FIELDS
 
@@ -506,6 +510,7 @@ def test_the_status_panel_shows_the_prompt_that_was_actually_sent(tmp_path, monk
     values["enhance_prompt"] = True
 
     real = generate_module.generate
+    results = []
 
     def wired(*args, **kwargs):
         kwargs.setdefault("pipeline_factory", factory_for(FakePipe()))
@@ -513,11 +518,14 @@ def test_the_status_panel_shows_the_prompt_that_was_actually_sent(tmp_path, monk
         kwargs.setdefault("enhancer", Recorder())
         kwargs.setdefault("output_root", tmp_path)
         kwargs.setdefault("retention_bytes", 10**9)
-        return real(*args, **kwargs)
+        results.append(real(*args, **kwargs))
+        return results[-1]
 
     monkeypatch.setattr(generate_module, "generate", wired)
-    _, _, status = handlers.on_generate("text_to_video", *(values[k] for k in FIELD_KEYS))
-    assert REWRITTEN in status, status
+    handlers.on_generate("text_to_video", *(values[k] for k in FIELD_KEYS))
+    ((result,),) = [results]
+    assert result.record.prompt == REWRITTEN, result.record
+    assert not any(REWRITTEN in note for note in result.warnings), result.warnings
 
 
 def test_the_unavailable_note_is_gone_from_the_ui():
@@ -1146,9 +1154,7 @@ def test_nothing_at_module_scope_fills_the_cache():
         "use inside the GPU worker, past the fork, and never during import"
     )
 
-    assert enhance_module._ENHANCER == {}, (
-        "importing enhance.py left something in the cache"
-    )
+    assert enhance_module._ENHANCER == {}, "importing enhance.py left something in the cache"
 
 
 def _recording_transformers(monkeypatch):

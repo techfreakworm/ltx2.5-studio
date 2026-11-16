@@ -1498,7 +1498,7 @@ def test_auto_decodes_with_conv_off_cuda_on_every_runner(kind, composite, monkey
     record = result.record
     assert (record.decoder, record.stage_2) == ("conv", False)
     assert (record.width, record.height, record.frames) == (SIZE, SIZE, FRAMES)
-    assert any("NVIDIA" in note for note in result.warnings), result.warnings
+    assert any("NVIDIA" in line for line in result.record.diagnostics), result.record.diagnostics
 
 
 @pytest.mark.parametrize("kind", RUNNERS)
@@ -1580,7 +1580,7 @@ def test_audio_to_audio_varies_the_audio_at_its_level_on_every_runner(
     )
     record = result.record
     assert (record.audio_level, record.decoder, record.stage_2) == (level, "conv", False)
-    assert any("moderately (level 0.73)" in note for note in result.warnings), result.warnings
+    assert "your audio was changed moderately." in result.warnings, result.warnings
 
 
 @pytest.mark.parametrize("kind", RUNNERS)

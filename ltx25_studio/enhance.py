@@ -430,7 +430,9 @@ def enhance_if_requested(request, *, enhancer=None) -> tuple[str | None, tuple[s
         )
 
     logger.info("prompt enhanced: %d chars in, %d chars out", len(original), len(enhanced))
-    return (enhanced, (*image_notes, _rewrite_note(enhanced)))
+    # The prompt actually sent is the record's ``prompt``; the UI shows it from
+    # there, so the rewrite is not repeated as a note (UI review 2, B-1).
+    return (enhanced, tuple(image_notes))
 
 
 def enhance(
@@ -521,21 +523,6 @@ def clear_enhancer_cache() -> None:
 # ---------------------------------------------------------------------------
 # internals
 # ---------------------------------------------------------------------------
-
-
-def _rewrite_note(enhanced: str) -> str:
-    """What the user must be able to read after the run.
-
-    An enhancer that silently rewrites the prompt is worse than none: the box
-    still shows what they typed, the video shows something else, and there is
-    nothing on screen that connects the two. ``ui/render.py`` prints every entry
-    in ``GenerationResult.warnings``, so quoting the rewritten prompt here is
-    what makes the substitution visible.
-    """
-    return (
-        "prompt enhancement rewrote your prompt, so the model was NOT given what you typed. "
-        f"The prompt actually sent was: {enhanced!r}"
-    )
 
 
 def _reference_frame(image):

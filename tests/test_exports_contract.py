@@ -444,17 +444,17 @@ def test_every_declared_export_has_somewhere_to_live_on_the_result(mode_id):
 # --------------------------------------------------------------------------
 
 
-def test_a_stage_2_run_says_the_output_is_twice_the_requested_size(tmp_path):
+def test_a_stage_2_run_records_the_size_it_returned(tmp_path):
+    """The record carries both sizes, and the UI shows them from there.
+
+    It used to be a note; UI review 2 (B-1) ruled that what the record already
+    says is not repeated as a note.
+    """
     result = run("text_to_video", tmp_path, enable_stage_2=True, width=704, height=480)
 
-    notes = " ".join(result.warnings)
-    assert "1408" in notes and "960" in notes, (
-        f"a stage-2 run did not tell the user its output is 1408x960 rather than the "
-        f"704x480 requested: {result.warnings}"
-    )
-    assert "704" in notes and "480" in notes, (
-        f"the note does not name the size that was actually asked for: {result.warnings}"
-    )
+    record = result.record
+    assert (record.requested_width, record.requested_height) == (704, 480), record
+    assert not any("1408" in note for note in result.warnings), result.warnings
 
 
 def test_a_single_stage_run_says_nothing_about_size(tmp_path):

@@ -479,11 +479,9 @@ def test_the_two_stage_steps_between_the_passes_are_named():
         progress=generate_module.ProgressReporter(recorder),
     )
 
-    assert "upscaling the latents" in recorder.labels, recorder.labels
+    assert "upscaling ×2" in recorder.labels, recorder.labels
     assert "decoding the frames" in recorder.labels, recorder.labels
-    assert recorder.labels.index("upscaling the latents") < recorder.labels.index(
-        "sampling — pass 2 of 2"
-    )
+    assert recorder.labels.index("upscaling ×2") < recorder.labels.index("sampling — pass 2 of 2")
 
 
 def test_a_two_stage_bar_never_retreats_even_though_its_steps_restart():

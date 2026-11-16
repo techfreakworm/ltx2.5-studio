@@ -588,7 +588,7 @@ def test_an_audio_export_mode_still_says_the_track_is_the_models(mode_id, tmp_pa
     """
     result = _uploaded(mode_id, tmp_path, monkeypatch)
 
-    assert any("model's own track" in note for note in result.warnings), (
+    assert any("it is not your file" in note for note in result.warnings), (
         f"{mode_id!r} returned the model's audio and never said so, so a user who uploaded "
         f"audio has no way to learn the file does not contain it: {result.warnings}"
     )
@@ -599,10 +599,10 @@ def test_a_video_exporting_mode_hands_back_the_users_own_audio(mode_id, tmp_path
     """At the seam a user actually meets: the frozen audio comes back as uploaded."""
     result = _uploaded(mode_id, tmp_path, monkeypatch)
 
-    assert any("audio you supplied" in note for note in result.warnings), (
+    assert "the sound in this file is your audio, unchanged." in result.warnings, (
         f"{mode_id!r} muxes the user's own audio and never says so: {result.warnings}"
     )
-    assert not any("model's own track" in note for note in result.warnings), (
+    assert not any("it is not your file" in note for note in result.warnings), (
         f"{mode_id!r} claims to be handing back the model's track: {result.warnings}"
     )
 
@@ -611,16 +611,16 @@ def test_a_video_exporting_mode_hands_back_the_users_own_audio(mode_id, tmp_path
 def test_the_note_says_WHY_the_upload_is_the_one_that_comes_back(
     mode_id, tmp_path, monkeypatch
 ):
-    """The reason is the mechanism, true by construction: the audio was held fixed.
+    """Said in the UI's words (UI review 2, B-1): the sound is the user's, unchanged.
 
-    No claim about what the model does with audio it is allowed to change.
+    True by construction -- the audio was held fixed while the picture was made
+    to it -- and no claim about what the model does with audio it may change.
     """
     result = _uploaded(mode_id, tmp_path, monkeypatch)
-    provenance = [note for note in result.warnings if "audio you supplied" in note]
+    provenance = [note for note in result.warnings if "your audio" in note]
 
-    assert provenance, result.warnings
+    assert provenance == ["the sound in this file is your audio, unchanged."], result.warnings
     note = provenance[0]
-    assert "held fixed" in note and "generated to it" in note, f"no reason given: {note!r}"
     assert "suppress" not in note.lower() and "dBFS" not in note, note
 
 

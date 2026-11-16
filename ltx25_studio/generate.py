@@ -32,6 +32,7 @@ from __future__ import annotations
 import contextvars
 import inspect
 import logging
+import math
 import secrets
 import time
 import uuid
@@ -42,6 +43,7 @@ from pathlib import Path
 from . import conditioning, constraints, modes
 from .constraints import DEFAULT_FRAME_RATE
 from .errors import (
+    AudioVideoDesyncError,
     DecodeError,
     EmptyOutputError,
     EncodeError,
@@ -567,19 +569,45 @@ def _checked_audio_length(request: GenerationRequest, spec, seconds: float | Non
     if seconds is None or request.auto_duration or not modes.requires(spec, "audio"):
         return
     from .audio import DEFAULT_LENGTH_TOLERANCE_SECONDS
-    from .errors import AudioVideoDesyncError
 
     fps = float(request.frame_rate)
     video_seconds = int(request.num_frames) / fps
     if seconds + DEFAULT_LENGTH_TOLERANCE_SECONDS + _METADATA_MARGIN_SECONDS < video_seconds:
-        raise AudioVideoDesyncError(
-            video_seconds=round(video_seconds, 3),
-            audio_seconds=round(seconds, 3),
-            largest_fitting_num_frames=constraints.largest_num_frames_within(
-                seconds, frame_rate=fps
-            ),
-            route="file",
+        raise _short_audio_refusal(
+            video_seconds=video_seconds, audio_seconds=seconds, frame_rate=fps, label=spec.label
         )
+
+
+def _shortest_usable_num_frames(frame_rate: float) -> int:
+    """The shortest length worth setting: more than one frame, and at least 0.1 s."""
+    ratio = constraints.DEFAULT_TEMPORAL_COMPRESSION_RATIO
+    frames = ratio + 1
+    while math.floor(frames / float(frame_rate) * 10 + 1e-9) == 0:
+        frames += ratio
+    return frames
+
+
+def _short_audio_refusal(*, video_seconds, audio_seconds, frame_rate, label):
+    """An uploaded file shorter than the set length, in the UI's words (gate and worker).
+
+    Names the longest legal length the file covers; where that is a single
+    frame (no usable length at all), names the shortest recording that works.
+    """
+    fps = float(frame_rate)
+    fitting = constraints.largest_num_frames_within(audio_seconds, frame_rate=fps)
+    shortest = _shortest_usable_num_frames(fps)
+    return AudioVideoDesyncError(
+        video_seconds=round(float(video_seconds), 3),
+        audio_seconds=round(float(audio_seconds), 3),
+        largest_fitting_num_frames=fitting,
+        route="file",
+        frame_rate=fps,
+        mode=label,
+        # Rounded up, so a recording of exactly this length does cover it.
+        shortest_seconds=(
+            math.ceil(shortest / fps * 10 - 1e-9) / 10 if fitting < shortest else None
+        ),
+    )
 
 
 def _length_from_audio(
@@ -601,10 +629,8 @@ def _length_from_audio(
         )
     fps = float(request.frame_rate)
     num_frames = constraints.largest_num_frames_within(seconds, frame_rate=fps)
-    note = (
-        f"length set from your audio: {seconds:.2f} s → {num_frames} frames "
-        f"({num_frames / fps:.2f} s at {fps:g} fps)."
-    )
+    # The video's own length (the longest legal one the audio covers), in seconds.
+    note = f"length set from your audio: {num_frames / fps:.1f} s."
     if seconds * fps > constraints.MAX_NUM_FRAMES:
         note += (
             f" Your audio is longer than the {constraints.MAX_SECONDS:g} s maximum, so it is "
@@ -653,7 +679,7 @@ def _video_seconds(source) -> float:
         raise
     except Exception as exc:  # noqa: BLE001 -- every open failure has one answer here
         raise constraints.ConstraintError(
-            f"{source} could not be opened as a video ({type(exc).__name__}); it may have "
+            f"{name} could not be opened as a video ({type(exc).__name__}); it may have "
             f"been removed. Upload it again, as an MP4, MOV or WebM file."
         ) from exc
     return float(seconds) if seconds else 0.0
@@ -674,10 +700,7 @@ def _length_from_clip(
             "(H.264) file."
         )
     num_frames = constraints.largest_num_frames_within(seconds, frame_rate=fps)
-    note = (
-        f"length set from your clip: {seconds:.2f} s → {num_frames} frames "
-        f"({num_frames / fps:.2f} s at {fps:g} fps)."
-    )
+    note = f"length set from your clip: {num_frames / fps:.1f} s."
     if seconds * fps > constraints.MAX_NUM_FRAMES:
         note += (
             f" Your clip is longer than the {constraints.MAX_SECONDS:g} s maximum, so it is "
@@ -969,7 +992,10 @@ def _prepared_variation(kwargs: dict, request: GenerationRequest, spec) -> tuple
     if clip is None:
         return ()
     level = clip.level
-    notes: list[str] = [audio_conditioning.video_level_note(level, requested=request.noise_scale)]
+    notes: list[str] = [audio_conditioning.video_level_note(level)]
+    snapped = audio_conditioning.snapped_level_note(level, request.noise_scale)
+    if snapped:
+        notes.append(snapped)
     source = clip.source
     if isinstance(source, (str, Path)):
         num_frames = int(kwargs["num_frames"])
@@ -985,8 +1011,8 @@ def _prepared_variation(kwargs: dict, request: GenerationRequest, spec) -> tuple
         if len(frames) < num_frames:
             fitting = constraints.nearest_valid_num_frames(int(len(frames)))[0]
             notes.append(
-                f"your clip held {len(frames)} frames, fewer than its length promised, so the "
-                f"video is {fitting} frames long."
+                f"your clip is shorter than its file said, so the video is "
+                f"{fitting / float(request.frame_rate):.1f} s long."
             )
             kwargs["num_frames"] = fitting
             frames = frames[:fitting]
@@ -1063,8 +1089,8 @@ def _chosen_length_note(output, request: GenerationRequest) -> tuple[str, ...]:
         return ()
     count = _frame_count(output)
     if count is None:
-        return ("the model chose the length itself, and its frame count could not be read.",)
-    return (f"the model chose {count} frames ({count / float(request.frame_rate):.2f} s).",)
+        return ("the model chose the length itself.",)
+    return (f"the model chose the length: {count / float(request.frame_rate):.1f} s.",)
 
 
 def _seeded_generator(pipe, seed: int):
@@ -1116,31 +1142,29 @@ def _muxes_supplied_audio(exports) -> bool:
     return "audio" in exports and "video" in exports
 
 
-def _supplied_audio_note(mode: str, exports, *, muxed: bool) -> tuple[str, ...]:
-    """Say which audio the file carries, whenever audio entered a run that exports audio."""
+def _supplied_audio_note(mode: str, exports, *, muxed: bool, level=None) -> tuple[str, ...]:
+    """Say which sound the file carries, whenever audio entered a run that exports audio.
+
+    In the UI's words (UI review 2, B-1). ``mode`` is kept for callers; the note
+    no longer names it. ``level`` is the audio variation level, where one applies.
+    """
     if "audio" not in tuple(exports or ()):
         return ()
     if muxed:
-        return (
-            "the audio in this file is the audio you supplied. It was held fixed while the "
-            "picture was generated to it, and it is length-matched to the video before it is "
-            "muxed, so it may be shorter than the file you uploaded.",
-        )
-    return (
-        f"the audio in this file is the model's own track for mode {mode!r}, made from the "
-        f"audio you supplied -- not your upload itself.",
-    )
+        return ("the sound in this file is your audio, unchanged.",)
+    if level is not None and float(level) >= 1.0:
+        return ("this sound is the model's, made fresh; it is not your file.",)
+    return ("this sound is the model's, made from yours; it is not your file.",)
 
 
-def _supplied_latents_note(mode: str, exports) -> tuple[str, ...]:
+def _supplied_latents_note(mode: str, exports, *, level=None) -> tuple[str, ...]:
     """The programmatic route, where there is no waveform to hand back."""
     if not _muxes_supplied_audio(exports):
-        return _supplied_audio_note(mode, exports, muxed=False)
+        return _supplied_audio_note(mode, exports, muxed=False, level=level)
     return (
-        f"audio reached mode {mode!r} as pre-encoded audio_latents, so there is no waveform "
-        f"to mux: this file carries those latents decoded by the model. They were held fixed "
-        f"while the picture was generated. Supply an audio FILE to get your own audio muxed "
-        f"back unchanged.",
+        "your audio arrived already encoded, so this file carries it decoded by the model, "
+        "held fixed while the picture was made. Supply an audio FILE to get your own audio "
+        "back unchanged.",
     )
 
 
@@ -1153,7 +1177,14 @@ def _audio_level_notes(kwargs: dict, request: GenerationRequest, spec) -> tuple[
         return ()
     from . import audio_conditioning
 
-    return (audio_conditioning.level_note(level, requested=request.noise_scale),)
+    notes = []
+    if float(level) < 1.0:
+        # At 1.0, "made fresh" is said by the note on which sound the file carries.
+        notes.append(audio_conditioning.level_note(level))
+    snapped = audio_conditioning.snapped_level_note(level, request.noise_scale)
+    if snapped:
+        notes.append(snapped)
+    return tuple(notes)
 
 
 def _prepared_audio(kwargs: dict, request: GenerationRequest, pipe, *, spec):
@@ -1210,7 +1241,7 @@ def _prepared_audio(kwargs: dict, request: GenerationRequest, pipe, *, spec):
     supplied = kwargs.get("audio_latents")
     if supplied is not None:
         return (
-            _supplied_latents_note(request.mode, exports)
+            _supplied_latents_note(request.mode, exports, level=kwargs.get("audio_noise_level"))
             + _checked_supplied_audio_latents(supplied, kwargs, request, pipe),
             None,
         )
@@ -1247,7 +1278,11 @@ def _prepared_audio(kwargs: dict, request: GenerationRequest, pipe, *, spec):
     # `notes`, so it reaches `GenerationResult.warnings` rather than the Space
     # log alone. It leads with which track the file will carry, because that is
     # the fact a user who uploaded audio is most likely to get wrong.
-    notes: list[str] = list(_supplied_audio_note(request.mode, exports, muxed=muxes_upload))
+    notes: list[str] = list(
+        _supplied_audio_note(
+            request.mode, exports, muxed=muxes_upload, level=kwargs.get("audio_noise_level")
+        )
+    )
 
     # TRIM long, REFUSE short, never pad, never silent. A file longer than the
     # num_frames-derived video is cut to upstream's own latent grid and the cut
@@ -1267,14 +1302,26 @@ def _prepared_audio(kwargs: dict, request: GenerationRequest, pipe, *, spec):
         ):
             # The trim note names the upload's real length, not the decoded part.
             reconcile_options["source_seconds"] = _audio_seconds(source)
-        waveform, trim_note = audio_module.reconcile_waveform_with_video(
-            waveform,
-            sampling_rate=rate,
-            params=audio_module.audio_params_from(audio_vae),
-            num_frames=int(num_frames),
-            frame_rate=frame_rate,
-            **reconcile_options,
-        )
+        try:
+            waveform, trim_note = audio_module.reconcile_waveform_with_video(
+                waveform,
+                sampling_rate=rate,
+                params=audio_module.audio_params_from(audio_vae),
+                num_frames=int(num_frames),
+                frame_rate=frame_rate,
+                **reconcile_options,
+            )
+        except AudioVideoDesyncError as exc:
+            if exc.route == "file":
+                raise
+            # The worker's backstop for an uploaded FILE: said as the gate says it,
+            # never in terms of audio_latents and num_frames.
+            raise _short_audio_refusal(
+                video_seconds=exc.video_seconds,
+                audio_seconds=exc.audio_seconds,
+                frame_rate=frame_rate,
+                label=spec.label,
+            ) from exc
         if trim_note is not None:
             notes.append(trim_note)
     elif muxes_upload:
@@ -1907,7 +1954,7 @@ _PHASE_BANDS = {
     "preparing the inputs": (0.10, 0.12),
     "sampling": (0.12, 0.82),
     "sampling — pass 1 of 2": (0.12, 0.55),
-    "upscaling the latents": (0.55, 0.60),
+    "upscaling ×2": (0.55, 0.60),
     "sampling — pass 2 of 2": (0.60, 0.82),
     "decoding the frames": (0.82, 0.88),
     "writing the file": (0.88, 1.00),
@@ -1989,7 +2036,7 @@ class ProgressReporter:
         to exactly one module. A string literal there is a second copy of a label
         that the bands table would silently stop containing.
         """
-        self.phase("upscaling the latents")
+        self.phase("upscaling ×2")
 
     def decoding(self) -> None:
         """The stage-2 diffusion decode. See :meth:`upscaling` for the shape."""
@@ -2243,10 +2290,9 @@ def generate(
         #     validation to keep in step;
         #   * it is above the pipeline factory, so a failed enhancement never first
         #     spends a model load it is going to throw away;
-        #   * the note it produces is built on the same side of the fork as the
-        #     GenerationResult that carries it, so it rides home in
-        #     `warnings` like every other note instead of being grafted on
-        #     afterwards.
+        #   * the prompt it sends is built on the same side of the fork as the
+        #     GenerationResult that carries it, so it rides home in the run
+        #     record's `prompt` instead of being grafted on afterwards.
         #
         # Called unconditionally -- `enhance_if_requested` returns immediately when
         # the toggle is off -- so `enhance.py` is executed on every generation and
@@ -2300,7 +2346,7 @@ def generate(
         except Exception as exc:
             if is_out_of_memory(exc):
                 raise GpuMemoryError(
-                    mode=request.mode, stage="loading the model", reason=str(exc)[:200]
+                    mode=spec.label, stage="loading the model", reason=str(exc)[:200]
                 ) from exc
             raise ModelLoadError(component=spec.pipeline, reason=str(exc)) from exc
 
@@ -2334,11 +2380,6 @@ def generate(
             if reporter:
                 kwargs["progress"] = reporter
 
-            size_notes = ()
-            if stage_2_enabled(spec, request):
-                from . import pipelines
-
-                size_notes = (pipelines.stage_2_size_note(request.width, request.height),)
             try:
                 output = pipe(**kwargs)
             except LTXStudioError:
@@ -2347,18 +2388,19 @@ def generate(
             except Exception as exc:
                 if is_out_of_memory(exc):
                     raise GpuMemoryError(
-                        mode=request.mode, stage="generating", reason=str(exc)[:200]
+                        mode=spec.label, stage="generating", reason=str(exc)[:200]
                     ) from exc
                 raise DecodeError(mode=request.mode, reason=f"the pipeline raised {exc!r}") from exc
 
             output = _decoded(output, request.mode)
             length_notes = _chosen_length_note(output, request)
             run_facts = getattr(pipe, "last_run", None)
-            decoder_notes = ()
+            decoder_lines = ()
             if isinstance(run_facts, dict) and "video" in spec.exports:
                 from . import pipelines
 
-                decoder_notes = (pipelines.decoder_note(run_facts),)
+                # Decoder policy is a diagnostic; the record carries which ran.
+                decoder_lines = (pipelines.decoder_note(run_facts),)
 
             reporter.phase("writing the file")
             try:
@@ -2405,8 +2447,10 @@ def generate(
             except Exception as exc:
                 raise EncodeError(path=str(run_dir), reason=str(exc)) from exc
 
+            # An undeclared track the encoder offered is a builder's fact: diagnostics.
+            artifact_lines: list[str] = []
             artifacts = _artifacts_for(
-                written, spec=spec, mode=request.mode, run_dir=run_dir, notes=encoder_warnings
+                written, spec=spec, mode=request.mode, run_dir=run_dir, notes=artifact_lines
             )
 
             # The second lap: model load, denoise, decode and encode. Closed here
@@ -2415,20 +2459,24 @@ def generate(
             # lap, so an unclosed window is silently missing from it.
             probe.split("generation (model load through encode)")
 
+            # Above Diagnostics: facts that change what the user got, in the UI's
+            # words (UI review 2, B-1). The upscaled size, the decoder and the prompt
+            # sent are the record's, and not repeated here.
             warnings = (
-                notes
-                + enhancement_notes
-                + _sweep(root, retention_bytes)
-                + tuple(encoder_warnings)
-                + audio_notes
-                + length_notes
-                + size_notes
-                + decoder_notes
+                notes + enhancement_notes + tuple(encoder_warnings) + audio_notes + length_notes
             )
             # Present on every run, but for the collapsed block, not the notes:
             # the flagship run that finally gives a headroom number is not the one
-            # somebody remembered to turn a flag on for.
-            diagnostics = probe.notes() + _partition_notes(probe) + (f"run folder: {run_dir}",)
+            # somebody remembered to turn a flag on for. Evictions and the decoder
+            # policy are diagnostics too.
+            diagnostics = (
+                decoder_lines
+                + tuple(artifact_lines)
+                + _sweep(root, retention_bytes)
+                + probe.notes()
+                + _partition_notes(probe)
+                + (f"run folder: {run_dir}",)
+            )
             record = _run_record(
                 request,
                 spec,

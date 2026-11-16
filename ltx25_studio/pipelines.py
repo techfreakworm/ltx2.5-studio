@@ -84,7 +84,6 @@ __all__ = [
     "VAE_TILE_STRIDE_NUM_FRAMES",
     "stage_1_kwargs",
     "stage_2_geometry",
-    "stage_2_size_note",
     "STAGE_2_SPATIAL_SCALE",
     "distilled_kwargs",
     "DISTILLED_GUIDANCE",
@@ -1167,22 +1166,6 @@ def stage_1_kwargs() -> dict:
 STAGE_2_SPATIAL_SCALE = 2
 
 
-def stage_2_size_note(width: int, height: int) -> str:
-    """What to tell the user about the size stage 2 will actually return.
-
-    **Requesting 704×480 with stage 2 gives a 1408×960 file**, which is correct
-    -- doubling both axes is what stage 2 *is* -- but nothing said so, and
-    ``verify_streams`` does not assert resolution, so the size a user asked for
-    was not the size they got and no part of the system mentioned it.
-    """
-    return (
-        f"stage 2 upsamples both axes, so this output is "
-        f"{int(width) * STAGE_2_SPATIAL_SCALE}×{int(height) * STAGE_2_SPATIAL_SCALE}, "
-        f"not the {int(width)}×{int(height)} requested. That is what stage 2 does: "
-        f"it renders at half size and enlarges, which is why it looks better."
-    )
-
-
 def upsample_kwargs(latents) -> dict:
     """Spatial x2 latent upsample.
 
@@ -1364,8 +1347,8 @@ def check_cpu_decoder_size(*, width, height, num_frames) -> None:
     if tokens is None or tokens > limit:
         raise DecoderUnavailableError(
             reason=(
-                f"without an NVIDIA (CUDA) GPU it runs only on the CPU, for very small "
-                f"videos (up to {limit} decoder positions; this one needs {tokens})"
+                "it needs a CUDA GPU at this size; on this machine it runs only for very "
+                "small, short videos"
             )
         )
 

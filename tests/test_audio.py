@@ -240,8 +240,9 @@ def test_a_mono_upload_is_widened_rather_than_rejected():
 def test_the_mono_upmix_is_reported_in_words_a_user_can_act_on():
     _widened, note = audio.match_channel_count(waveform_of(1), channels=2)
 
-    assert "mono" in note and "duplicated" in note, note
+    assert "mono" in note and "both sides" in note, note
     assert "not true stereo" in note, f"the note does not say what the user actually got: {note}"
+    assert "VAE" not in note and "channels" not in note, f"builder's words in a user's note: {note}"
 
 
 def test_stereo_passes_through_untouched_and_unremarked():
@@ -1161,7 +1162,7 @@ def test_a_long_upload_is_trimmed_to_upstreams_own_latent_grid():
     out, note = _recon(wave)
     assert out.shape[-1] == 77440, "round(4.84 s * 16 kHz) -- whole latent frames, no partial hop"
     assert out.shape[-1] % _RECON_PARAMS.samples_per_latent_frame == 0
-    assert note == "audio input trimmed from 6.00s to 4.84s to match 121 frames"
+    assert note == "your audio was trimmed from 6.00 s to 4.84 s to match the video."
 
 
 def test_the_trim_converts_to_the_incoming_files_own_rate():
@@ -1170,7 +1171,7 @@ def test_the_trim_converts_to_the_incoming_files_own_rate():
     wave = waveform_of(2, samples=288000)  # 6.0 s at 48 kHz
     out, note = _recon(wave, sampling_rate=48000)
     assert out.shape[-1] == round(4.84 * 48000)
-    assert note == "audio input trimmed from 6.00s to 4.84s to match 121 frames"
+    assert note == "your audio was trimmed from 6.00 s to 4.84 s to match the video."
 
 
 def test_a_short_upload_is_refused_naming_the_change_that_would_fit():
@@ -1242,7 +1243,7 @@ def test_the_trim_note_can_name_the_uploads_real_length():
         frame_rate=25.0,
         source_seconds=3600.0,
     )
-    assert note == "audio input trimmed from 3600.00s to 4.84s to match 121 frames"
+    assert note == "your audio was trimmed from 3600.00 s to 4.84 s to match the video."
 
 
 def _long_wav(path, *, seconds, rate=16000):

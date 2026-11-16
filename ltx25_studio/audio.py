@@ -427,8 +427,7 @@ def reconcile_waveform_with_video(
     shown = audio_seconds if source_seconds is None else float(source_seconds)
     return (
         kept,
-        f"audio input trimmed from {shown:.2f}s to {kept_seconds:.2f}s "
-        f"to match {num_frames} frames",
+        f"your audio was trimmed from {shown:.2f} s to {kept_seconds:.2f} s to match the video.",
     )
 
 
@@ -766,8 +765,8 @@ def match_channel_count(waveform, *, channels: int):
     # Fancy indexing rather than `.repeat`, whose meaning differs between torch
     # and numpy; this selects row 0 `channels` times and means the same in both.
     return waveform[[0] * channels], (
-        f"the audio was mono and this model's audio VAE takes {channels} channels, so the "
-        f"single channel was duplicated. No audio was lost, but it is not true stereo."
+        "your audio was mono, so its one channel was used for both sides: nothing was "
+        "lost, but it is not true stereo."
     )
 
 

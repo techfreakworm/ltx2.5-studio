@@ -37,6 +37,7 @@ __all__ = [
     "sigma_tail",
     "snap_level",
     "snap_video_level",
+    "snapped_level_note",
     "video_level_note",
 ]
 
@@ -57,9 +58,9 @@ DEFAULT_VIDEO_LEVEL = VIDEO_VARIATION_LEVELS[-1]
 _VIDEO_WORDS = dict(zip(VIDEO_VARIATION_LEVELS, ("a little", "moderately", "a lot"), strict=True))
 
 _LEVEL_WORDS = {
-    VARIATION_LEVELS[0]: "lightly",
+    VARIATION_LEVELS[0]: "a little",
     VARIATION_LEVELS[1]: "moderately",
-    VARIATION_LEVELS[2]: "strongly",
+    VARIATION_LEVELS[2]: "a lot",
 }
 
 
@@ -81,16 +82,23 @@ def sigma_tail(level: float) -> list[float]:
     return schedule[schedule.index(float(level)) :]
 
 
-def video_level_note(level: float, *, requested=None) -> str:
-    """What happened to the user's clip, in plain words."""
-    asked = ""
-    if requested is not None and abs(float(requested) - float(level)) > 1e-6:
-        asked = (
-            f" You asked for {_two(requested)}; the supported levels are "
-            f"{', '.join(_two(v) for v in VIDEO_VARIATION_LEVELS)}, and {_two(level)} is the "
-            f"nearest."
-        )
-    return f"your clip was changed {_VIDEO_WORDS[float(level)]} (level {_two(level)}).{asked}"
+def video_level_note(level: float) -> str:
+    """What happened to the user's clip, in the UI's words: the level that was used."""
+    return f"your clip was changed {_VIDEO_WORDS[float(level)]}."
+
+
+def snapped_level_note(level: float, requested) -> str | None:
+    """The request, said only when it was snapped to a different level.
+
+    A request that reads as the level used (0.42 for 0.421875) is not a snap a
+    person would recognise, so nothing is said for it.
+    """
+    if requested is None or _two(requested) == _two(level):
+        return None
+    return (
+        f"you asked for {_two(requested)}, which is not one of the levels; the nearest, "
+        f"{_two(level)}, was used."
+    )
 
 
 def audio_sigmas(video_sigmas, level: float) -> list[float]:
@@ -105,26 +113,14 @@ def _two(value) -> str:
     return str(Decimal(str(float(value))).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
 
 
-def level_note(level: float, *, requested=None) -> str:
-    """What happened to the user's audio, in plain words."""
+def level_note(level: float) -> str:
+    """What happened to the user's audio, in the UI's words: the level that was used."""
     level = float(level)
     if level == FROZEN:
-        return (
-            "your audio was held exactly as you supplied it while the picture was generated "
-            "to it, and the file carries it unchanged."
-        )
-    asked = ""
-    if requested is not None and abs(float(requested) - level) > 1e-6:
-        asked = (
-            f" You asked for {_two(requested)}; the supported levels are "
-            f"{', '.join(_two(v) for v in VARIATION_LEVELS)}, and {_two(level)} is the nearest."
-        )
+        return "the sound in this file is your audio, unchanged."
     if level >= 1.0:
-        return (
-            "your audio was not used: at level 1.00 the sound is generated fresh, as if no "
-            f"audio had been supplied.{asked}"
-        )
-    return f"your audio was changed {_LEVEL_WORDS[level]} (level {_two(level)}).{asked}"
+        return "your audio was not used: this sound was made fresh."
+    return f"your audio was changed {_LEVEL_WORDS[level]}."
 
 
 # ---------------------------------------------------------------------------

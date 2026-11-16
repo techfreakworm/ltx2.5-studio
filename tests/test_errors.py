@@ -64,7 +64,7 @@ ERROR_SPECS = {
     ),
     "DecoderUnavailableError": (
         {"reason": "it needs an NVIDIA (CUDA) GPU at this size"},
-        ["diffusion decoder", "NVIDIA", "standard decoder"],
+        ["Best quality", "NVIDIA", "Fast"],
     ),
     "DecoderTooSmallError": (
         {
@@ -73,7 +73,7 @@ ERROR_SPECS = {
             "smallest": (128, 128, 17),
             "stage_2": True,
         },
-        ["192×128", "224×224", "17 frames", "128×128", "stage 2"],
+        ["192×128", "224×224", "17 frames", "128×128", "Upscale ×2"],
     ),
     # -- model files (PLAN §5.2) -----------------------------------------
     "MissingModelFileError": (

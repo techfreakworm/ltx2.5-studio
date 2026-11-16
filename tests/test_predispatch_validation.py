@@ -354,8 +354,7 @@ def test_auto_duration_in_an_audio_mode_takes_the_length_from_the_audio(
         "the text-only duration head cannot hear the audio and must not be asked"
     )
     notes = [n for n in result.warnings if "length set from your audio" in n]
-    assert len(notes) == 1, result.warnings
-    assert f"{expected} frames" in notes[0], notes[0]
+    assert notes == [f"length set from your audio: {expected / frame_rate:.1f} s."], result.warnings
 
 
 def test_audio_longer_than_the_maximum_is_capped_and_says_so(accepted, loads_as_probed):
@@ -363,7 +362,7 @@ def test_audio_longer_than_the_maximum_is_capped_and_says_so(accepted, loads_as_
     result, sent = accepted(mode="audio_to_audio", audio=audio_file(25.0), auto_duration=True)
     assert sent["num_frames"] == constraints.MAX_NUM_FRAMES
     note = next(n for n in result.warnings if "length set from your audio" in n)
-    assert "481 frames" in note and "20" in note, note
+    assert note.startswith("length set from your audio: 20.0 s.") and "maximum" in note, note
 
 
 def test_very_short_audio_is_clamped_to_the_minimum_length(accepted, loads_as_probed):
@@ -411,7 +410,7 @@ def test_the_length_the_duration_head_chose_is_reported(tmp_path):
         retention_bytes=10**9,
     )
     notes = [n for n in result.warnings if "the model chose" in n]
-    assert notes == ["the model chose 97 frames (4.04 s)."], result.warnings
+    assert notes == ["the model chose the length: 4.0 s."], result.warnings
 
 
 def test_no_chosen_length_note_when_the_user_set_the_length(tmp_path):
@@ -631,7 +630,45 @@ def test_audio_shorter_than_a_set_length_is_refused_before_dispatch(mode_id, ref
     )
     assert error.gpu_used is False
     assert error.largest_fitting_num_frames == 41
-    assert "Your audio is 2.00 s long" in str(error) and "audio_latents" not in str(error)
+    # UI review 2, B-2: the UI's words, and the longest set length that fits.
+    assert str(error) == (
+        'Your audio is 2.0 s and the length is set to 5.0 s. Choose "Match my clip", '
+        "or set 1.7 s or less."
+    )
+
+
+@pytest.mark.parametrize("mode_id", ["audio_to_video", "audio_to_audio"])
+def test_a_four_second_wav_against_a_set_five_seconds_is_refused_for_free(
+    mode_id, refused, tmp_path
+):
+    error = refused(
+        errors.AudioVideoDesyncError,
+        mode=mode_id,
+        audio=_wav(tmp_path / "four.wav", seconds=4.0),
+        num_frames=121,
+    )
+    assert error.gpu_used is False
+    assert str(error) == (
+        'Your audio is 4.0 s and the length is set to 5.0 s. Choose "Match my clip", '
+        "or set 3.7 s or less."
+    )
+
+
+def test_the_set_length_boundary_exact_fit_runs_and_the_next_length_is_refused(
+    accepted, refused, tmp_path
+):
+    # 97 frames at 24 fps is 4.0417 s: audio of exactly that length fits.
+    accepted(
+        mode="audio_to_video", audio=_wav(tmp_path / "fit.wav", seconds=97 / 24), num_frames=97
+    )
+    # The next legal length (105 frames, 4.375 s) is past it by more than the tolerance.
+    error = refused(
+        errors.AudioVideoDesyncError,
+        mode="audio_to_video",
+        audio=_wav(tmp_path / "over.wav", seconds=97 / 24),
+        num_frames=105,
+    )
+    assert error.largest_fitting_num_frames == 97
 
 
 def test_audio_just_inside_the_tolerance_is_not_refused(accepted, tmp_path):

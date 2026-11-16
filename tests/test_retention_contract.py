@@ -186,13 +186,14 @@ def test_an_eviction_is_reported_on_the_result(tmp_path):
 
     result = run(tmp_path, retention_bytes=ARTIFACT_BYTES * 2)
 
-    assert result.warnings, (
-        "a run was evicted and the result carries no warning about it. The eviction happened "
-        "silently, which is the half of PLAN §2.7 that is about the user rather than the disk."
+    # In the record's diagnostics, not above them: an eviction is housekeeping,
+    # not a fact about what this run made (UI review 2, B-1).
+    diagnostics = result.record.diagnostics
+    assert any("run-old" in line for line in diagnostics), (
+        "a run was evicted and the result carries no word about it. The eviction happened "
+        f"silently, which is the half of PLAN §2.7 that is about the user: {diagnostics}"
     )
-    assert any("run-old" in warning for warning in result.warnings), (
-        f"the warnings do not name what was evicted: {result.warnings}"
-    )
+    assert not any("run-old" in note for note in result.warnings), result.warnings
 
 
 def test_a_run_that_evicts_nothing_says_nothing(tmp_path):
@@ -203,6 +204,9 @@ def test_a_run_that_evicts_nothing_says_nothing(tmp_path):
 
     assert result.warnings == (), (
         f"nothing was evicted but the run warned anyway: {result.warnings}"
+    )
+    assert not any("evicted" in line for line in result.record.diagnostics), (
+        result.record.diagnostics
     )
 
 
@@ -239,12 +243,10 @@ def test_a_broken_sweep_is_surfaced_rather_than_swallowed(tmp_path, monkeypatch)
 
     result = run(tmp_path, retention_bytes=ARTIFACT_BYTES)
 
-    assert result.warnings, (
+    diagnostics = result.record.diagnostics
+    assert any("retention" in line.lower() for line in diagnostics), (
         "the sweep failed and the run reported nothing. Retention silently not happening is "
-        "how the predecessor's disk filled."
-    )
-    assert any("retention" in warning.lower() for warning in result.warnings), (
-        f"the warning does not say what failed: {result.warnings}"
+        f"how the predecessor's disk filled: {diagnostics}"
     )
 
 

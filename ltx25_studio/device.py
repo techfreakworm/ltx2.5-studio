@@ -111,12 +111,9 @@ class StageTwoNeedsCudaError(ConstraintError):
         self.device = device
         self.tokens = tokens
         self.limit = limit
-        super().__init__(
-            f"Stage 2 is not available at this size on this machine ({device}). Its final "
-            f"decoder needs an NVIDIA (CUDA) GPU; here it can only run on the CPU, which fits "
-            f"very small videos (up to {limit} decoder positions, and this one needs "
-            f"{tokens}). Turn off stage 2, or make the video smaller and shorter."
-        )
+        # The UI's words (UI review 2, B-1): its control is "Upscale ×2". The
+        # position counts stay on the instance for the logs.
+        super().__init__(f"Upscale ×2 needs a CUDA GPU; this machine runs on {device}.")
 
 
 _PLAIN_CHECK_NAMES = {

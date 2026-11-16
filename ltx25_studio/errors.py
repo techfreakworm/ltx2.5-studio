@@ -32,6 +32,8 @@ Imports nothing else from this package (PLAN §7.2).
 
 from __future__ import annotations
 
+import math
+
 # The ONE gradio import allowed outside ui/ (test_architecture.py pins it to
 # exactly this name). It is unconditional and at module level on purpose:
 # gradio is a pinned runtime dependency (requirements.txt, ==6.24.0), and the
@@ -417,13 +419,15 @@ class DecoderTooSmallError(ConstraintError):
         #: ``(width, height, frames)``: the closest request that works.
         self.smallest = tuple(smallest)
         self.stage_2 = bool(stage_2)
-        what = "Stage 2 cannot finish" if stage_2 else "The diffusion decoder cannot decode"
-        fix = "turn stage 2 off" if stage_2 else "choose the standard decoder"
+        # The UI's words: its controls are "Upscale ×2" and the decoder choice
+        # "Best quality" / "Fast" (ui/render.py DECODER_OPTIONS).
+        what = "Upscale ×2 cannot finish" if stage_2 else "Best quality cannot decode"
+        fix = "turn Upscale ×2 off" if stage_2 else "choose Fast"
         super().__init__(
-            f"{what} a video this small: its final decoder needs at least "
+            f"{what} a video this small: it needs at least "
             f"{self.minimum[0]}×{self.minimum[1]} pixels and {self.minimum[2]} frames, and this "
             f"run would give it {self.output[0]}×{self.output[1]} at {self.output[2]} frames. "
-            f"The smallest request that works is {self.smallest[0]}×{self.smallest[1]} at "
+            f"The smallest that works is {self.smallest[0]}×{self.smallest[1]} at "
             f"{self.smallest[2]} frames. Make the video larger or longer, or {fix}."
         )
 
@@ -434,8 +438,8 @@ class DecoderUnavailableError(ConstraintError):
     def __init__(self, *, reason):
         self.reason = reason
         super().__init__(
-            f"The diffusion decoder was chosen but cannot run here: {reason}. Choose the "
-            f"standard decoder, or auto, which uses the diffusion decoder wherever it can run."
+            f"Best quality was chosen but cannot run here: {reason}. Choose Fast, or Auto, "
+            f"which uses Best quality wherever it can run."
         )
 
 
@@ -483,33 +487,69 @@ class AudioVideoDesyncError(ConstraintError):
     """
 
     def __init__(
-        self, *, video_seconds, audio_seconds, largest_fitting_num_frames=None, route="latents"
+        self,
+        *,
+        video_seconds,
+        audio_seconds,
+        largest_fitting_num_frames=None,
+        route="latents",
+        frame_rate=None,
+        mode=None,
+        shortest_seconds=None,
     ):
         self.video_seconds = video_seconds
         self.audio_seconds = audio_seconds
         self.largest_fitting_num_frames = largest_fitting_num_frames
         self.route = route
-        if route == "file":
+        self.frame_rate = frame_rate
+        #: The mode's label, for the too-short sentence.
+        self.mode = mode
+        #: Set when no usable length fits the file: the shortest recording that does.
+        self.shortest_seconds = shortest_seconds
+        if route == "file" and shortest_seconds is not None:
             message = (
-                f"Your audio is {float(audio_seconds):.2f} s long, shorter than the "
-                f"{float(video_seconds):.2f} s video you set. Shorten the video, or let its "
-                f"length follow your audio."
+                f"Your audio is {_short_seconds(audio_seconds)}, too short for "
+                f"{mode or 'this mode'}: the shortest recording it can use is "
+                f"{float(shortest_seconds):.1f} s."
             )
+        elif route == "file":
+            # An uploaded file: said in the UI's words (seconds, its "Match my
+            # clip" choice), with the longest set length that fits.
+            audio, video = _seconds_pair(audio_seconds, video_seconds)
+            message = f"Your audio is {audio} and the length is set to {video}."
+            if largest_fitting_num_frames is not None:
+                rate = float(frame_rate or 24.0)
+                fits = math.floor(int(largest_fitting_num_frames) / rate * 10 + 1e-9) / 10
+                message += f' Choose "Match my clip", or set {fits:.1f} s or less.'
+            else:
+                message += ' Choose "Match my clip", or set a length no longer than your audio.'
         else:
             message = (
                 f"video and audio lengths disagree: video is {video_seconds} s but audio is "
                 f"{audio_seconds} s. Supplying audio_latents overrides the audio length while "
                 f"num_frames still governs the video; adjust one so they match."
             )
-        if largest_fitting_num_frames is not None:
-            # Optional because only some raise sites can compute it: the
-            # file-upload path knows the frame rate and can name the exact
-            # change that would fit, and an error that names the fix beats one
-            # that only names the mismatch.
-            message += (
-                f" The longest video this audio covers is num_frames={largest_fitting_num_frames}."
-            )
+            if largest_fitting_num_frames is not None:
+                message += (
+                    f" The longest video this audio covers is "
+                    f"num_frames={largest_fitting_num_frames}."
+                )
         super().__init__(message)
+
+
+def _seconds_pair(first, second) -> tuple[str, str]:
+    """Two lengths to one decimal, or two where one decimal would make them read the same."""
+    for places in (1, 2):
+        a, b = f"{float(first):.{places}f} s", f"{float(second):.{places}f} s"
+        if a != b:
+            return a, b
+    return a, b
+
+
+def _short_seconds(value) -> str:
+    """A length to one decimal, or two where one would read as no length at all."""
+    shown = f"{float(value):.1f} s"
+    return f"{float(value):.2f} s" if shown == "0.0 s" else shown
 
 
 # ---------------------------------------------------------------------------
@@ -809,8 +849,8 @@ class GpuMemoryError(GenerationError):
         self.stage = stage
         self.reason = reason
         super().__init__(
-            f"The GPU ran out of memory while {stage} for mode {mode!r}. Try a smaller size, "
-            f"fewer frames, or turn off stage 2. ({reason})"
+            f"The GPU ran out of memory while {stage} ({mode}). Try a smaller size, a shorter "
+            f"video, or turn off Upscale ×2. ({reason})"
         )
 
 

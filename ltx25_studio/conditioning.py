@@ -183,10 +183,10 @@ def validate_condition_index(pixel_frame: int, *, num_frames: int) -> int:
     """Return the index unchanged, or raise naming the index and the bound."""
     if 0 <= pixel_frame < num_frames:
         return pixel_frame
+    # Refused because the pipeline would skip it with only a log line.
     raise ConstraintError(
-        f"conditioning frame {pixel_frame} is outside this clip, which has {num_frames} frames "
-        f"(valid range 0 to {num_frames - 1}). Upstream would skip this condition with only a "
-        f"log line and generate anyway, so the image would silently have no effect."
+        f"The shot at frame {pixel_frame} is outside this clip, which has {num_frames} frames, "
+        f"so it would have no effect: place it between frame 0 and frame {num_frames - 1}."
     )
 
 

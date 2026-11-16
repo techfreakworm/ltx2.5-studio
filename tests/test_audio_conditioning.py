@@ -65,13 +65,28 @@ def test_the_frozen_schedule_is_all_zero():
 
 
 def test_the_level_note_says_what_happened_in_plain_words():
-    assert "changed moderately (level 0.73)" in audio_conditioning.level_note(0.725)
-    assert "lightly" in audio_conditioning.level_note(0.421875)
-    assert "strongly" in audio_conditioning.level_note(0.909375)
+    # The UI's words: a little / moderately / a lot, and only the level used.
+    assert audio_conditioning.level_note(0.725) == "your audio was changed moderately."
+    assert audio_conditioning.level_note(0.421875) == "your audio was changed a little."
+    assert audio_conditioning.level_note(0.909375) == "your audio was changed a lot."
     fresh = audio_conditioning.level_note(1.0)
     assert "not used" in fresh, fresh
-    snapped = audio_conditioning.level_note(0.421875, requested=0.5)
-    assert "0.50" in snapped and "0.42" in snapped, snapped
+
+
+def test_a_request_is_mentioned_only_when_it_was_snapped_to_a_different_level():
+    """The lead measured "You asked for 0.42 ... 0.42 is the nearest" reaching the user."""
+    for level in audio_conditioning.VARIATION_LEVELS:
+        assert audio_conditioning.snapped_level_note(level, None) is None
+        assert audio_conditioning.snapped_level_note(level, level) is None
+    # 0.42 reads as the level used (0.421875): no snap a person would recognise.
+    assert audio_conditioning.snapped_level_note(0.421875, 0.42) is None
+    assert audio_conditioning.snapped_level_note(0.725, 0.73) is None
+    assert audio_conditioning.snapped_level_note(0.421875, 0.5) == (
+        "you asked for 0.50, which is not one of the levels; the nearest, 0.42, was used."
+    )
+    assert audio_conditioning.snapped_level_note(1.0, 0.97) == (
+        "you asked for 0.97, which is not one of the levels; the nearest, 1.00, was used."
+    )
 
 
 # --------------------------------------------------------------------------
@@ -183,7 +198,21 @@ def test_audio_to_audio_reports_the_level_it_used(tmp_path):
 
     assert sent["audio_noise_level"] == 0.421875
     assert "noise_scale" not in sent
-    assert any("lightly (level 0.42)" in note for note in result.warnings), result.warnings
+    assert "your audio was changed a little." in result.warnings, result.warnings
+    # 0.5 is not a level: it was snapped to a different one, so the request is said.
+    assert (
+        "you asked for 0.50, which is not one of the levels; the nearest, 0.42, was used."
+        in result.warnings
+    ), result.warnings
+
+
+@pytest.mark.usefixtures("audio_input_ready")
+def test_a_request_that_reads_as_the_level_used_is_not_repeated(tmp_path):
+    result, sent = _fake_run("audio_to_audio", tmp_path, noise_scale=0.42)
+
+    assert sent["audio_noise_level"] == 0.421875
+    assert "your audio was changed a little." in result.warnings, result.warnings
+    assert not any("not one of the levels" in note for note in result.warnings), result.warnings
 
 
 @pytest.mark.usefixtures("audio_input_ready")
@@ -192,7 +221,7 @@ def test_audio_to_video_is_frozen_through_generate(tmp_path):
 
     assert sent["audio_noise_level"] == 0.0
     assert "noise_scale" not in sent
-    assert any("held fixed" in note for note in result.warnings), result.warnings
+    assert "the sound in this file is your audio, unchanged." in result.warnings, result.warnings
 
 
 # --------------------------------------------------------------------------
@@ -400,8 +429,9 @@ def test_the_clip_levels_are_the_three_distilled_sigmas():
 
 
 def test_the_clip_note_says_how_much_it_was_changed():
-    assert "changed a lot (level 0.91)" in audio_conditioning.video_level_note(0.909375)
-    assert "a little (level 0.42)" in audio_conditioning.video_level_note(0.421875)
+    assert audio_conditioning.video_level_note(0.909375) == "your clip was changed a lot."
+    assert audio_conditioning.video_level_note(0.421875) == "your clip was changed a little."
+    assert audio_conditioning.video_level_note(0.725) == "your clip was changed moderately."
 
 
 def _clip(tmp_path, frames, size=64):
@@ -452,8 +482,8 @@ def test_the_length_follows_the_clip_and_the_note_says_so(tiny, tmp_path):
 
     assert result.record.frames == 17
     assert result.record.length_source == "video"
-    assert any("length set from your clip" in note for note in result.warnings)
-    assert any("changed a lot (level 0.91)" in note for note in result.warnings)
+    assert "length set from your clip: 0.7 s." in result.warnings, result.warnings
+    assert "your clip was changed a lot." in result.warnings, result.warnings
 
 
 def test_stage_2_composes_on_top_of_a_clip_variation(tiny, tmp_path, transformer_calls):

@@ -503,7 +503,9 @@ def test_a_chained_input_is_gated_on_its_file_before_anything_is_sent(tmp_path, 
     record = call_records(ledger)[-1]
     assert record["label"] == "a2v" and record["billed_conservative"] == 0.0 and record["category"] == "input"
     result = json.loads((out / "a2v" / "result.json").read_text())
-    assert result["sent"] is False and "shorter than the 5.04 s video" in result["detail"]
+    assert (result["sent"], result["category"]) == (False, "input") and result["detail"].endswith(
+        "Your audio is 0.3 s, too short for Audio to video: the shortest recording it can use is 0.4 s."
+    )
 
 
 def test_an_unknown_mode_and_an_illegal_override_are_usage_errors():

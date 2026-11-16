@@ -255,7 +255,7 @@ def test_the_drop_warning_fires_exactly_where_a_track_is_actually_dropped(mode_i
     worse than silence, not better.
     """
     result = run_production(mode_id, tmp_path)
-    dropped = [note for note in result.warnings if "dropped rather than muxed" in note]
+    dropped = [note for note in result.warnings if "was left out" in note]
 
     if "audio" in modes.MODES[mode_id].exports:
         assert not dropped, (

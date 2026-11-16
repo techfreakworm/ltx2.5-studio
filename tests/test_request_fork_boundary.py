@@ -235,37 +235,39 @@ def test_the_progress_handle_pickles_into_the_worker():
     assert list(back.iterables) == []
 
 
-def test_the_prompt_enhancement_note_crosses_back_inside_the_result():
-    """The return leg for a note that is now built on the far side.
+def test_the_enhanced_prompt_crosses_back_inside_the_run_record(tmp_path):
+    """The return leg for a prompt that is now built on the far side.
 
-    Enhancement used to run in the web process, so its note was grafted onto the
-    worker's result after the fact by a helper that no longer exists. It now
-    originates INSIDE the worker, which means the only way the user ever reads
-    which prompt was actually sent is if the note survives the res queue in
-    ``GenerationResult.warnings``.
+    Enhancement runs INSIDE the worker, so the only way the user ever reads which
+    prompt was actually sent is if it survives the res queue. It travels as the
+    run record's ``prompt``, which the UI shows (UI review 2, B-1: it is no
+    longer repeated as a note).
 
-    It is a plain ``str``, so this is cheap -- but the LoRA report was "obviously
-    fine" too, right up until ``MappingProxyType`` killed the first staged
-    generation on the Space at 2.05 s. The cost of checking is one assert.
+    The record is builtins only, so this is cheap -- but the LoRA report was
+    "obviously fine" too, right up until ``MappingProxyType`` killed the first
+    staged generation on the Space at 2.05 s. The cost of checking is one assert.
     """
-    from ltx25_studio import enhance as enhance_module
+    from conftest import inputs_for
+    from test_exports_contract import FakePipe, factory_returning, one_muxed_file_encoder
 
     rewritten = "A weathered stone lighthouse stands on a basalt outcrop as dense fog rolls in."
-    note = enhance_module._rewrite_note(rewritten)
-    result = generate_module.GenerationResult(
-        output_path=Path("/tmp/run-abc/video.mp4"),
-        run_id="abc123",
-        run_dir=Path("/tmp/run-abc"),
+    result = generate_module.generate(
         mode="text_to_video",
         seed=7,
-        warnings=(note,),
+        enhance_prompt=True,
+        **inputs_for("text_to_video"),
+        pipeline_factory=factory_returning(FakePipe()),
+        encoder=one_muxed_file_encoder,
+        enhancer=lambda prompt, image=None: rewritten,
+        output_root=tmp_path,
+        retention_bytes=10**9,
     )
+
     back = pickle.loads(pickle.dumps(result))
     assert back == result
-    assert back.warnings[0] == note
-    assert rewritten in back.warnings[0], (
-        "the note crossed the fork without the rewritten prompt in it, so the user is told a "
-        "substitution happened and never told what it was"
+    assert back.record.prompt == rewritten, (
+        "the record crossed the fork without the rewritten prompt in it, so the user is never "
+        "told which prompt was sent"
     )
 
 
@@ -280,7 +282,7 @@ def test_the_result_crossing_back_pickles(tmp_path):
         seed=7,
         video_path=tmp_path / "run-abc" / "video.mp4",
         audio_path=None,
-        warnings=("audio input trimmed from 6.00s to 4.84s to match 121 frames",),
+        warnings=("your audio was trimmed from 6.00 s to 4.84 s to match the video.",),
     )
     back = pickle.loads(pickle.dumps(result))
     assert back == result

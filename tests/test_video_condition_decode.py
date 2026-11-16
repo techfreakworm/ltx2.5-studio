@@ -421,5 +421,6 @@ def test_an_undecodable_upload_fails_before_any_gpu_work(mode_id, tmp_path):
             retention_bytes=10**9,
         )
 
-    assert str(junk) in str(caught.value)
+    # The file's name, never its absolute path (UI review 2, B-1).
+    assert junk.name in str(caught.value) and str(junk) not in str(caught.value)
     assert pipe.kwargs == {}, "the pipeline must never have been called"

@@ -141,7 +141,7 @@ def test_an_explicit_diffusion_below_the_minimum_raises_naming_the_smallest_requ
     with pytest.raises(DecoderTooSmallError) as caught:
         runner(prompt="a", video_decoder="diffusion", **SMALL)
     assert caught.value.smallest == (224, 224, 17) and caught.value.stage_2 is False
-    assert "standard decoder" in str(caught.value)
+    assert "choose Fast" in str(caught.value)
     assert not pipeline.calls
 
 
@@ -248,12 +248,15 @@ def test_an_unknown_request_decoder_is_refused_before_dispatch():
     "device,ran",
     [("cuda", "model's diffusion decoder"), ("cpu", "standard (convolutional) decoder")],
 )
-def test_the_run_notes_name_the_decoder_that_ran(device, ran, tmp_path):
+def test_the_diagnostics_name_the_decoder_that_ran(device, ran, tmp_path):
+    """Decoder policy is a diagnostic (UI review 2, B-1); the record says which ran."""
     runner, _pipeline, _built = runner_on(device)
 
     result = _generate("text_to_video", tmp_path, runner, **OK)
 
-    assert any(f"decoded by the {ran}" in note for note in result.warnings), result.warnings
+    diagnostics = result.record.diagnostics
+    assert any(f"decoded by the {ran}" in line for line in diagnostics), diagnostics
+    assert not any("decoded by the" in note for note in result.warnings), result.warnings
 
 
 # --------------------------------------------------------------------------
@@ -300,7 +303,10 @@ def test_a_single_stage_run_decodes_with_the_tiny_diffusion_decoder(tiny, mode_i
     actual = probe_streams(result.output_path)
     assert (actual["width"], actual["height"]) == (128, 128), actual
     assert actual["audio"] == ("audio" in modes.get_mode(mode_id).exports), actual
-    assert any("diffusion decoder" in note for note in result.warnings), result.warnings
+    assert result.record.decoder == "diffusion", result.record
+    assert any("diffusion decoder" in line for line in result.record.diagnostics), (
+        result.record.diagnostics
+    )
 
 
 def test_a_single_stage_diffusion_decode_is_labelled_and_the_bar_never_retreats():

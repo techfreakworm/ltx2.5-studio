@@ -973,7 +973,7 @@ def test_a_long_upload_is_trimmed_and_the_user_is_told(monkeypatch, tmp_path):
         encoder=good_encoder,
         output_root=tmp_path,
     )
-    assert "audio input trimmed from 6.00s to 4.84s to match 121 frames" in result.warnings
+    assert "your audio was trimmed from 6.00 s to 4.84 s to match the video." in result.warnings
     # The encoder must have consumed the TRIMMED waveform -- the note without
     # the trim would be the inverted defect: reporting an alteration that
     # never happened.
@@ -1048,7 +1048,9 @@ def test_a_short_upload_is_refused_before_the_metered_call(monkeypatch, tmp_path
             output_root=tmp_path,
         )
     assert pipe.calls == []
-    assert "num_frames=73" in str(excinfo.value)
+    # 73 frames is the longest legal length inside 3.0 s at 25 fps: 2.92 s, said as 2.9 s.
+    assert excinfo.value.largest_fitting_num_frames == 73
+    assert "or set 2.9 s or less" in str(excinfo.value), str(excinfo.value)
 
 
 def test_auto_duration_takes_the_length_from_the_upload(monkeypatch, tmp_path):
@@ -1069,7 +1071,7 @@ def test_auto_duration_takes_the_length_from_the_upload(monkeypatch, tmp_path):
     _, sent = pipe.calls[-1]
     assert sent["num_frames"] == 145
     assert "min_seconds" not in sent and "max_seconds" not in sent
-    assert any("length set from your audio: 6.00 s → 145 frames" in w for w in result.warnings)
+    assert "length set from your audio: 5.8 s." in result.warnings, result.warnings
     assert pipe.audio_vae.mels[-1].shape[-1] == 92800, "the upload was not reconciled to 5.80 s"
 
 

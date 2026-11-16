@@ -994,20 +994,20 @@ def structure_failure(checked: PictureCheck | PictureMeasurements) -> str | None
     return f"{name} ({_CONDITIONS[name].rule}): measured {seen}"
 
 
-def dropped_audio_warning(mode: str) -> str:
-    """Why a video-only mode's file has no sound.
+def dropped_audio_warning(counterpart_label: str | None = None) -> str:
+    """Why a video-only mode's file has no sound, in the UI's words.
 
     The audio existed: the model is jointly audio-visual and renders it whether
     or not the mode exports it. Discarding it without saying so would leave a
     user who expected sound with silence and no explanation -- which is the
-    silent-wrongness shape, just quieter.
+    silent-wrongness shape, just quieter. The mode that keeps the sound is named
+    only where one exists (``modes.counterpart_label_for``): video to video has
+    none, and a remedy that does not exist is worse than none.
     """
-    return (
-        f"mode {mode!r} exports video only, so the audio track this generation produced was "
-        f"dropped rather than muxed. The model is jointly audio-visual and has no video-off "
-        f"switch, so that audio was rendered and paid for either way -- use the matching "
-        f"audio+video mode to keep it."
-    )
+    note = "this mode returns silent video. The sound the model made with it was left out"
+    if counterpart_label:
+        return f"{note}; {counterpart_label} keeps it."
+    return f"{note}."
 
 
 def _write_video(
@@ -1020,6 +1020,7 @@ def _write_video(
     include_audio: bool,
     mode: str = "",
     supplied_audio: SuppliedAudio | None = None,
+    counterpart_label: str | None = None,
 ):
     """Encode the frames, muxing the audio track only if the mode exports it.
 
@@ -1070,7 +1071,7 @@ def _write_video(
         )
     if audio is not None and not include_audio:
         # Declared, intended, and reported -- never silent. See the module docstring.
-        notes.append(dropped_audio_warning(mode))
+        notes.append(dropped_audio_warning(counterpart_label))
         _log.warning("%s", notes[-1])
         audio = None
     if audio is not None:
@@ -1265,6 +1266,7 @@ def write_output(
                 include_audio="audio" in exports,
                 mode=mode,
                 supplied_audio=supplied_audio,
+                counterpart_label=extra.get("counterpart_label"),
             )
             if warnings is not None:
                 warnings.extend(notes)
