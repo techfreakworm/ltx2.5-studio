@@ -913,19 +913,33 @@ def test_the_base_loads_from_the_local_snapshot_not_the_repo_id(tmp_path, monkey
 
 
 def test_the_stage_2_parts_load_from_the_local_snapshot_too(tmp_path, monkeypatch):
-    """The upsampler and decoder are separate loads with the same failure mode."""
+    """The upsampler and decoder are separate loads with the same failure mode.
+
+    Each from its own directory: the decoder is pinned to a later revision than
+    the rest, and the HF cache keeps each revision in its own snapshot.
+    """
     from ltx25_studio import model_files
 
-    snapshot = tmp_path / "snapshots" / model_files.REVISION
+    monkeypatch.setenv("HF_HUB_CACHE", str(tmp_path))
+    repo = tmp_path / f"models--{model_files.REPO_ID.replace('/', '--')}" / "snapshots"
+    snapshot = repo / model_files.REVISION
     snapshot.mkdir(parents=True)
+    expected = {
+        "LTX2LatentUpsamplerModel": snapshot / "latent_upsampler",
+        "LTX2VideoDiffusionDecoderModel": (
+            repo / model_files.DIFFUSION_DECODER_REVISION / "diffusion_decoder"
+        ),
+    }
+    for directory in expected.values():
+        directory.mkdir(parents=True)
     recorders = install_fake_stack(monkeypatch, snapshot)
 
     pipelines._stage_2_parts(FakeModel())
 
-    for name in ("LTX2LatentUpsamplerModel", "LTX2VideoDiffusionDecoderModel"):
+    for name, directory in expected.items():
         call = recorders[name].calls[-1]
-        assert call["target"] == snapshot, f"{name} was not loaded from the snapshot"
-        assert call["subfolder"], f"{name} was loaded without a subfolder"
+        assert call["target"] == directory, f"{name} was loaded from {call['target']}"
+        assert call["output_loading_info"] is True, f"{name} was loaded without its key report"
 
 
 def test_construction_refuses_when_there_is_no_local_snapshot(tmp_path, monkeypatch):
@@ -1832,3 +1846,15 @@ def test_the_stage_2_audio_finish_runs_without_autograd():
     runner(prompt="a lighthouse", enable_stage_2=True)
 
     assert seen == [("vae", False), ("vocoder", False)], seen
+
+
+def test_the_startup_report_prints_the_decoders_revision_beside_the_models(runtime_config):
+    """The decoder is pinned later than the rest; a report showing one revision hides that."""
+    from ltx25_studio import model_files
+
+    report = pipelines.startup_report(runtime_config, missing_files=())
+
+    model = next(line for line in report.splitlines() if "model revision" in line)
+    decoder = next(line for line in report.splitlines() if "decoder revision" in line)
+    assert model_files.REVISION in model
+    assert model_files.DIFFUSION_DECODER_REVISION in decoder

@@ -291,3 +291,189 @@ def test_no_hardcoded_hub_strings_outside_model_files(path):
         f"{path.relative_to(REPO_ROOT)} hardcodes Hub coordinates: {offenders}. "
         "Move them into model_files.py (PLAN §5.2)."
     )
+
+
+# --------------------------------------------------------------------------
+# the diffusion decoder at its own revision (F50)
+#
+# Lightricks replaced the decoder's weights after the pinned revision; the file
+# at REVISION differs in 405 of 407 tensors. Only that component is re-pinned.
+# --------------------------------------------------------------------------
+
+DECODER_REVISION = "aba1b70255c292c8a06702008dd376f0d3007264"
+
+
+def test_exactly_one_component_is_pinned_to_a_different_revision():
+    off_pin = {
+        name: spec.revision
+        for name, spec in model_files.COMPONENTS.items()
+        if spec.revision != model_files.REVISION
+    }
+    assert off_pin == {"diffusion_decoder": DECODER_REVISION}, off_pin
+    assert model_files.REVISION == "871165de037793df7d75c23a02dd7f45fd364c97"
+
+
+def test_the_download_plan_fetches_the_decoder_at_its_own_revision():
+    plan = dict(model_files.download_plan())
+
+    assert list(plan) == [model_files.REVISION, DECODER_REVISION]
+    assert plan[DECODER_REVISION] == (
+        "diffusion_decoder/config.json",
+        "diffusion_decoder/diffusion_pytorch_model.safetensors",
+    )
+    assert "model_index.json" in plan[model_files.REVISION]
+    assert not any(path.startswith("diffusion_decoder/") for path in plan[model_files.REVISION])
+    assert sum(len(paths) for paths in plan.values()) == len(model_files.download_allow_list())
+
+
+def test_the_startup_download_asks_for_each_file_at_its_revision(monkeypatch):
+    import sys
+    import types
+
+    from ltx25_studio import preflight
+
+    asked = []
+    hub = types.ModuleType("huggingface_hub")
+    hub.hf_hub_download = lambda **kwargs: asked.append(kwargs) or f"/x/{kwargs['filename']}"
+    monkeypatch.setitem(sys.modules, "huggingface_hub", hub)
+
+    preflight.ensure_weights()
+
+    revision_of = {call["filename"]: call["revision"] for call in asked}
+    assert revision_of["diffusion_decoder/diffusion_pytorch_model.safetensors"] == DECODER_REVISION
+    assert revision_of["diffusion_decoder/config.json"] == DECODER_REVISION
+    assert revision_of["vae/diffusion_pytorch_model.safetensors"] == model_files.REVISION
+    assert len(asked) == len(model_files.download_allow_list())
+
+
+def test_the_preload_entries_are_one_per_revision():
+    entries = model_files.preload_from_hub_entries()
+
+    assert [entry.rsplit(" ", 1)[1] for entry in entries] == [
+        model_files.REVISION,
+        DECODER_REVISION,
+    ]
+    assert model_files.preload_from_hub_entry() == entries[0]
+
+
+def test_the_decoder_directory_is_its_own_revisions_snapshot(monkeypatch, tmp_path):
+    from ltx25_studio import config, preflight
+
+    monkeypatch.delenv(config.ENV_MODEL_SNAPSHOT_DIR, raising=False)
+    monkeypatch.setenv("HF_HUB_CACHE", str(tmp_path))
+    repo = preflight.cache_repo_dir()
+
+    assert preflight.component_dir("diffusion_decoder") == (
+        repo / "snapshots" / DECODER_REVISION / "diffusion_decoder"
+    )
+    assert preflight.component_dir("vae") == repo / "snapshots" / model_files.REVISION / "vae"
+
+
+def test_the_snapshot_override_still_holds_every_component(monkeypatch, tmp_path):
+    from ltx25_studio import config, preflight
+
+    (tmp_path / "model_index.json").write_text("{}")
+    monkeypatch.setenv(config.ENV_MODEL_SNAPSHOT_DIR, str(tmp_path))
+
+    assert preflight.component_dir("diffusion_decoder") == tmp_path / "diffusion_decoder"
+    assert preflight.component_dir("latent_upsampler") == tmp_path / "latent_upsampler"
+
+
+def test_the_completeness_check_looks_for_the_decoder_under_its_revision(monkeypatch, tmp_path):
+    from ltx25_studio import config, preflight
+
+    monkeypatch.delenv(config.ENV_MODEL_SNAPSHOT_DIR, raising=False)
+    monkeypatch.setenv("HF_HUB_CACHE", str(tmp_path))
+    repo = preflight.cache_repo_dir()
+    for path in model_files.download_allow_list():
+        target = repo / "snapshots" / model_files.REVISION / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"x")
+
+    missing = preflight.missing_cached_files()
+
+    assert set(missing) == {
+        "diffusion_decoder/config.json",
+        "diffusion_decoder/diffusion_pytorch_model.safetensors",
+    }, "the decoder at the old revision must not count as present"
+    with pytest.raises(MissingModelFileError) as caught:
+        preflight.require_cache_complete()
+    assert DECODER_REVISION in str(caught.value)
+
+
+# --------------------------------------------------------------------------
+# the strict load: decoder.type_emb tolerated, nothing else (real classes)
+# --------------------------------------------------------------------------
+
+
+@pytest.fixture
+def tiny_decoder_dir(tmp_path, monkeypatch):
+    """A tiny random decoder saved to an override snapshot, as safetensors."""
+    torch = pytest.importorskip("torch")
+    pytest.importorskip("diffusers")
+    from diffusers import LTX2VideoDiffusionDecoderModel
+
+    from ltx25_studio import config
+
+    (tmp_path / "model_index.json").write_text("{}")
+    monkeypatch.setenv(config.ENV_MODEL_SNAPSHOT_DIR, str(tmp_path))
+    torch.manual_seed(0)
+    model = LTX2VideoDiffusionDecoderModel(
+        latent_channels=8,
+        decoder_head_dim=8,
+        decoder_stage_channels=[64, 32, 16, 16, 8],
+        decoder_stage_depths=[1, 1, 1, 1, 1],
+        decoder_t_emb_dim=32,
+    )
+    model.save_pretrained(tmp_path / "diffusion_decoder", safe_serialization=True)
+    return tmp_path / "diffusion_decoder"
+
+
+def _edit_weights(directory, edit):
+    from safetensors.torch import load_file, save_file
+
+    path = directory / "diffusion_pytorch_model.safetensors"
+    tensors = load_file(str(path))
+    edit(tensors)
+    save_file(tensors, str(path), metadata={"format": "pt"})
+
+
+def _load_decoder():
+    import torch
+    from diffusers import LTX2VideoDiffusionDecoderModel
+
+    from ltx25_studio import pipelines
+
+    return pipelines._load_part(
+        LTX2VideoDiffusionDecoderModel, "diffusion_decoder", dtype=torch.float32
+    )
+
+
+def test_the_decoders_one_extra_key_is_tolerated(tiny_decoder_dir):
+    import torch
+
+    _edit_weights(tiny_decoder_dir, lambda t: t.update({"decoder.type_emb": torch.zeros(8)}))
+
+    model = _load_decoder()
+
+    assert not hasattr(model.decoder, "type_emb")
+
+
+@pytest.mark.parametrize("change", ["unexpected", "missing"])
+def test_anything_else_off_the_class_is_a_load_error(tiny_decoder_dir, change):
+    import torch
+
+    from ltx25_studio.errors import ModelLoadError
+
+    def edit(tensors):
+        tensors["decoder.type_emb"] = torch.zeros(8)
+        if change == "unexpected":
+            tensors["decoder.something_new"] = torch.zeros(4)
+        else:
+            tensors.pop("decoder.conv_out.bias")
+
+    _edit_weights(tiny_decoder_dir, edit)
+
+    with pytest.raises(ModelLoadError) as caught:
+        _load_decoder()
+    assert "diffusion_decoder" in str(caught.value)

@@ -44,6 +44,7 @@ from .errors import LTXStudioError, MissingModelFileError
 __all__ = [
     "EXPECTED_DIFFUSERS_VERSION",
     "cache_repo_dir",
+    "component_dir",
     "snapshot_dir",
     "snapshot_override",
     "check_diffusers_version",
@@ -90,26 +91,36 @@ def ensure_weights(
     from huggingface_hub import hf_hub_download
 
     log = logging.getLogger("ltx25_studio")
+    # Each path at the revision its component is pinned to (model_files.REVISION
+    # for all but the diffusion decoder): download_plan groups them.
+    plan = [
+        (revision, path)
+        for revision, group in model_files.download_plan(components)
+        for path in group
+    ]
     paths = model_files.download_allow_list(components)
     total_gb = model_files.total_size_gb(components)
     log.info(
-        "fetching %d files (%.2f GB) at revision %s", len(paths), total_gb, model_files.REVISION
+        "fetching %d files (%.2f GB) at revisions %s",
+        len(paths),
+        total_gb,
+        ", ".join(model_files.revisions(components)),
     )
     fetched: list[Path] = []
-    for index, path in enumerate(paths, 1):
+    for index, (revision, path) in enumerate(plan, 1):
         # Progress is not decoration. This is a 72 GB cold start on every restart,
         # and a log that goes quiet for forty minutes is indistinguishable from a
         # log that has stopped.
-        log.info("  [%2d/%d] %s", index, len(paths), path)
+        log.info("  [%2d/%d] %s @ %s", index, len(plan), path, revision[:8])
         if progress is not None:
-            progress(index / len(paths), f"fetching {path}")
+            progress(index / len(plan), f"fetching {path}")
         try:
             fetched.append(
                 Path(
                     hf_hub_download(
                         repo_id=model_files.REPO_ID,
                         filename=path,
-                        revision=model_files.REVISION,
+                        revision=revision,
                         token=token,
                         cache_dir=str(hub_cache) if hub_cache else None,
                     )
@@ -117,11 +128,8 @@ def ensure_weights(
             )
         except Exception as exc:
             raise MissingModelFileError(
-                filename=f"{path} ({index} of {len(paths)}; {exc.__class__.__name__})",
-                url=(
-                    f"{model_files.HUB_BASE_URL}/{model_files.REPO_ID}/blob/"
-                    f"{model_files.REVISION}/{path}"
-                ),
+                filename=f"{path} ({index} of {len(plan)}; {exc.__class__.__name__})",
+                url=f"{model_files.HUB_BASE_URL}/{model_files.REPO_ID}/blob/{revision}/{path}",
             ) from exc
     log.info("fetched %d/%d files", len(fetched), len(paths))
     return tuple(fetched)
@@ -194,6 +202,16 @@ def cache_repo_dir(hub_cache: str | os.PathLike[str] | None = None) -> Path:
             or Path(os.environ.get("HF_HOME", Path.home() / ".cache" / "huggingface")) / "hub"
         )
     return root / f"models--{model_files.REPO_ID.replace('/', '--')}"
+
+
+def component_dir(name: str, hub_cache: str | os.PathLike[str] | None = None) -> Path:
+    """The directory component ``name`` loads from: ``model_files.component_dir`` here.
+
+    ``LTX25_MODEL_SNAPSHOT_DIR`` holds every component when set (and no explicit
+    cache is asked for); otherwise each component's own revision's snapshot.
+    """
+    override = snapshot_override() if hub_cache is None else None
+    return model_files.component_dir(name, repo_cache=cache_repo_dir(hub_cache), override=override)
 
 
 def snapshot_override() -> Path | None:
@@ -271,8 +289,15 @@ def missing_cached_files(
             for name in _declared_components(snapshot)
             if not (snapshot / name).is_dir() or not any((snapshot / name).iterdir())
         )
+    if revision is not None:
+        return tuple(
+            path for path in model_files.download_allow_list() if not (snapshot / path).exists()
+        )
+    repo_cache = cache_repo_dir(hub_cache)
     return tuple(
-        path for path in model_files.download_allow_list() if not (snapshot / path).exists()
+        path
+        for path in model_files.download_allow_list()
+        if not model_files.local_path(path, repo_cache=repo_cache).exists()
     )
 
 
@@ -298,7 +323,7 @@ def require_cache_complete(
     first = missing[0]
     url = (
         f"{model_files.HUB_BASE_URL}/{model_files.REPO_ID}/blob/"
-        f"{revision or model_files.REVISION}/{first}"
+        f"{revision or model_files.revision_of_path(first)}/{first}"
     )
     raise MissingModelFileError(
         filename=f"{first} ({len(missing)} of {len(model_files.download_allow_list())} missing)",

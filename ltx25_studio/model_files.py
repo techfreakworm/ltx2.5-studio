@@ -32,6 +32,7 @@ A naive ``snapshot_download`` of those folders pays 44.33 GB for nothing.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from types import MappingProxyType
 
 from .errors import MissingModelFileError, UnknownComponentError
@@ -40,20 +41,28 @@ __all__ = [
     "COMPONENTS",
     "DEFAULT_COMPONENTS",
     "DEFAULT_DTYPE",
+    "DIFFUSION_DECODER_REVISION",
     "HUB_BASE_URL",
     "REPO_ID",
     "REVISION",
     "ROOT_FILES",
+    "TOLERATED_UNEXPECTED_KEYS",
     "TINY_REPO_ID",
     "TINY_REVISION",
     "ComponentSpec",
+    "component_dir",
     "config_filename",
     "download_allow_list",
+    "download_plan",
     "file_url",
     "get_component",
+    "local_path",
     "missing_config_files",
+    "preload_from_hub_entries",
     "preload_from_hub_entry",
     "require_file",
+    "revision_of_path",
+    "revisions",
     "total_size_gb",
 ]
 
@@ -65,6 +74,18 @@ REPO_ID = "Lightricks/LTX-2.5-Diffusers"
 #: Pinned commit SHA. A branch name is not a pin -- the content behind ``main``
 #: can change under us without any signal (PLAN §5.2).
 REVISION = "871165de037793df7d75c23a02dd7f45fd364c97"
+
+#: The diffusion decoder alone is pinned later: Lightricks replaced its weights
+#: on 2026-10-08 ("Decoder weights match the source bitwise"); the file at
+#: :data:`REVISION` differs in 405 of 407 tensors. Its config is unchanged and
+#: the new file adds one tensor the pinned class does not have
+#: (:data:`TOLERATED_UNEXPECTED_KEYS`). The global revision stays: the newer
+#: ``model_index.json`` declares components this app neither fetches nor nulls.
+DIFFUSION_DECODER_REVISION = "aba1b70255c292c8a06702008dd376f0d3007264"
+
+#: Keys a component's checkpoint may carry that its pinned diffusers class does
+#: not load. Anything else unexpected, missing or mismatched is a load error.
+TOLERATED_UNEXPECTED_KEYS = MappingProxyType({"diffusion_decoder": ("decoder.type_emb",)})
 
 HUB_BASE_URL = "https://huggingface.co"
 
@@ -176,6 +197,7 @@ _SPECS = (
         size_gb=0.8343,
         default=True,
         files=("config.json", "diffusion_pytorch_model.safetensors"),
+        revision=DIFFUSION_DECODER_REVISION,
     ),
     ComponentSpec(
         name="temporal_latent_upsampler",
@@ -283,8 +305,63 @@ def total_size_gb(components: tuple[str, ...] | None = None) -> float:
     return sum(get_component(name).size_gb for name in names)
 
 
+def component_dir(name: str, *, repo_cache, override=None) -> Path:
+    """The directory component ``name`` loads from. Every reader resolves it here.
+
+    ``repo_cache`` is the repo's HF cache directory (``models--org--name``); the
+    HF cache keeps each revision in its own ``snapshots/<revision>``, so a
+    component lives under ITS revision. ``override`` (``LTX25_MODEL_SNAPSHOT_DIR``)
+    holds every component. Path arithmetic only: nothing is read.
+    """
+    spec = get_component(name)
+    if override is not None:
+        return Path(override) / spec.subfolder
+    return Path(repo_cache) / "snapshots" / spec.revision / spec.subfolder
+
+
+def local_path(path: str, *, repo_cache, override=None) -> Path:
+    """Where one allow-listed repo-relative path lives on disk (see :func:`component_dir`)."""
+    if override is not None:
+        return Path(override) / path
+    return Path(repo_cache) / "snapshots" / revision_of_path(path) / path
+
+
+def revisions(components: tuple[str, ...] | None = None) -> tuple[str, ...]:
+    """The revisions a component set is fetched at: :data:`REVISION` first."""
+    names = DEFAULT_COMPONENTS if components is None else components
+    others = sorted({get_component(name).revision for name in names} - {REVISION})
+    return (REVISION, *others)
+
+
+def revision_of_path(path: str) -> str:
+    """The revision a repo-relative allow-list path is fetched at."""
+    subfolder = path.split("/", 1)[0]
+    for spec in _SPECS:
+        if spec.subfolder == subfolder and path in spec.paths:
+            return spec.revision
+    return REVISION
+
+
+def download_plan(
+    components: tuple[str, ...] | None = None,
+) -> tuple[tuple[str, tuple[str, ...]], ...]:
+    """``((revision, paths), ...)``: every allow-listed path, grouped by its revision.
+
+    The HF cache keeps each revision in its own snapshot directory, so a file is
+    fetched, checked and loaded at the revision its component is pinned to.
+    """
+    paths = download_allow_list(components)
+    return tuple(
+        (revision, tuple(path for path in paths if revision_of_path(path) == revision))
+        for revision in revisions(components)
+    )
+
+
 def download_allow_list(components: tuple[str, ...] | None = None) -> tuple[str, ...]:
     """Every repo-relative path to fetch, sorted -- and only the live shards.
+
+    Across revisions: :func:`download_plan` groups them by the revision each is
+    fetched at.
 
     PLAN §5.2: the runtime download and the Space README ``preload_from_hub:``
     list are generated from this one function, never hand-maintained in two
@@ -345,12 +422,19 @@ def missing_config_files(components: tuple[str, ...] | None = None) -> tuple[str
     return tuple(name for name in names if config_filename(name) not in get_component(name).files)
 
 
-def preload_from_hub_entry(components: tuple[str, ...] | None = None) -> str:
-    """The single ``preload_from_hub:`` entry for the Space README.
+def preload_from_hub_entries(components: tuple[str, ...] | None = None) -> tuple[str, ...]:
+    """The ``preload_from_hub:`` entries for the Space README, one per revision."""
+    return tuple(
+        f"{REPO_ID} {','.join(paths)} {revision}" for revision, paths in download_plan(components)
+    )
 
-    Format is ``"repo_id file1,file2,... commit_sha"``. One repo means one
-    entry, which is what keeps us inside the platform's 10-entry cap despite
-    needing far more than 10 files.
+
+def preload_from_hub_entry(components: tuple[str, ...] | None = None) -> str:
+    """The ``preload_from_hub:`` entry for :data:`REVISION` (see :func:`preload_from_hub_entries`).
+
+    Format is ``"repo_id file1,file2,... commit_sha"``. One entry per revision
+    keeps us inside the platform's 10-entry cap despite needing far more than 10
+    files.
 
     **The revision is not optional.** If the preload fetches ``main`` while the
     app loads a pinned SHA, those are *different cache keys*: the preload is
@@ -358,4 +442,4 @@ def preload_from_hub_entry(components: tuple[str, ...] | None = None) -> str:
     on disk. Any drift test must compare the whole entry, revision included --
     not just the file list.
     """
-    return f"{REPO_ID} {','.join(download_allow_list(components))} {REVISION}"
+    return preload_from_hub_entries(components)[0]

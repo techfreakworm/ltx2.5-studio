@@ -162,14 +162,15 @@ def test_the_commented_preload_block_has_not_drifted():
     assert entries, (
         "the commented preload_from_hub block is gone from README.md. It is kept "
         "deliberately so the Space can flip back to preloading when it goes public; "
-        "regenerate it from model_files.preload_from_hub_entry()."
+        "regenerate it from model_files.preload_from_hub_entries()."
     )
-    expected = model_files.preload_from_hub_entry()
-    assert entries[0] == expected, (
-        "the COMMENTED preload block has drifted from model_files.py. Nothing "
-        "exercises it, so this test is the only thing that would notice.\n"
-        f"  README   : {entries[0][:90]}…\n"
-        f"  generated: {expected[:90]}…"
+    expected = list(model_files.preload_from_hub_entries())
+    assert entries == expected, (
+        "the COMMENTED preload block has drifted from model_files.py (one entry per "
+        "revision). Nothing exercises it, so this test is the only thing that would notice.\n"
+        + "\n".join(f"  README   : {entry[:70]}… {entry[-8:]}" for entry in entries)
+        + "\n"
+        + "\n".join(f"  generated: {entry[:70]}… {entry[-8:]}" for entry in expected)
     )
 
 
@@ -204,9 +205,10 @@ def test_the_runtime_download_still_comes_from_model_files():
         "preflight.ensure_weights no longer reads model_files.download_allow_list(); "
         "the download list has drifted away from its single source."
     )
-    assert "model_files.REVISION" in source, (
-        "the runtime download does not pin the revision. Without it the download and "
-        "the app resolve different cache keys and the fetch is wasted (PLAN §6.2)."
+    assert "download_plan" in source, (
+        "the runtime download does not fetch each component at its pinned revision. "
+        "Without it the download and the app resolve different cache keys and the fetch "
+        "is wasted (PLAN §6.2)."
     )
 
 

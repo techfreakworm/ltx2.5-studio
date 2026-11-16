@@ -906,19 +906,62 @@ def _stage_2_parts(base, *, dtype=None, device: str | None = None):
 
 
 def _load_part(cls, component, *, dtype=None, device=None):
-    """One stage-2 checkpoint from the local snapshot, at the checkpoint's dtype."""
+    """One stage-2 checkpoint from its own directory, at the checkpoint's dtype.
+
+    The directory comes from ``preflight.component_dir``: each component at the
+    revision it is pinned to (the diffusion decoder's is later than the rest).
+    The load is exact: anything missing, mismatched or unexpected -- other than
+    ``model_files.TOLERATED_UNEXPECTED_KEYS`` -- is a load error.
+    """
     import torch
 
     from . import device as device_module
+    from . import preflight
 
     # Same rule as the base load, and the same reason: the checkpoints are bf16,
     # so this is a no-op rather than a conversion. See `_base_pipeline`.
     weight_dtype = dtype or getattr(torch, device_module.weight_dtype_for(device))
-    spec = model_files.get_component(component)
+    directory = preflight.component_dir(component)
+    if not directory.is_dir():
+        raise ModelLoadError(
+            component=component,
+            reason=(
+                f"no local files at {directory}. Weights are fetched by "
+                f"`preflight.ensure_weights()`, each component at its pinned revision."
+            ),
+        )
     try:
-        return cls.from_pretrained(_snapshot_path(), subfolder=spec.subfolder, dtype=weight_dtype)
+        loaded = cls.from_pretrained(directory, dtype=weight_dtype, output_loading_info=True)
     except Exception as exc:
         raise ModelLoadError(component=component, reason=str(exc)) from exc
+    model, info = loaded if isinstance(loaded, tuple) else (loaded, None)
+    if info is not None:
+        _require_exact_load(component, info)
+    return model
+
+
+def _require_exact_load(component: str, info: dict) -> None:
+    """Refuse a checkpoint that does not match its class, beyond the tolerated keys."""
+    tolerated = set(model_files.TOLERATED_UNEXPECTED_KEYS.get(component, ()))
+    unexpected = sorted(set(info.get("unexpected_keys") or ()) - tolerated)
+    problems = [
+        f"{label} {sorted(map(str, values))[:5]}"
+        for label, values in (
+            ("missing keys", info.get("missing_keys") or ()),
+            ("mismatched keys", info.get("mismatched_keys") or ()),
+            ("load errors", info.get("error_msgs") or ()),
+            ("unexpected keys", unexpected),
+        )
+        if values
+    ]
+    if problems:
+        raise ModelLoadError(
+            component=component,
+            reason="its checkpoint does not match the pinned class: " + "; ".join(problems),
+        )
+    ignored = sorted(set(info.get("unexpected_keys") or ()) & tolerated)
+    if ignored:
+        _log().info("%s: ignored the expected extra key(s) %s", component, ", ".join(ignored))
 
 
 def _decoder_part(base, *, dtype=None, device: str | None = None):
@@ -1972,7 +2015,10 @@ def startup_report(
     override = preflight.snapshot_override()
     if override is None:
         expected_files = len(model_files.download_allow_list())
-        unit, source = "files", f"pinned {model_files.REPO_ID} @ {model_files.REVISION}"
+        unit, source = (
+            "files",
+            f"pinned {model_files.REPO_ID} @ {', '.join(r[:8] for r in model_files.revisions())}",
+        )
     else:
         expected_files = len(preflight._declared_components(override))
         unit, source = "declared components", f"{override} (LTX25_MODEL_SNAPSHOT_DIR)"
@@ -2011,6 +2057,7 @@ def startup_report(
     if mps_self_test is not None:
         lines.append(f"  mps self-test   : {mps_self_test.describe()}")
     lines.append(f"  model revision  : {model_files.REVISION}")
+    lines.append(f"  decoder revision: {model_files.get_component('diffusion_decoder').revision}")
     if missing_files:
         lines.append(f"  first missing   : {missing_files[0]}")
     return "\n".join(lines)
