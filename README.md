@@ -289,9 +289,10 @@ Mac with **128 GB** of unified memory. Smaller machines are not verified.
 - **A separate Python 3.12 environment** with PyTorch 2.15.0, torchvision 0.29.2 and
   torchaudio 2.11.1 in place of the trio `requirements.txt` pins, plus `gguf` (0.19.0 was
   used), and every other pin from `requirements.txt` except `bitsandbytes` and `kernels`,
-  which are CUDA-only. PyTorch 2.15.0 is what was verified; 2.14.1 measured the same in the
-  numerics checks. **PyTorch 2.11, the Space's pin, computes attention wrongly on MPS**, and the
-  app's own numerics self-test refuses to generate on it.
+  which are CUDA-only. PyTorch 2.14 or newer: 2.15.0 is what was verified on real weights, and
+  2.14.1 measured the same in the numerics checks. **PyTorch 2.11, the Space's pin, computes
+  attention wrongly on MPS**, and the app's own numerics self-test, run at startup, refuses to
+  generate on it.
 - **The weights, about 55 GB**, in the Hugging Face cache:
   - from `Lightricks/LTX-2.5-Diffusers` at revision `871165de`, everything except the
     transformer shards, the latent upsamplers and the diffusion decoder (those three are
