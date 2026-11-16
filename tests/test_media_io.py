@@ -209,6 +209,63 @@ def test_a_nonsense_rate_is_refused(tmp_path):
         conditioning.decode_video_frames(source, frame_rate=0)
 
 
+# Review r1, media-io-1: H.264 with B-frames in an AVI (DVR, CCTV and dashcam
+# exports). AVI has no presentation stamps, so the decoder hands back frames in
+# display order carrying decode-order pts (1, 4, 3, 5, 2, 8, ...).
+
+
+def decoded_pts(path) -> list:
+    with av.open(str(path)) as container:
+        return [frame.pts for frame in container.decode(video=0)]
+
+
+def nearest_source_frames(count, *, source_rate, rate) -> list[int]:
+    """The reference: for each output time, the nearest source frame (ties earlier)."""
+    times = [Fraction(k, source_rate) for k in range(count)]
+    wanted = []
+    for i in range(int(Fraction(count, source_rate) * rate)):
+        t = Fraction(i, rate)
+        wanted.append(min(range(count), key=lambda k: (abs(times[k] - t), times[k])))
+    return wanted
+
+
+@pytest.mark.parametrize(("source_rate", "rate"), [(24, 24), (30, 24), (60, 24)])
+def test_an_avi_with_b_frames_is_read_by_display_time(source_rate, rate, tmp_path):
+    count = 60
+    source = write_clip(
+        tmp_path / "dvr.avi", [marker_frame(k) for k in range(count)], rate=source_rate
+    )
+    stamps = decoded_pts(source)
+    assert stamps != sorted(stamps), "the fixture lost its decode-order stamps"
+
+    frames = conditioning.decode_video_frames(source, frame_rate=rate)
+
+    got = [marker_index(frame) for frame in frames]
+    assert got == nearest_source_frames(count, source_rate=source_rate, rate=rate), got
+
+
+def test_an_avi_read_at_its_own_rate_matches_the_frame_by_frame_read(tmp_path):
+    source = write_clip(tmp_path / "dvr.avi", [marker_frame(k) for k in range(48)], rate=24)
+
+    timed = conditioning.decode_video_frames(source, frame_rate=24)
+    in_order = conditioning.decode_video_frames(source)
+
+    assert [marker_index(f) for f in timed] == [marker_index(f) for f in in_order]
+    assert timed.shape[0] == in_order.shape[0] == 48
+
+
+def test_a_stream_with_no_timestamps_is_timed_by_its_frame_duration(tmp_path):
+    """A raw Annex B .h264 has no stamps, and FFmpeg guesses 25 fps for its
+    average rate; each frame still carries its real duration (1/60 s here)."""
+    source = write_clip(tmp_path / "raw.h264", [marker_frame(k) for k in range(60)], rate=60)
+    assert set(decoded_pts(source)) == {None}, "the fixture carries timestamps after all"
+
+    frames = conditioning.decode_video_frames(source, frame_rate=24)
+
+    got = [marker_index(frame) for frame in frames]
+    assert got == nearest_source_frames(60, source_rate=60, rate=24), got
+
+
 # ---------------------------------------------------------------------------
 # F16 -- orientation
 # ---------------------------------------------------------------------------

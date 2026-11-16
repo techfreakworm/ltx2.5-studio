@@ -48,6 +48,8 @@ module still imports with no media stack and no GPU present.
 
 from __future__ import annotations
 
+import heapq
+from collections import deque
 from collections.abc import Sequence
 from dataclasses import dataclass
 from fractions import Fraction
@@ -294,6 +296,58 @@ def _frame_by_frame(container, stream, *, max_frames):
     return frames
 
 
+#: The deepest picture reordering H.264 and HEVC allow. A frame's display time
+#: is settled once this many later frames have been decoded.
+REORDER_DEPTH = 16
+
+
+def _duration(frame):
+    """How long ``frame`` is shown, in seconds, or ``None`` if it does not say."""
+    if frame.duration and frame.time_base is not None:
+        return Fraction(frame.duration) * frame.time_base
+    return None
+
+
+def _display_times(frames, *, nominal: Fraction):
+    """``(seconds from the first frame, frame)`` for decoded frames, in display order.
+
+    A decoder hands frames back in display order, so the k-th frame shows at
+    the k-th smallest timestamp. Most containers stamp each frame with its own
+    display time and the sort changes nothing; H.264 with B-frames in AVI
+    stamps display-order frames with decode-order times, and the sort over
+    :data:`REORDER_DEPTH` frames restores them. A frame with no stamp at all is
+    shown one frame duration after the one before (``nominal`` only if it has
+    no duration). Times never go backwards.
+    """
+    pending: deque = deque()
+    stamps: list = []
+    origin = shown = None
+    last = (None, None)  # (seconds, frame) of the latest frame placed
+
+    def release():
+        nonlocal origin, shown
+        seconds = heapq.heappop(stamps)
+        origin = seconds if origin is None else origin
+        shown = seconds - origin if shown is None else max(shown, seconds - origin)
+        return shown, pending.popleft()
+
+    for frame in frames:
+        stamp = frame.pts if frame.pts is not None else frame.dts
+        if stamp is not None and frame.time_base is not None:
+            seconds = Fraction(stamp) * frame.time_base
+        elif last[0] is None:
+            seconds = Fraction(0)
+        else:
+            seconds = last[0] + (_duration(last[1]) or _duration(frame) or 1 / nominal)
+        last = (seconds, frame)
+        heapq.heappush(stamps, seconds)
+        pending.append(frame)
+        if len(pending) > REORDER_DEPTH:
+            yield release()
+    while pending:
+        yield release()
+
+
 def _at_rate(container, stream, *, frame_rate: Fraction, max_frames):
     """The frame nearest each ``t = i / frame_rate``, from the first frame on.
 
@@ -301,9 +355,9 @@ def _at_rate(container, stream, *, frame_rate: Fraction, max_frames):
     are not filled, so a short clip yields fewer frames.
     """
     limit = float("inf") if max_frames is None else max_frames
-    nominal = stream.average_rate or stream.guessed_rate or frame_rate
+    nominal = Fraction(stream.guessed_rate or stream.average_rate or frame_rate)
     frames: list = []
-    turns = origin = None
+    turns = None
     previous = None  # (seconds, frame)
     gap = None
     cached = (None, None)
@@ -314,14 +368,9 @@ def _at_rate(container, stream, *, frame_rate: Fraction, max_frames):
             cached = (frame, _upright(frame, turns))
         frames.append(cached[1])
 
-    for frame in container.decode(stream):
+    for when, frame in _display_times(container.decode(stream), nominal=nominal):
         if turns is None:
             turns = _quarter_turns(frame, stream)
-        if frame.pts is None or frame.time_base is None:
-            when = Fraction(0) if previous is None else previous[0] + 1 / Fraction(nominal)
-        else:
-            origin = frame.pts if origin is None else origin
-            when = Fraction(frame.pts - origin) * frame.time_base
         while len(frames) < limit and Fraction(len(frames)) / frame_rate <= when:
             target = Fraction(len(frames)) / frame_rate
             if previous is not None and target - previous[0] <= when - target:
@@ -336,10 +385,7 @@ def _at_rate(container, stream, *, frame_rate: Fraction, max_frames):
 
     if previous is not None:
         last_seconds, last = previous
-        if last.duration and last.time_base is not None:
-            shown_for = Fraction(last.duration) * last.time_base
-        else:
-            shown_for = gap if gap is not None else 1 / Fraction(nominal)
+        shown_for = _duration(last) or gap or 1 / nominal
         while len(frames) < limit and Fraction(len(frames)) / frame_rate < last_seconds + shown_for:
             take(last)
     return frames
