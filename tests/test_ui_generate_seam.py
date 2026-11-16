@@ -521,23 +521,12 @@ def test_a_mono_upload_is_reported_to_the_user_not_only_the_log(monkeypatch, tmp
 # `audio_counterpart` is None and no such mode exists.
 #
 # The registry declares `exports=("audio", "video")` for it, so a file comes
-# back with sound. WHICH sound has been answered twice:
-#
-#   * `4683a57` muxed the model's OWN generated track, on six reasons recorded
-#     at the mode-11 spec in `modes.py`;
-#   * a controlled discriminator on the live Space then measured that track.
-#     Same pipeline, same 512x960x121 geometry, same seed, one variable --
-#     whether audio was supplied. Audio in: -88.3 dBFS, digital silence. No
-#     audio in: -24.2 dBFS, real content. **Supplying audio suppresses the
-#     model's own audio generation**, 64 dB of separation, so `4683a57` was
-#     muxing an empty stream -- which is worse than no stream, because it looks
-#     like a track until you play it.
-#
-# ✅ RULED, for the video-exporting case only: mux the user's SUPPLIED audio.
-# The audio-only export modes are untouched -- their artifact IS the model's
-# track. These tests pin the three halves that can regress silently: that a
-# file comes back with sound, that it is the RIGHT sound for the mode, and that
-# the user is told which one it is and why.
+# back with sound: the user's own audio, because in this mode the audio is
+# frozen -- held exactly while the picture is generated to it
+# (`audio_conditioning`). The audio-only export modes hand back the model's
+# track, made from the upload. These tests pin the three halves that can
+# regress silently: that a file comes back with sound, that it is the RIGHT
+# sound for the mode, and that the user is told which one it is and why.
 # --------------------------------------------------------------------------
 
 #: The modes whose container carries the user's own upload back.
@@ -599,7 +588,7 @@ def test_an_audio_export_mode_still_says_the_track_is_the_models(mode_id, tmp_pa
     """
     result = _uploaded(mode_id, tmp_path, monkeypatch)
 
-    assert any("model's OWN track" in note for note in result.warnings), (
+    assert any("model's own track" in note for note in result.warnings), (
         f"{mode_id!r} returned the model's audio and never said so, so a user who uploaded "
         f"audio has no way to learn the file does not contain it: {result.warnings}"
     )
@@ -607,24 +596,14 @@ def test_an_audio_export_mode_still_says_the_track_is_the_models(mode_id, tmp_pa
 
 @pytest.mark.parametrize("mode_id", MUXES_UPLOAD)
 def test_a_video_exporting_mode_hands_back_the_users_own_audio(mode_id, tmp_path, monkeypatch):
-    """The flip, at the seam a user actually meets.
-
-    ``4683a57`` muxed the model's track here. The live discriminator then
-    measured that track at -88.3 dBFS against -24.2 dBFS for the same pipeline
-    with no audio supplied: supplying audio suppresses the model's own audio
-    generation, so what shipped was a well-formed AAC stream containing silence.
-    The upload is what the user has, what he expects back, and the only one of
-    the two that is not empty.
-    """
+    """At the seam a user actually meets: the frozen audio comes back as uploaded."""
     result = _uploaded(mode_id, tmp_path, monkeypatch)
 
-    assert any("audio YOU supplied" in note for note in result.warnings), (
-        f"{mode_id!r} muxes the user's own audio and never says so, which is the same "
-        f"silence the mode-11 defect was: {result.warnings}"
+    assert any("audio you supplied" in note for note in result.warnings), (
+        f"{mode_id!r} muxes the user's own audio and never says so: {result.warnings}"
     )
-    assert not any("model's OWN track" in note for note in result.warnings), (
-        f"{mode_id!r} claims to be handing back the model's track, which is both wrong and "
-        f"(per the measurement) a claim about digital silence: {result.warnings}"
+    assert not any("model's own track" in note for note in result.warnings), (
+        f"{mode_id!r} claims to be handing back the model's track: {result.warnings}"
     )
 
 
@@ -632,22 +611,17 @@ def test_a_video_exporting_mode_hands_back_the_users_own_audio(mode_id, tmp_path
 def test_the_note_says_WHY_the_upload_is_the_one_that_comes_back(
     mode_id, tmp_path, monkeypatch
 ):
-    """Honest and useful, where the previous behaviour was honest and useless.
+    """The reason is the mechanism, true by construction: the audio was held fixed.
 
-    "here is your audio back" invites the reading that we simply preferred it.
-    The reason is the whole finding -- the model's generation is *suppressed* by
-    the audio input -- and it is what stops the next person re-deriving
-    ``4683a57``'s six reasons and flipping this back.
+    No claim about what the model does with audio it is allowed to change.
     """
     result = _uploaded(mode_id, tmp_path, monkeypatch)
-    provenance = [note for note in result.warnings if "audio YOU supplied" in note]
+    provenance = [note for note in result.warnings if "audio you supplied" in note]
 
     assert provenance, result.warnings
     note = provenance[0]
-    assert "SUPPRESSES" in note, f"the note states no reason: {note!r}"
-    assert "-88.3 dBFS" in note and "-24.2 dBFS" in note, (
-        f"the measurement that overturned the previous ruling is not quoted: {note!r}"
-    )
+    assert "held fixed" in note and "generated to it" in note, f"no reason given: {note!r}"
+    assert "suppress" not in note.lower() and "dBFS" not in note, note
 
 
 @pytest.mark.parametrize("mode_id", MUXES_UPLOAD)
@@ -739,7 +713,7 @@ def test_the_programmatic_latents_route_is_told_which_track_too(tmp_path):
         retention_bytes=10**9,
     )
 
-    assert any("model's OWN track" in note for note in result.warnings), (
+    assert any("decoded by the model" in note for note in result.warnings), (
         f"audio was supplied as latents and the result never says which track came back: "
         f"{result.warnings}"
     )

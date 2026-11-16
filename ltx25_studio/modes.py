@@ -32,11 +32,13 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from types import MappingProxyType
 
+from . import audio_conditioning
 from .conditioning import ConditionSpec
 from .errors import ConstraintError, UnknownModeError
 
 __all__ = [
     "IMAGE_CONDITION_STRENGTH",
+    "KEPT_VIDEO_STRENGTH",
     "MAX_VIDEO_CONDITION_STRENGTH",
     "MIN_RESOLUTION",
     "MODES",
@@ -66,8 +68,9 @@ MIN_RESOLUTION = 256
 #: A still image anchors its frame completely.
 IMAGE_CONDITION_STRENGTH = 1.0
 
-#: Video conditioning must stay below 1.0: at full strength the input frames are
-#: pinned and nothing is generated.
+#: ``video_to_video`` conditioning stays below 1.0: at full strength the input
+#: frames are pinned and nothing is generated (``video_to_audio`` wants exactly
+#: that; see :data:`KEPT_VIDEO_STRENGTH`).
 #:
 #: ⚠️ **This ceiling never binds in practice, and it is not the lever anyone
 #: wants.** ``_conditions`` takes ``min(request.strength,
@@ -83,6 +86,10 @@ IMAGE_CONDITION_STRENGTH = 1.0
 #: exists. ``test_the_global_ceiling_is_not_the_lever`` fails if this stops
 #: being true.
 MAX_VIDEO_CONDITION_STRENGTH = 0.99
+
+#: The video is kept exactly and only sound is generated (``video_to_audio``):
+#: every video token is told it is clean.
+KEPT_VIDEO_STRENGTH = 1.0
 
 
 @dataclass(frozen=True)
@@ -115,6 +122,11 @@ class ModeSpec:
     #: Input kinds the mode can use but does not need. Anything in neither
     #: tuple is dropped from the request before the run (generate.py).
     optional_inputs: tuple[str, ...] = ()
+    #: How supplied audio is treated: ``"frozen"`` (held exactly) or
+    #: ``"variation"`` (noised to the request's level); None without audio input.
+    audio_conditioning: str | None = None
+    #: A video condition strength the mode fixes, overriding the request's.
+    video_strength: float | None = None
 
 
 def accepts(spec: ModeSpec, kind: str) -> bool:
@@ -143,12 +155,9 @@ _AUDIO_ONLY_NOTE = (
 )
 
 _AUDIO_TO_VIDEO_NOTE = (
-    "This mode encodes your audio into latents before generating, so it pays the audio "
-    "encode on top of a normal video render. The file comes back with sound, and that "
-    "sound is YOUR audio, muxed back in — because supplying audio suppresses the model's "
-    "own audio generation, so the track it would otherwise contribute is silent. Your "
-    "upload is length-matched to the video first, so what you get back is the same "
-    "waveform that steered the render."
+    "This mode encodes your audio before generating, so it pays the audio encode on top of "
+    "a normal video render. Your audio is held fixed while the picture is generated to it, "
+    "so the file carries your audio, length-matched to the video."
 )
 
 
@@ -182,19 +191,26 @@ def _base_kwargs(request, *, min_resolution: bool) -> dict:
     return {key: value for key, value in candidates.items() if value is not None}
 
 
-def _with_audio(request, kwargs: dict) -> dict:
-    """Attach the audio-latent route.
+def _with_audio(request, kwargs: dict, conditioning: str) -> dict:
+    """Attach the audio-latent route and the audio stream's own noise level.
 
-    There is no ``audio=`` argument on any LTX2 pipeline (PLAN §3.1c). Audio
-    enters as pre-encoded ``audio_latents`` combined with ``noise_scale``, which
-    behaves like img2img strength: 1.0 discards the input entirely.
+    There is no ``audio=`` argument on any LTX2 pipeline (PLAN §3.1c): audio
+    enters as pre-encoded ``audio_latents``. ``noise_scale`` is NOT sent: on the
+    condition pipeline it is also the video's initial noise level, so the video
+    is sampled as in every other mode and the audio's level travels as
+    ``audio_noise_level`` (consumed by ``pipelines.StageRunner``; see
+    ``audio_conditioning``).
     """
     latents = getattr(request, "audio_latents", None)
     if latents is not None:
         kwargs["audio_latents"] = latents
-    noise_scale = getattr(request, "noise_scale", None)
-    if noise_scale is not None:
-        kwargs["noise_scale"] = noise_scale
+    if conditioning == "frozen":
+        kwargs["audio_noise_level"] = audio_conditioning.FROZEN
+    else:
+        noise_scale = getattr(request, "noise_scale", None)
+        kwargs["audio_noise_level"] = audio_conditioning.snap_level(
+            1.0 if noise_scale is None else noise_scale
+        )
     return kwargs
 
 
@@ -239,7 +255,9 @@ def _refuse_unaccepted(request, accepted: frozenset[str], label: str) -> None:
         )
 
 
-def _conditions(request, accepted: frozenset[str]) -> tuple[ConditionSpec, ...]:
+def _conditions(
+    request, accepted: frozenset[str], video_strength: float | None = None
+) -> tuple[ConditionSpec, ...]:
     """Build the condition list. Image and video share one mechanism (§3.1a)."""
     specs: list[ConditionSpec] = []
     image = getattr(request, "image", None)
@@ -252,14 +270,10 @@ def _conditions(request, accepted: frozenset[str]) -> tuple[ConditionSpec, ...]:
         strength = getattr(request, "strength", None)
         if strength is None:
             strength = MAX_VIDEO_CONDITION_STRENGTH
-        specs.append(
-            ConditionSpec(
-                source=video,
-                kind="video",
-                index=0,
-                strength=min(float(strength), MAX_VIDEO_CONDITION_STRENGTH),
-            )
-        )
+        strength = min(float(strength), MAX_VIDEO_CONDITION_STRENGTH)
+        if video_strength is not None:
+            strength = float(video_strength)
+        specs.append(ConditionSpec(source=video, kind="video", index=0, strength=strength))
     specs.extend(
         entry
         for entry in getattr(request, "conditions", ()) or ()
@@ -268,22 +282,21 @@ def _conditions(request, accepted: frozenset[str]) -> tuple[ConditionSpec, ...]:
     return tuple(specs)
 
 
-def _text_builder(*, min_resolution: bool = False, audio: bool = False) -> Callable:
-    def build(request, accepted: frozenset[str]) -> dict:
-        kwargs = _base_kwargs(request, min_resolution=min_resolution)
-        return _with_audio(request, kwargs) if audio else kwargs
+def _text_builder(*, min_resolution: bool = False) -> Callable:
+    def build(request, accepted: frozenset[str], fields: dict) -> dict:
+        return _base_kwargs(request, min_resolution=min_resolution)
 
     return build
 
 
-def _condition_builder(*, min_resolution: bool = False, audio: bool = False) -> Callable:
-    def build(request, accepted: frozenset[str]) -> dict:
+def _condition_builder(*, min_resolution: bool = False) -> Callable:
+    def build(request, accepted: frozenset[str], fields: dict) -> dict:
         kwargs = _base_kwargs(request, min_resolution=min_resolution)
-        conditions = _conditions(request, accepted)
+        conditions = _conditions(request, accepted, fields.get("video_strength"))
         if conditions:
             kwargs["conditions"] = conditions
-        if audio:
-            _with_audio(request, kwargs)
+        if fields.get("audio_conditioning"):
+            _with_audio(request, kwargs, fields["audio_conditioning"])
         return kwargs
 
     return build
@@ -291,12 +304,14 @@ def _condition_builder(*, min_resolution: bool = False, audio: bool = False) -> 
 
 def _mode(builder: Callable, **fields) -> ModeSpec:
     """A registry entry whose builder knows, from the entry itself, what it accepts."""
+    if fields.get("audio_conditioning") not in (None, "frozen", "variation"):
+        raise ValueError(f"unknown audio_conditioning {fields['audio_conditioning']!r}")
     accepted = frozenset(fields["inputs"]) | frozenset(fields.get("optional_inputs", ()))
     label = fields["label"]
 
     def build_kwargs(request) -> dict:
         _refuse_unaccepted(request, accepted, label)
-        kwargs = builder(request, accepted)
+        kwargs = builder(request, accepted, fields)
         if "text" not in accepted:
             # PLAN §3.2 row 2: one condition, empty prompt.
             kwargs["prompt"] = ""
@@ -381,6 +396,7 @@ _SPECS = (
     ),
     _mode(
         _condition_builder(min_resolution=True),
+        video_strength=KEPT_VIDEO_STRENGTH,
         id="video_to_audio",
         label="Video to audio",
         pipeline="condition",
@@ -392,7 +408,8 @@ _SPECS = (
         skip_stage_2=True,
     ),
     _mode(
-        _condition_builder(min_resolution=True, audio=True),
+        _condition_builder(min_resolution=True),
+        audio_conditioning="variation",
         id="audio_to_audio",
         label="Audio to audio",
         pipeline="condition",
@@ -405,107 +422,14 @@ _SPECS = (
     ),
     # -- 11: exports video, so it gets none of the audio-only mitigations -----
     #
-    # ⛔ **It used to export video ONLY, and that was the defect.** A user who
-    # conditioned on audio got back an mp4 with ZERO audio streams -- confirmed
-    # twice on the live Space. The generated track was discarded by
-    # `outputs._write_video`'s `include_audio` branch and reported through
-    # `dropped_audio_warning`, which told the user to "use the matching
-    # audio+video mode to keep it". **There is no such mode.** `audio_counterpart`
-    # is None here, so the one mitigation the drop had pointed at nothing.
-    #
-    # ⛔ **RULED, THEN OVERTURNED BY MEASUREMENT.** The six reasons below chose
-    # the model's generated track, and they are kept verbatim because five of
-    # them are still true and the sixth is the cost the new ruling accepts. What
-    # they could not weigh is a fact that did not exist when they were written.
-    #
-    # ✅ **A controlled discriminator on the live Space: supplying audio
-    # SUPPRESSES the model's own audio generation.** Same pipeline, same
-    # 512x960x121 geometry, same seed, one variable -- whether an audio input
-    # was given. Both files carried a well-formed 48 kHz stereo AAC track:
-    #
-    #     audio_to_video       (audio IN)   video+aac ✓   -88.3 dBFS   silence
-    #     text_to_audio_video  (no audio)   video+aac ✓   -24.2 dBFS   content
-    #
-    # 64 dB of separation. So on exactly the runs reason 1-6 govern, "the track
-    # that cannot silently mislead" is digital silence -- the same emptiness the
-    # original defect had, now wearing a stream header, which is arguably worse
-    # because it looks like a track until you play it.
-    #
-    # ✅ **RULED (this mode ONLY): mux the audio the user SUPPLIED.** He provided
-    # it, he expects it back, and the model's track is empty anyway. Reason 3 was
-    # a true statement about the code -- the reconciled waveform was a local in
-    # `generate._prepared_audio` and did not survive to export time -- and it is
-    # now false by construction: `_prepared_audio` returns it as an
-    # `outputs.SuppliedAudio`, captured after the reconcile and before the
-    # encode, carrying the UPLOAD's sample rate so reason 4 cannot bite either.
-    # Reason 5 is the price and it is paid knowingly: the file will look
-    # synchronised whether or not the render followed the audio. Reasons 1, 2 and
-    # 6 are unchanged and simply lost to a bigger fact.
-    #
-    # ⚠️ **Scope.** `audio_to_audio` (mode 10) and `video_to_audio` (mode 9) are
-    # NOT changed: they are audio-export modes whose artifact IS the model's
-    # track, and they are outside the ruling. Whether the same suppression makes
-    # mode 10's export silent is a real question that nothing has measured; it is
-    # recorded as open rather than answered by extension.
-    #
-    # The scope is enforced by `generate._muxes_supplied_audio`, which derives it
-    # from `exports` -- a video container declared to carry sound -- rather than
-    # from a flag on this spec, because a flag is the thing whoever adds the next
-    # audio-input mode forgets.
-    #
-    # ⛔ The superseded ruling, kept in full:
-    #
-    # ~~**RULED: the muxed track is the audio the model GENERATED, not the audio
-    # the user supplied.** Both were defensible; the generated one is the one
-    # that cannot silently mislead.~~ Six reasons, in the order that decided it:
-    #
-    # 1. **`audio_to_audio` already answers this question.** Mode 10 takes the
-    #    same audio input, through the same `_condition_builder(audio=True)`, on
-    #    the same `condition` pipeline, and returns the model's track -- nobody
-    #    argues it should hand the upload back. Mode 11 is that same joint render
-    #    with the video kept instead of discarded. Returning a DIFFERENT track
-    #    for one than for the other would make "the audio in this file" mean two
-    #    things across two modes that differ only in which track survives.
-    #
-    # 2. **Alignment is by construction for one and not the other.** The
-    #    generated audio comes off the same joint latent timeline as the frames.
-    #    The upload does not: `audio.reconcile_waveform_with_video` returns it
-    #    UNTOUCHED inside a +/-0.05 s tolerance, and when it does trim, it snaps
-    #    to `seconds_for_latent_frames(...)` -- upstream's latent grid -- not to
-    #    `num_frames / frame_rate`. The upload is never guaranteed video-length.
-    #
-    # 3. **The reconciled waveform does not exist at export time.** It is a local
-    #    in `generate._prepared_audio`, consumed into `audio_latents` and gone.
-    #    What survives is `request.audio`: the ORIGINAL, UNTRIMMED file. Muxing
-    #    that would reintroduce at the output end exactly the desync `2eaeb2c`
-    #    fixed at the input end -- a 10 s upload against a 5 s video conditions
-    #    on 5 s and would ship with 10 s of sound.
-    #
-    # 4. **Rates.** The upload carries the file's own rate; the writer is handed
-    #    `vocoder.config.output_sampling_rate` (48000 against the VAE's 16000 --
-    #    see `conftest`'s note on that trap). Muxing the upload at the vocoder's
-    #    rate pitch-shifts it silently, which is the defect class
-    #    `outputs._required` exists to refuse, and carrying a second rate would
-    #    double the writer's independent rate assumptions.
-    #
-    # 5. **It cannot mask a conditioning failure.** Muxing the upload back would
-    #    make every mode-11 file look and sound synchronised whether or not the
-    #    model actually followed the audio -- the user's own track papering over
-    #    a render that ignored it. The generated track cannot do that: if the
-    #    model ignored the conditioning, you hear it.
-    #
-    # 6. **Nothing is lost either way.** The user still holds their file and can
-    #    mux it over the video losslessly. The generated track, once dropped, is
-    #    gone and was paid for in GPU-seconds -- which is what the drop warning
-    #    always said, while pointing at a sibling mode that does not exist.
-    #
-    # The user is TOLD which track they got, every run, through the warnings
-    # channel -- `generate._prepared_audio`. Silence is what the defect was, and
-    # that has not changed: the note now says the audio is his own AND says why,
-    # because "here is your audio back" without the suppression finding invites
-    # the next person to re-derive the six reasons and flip it again.
+    # The audio is frozen: its latents are the encoded upload, unchanged, and the
+    # transformer is told at every step that they are clean, so the picture is
+    # generated to the sound. The file therefore carries the user's own audio
+    # (`generate._muxes_supplied_audio`, derived from `exports`): it is the very
+    # waveform the picture was generated to, length-matched to the video.
     _mode(
-        _condition_builder(audio=True),
+        _condition_builder(),
+        audio_conditioning="frozen",
         id="audio_to_video",
         label="Audio to video",
         pipeline="condition",

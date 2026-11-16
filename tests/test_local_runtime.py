@@ -303,6 +303,20 @@ def test_staged_and_resident_runs_are_identical(case, tmp_path):
     _assert_same(staged, resident)
 
 
+def test_the_audio_pipeline_does_not_keep_a_released_transformer_alive(tmp_path):
+    """The audio-conditioned derivative shares the staged pair; a release must reach it."""
+    fields = {"prompt": PROMPT, "audio": _inputs(tmp_path)["audio"]}
+    local_runtime.clear_local_cache()
+    _generate("staged", "audio_to_video", tmp_path, shim_audio=True, **fields)
+    runner = _runner("condition", "staged")
+    derived = runner._audio_pipeline
+    assert derived is not None and derived.transformer is not None
+
+    runner._weights.release_transformer()
+
+    assert derived.transformer is None, "the audio pipeline still holds the released transformer"
+
+
 def test_the_duration_head_chooses_the_same_length_staged_and_resident(tmp_path):
     fields = {"prompt": PROMPT, "auto_duration": True, "min_seconds": 0.3, "max_seconds": 0.7}
     staged = _generate("staged", "text_to_audio_video", tmp_path, **fields)

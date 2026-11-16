@@ -1085,22 +1085,8 @@ def distilled_kwargs() -> dict:
     schedule from it, and the model card warns that passing it "would hand the
     model a generic linear schedule and quietly cost quality".
 
-    ⏸️ **OPEN, and deliberately not acted on.** For a run given ``noise_scale``
-    -- only the audio-input modes -- ``sigmas[0]`` stays 1.0 while the latents
-    are noised to ``noise_scale``. 📄 That contradicts upstream's own inference
-    rule, ``noise_scale = sigmas[0] if sigmas is not None else 1.0``, and our
-    ``stage_2_kwargs`` honours the same rule.
-
-    **It was diagnosed as the cause of a silent `audio_to_audio` and it was
-    not.** ✅ The silence was a spectrally-sparse test fixture; with realistic
-    audio the mode is healthy at −10.4 dBFS **carrying the full mismatch**, and
-    H10b spans −9.9 to −19.6 dBFS in the right direction with it in place.
-
-    ⚠️ **Truncating the schedule at ``noise_scale`` is not a safe no-op.** It
-    would take an eight-step run to **two** steps at 0.5 and **one** at 0.1 --
-    values that measured healthy on eight. So the fix needs evidence that it
-    *improves* something, not merely that it agrees with the contract, and no
-    instrument we have measures what it would change.
+    The audio-input modes keep this schedule too: their audio has its own
+    level and schedule (``audio_conditioning``), so no run truncates it.
     """
     return {"sigmas": list(DISTILLED_SIGMA_VALUES), **DISTILLED_GUIDANCE}
 
@@ -1333,6 +1319,8 @@ class StageRunner:
         #: turned a dependency of one branch into a hard requirement for every
         #: mode -- when NATTEN could not resolve, nothing loaded at all.
         self._stage_2_factory = stage_2_factory
+        #: The audio-conditioned derivative of ``pipeline``, built on first use.
+        self._audio_pipeline = None
 
     def _stage_2_ready(self):
         """Obtain the stage-2 parts, building them if this is the first request."""
@@ -1365,12 +1353,15 @@ class StageRunner:
         it, and it is optional so every direct caller (the offline gate, the
         ``scripts/`` harnesses) is unaffected.
         """
-        kwargs = _with_real_conditions(kwargs)
+        kwargs = dict(_with_real_conditions(kwargs))
+        # Ours, like enable_stage_2: the audio stream's own noise level.
+        pipeline, audio_kwargs = self._pipeline_for(kwargs.pop("audio_noise_level", None))
+        kwargs.update(audio_kwargs)
         if not enable_stage_2:
             # The distilled recipe applies here too. It used to apply ONLY on
             # the stage-2 path, which is how eleven of twelve host runs were
             # generated with a linear schedule and SFT guidance.
-            return self.pipeline(**kwargs, **distilled_kwargs(), **_sampling_kwargs(progress))
+            return pipeline(**_merged(kwargs, distilled_kwargs(), _sampling_kwargs(progress)))
         from . import device as device_module
 
         device_module.check_stage_2_size(
@@ -1386,7 +1377,7 @@ class StageRunner:
             stage_2=True,
         )
 
-        stage_1 = self.pipeline(
+        stage_1 = pipeline(
             **_merged(kwargs, stage_1_kwargs(), _sampling_kwargs(progress, index=1, passes=2))
         )
         if progress is not None:
@@ -1394,7 +1385,7 @@ class StageRunner:
         upsampled = _latents_of(self.upsampler(**upsample_kwargs(_latents_of(stage_1))))
         # Stage 2's own values win: the audio-input modes already carry
         # noise_scale and audio_latents in the request.
-        stage_2 = self.pipeline(
+        stage_2 = pipeline(
             **_merged(
                 {k: v for k, v in kwargs.items() if k not in STAGE_2_STRIPPED_KEYS},
                 stage_2_geometry(
@@ -1414,6 +1405,24 @@ class StageRunner:
             latents, generator = _for_the_cpu_decoder(latents, generator)
         decoded = self.decoder(**decode_kwargs(latents, generator=generator))
         return self._with_audio(decoded, stage_2)
+
+    def _pipeline_for(self, audio_noise_level):
+        """The pipeline for this call, and any kwargs it must also be given.
+
+        With an audio level, a real condition pipeline is swapped for its
+        audio-conditioned derivative (shared modules); a stand-in in the
+        offline gate is handed the level instead.
+        """
+        if audio_noise_level is None:
+            return self.pipeline, {}
+        from . import audio_conditioning
+
+        if not audio_conditioning.is_condition_pipeline(self.pipeline):
+            return self.pipeline, {"audio_noise_level": audio_noise_level}
+        self._audio_pipeline = audio_conditioning.audio_pipeline(
+            self.pipeline, audio_noise_level, derived=self._audio_pipeline
+        )
+        return self._audio_pipeline, {}
 
     def _ratio(self, axis: str) -> int:
         """The VAE's compression ratio on ``axis``, read off the pipeline."""

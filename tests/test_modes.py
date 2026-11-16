@@ -353,10 +353,10 @@ def test_the_cost_note_agrees_with_which_track_the_run_will_actually_return():
     assert "your audio" in note, (
         f"the annunciator does not tell the user the sound will be his own: {spec.cost_note!r}"
     )
-    assert "suppress" in note, (
-        f"the annunciator states the behaviour and not the reason for it, which is how "
-        f"`4683a57`'s six reasons get re-derived and this gets flipped back: {spec.cost_note!r}"
+    assert "held fixed" in note, (
+        f"the annunciator states the behaviour and not the reason for it: {spec.cost_note!r}"
     )
+    assert "suppress" not in note, f"the annunciator repeats the unproven claim: {note!r}"
     assert "model's own track" not in note, (
         f"the annunciator still carries the superseded ruling's promise: {spec.cost_note!r}"
     )
@@ -487,15 +487,17 @@ def test_video_to_video_conditions_at_less_than_full_strength(make_request):
     assert all(s is not None and s < 1.0 for s in strengths), strengths
 
 
-@pytest.mark.parametrize("mode_id", ["audio_to_audio", "audio_to_video"])
-def test_audio_input_modes_pass_latents_and_noise_scale(mode_id, make_request):
+@pytest.mark.parametrize("mode_id,level", [("audio_to_audio", 0.421875), ("audio_to_video", 0.0)])
+def test_audio_input_modes_pass_latents_and_their_own_audio_level(mode_id, level, make_request):
     """PLAN §3.1c: there is no ``audio=`` kwarg. Audio enters as ``audio_latents``
-    combined with ``noise_scale``."""
+    with the audio stream's own level; ``noise_scale`` would also set the video's
+    initial noise on the condition pipeline, so it is not sent."""
     kwargs = modes.get_mode(mode_id).build_kwargs(
         make_request(mode=mode_id, audio=object(), audio_latents=object(), noise_scale=0.3)
     )
     assert "audio_latents" in kwargs
-    assert kwargs["noise_scale"] == 0.3
+    assert kwargs["audio_noise_level"] == level
+    assert "noise_scale" not in kwargs
     assert "audio" not in kwargs, "there is no `audio=` argument on any LTX2 pipeline"
 
 

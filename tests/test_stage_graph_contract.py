@@ -1101,30 +1101,24 @@ def test_no_advertised_lever_sets_guidance_or_steps():
 # --------------------------------------------------------------------------
 
 
-def test_the_schedule_is_not_truncated_for_a_partially_noised_run():
-    """⏸️ Pins current behaviour, and records that it is an OPEN question.
+def test_a_partially_noised_audio_run_keeps_the_videos_full_schedule():
+    """The audio's level is its own; the video is sampled as in every other mode.
 
-    `noise_scale` and `sigmas[0]` are the same quantity to upstream, and ours
-    disagree on the audio-input modes. It was diagnosed as the cause of a
-    silent `audio_to_audio` and it was **not** — the silence was a
-    spectrally-sparse fixture, and the mode is healthy at −10.4 dBFS carrying
-    the full mismatch.
-
-    This test exists so a future change is deliberate rather than incidental:
-    truncating would take an eight-step run to **two** steps at 0.5 and **one**
-    at 0.1, values that measured healthy on eight. If someone makes that change
-    they should have evidence it improves something, and this failing is the
-    prompt to go and get it.
+    It used to send ``noise_scale=0.5``, which upstream also applies to the
+    video's initial noise while the schedule starts at 1.0. Now no
+    ``noise_scale`` is sent (the video starts at its first sigma), the full
+    distilled schedule stays, and the audio level travels separately: the audio
+    holds at it until the schedule comes down to it
+    (``test_audio_conditioning`` runs this on the real pipelines).
     """
-    runner, pipeline, _up, _dec = two_stage()
+    pipeline = AudioPipeline()
+    runner = pipelines.StageRunner(pipeline, kind="condition")
 
-    runner(prompt="a lighthouse", noise_scale=0.5)
+    runner(prompt="a lighthouse", audio_noise_level=0.725)
 
-    assert pipeline.kwargs["sigmas"] == list(pipelines.DISTILLED_SIGMA_VALUES), (
-        "the schedule is now truncated for a partially-noised run. That may be right, "
-        "but it needs a measurement showing it improves output -- agreeing with the "
-        "contract is not evidence, and it costs six of eight denoise steps at 0.5."
-    )
+    assert pipeline.kwargs["sigmas"] == list(pipelines.DISTILLED_SIGMA_VALUES)
+    assert "noise_scale" not in pipeline.kwargs
+    assert pipeline.kwargs["audio_noise_level"] == 0.725
 
 
 # --------------------------------------------------------------------------

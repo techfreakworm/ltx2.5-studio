@@ -1042,6 +1042,7 @@ class LocalStageRunner:
         self._weights = weights
         self.kind = kind
         self.pipeline = weights.pipeline_for(kind)
+        self._audio_pipeline = None
 
     @property
     def device(self) -> str:
@@ -1065,15 +1066,28 @@ class LocalStageRunner:
             raise StageTwoUnavailableError(device=weights.device)
         import torch
 
-        kwargs = pipelines._with_real_conditions(kwargs)
+        kwargs = dict(pipelines._with_real_conditions(kwargs))
+        audio_noise_level = kwargs.pop("audio_noise_level", None)
         kwargs = weights.with_explicit_crf(kwargs)
         call = _merged(kwargs, pipelines.distilled_kwargs(), pipelines._sampling_kwargs(progress))
         if weights.residency == STAGED:
             call = weights.prompt_embeddings(self.pipeline, call)
             weights.ensure_transformer()
-        weights.preflight_denoise(self.pipeline, call)
+        pipeline = self.pipeline
+        if audio_noise_level is not None:
+            from . import audio_conditioning
+
+            # After the transformer is resident: the derived pipeline syncs to it.
+            self._audio_pipeline = audio_conditioning.audio_pipeline(
+                self.pipeline, audio_noise_level, derived=self._audio_pipeline
+            )
+            # Registered so a release detaches the staged pair from it too;
+            # otherwise it would keep a released transformer alive.
+            weights.pipelines[f"{self.kind}+audio"] = self._audio_pipeline
+            pipeline = self._audio_pipeline
+        weights.preflight_denoise(pipeline, call)
         with weights.phase("denoise and decode"), torch.inference_mode():
-            return self.pipeline(**call)
+            return pipeline(**call)
 
 
 # --------------------------------------------------------------------------

@@ -136,8 +136,11 @@ class GenerationRequest:
     video: object | None = None
     audio: object | None = None
     audio_latents: object | None = None
+    #: ``audio_to_audio`` only: how strongly the user's audio is varied, snapped
+    #: to ``audio_conditioning.VARIATION_LEVELS``. 1.0 ignores the upload.
     noise_scale: float = 0.5
     conditions: tuple = ()
+    #: ``video_to_video`` only: how strongly the video anchors the result (< 1).
     strength: float = 0.8
     #: NOTE: there is deliberately no `guidance_scale` or `num_inference_steps`.
     #: The distilled recipe fixes both, and a lever that fights the schedule is
@@ -358,9 +361,12 @@ def scope_request_to_mode(request: GenerationRequest, spec) -> tuple[GenerationR
     if kept != request.conditions:
         changes["conditions"] = kept
 
-    if not accepts("video") and request.strength != defaults.strength:
+    # Levers a mode does not read go back to their defaults.
+    if (
+        not accepts("video") or spec.video_strength is not None
+    ) and request.strength != defaults.strength:
         changes["strength"] = defaults.strength
-    if not accepts("audio") and request.noise_scale != defaults.noise_scale:
+    if spec.audio_conditioning != "variation" and request.noise_scale != defaults.noise_scale:
         changes["noise_scale"] = defaults.noise_scale
     if spec.skip_stage_2 and request.enable_stage_2:
         changes["enable_stage_2"] = False
@@ -716,123 +722,58 @@ def _seeded_generator(pipe, seed: int):
     return generator
 
 
-#: The discriminator that overturned ``4683a57``'s choice, kept as data so every
-#: sentence quoting it quotes the same numbers. One controlled pair on the live
-#: Space: same pipeline, same 512x960x121 geometry, same seed, one variable --
-#: whether an audio input was supplied. Both files carried a well-formed 48 kHz
-#: stereo AAC track; only one of them carried any sound.
-SUPPRESSION_EVIDENCE = (
-    "measured on the live Space at identical geometry and seed: with audio supplied, "
-    "-88.3 dBFS (digital silence); with none supplied, -24.2 dBFS of real content"
-)
-
-
 def _muxes_supplied_audio(exports) -> bool:
     """Whether the user's own waveform is what belongs in this mode's container.
 
-    **Derived from the contract, never from the mode id** -- the same rule
-    :func:`_supplied_audio_note` already follows, and for the same reason: a
-    registry flag can be forgotten by whoever adds the next audio-input mode,
-    while a predicate over ``exports`` cannot.
-
-    The predicate is "this run writes a video container AND that container is
-    declared to carry sound". That is exactly the situation the measurement
-    covers: the model's audio generation is suppressed by the audio input, so the
-    track it would mux is empty, and an empty stream inside a video is strictly
-    worse than no stream at all -- it looks like a track until you play it.
-
-    It deliberately does NOT cover the audio-only export modes. Their artifact
-    *is* the model's track; handing back the upload there would answer a
-    different question than the one the mode asks, and ``audio_to_audio`` is out
-    of scope by operator ruling. Whether the same suppression makes their export
-    silent too is a real question and an open one -- it has not been measured,
-    and this predicate is not the place to guess.
+    Derived from the contract, never from the mode id: a run that writes a video
+    container declared to carry sound. That is ``audio_to_video``, whose audio is
+    frozen -- held exactly while the picture is generated to it -- so the
+    upload, length-matched to the video, is the very track the picture was
+    generated to. The audio-only exports are not covered: their artifact is the
+    model's track, made from the upload.
     """
     exports = tuple(exports or ())
     return "audio" in exports and "video" in exports
 
 
 def _supplied_audio_note(mode: str, exports, *, muxed: bool) -> tuple[str, ...]:
-    """Say which of the two audio tracks the user is holding. Never silent.
-
-    **An audio-conditioned mode has two candidate tracks and they are not the
-    same sound.** The user supplied one; the model, being jointly audio-visual,
-    renders another. Which one the file carries is
-    :func:`_muxes_supplied_audio`'s decision; this is the sentence that stops the
-    user having to guess.
-
-    ⛔ **The default flipped for the video-exporting case, and the old reasoning
-    was not wrong -- it was answered.** ``4683a57`` muxed the model's track for
-    consistency with ``audio_to_audio`` and because the generated track is
-    aligned to the frames by construction. Both of those still hold. What did not
-    exist when they were weighed is the measurement in
-    :data:`SUPPRESSION_EVIDENCE`: supplying audio *suppresses* the model's own
-    audio generation, so on exactly the runs that reasoning governed, the
-    "correct" track is digital silence. Consistency with a sibling mode is not
-    worth handing a user a file that looks like it has sound.
-
-    ⚠️ **What the flip costs, stated rather than dropped.** Reason 5 of the
-    original ruling was that muxing the upload back makes the file look and sound
-    synchronised whether or not the model actually followed the audio -- the
-    user's own track papering over a render that ignored it. That cost is real,
-    and it is now accepted, because the alternative is a silent file, which
-    papers over nothing and tells the user nothing either.
-
-    Gated on ``exports`` rather than on the mode id: a future audio-input mode
-    that exports no audio would make this note a lie, and deriving it from the
-    contract means the note cannot outlive the behaviour it describes.
-    """
+    """Say which audio the file carries, whenever audio entered a run that exports audio."""
     if "audio" not in tuple(exports or ()):
         return ()
-    # Lazily, like every other use of this module here: `audio` pulls torch and
-    # torchaudio, and `generate` is imported by layers that must stay cheap.
-    from .audio import DEFAULT_LENGTH_TOLERANCE_SECONDS
-
     if muxed:
         return (
-            f"the audio in this file is the audio YOU supplied, not a track the model "
-            f"generated. That is deliberate: supplying audio SUPPRESSES the model's own audio "
-            f"generation ({SUPPRESSION_EVIDENCE}), so the track it would have contributed to "
-            f"mode {mode!r} is silence with a stream header on it. Your upload is reconciled "
-            f"to the video length before it is muxed, so the sound in this file is the same "
-            f"waveform that conditioned the render, which is not always the whole of the file "
-            f"you uploaded.",
+            "the audio in this file is the audio you supplied. It was held fixed while the "
+            "picture was generated to it, and it is length-matched to the video before it is "
+            "muxed, so it may be shorter than the file you uploaded.",
         )
     return (
-        f"the audio in this file is the model's OWN track, generated jointly with the "
-        f"frames -- not the audio you supplied. Your audio conditioned the render for mode "
-        f"{mode!r}; it was not muxed back in. The generated track is aligned to the frames "
-        f"by construction and your upload is not (it is reconciled to the video only within "
-        f"a {DEFAULT_LENGTH_TOLERANCE_SECONDS}s tolerance and on upstream's latent grid), so "
-        f"the two are not interchangeable. Mux your own file over the video yourself if that "
-        f"is what you wanted.",
+        f"the audio in this file is the model's own track for mode {mode!r}, made from the "
+        f"audio you supplied -- not your upload itself.",
     )
 
 
 def _supplied_latents_note(mode: str, exports) -> tuple[str, ...]:
-    """The programmatic route, where there is no waveform to hand back.
-
-    ``audio_latents`` supplied directly are already encoded: the waveform they
-    came from never entered this process, so the substitution
-    :func:`_muxes_supplied_audio` asks for is unavailable however much the mode
-    would like it. The run still gets the model's track -- and by
-    :data:`SUPPRESSION_EVIDENCE` that track is very likely silent, since the
-    pipeline receives the same ``audio_latents`` either way and cannot tell which
-    route produced them.
-
-    Saying so is the whole point. "Could not do it" and "chose not to do it" must
-    never read the same, and a caller who wanted their own audio back has exactly
-    one thing to change.
-    """
+    """The programmatic route, where there is no waveform to hand back."""
     if not _muxes_supplied_audio(exports):
         return _supplied_audio_note(mode, exports, muxed=False)
     return (
         f"audio reached mode {mode!r} as pre-encoded audio_latents, so there is no waveform "
-        f"to mux and this file carries the model's OWN track. Supplying audio suppresses the "
-        f"model's audio generation ({SUPPRESSION_EVIDENCE}) and the pipeline cannot tell the "
-        f"two input routes apart, so that track is very likely silent. Supply an audio FILE "
-        f"rather than latents to get your own audio muxed back.",
+        f"to mux: this file carries those latents decoded by the model. They were held fixed "
+        f"while the picture was generated. Supply an audio FILE to get your own audio muxed "
+        f"back unchanged.",
     )
+
+
+def _audio_level_notes(kwargs: dict, request: GenerationRequest, spec) -> tuple[str, ...]:
+    """The level the user's audio was varied at, for a mode that varies it."""
+    level = kwargs.get("audio_noise_level")
+    if spec.audio_conditioning != "variation" or level is None:
+        return ()
+    if kwargs.get("audio_latents") is None:
+        return ()
+    from . import audio_conditioning
+
+    return (audio_conditioning.level_note(level, requested=request.noise_scale),)
 
 
 def _prepared_audio(kwargs: dict, request: GenerationRequest, pipe, *, spec):
@@ -852,11 +793,9 @@ def _prepared_audio(kwargs: dict, request: GenerationRequest, pipe, *, spec):
     and returned mp4s with no audio stream at all; the fix is not only to mux a
     track but to say which track it is.
 
-    ✅ **And for a video-exporting mode the track it hands back is now the
-    user's own** -- ``4683a57`` chose the model's, on six reasons that were sound
-    when it was written, and a controlled discriminator has since measured the
-    model's track as digital silence whenever audio is supplied. The waveform
-    that leaves here is the RECONCILED one, taken after
+    For a video-exporting mode the track it hands back is the user's own
+    (:func:`_muxes_supplied_audio`). The waveform that leaves here is the
+    RECONCILED one, taken after
     ``reconcile_waveform_with_video`` and before the encode, so the sound in the
     file is byte-for-byte the sound that conditioned the render. Taking it before
     the reconcile would ship a 10 s upload over a 5 s video; taking it after the
@@ -946,9 +885,8 @@ def _prepared_audio(kwargs: dict, request: GenerationRequest, pipe, *, spec):
     elif muxes_upload:
         # auto_duration: `num_frames` is absent, so there is no video length to
         # reconcile against and the waveform about to be muxed is the raw upload.
-        # It is still the better of the two tracks -- the model's is suppressed --
-        # but "we could not check the lengths" must not travel as silence, which
-        # is the same rule `_checked_supplied_audio_latents` follows one branch up.
+        # "We could not check the lengths" must not travel as silence, which is
+        # the same rule `_checked_supplied_audio_latents` follows one branch up.
         notes.append(
             "automatic duration is on, so the video length was chosen by the duration head "
             "and your audio could NOT be reconciled against it. The file carries your upload "
@@ -1830,6 +1768,7 @@ def generate(
             # container is the one it belongs in, and None everywhere else; see
             # `_muxes_supplied_audio`.
             audio_notes, supplied_audio = _prepared_audio(kwargs, request, pipe, spec=spec)
+            audio_notes += _audio_level_notes(kwargs, request, spec)
             # Consumed by `StageRunner`, never forwarded to diffusers -- the same
             # treatment `enable_stage_2` gets, and for the same reason: it is ours.
             # Only when somebody is listening, so an injected fake in the offline
