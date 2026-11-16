@@ -458,6 +458,19 @@ on a tiny test checkpoint, not yet on real weights.
 
 ---
 
+## Examples on the page
+
+Every mode comes with at least one example, which fills the form and runs nothing, and a
+sample output on the monitor. They live in `examples/`: `manifest.json` lists them, and the
+inputs and the samples are stored with Git LFS. The inputs were made for this project's tests,
+and every sample is a re-encode of this app's own output from a real-weights run on a Mac;
+[`examples/PROVENANCE.md`](examples/PROVENANCE.md) says where each file comes from. A clone
+without Git LFS has small pointer files in their place: the page then leaves out every example
+and sample that needs one, keeps the examples that are only a prompt, and shows its designed
+idle monitor instead of a sample.
+
+---
+
 ## Design documents
 
 - [`docs/PLAN.md`](docs/PLAN.md) — the build contract: the integration path and the pinned

@@ -1,0 +1,244 @@
+{
+ "modes": {
+  "text_to_audio_video": {
+   "examples": [
+    {
+     "label": "Storm on deck",
+     "prompt": "A weathered sea captain in a yellow raincoat stands on the deck of a ship in a storm and shouts: \"The storm is coming! All hands on deck!\" Thunder rolls and waves crash against the hull.",
+     "settings": {
+      "shape": "3:2",
+      "seconds": 5.0,
+      "seed": 12
+     }
+    },
+    {
+     "label": "A short prompt, enhanced",
+     "prompt": "a dog runs on a beach",
+     "settings": {
+      "shape": "3:2",
+      "seconds": 5.0,
+      "seed": 41,
+      "enhance": true
+     }
+    },
+    {
+     "label": "Let the model pick the length",
+     "prompt": "A lighthouse keeper climbs a spiral staircase with a lantern, steps echoing on iron, then opens the door at the top to a roaring night storm and shouts into the wind: \"Light the lamp!\"",
+     "settings": {
+      "shape": "3:2",
+      "seed": 31,
+      "auto_duration": true
+     }
+    }
+   ],
+   "sample": {
+    "file": "samples/text_to_audio_video.mp4",
+    "caption": "Made by this app: LTX-2.5, single pass. Same prompt and seed as “Storm on deck”.",
+    "settings": "704 × 480, 5 s, with sound",
+    "seed": 12
+   }
+  },
+  "text_to_video": {
+   "examples": [
+    {
+     "label": "Tram at golden hour",
+     "prompt": "A red vintage tram climbs a steep cobbled street at golden hour, slow push-in.",
+     "settings": {
+      "shape": "3:2",
+      "seconds": 5.0,
+      "seed": 7
+     }
+    }
+   ],
+   "sample": {
+    "file": "samples/text_to_video.mp4",
+    "caption": "Made by this app: LTX-2.5, single pass. Same prompt and seed as the example.",
+    "settings": "704 × 480, 5 s",
+    "seed": 7
+   }
+  },
+  "image_to_video": {
+   "examples": [
+    {
+     "label": "Tram picture",
+     "image": "media/tram.jpg",
+     "settings": {
+      "shape": "3:2",
+      "seconds": 5.0,
+      "seed": 13
+     }
+    }
+   ],
+   "sample": {
+    "file": "samples/image_to_video.mp4",
+    "caption": "Made by this app: LTX-2.5, single pass. From the example's picture, same seed.",
+    "settings": "704 × 480, 5 s",
+    "seed": 13
+   }
+  },
+  "image_text_to_video": {
+   "examples": [
+    {
+     "label": "Tram picture + push-in",
+     "image": "media/tram.jpg",
+     "prompt": "A red vintage tram climbs a steep cobbled street at golden hour, slow push-in.",
+     "settings": {
+      "shape": "3:2",
+      "seconds": 5.0,
+      "seed": 14
+     }
+    }
+   ],
+   "sample": {
+    "file": "samples/image_text_to_video.mp4",
+    "caption": "Made by this app: LTX-2.5, single pass. From the example's picture and prompt, same seed.",
+    "settings": "704 × 480, 5 s",
+    "seed": 14
+   }
+  },
+  "image_to_audio_video": {
+   "examples": [
+    {
+     "label": "Cabin under the aurora",
+     "image": "media/cabin.jpg",
+     "settings": {
+      "shape": "3:2",
+      "seconds": 5.0,
+      "seed": 15
+     }
+    }
+   ],
+   "sample": {
+    "file": "samples/image_to_audio_video.mp4",
+    "caption": "Made by this app: LTX-2.5, single pass. From the example's picture, same seed.",
+    "settings": "704 × 480, 5 s, with sound",
+    "seed": 15
+   }
+  },
+  "image_text_to_audio_video": {
+   "examples": [
+    {
+     "label": "The captain speaks",
+     "image": "media/captain.jpg",
+     "prompt": "A weathered sea captain in a yellow raincoat stands on the deck of a ship in a storm and shouts: \"The storm is coming! All hands on deck!\" Thunder rolls and waves crash against the hull.",
+     "settings": {
+      "seconds": 5.0,
+      "seed": 16,
+      "width": 480,
+      "height": 704
+     }
+    }
+   ],
+   "sample": {
+    "file": "samples/image_text_to_audio_video.mp4",
+    "caption": "Made by this app: LTX-2.5, single pass. From the example's picture and prompt, same seed.",
+    "settings": "480 × 704, 5 s, with sound",
+    "seed": 16
+   }
+  },
+  "video_to_video": {
+   "examples": [
+    {
+     "label": "Cabin, turned to summer",
+     "video": "media/cabin_clip.mp4",
+     "prompt": "A bright summer day: the log cabin stands in a green meadow full of wildflowers under a clear blue sky, sunlight on the roof.",
+     "settings": {
+      "noise": "A lot",
+      "seed": 17
+     }
+    }
+   ],
+   "sample": {
+    "file": "samples/video_to_video.mp4",
+    "caption": "Made by this app: LTX-2.5, single pass. From the example's clip and prompt at “A lot”, same seed.",
+    "settings": "704 × 480, 5 s (the clip's length)",
+    "seed": 17
+   }
+  },
+  "text_to_audio": {
+   "examples": [
+    {
+     "label": "Platform announcement",
+     "prompt": "A calm male voice says: \"Welcome aboard. Mind the gap between the train and the platform.\" A two-tone door chime follows.",
+     "settings": {
+      "seconds": 5.0,
+      "seed": 18
+     }
+    }
+   ],
+   "sample": {
+    "file": "samples/text_to_audio.m4a",
+    "caption": "Made by this app: LTX-2.5, single pass. Same prompt and seed as the example.",
+    "settings": "5 s of sound",
+    "seed": 18
+   }
+  },
+  "video_to_audio": {
+   "examples": [
+    {
+     "label": "Give the captain a voice",
+     "video": "media/captain_silent.mp4",
+     "prompt": "A sea captain shouts orders on the deck of a ship in a storm. His voice is loud and hoarse; wind howls and waves crash.",
+     "settings": {
+      "seconds": 5.0,
+      "seed": 19
+     }
+    }
+   ],
+   "sample": {
+    "file": "samples/video_to_audio.m4a",
+    "caption": "Made by this app: LTX-2.5, single pass. Made for the example's silent clip, same seed.",
+    "settings": "5 s of sound",
+    "seed": 19
+   }
+  },
+  "audio_to_audio": {
+   "examples": [
+    {
+     "label": "Ocean, varied",
+     "audio": "media/ocean.wav",
+     "settings": {
+      "noise": "Moderately",
+      "seed": 20
+     }
+    }
+   ],
+   "sample": {
+    "file": "samples/audio_to_audio.m4a",
+    "caption": "Made by this app: LTX-2.5, single pass. From the example's recording at “Moderately”, same seed.",
+    "settings": "4.7 s of sound (the recording's length)",
+    "seed": 20
+   }
+  },
+  "audio_to_video": {
+   "examples": [
+    {
+     "label": "A portrait set to a recording",
+     "audio": "media/captain_line.wav",
+     "image": "media/captain.jpg",
+     "prompt": "Close-up of a weathered sea captain shouting on the deck of a ship in a storm, rain on his face.",
+     "settings": {
+      "width": 480,
+      "height": 704,
+      "seed": 21
+     }
+    },
+    {
+     "label": "A voice, a studio",
+     "audio": "media/studio_welcome.wav",
+     "prompt": "A young woman with red hair speaks to the camera in a bright modern studio with colourful neon lights behind her, close-up, vivid colour.",
+     "settings": {
+      "shape": "3:2",
+      "seed": 25
+     }
+    }
+   ],
+   "sample": {
+    "file": "samples/audio_to_video.mp4",
+    "caption": "Made by this app: LTX-2.5, single pass. From the example's recording, picture and prompt, same seed. The sound is the recording itself.",
+    "settings": "480 × 704, 4.7 s (the recording's length)",
+    "seed": 21
+   }
+  }
+ }
+}
