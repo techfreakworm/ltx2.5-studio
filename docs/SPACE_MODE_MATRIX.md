@@ -972,6 +972,9 @@ evidence directory, outside this repo.
 - Through `scripts/local_generate.py`, which drives the app's own `generate()`. Single stage,
   conv-VAE decode (the diffusion decoder needs CUDA), 704×480×121 (5 s at 24 fps) unless a row
   says otherwise. **The app's own UI was not part of these runs.**
+- The code is named per row. Most runs predate `c712e7e`, which made the local runner a
+  `StageRunner`, one stage graph with the Space's (the local side supplies only the
+  residency); the lip-sync runs below (`aa7ff84`, `482800d`) ran after it.
 - The lead opened every output: six native-resolution frames per video; per soundtrack the
   loudness, a spectrogram and a transcript; for conditioned modes, frame 0 against the
   supplied image (SSIM, PSNR). Inputs were files prepared for the test (generated images, synthetic

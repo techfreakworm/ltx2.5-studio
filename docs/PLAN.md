@@ -1468,7 +1468,8 @@ ltx25_studio/
   preflight.py               # weights complete (or the local runner's files present);
                              #   §1.3 — the diffusers-version fail-fast assertion. No RAM check
   memory.py                  # local runs: committed memory + the next step vs a limit (§5.6)
-  local_runtime.py           # local runs on mps/cpu: GGUF transformer, staged residency
+  local_runtime.py           # the local StageRunner on mps/cpu: GGUF transformer, staged
+                             #   residency, supplied through one seam (§8.7)
   zerogpu.py                 # §8 — the `spaces` shim, the static @spaces.GPU policy, the
                              #   duration callable, contextvar propagation, and the
                              #   "never return CUDA tensors" boundary
@@ -1659,7 +1660,9 @@ trade. But a mode whose `skip_stage_2` is set generates video nobody sees (§3.2
 is pure quota — `generate.stage_2_enabled()` forces it off there, because honouring the toggle
 would be honouring a mistake. `StageRunner` owns the graph so `generate.py` carries no branch on
 it, and requesting stage 2 without the upsampler loaded **raises** rather than quietly rendering
-single-stage, which would look like it worked and be visibly worse.
+single-stage, which would look like it worked and be visibly worse. *(2026-11-16, `c712e7e`: the
+local runner is a `StageRunner` too, so a Mac runs this same graph and supplies only the
+residency, §8.7.)*
 
 **Why not the modular path.** The model card's own Option C example uses the classic pipelines,
 so that is the documented, lower-risk API. The modular path (`LTX25ModularPipeline` /
@@ -1924,13 +1927,21 @@ a code path that works on ZeroGPU works on MPS, or vice versa.
 
 > **As built, 2026-11-16.** The device is chosen in `device.py`: `LTX25_DEVICE` = `auto`
 > (CUDA where it exists, otherwise no generation device: the UI starts and Generate says how
-> to opt in) | `cuda` | `mps` | `cpu`. On `mps`/`cpu` real weights go to `local_runtime.py`:
-> the GGUF transformer through diffusers' own loader, staged residency (text encoder and
-> transformer never resident together), RoPE computed on the CPU in float64, a memory
-> preflight before every heavy step (`memory.py`), and an MPS numerics self-test that refuses
-> a PyTorch which computes wrongly on this GPU (2.11 does; 2.15.0 is what was verified).
-> Capability-limited as predicted: Upscale ×2, the diffusion decoder and bitsandbytes int8 need
-> CUDA. Verified on real weights for all eleven modes (`SPACE_MODE_MATRIX.md` §10.2).
+> to opt in) | `cuda` | `mps` | `cpu`. On `mps`/`cpu` real weights go to `local_runtime.py`,
+> whose `LocalStageRunner` **is** a `pipelines.StageRunner` (since `c712e7e`): the stage graph
+> — the decode policy, stage 2 and its refusals, the audio conditioning, the clip variation,
+> the run facts — is one piece of code for the Space and the Mac, and `generate.py` drives both
+> runners the same way. The local runner supplies only residency, through one seam around every
+> pipeline call: the GGUF transformer through diffusers' own loader, staged residency (text
+> encoder and transformer never resident together; the prompt is encoded first and passed as
+> embeddings), RoPE computed on the CPU in float64, and a memory preflight before every heavy
+> step (`memory.py`). An MPS numerics self-test refuses a PyTorch which computes wrongly on this
+> GPU (2.11 does; 2.15.0 is what was verified). Capability-limited as predicted, by the same
+> rules on both runners: off CUDA the default decode is the conv VAE and the run says why, and
+> Upscale ×2 or an explicit diffusion decode runs only at very small sizes and is refused before
+> dispatch at real ones; bitsandbytes int8 needs CUDA. Verified on real weights for all eleven
+> modes (`SPACE_MODE_MATRIX.md` §10.2); most of those runs predate `c712e7e`, and the lip-sync
+> runs (`aa7ff84`, `482800d`) ran on it.
 
 ---
 

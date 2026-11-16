@@ -313,10 +313,12 @@ generation device: Generate explains how to opt in (next section).
 
 ## Run it locally (Apple silicon)
 
-The app's own code — the same `generate()` the Space runs — can generate on an Apple-silicon
-Mac's GPU (MPS), with the distilled transformer as a Q8_0 GGUF file and every other component
-from the pinned snapshot. This is how all eleven modes were verified on 2026-11-16, on a
-Mac with **128 GB** of unified memory. Smaller machines are not verified.
+The app's own code can generate on an Apple-silicon Mac's GPU (MPS), with the distilled
+transformer as a Q8_0 GGUF file and every other component from the pinned snapshot. It is one
+code path with the Space: the same `generate()` and the same stage graph, in which the local
+runner decides only what is in memory when (by default the text encoder and the transformer are
+never in memory together). This is how all eleven modes were verified on 2026-11-16, on a Mac
+with **128 GB** of unified memory. Smaller machines are not verified.
 
 **What you need.**
 
@@ -373,16 +375,20 @@ verified yet**.
 
 **What it costs in memory, as measured** (the whole machine's committed memory — active,
 wired and compressed pages — on the 128 GB Mac): 57–61 GB at 704×480 with 49–121 frames,
-and 70 GB at 193 frames (8 s); runs made while other heavy jobs shared the machine read up to
-75 GB. Up to 121 frames the peak comes from loading the text encoder or the transformer, not
-from the denoise.
+and 70 GB at 193 frames (8 s); across all of that day's runs, at 704×480 or 480×704 with up to
+193 frames, the peaks were 57–72 GB, and runs made while other heavy jobs shared the machine
+read up to 75 GB. Up to 121 frames the peak comes from loading the text encoder or the
+transformer, not from the denoise. With Enhance on, 65.0 and 69.6 GB were measured at 704×480
+with 49 frames (the text and the image route), against 57 GB for the same size without it.
 
 **How long it takes.** At 704×480×121 (5 s of video), the denoise and decode took 142 s on a
 quiet machine and 333 s with other work running, plus about a minute of loading; 193 frames
 (8 s) took 563 s.
 
-**What does not run locally.** Upscale ×2, the model's diffusion decoder (every local run
-decodes with the conv VAE) and bitsandbytes int8 need an NVIDIA GPU (CUDA).
+**What does not run locally.** Upscale ×2, the model's diffusion decoder and bitsandbytes int8
+need an NVIDIA GPU (CUDA). On a Mac the default decoder setting decodes with the conv VAE and
+the run says so; asking for the diffusion decoder or for Upscale ×2 is refused before anything
+runs, except at very small sizes such as the test checkpoint's.
 
 ---
 
