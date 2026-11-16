@@ -24,7 +24,7 @@ import sys
 import time
 from dataclasses import dataclass, replace
 
-from .errors import ConfigError, LTXStudioError
+from .errors import MEMORY, ConfigError, LTXStudioError
 
 __all__ = [
     "DEFAULT_DARWIN_LIMIT_GB",
@@ -113,7 +113,14 @@ FIXED_ACTIVATION_GB = 1.0
 
 
 class MemoryPreflightError(LTXStudioError):
-    """A step would push committed memory over the limit, so it was not started."""
+    """A step would push committed memory over the limit, so it was not started.
+
+    Its own failure category, ``memory``: this machine's memory check declined
+    a step and nothing was loaded for it, so no GPU time was used.
+    """
+
+    category = MEMORY
+    gpu_used = False
 
     def __init__(self, result: PreflightResult | None = None, *, reason: str | None = None):
         self.result = result

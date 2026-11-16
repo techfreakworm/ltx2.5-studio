@@ -403,7 +403,7 @@ def test_the_new_categories_are_appended_so_existing_ones_keep_their_place():
         errors.ENHANCER,
         errors.BUG,
     )
-    assert errors.CATEGORIES[7:] == ("limit", "queue")
+    assert errors.CATEGORIES[7:] == ("limit", "queue", "memory")
 
 
 def test_a_foreign_exception_of_ours_is_a_bug():

@@ -53,6 +53,7 @@ __all__ = [
     "CATEGORIES",
     "ENHANCER",
     "INPUT",
+    "MEMORY",
     "OOM",
     "QUOTA",
     "TIMEOUT",
@@ -119,9 +120,13 @@ BUG = "bug"
 LIMIT = "limit"
 #: No GPU was free in time ("queue timeout"); nothing ran.
 QUEUE = "queue"
+#: This machine's memory check declined a step (``memory.MemoryPreflightError``):
+#: committed memory plus what the step needs is over the limit, so nothing was
+#: loaded for it.
+MEMORY = "memory"
 #: Appended, never reordered: the UI renders a card per string and treats an
 #: unknown one as the generic card.
-CATEGORIES = (QUOTA, TIMEOUT, OOM, INPUT, ADAPTER, ENHANCER, BUG, LIMIT, QUEUE)
+CATEGORIES = (QUOTA, TIMEOUT, OOM, INPUT, ADAPTER, ENHANCER, BUG, LIMIT, QUEUE, MEMORY)
 
 
 @dataclass(frozen=True)
