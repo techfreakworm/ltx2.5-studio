@@ -45,11 +45,14 @@ design call, not a test's to make. These specs hold under either answer.
 
 from __future__ import annotations
 
+from pathlib import Path
+
+import numpy as np
 import pytest
 from conftest import code_tokens, image_input, inputs_for, package_python_files, video_file
 from test_exports_contract import factory_returning, one_muxed_file_encoder
 
-from ltx25_studio import conditioning, modes
+from ltx25_studio import audio_conditioning, conditioning, modes
 from ltx25_studio import generate as generate_module
 from ltx25_studio.errors import LTXStudioError
 from ltx25_studio.ui.fields import SHOT_ANCHOR_COLUMN, SHOT_COLUMNS
@@ -70,6 +73,8 @@ VARIATION_MODES = tuple(
 )
 
 NUM_FRAMES = 121
+#: The clip a variation mode is given here; its length is the run's length.
+VARIATION_CLIP_FRAMES = 17
 
 
 class CapturingPipe:
@@ -107,7 +112,7 @@ def _inputs(mode_id):
     fields = inputs_for(mode_id)
     if mode_id in VARIATION_MODES:
         # A variation runs at its clip's length, so the clip must reach past the anchor.
-        fields["video"] = video_file(frames=17)
+        fields["video"] = video_file(frames=VARIATION_CLIP_FRAMES)
     return fields
 
 
@@ -131,11 +136,21 @@ def run_with_shots(mode_id, rows, tmp_path, *, num_frames=NUM_FRAMES, sent=None)
 
 
 def assert_the_clip_is_the_variation(mode_id, sent):
-    """Mode 04: the clip arrives as decoded frames to vary, never as a condition or a path."""
+    """Mode 04: the clip arrives as decoded frames to vary, never as a condition or a path.
+
+    Every frame of it, as ``uint8``, at the mode's default level (no level was asked for).
+    """
     clip = sent.get("video_variation")
-    assert clip is not None, f"{mode_id}: the clip did not arrive as the variation"
-    assert not isinstance(clip.source, str), f"{mode_id}: the clip arrived as a path"
+    assert isinstance(clip, modes.VariationClip), (
+        f"{mode_id}: the clip did not arrive as the variation: {sorted(sent)}"
+    )
+    assert not isinstance(clip.source, (str, Path)), f"{mode_id}: the clip arrived as a path"
     assert getattr(clip.source, "ndim", None) == 4, f"{mode_id}: {type(clip.source)!r}"
+    assert clip.source.dtype == np.uint8, f"{mode_id}: {clip.source.dtype}"
+    assert len(clip.source) == VARIATION_CLIP_FRAMES, (
+        f"{mode_id}: {len(clip.source)} of the clip's {VARIATION_CLIP_FRAMES} frames arrived"
+    )
+    assert clip.level == audio_conditioning.DEFAULT_VIDEO_LEVEL, f"{mode_id}: level {clip.level}"
 
 
 # --------------------------------------------------------------------------
@@ -213,6 +228,55 @@ def test_the_users_shot_actually_arrives_as_a_condition(mode_id, tmp_path):
     assert len(with_shot) == len(without) + 1, (
         f"mode {mode_id!r}: adding a shot row changed the condition count from "
         f"{len(without)} to {len(with_shot)}; it must add exactly one."
+    )
+
+
+@pytest.mark.parametrize("mode_id", VARIATION_MODES)
+def test_a_shot_beside_a_varied_clip_is_placed_by_the_real_pipeline(mode_id, tmp_path, monkeypatch):
+    """Through ``generate`` and the runner into the real condition pipeline (tiny, CPU).
+
+    The runner starts the denoise from the clip's latents; the shot must still be
+    placed, since upstream drops a condition it cannot place with only a log line.
+    A placed shot adds its own tokens to the sequence the transformer denoises.
+    """
+    pytest.importorskip("torch")
+    pytest.importorskip("diffusers")
+    from diffusers import LTX2ConditionPipeline
+    from test_real_pipeline_tiny import _tiny_snapshot_cached, load_smoke, run_tiny
+
+    if not _tiny_snapshot_cached():
+        pytest.skip("the tiny checkpoint is not in the HF cache")
+    tiny = load_smoke().tiny_stack(device="cpu")
+    calls, lengths = [], []
+    original = LTX2ConditionPipeline.__call__
+
+    def spy(self, *args, **kwargs):
+        calls.append(kwargs)
+        return original(self, *args, **kwargs)
+
+    def length(_module, _args, kwargs):
+        lengths.append(kwargs["hidden_states"].shape[1])
+
+    monkeypatch.setattr(LTX2ConditionPipeline, "__call__", spy)
+    hook = tiny["base"].transformer.register_forward_pre_hook(length, with_kwargs=True)
+    try:
+        run_tiny(tiny, mode_id, tmp_path, video=video_file(25), conditions=[keyframe(mode_id, 3)])
+    finally:
+        hook.remove()
+
+    (sent,) = calls
+    conditions = sent.get("conditions") or []
+    assert len(conditions) == 1, f"diffusers was handed {conditions!r}, not the one shot"
+    assert not isinstance(conditions[0].frames, (str, Path)), conditions[0].frames
+    base = tiny["base"]
+    _batch, _channels, frames, height, width = sent["latents"].shape  # the clip's
+    per_frame = (height // base.transformer_spatial_patch_size) * (
+        width // base.transformer_spatial_patch_size
+    )
+    clip_tokens = frames // base.transformer_temporal_patch_size * per_frame
+    assert lengths[0] == clip_tokens + per_frame, (
+        f"the transformer denoised {lengths[0]} tokens: the clip is {clip_tokens} and a placed "
+        f"one-frame shot adds {per_frame}"
     )
 
 

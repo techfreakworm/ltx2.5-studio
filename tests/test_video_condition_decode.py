@@ -280,6 +280,37 @@ class CapturingPipe:
 
 
 VIDEO_INPUT_MODES = ("video_to_video", "video_to_audio")
+#: The modes above that vary their clip (mode 04) instead of conditioning on it.
+VARIATION_MODES = tuple(
+    mode_id
+    for mode_id in VIDEO_INPUT_MODES
+    if modes.get_mode(mode_id).video_conditioning == "variation"
+)
+
+
+def every_frame_of(path) -> np.ndarray:
+    """Every frame in ``path``, read by ``av`` alone, as ``(F, H, W, 3)`` ``uint8``."""
+    with av.open(str(path)) as container:
+        return np.stack([frame.to_ndarray(format="rgb24") for frame in container.decode(video=0)])
+
+
+def strings_naming(value, path) -> list:
+    """Every ``str`` or ``Path`` anywhere inside ``value`` that names ``path``'s file."""
+    import dataclasses
+
+    name, found, pending = Path(path).name, [], [value]
+    while pending:
+        item = pending.pop()
+        if isinstance(item, (str, Path)):
+            if name in str(item):
+                found.append(item)
+        elif isinstance(item, dict):
+            pending.extend(item.values())
+        elif isinstance(item, (list, tuple)):
+            pending.extend(item)
+        elif dataclasses.is_dataclass(item) and not isinstance(item, type):
+            pending.extend(getattr(item, field.name) for field in dataclasses.fields(item))
+    return found
 
 
 @pytest.mark.parametrize("mode_id", VIDEO_INPUT_MODES)
@@ -292,11 +323,15 @@ def test_no_video_path_string_reaches_the_pipeline(mode_id, tmp_path):
     survives. So this must fail here, offline, where the whole error is legible.
     """
     pipe = CapturingPipe()
+    upload = write_video(tmp_path / "input.mp4")
+    varies = mode_id in VARIATION_MODES
     generate_module.generate(
         mode=mode_id,
         seed=7,
-        video=str(write_video(tmp_path / "input.mp4")),
+        video=str(upload),
         num_frames=9,
+        # A variation is varied by the level asked for: 0.8 snaps to the supported 0.725.
+        **({"noise_scale": 0.8} if varies else {}),
         pipeline_factory=factory_returning(pipe),
         encoder=one_muxed_file_encoder,
         output_root=tmp_path,
@@ -304,14 +339,19 @@ def test_no_video_path_string_reaches_the_pipeline(mode_id, tmp_path):
     )
 
     conditions = pipe.kwargs.get("conditions", ())
-    if modes.get_mode(mode_id).video_conditioning == "variation":
+    if varies:
         # Mode 04 varies the clip: it travels as decoded frames, and is no condition.
         assert not conditions, f"{mode_id} also conditioned on its clip: {conditions!r}"
-        clip = pipe.kwargs["video_variation"]
+        clip = pipe.kwargs.get("video_variation")
+        assert isinstance(clip, modes.VariationClip), f"no clip to vary: {sorted(pipe.kwargs)}"
         assert not isinstance(clip.source, (str, Path)), (
             f"{mode_id} handed the pipeline {clip.source!r} -- a path, not frames."
         )
         assert upstream_accepts(clip.source)
+        assert clip.source.dtype == np.uint8, "a one-frame clip is re-compressed upstream: uint8"
+        assert np.array_equal(clip.source, every_frame_of(upload)), "not every frame, in order"
+        assert clip.level == 0.725, f"the clip is varied at {clip.level}, not 0.725"
+        assert not strings_naming(pipe.kwargs, upload), strings_naming(pipe.kwargs, upload)
         return
     assert conditions, f"{mode_id} built no condition at all from its video input"
     for condition in conditions:
@@ -321,6 +361,44 @@ def test_no_video_path_string_reaches_the_pipeline(mode_id, tmp_path):
             f"and raises TypeError for anything it has no branch for."
         )
         assert upstream_accepts(condition.source)
+
+
+@pytest.mark.parametrize("mode_id", VARIATION_MODES)
+def test_a_varied_clip_reaches_diffusers_as_latents_never_as_a_path(mode_id, tmp_path, monkeypatch):
+    """One layer down: through the runner into the real condition pipeline (tiny, CPU).
+
+    The runner preprocesses the decoded clip with the pipeline's own dispatch and
+    encodes it, so diffusers is called with the clip's latents, the requested level
+    snapped to a supported one, the schedule's tail from it, and no condition.
+    """
+    torch = pytest.importorskip("torch")
+    pytest.importorskip("diffusers")
+    from diffusers import LTX2ConditionPipeline
+    from test_real_pipeline_tiny import _tiny_snapshot_cached, load_smoke, run_tiny
+
+    if not _tiny_snapshot_cached():
+        pytest.skip("the tiny checkpoint is not in the HF cache")
+    tiny = load_smoke().tiny_stack(device="cpu")
+    calls = []
+    original = LTX2ConditionPipeline.__call__
+
+    def spy(self, *args, **kwargs):
+        calls.append(kwargs)
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(LTX2ConditionPipeline, "__call__", spy)
+    upload = write_video(tmp_path / "input.mp4", frames=9)
+    run_tiny(tiny, mode_id, tmp_path, video=str(upload), noise_scale=0.8)
+
+    (sent,) = calls
+    assert "video_variation" not in sent and not sent.get("conditions"), sorted(sent)
+    latents = sent["latents"]
+    assert torch.is_tensor(latents) and latents.dtype == torch.float32, type(latents)
+    assert tuple(latents.shape[2:]) == (2, 2, 2), "9 frames of 64x64 encode to 2x2x2 latents"
+    assert (sent["num_frames"], sent["height"], sent["width"]) == (9, 64, 64)
+    assert sent["noise_scale"] == 0.725, "0.8 snaps to the nearest supported level, 0.725"
+    assert sent["sigmas"] == [0.725, 0.421875], sent["sigmas"]
+    assert not strings_naming(sent, upload), strings_naming(sent, upload)
 
 
 @pytest.mark.parametrize("mode_id", VIDEO_INPUT_MODES)
