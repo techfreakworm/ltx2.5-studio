@@ -151,6 +151,32 @@ def _verify_streams():
     return module
 
 
+def _release_file_cache(args, report: _Report, when: str) -> None:
+    """Give back the page-cache pages of every file this run loads; print the gauge."""
+    files = local_runtime.run_files(args.snapshot_dir, args.transformer_gguf)
+    before = memory.committed_gb()
+    released = memory.release_file_cache(files)
+    after = memory.committed_gb()
+
+    def gb(value):
+        return f"{value:.1f} GB" if value is not None else "n/a"
+
+    line = (
+        f"file cache {when}: released {released / memory.GB:.1f} GB across {len(files)} files; "
+        f"committed {gb(before)} -> {gb(after)}"
+    )
+    report.data.setdefault("file_cache", []).append(
+        {
+            "when": when,
+            "released_gb": released / memory.GB,
+            "committed_before_gb": before,
+            "committed_after_gb": after,
+            "files": len(files),
+        }
+    )
+    report.line(f"== {line}")
+
+
 def _classify(exc: BaseException) -> int:
     seen = set()
     while exc is not None and id(exc) not in seen:
@@ -194,7 +220,9 @@ def _plan(args, report: _Report) -> tuple[list[tuple[str, str]], bool]:
         if args.transformer_gguf
         else "snapshot transformer/",
         "memory_limit_gb": limit,
-        "load_spike_factor": memory.load_spike_factor(),
+        "load_spike_factor": {
+            source: memory.load_spike_factor(source) for source in memory.LOAD_SPIKE_FACTORS
+        },
         "activation_calibration": memory.activation_calibration(),
         "stage_2": "not available locally (CUDA-only decoder)",
         "loras": [_lora(item) for item in args.lora],
@@ -374,6 +402,7 @@ def main(argv=None) -> int:
     report = _Report()
     report.data["argv"] = list(sys.argv if argv is None else argv)
     code = EXIT_OK
+    live = False
     try:
         for flag in ("image", "video", "audio"):
             path = getattr(args, flag)
@@ -382,6 +411,15 @@ def main(argv=None) -> int:
         for item in args.lora:
             if not Path(_lora(item)["source"]).is_file():
                 raise ConstraintError(f"--lora {item}: no such file")
+        if args.dry_run:
+            report.line(
+                "== file cache: left alone (dry run); a live run first gives back the page-cache "
+                "pages of every file it will load, so 'committed now' is not inflated by an "
+                "earlier run, and gives them back again at exit"
+            )
+        else:
+            live = True
+            _release_file_cache(args, report, "before the run")
         missing, fits = _plan(args, report)
         if args.dry_run:
             report.line("== dry run: nothing was loaded")
@@ -402,6 +440,9 @@ def main(argv=None) -> int:
         report.line(
             f"== {'refused' if code == EXIT_REFUSED else 'error'}: {type(exc).__name__}: {exc}"
         )
+    if live:
+        with contextlib.suppress(Exception):
+            _release_file_cache(args, report, "at exit")
     report.data["exit_code"] = code
     if args.json is not None:
         args.json.parent.mkdir(parents=True, exist_ok=True)

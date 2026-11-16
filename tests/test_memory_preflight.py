@@ -169,14 +169,67 @@ def test_a_garbled_calibration_is_refused(monkeypatch):
         memory.activation_estimate_gb(704, 480, 121)
 
 
-def test_the_load_spike_factor_defaults_to_two_and_reads_the_environment(monkeypatch):
+def test_the_load_spike_factor_depends_on_the_source_and_reads_the_environment(monkeypatch):
+    """Measured on the Mac: safetensors -> MPS with the bounded move ~1.0x plus a
+    chunk (1.15 kept), GGUF 1.04x (1.10 kept). One variable overrides both."""
     monkeypatch.delenv("LTX25_LOAD_SPIKE_FACTOR", raising=False)
-    assert memory.load_spike_factor() == 2.0
+    assert memory.load_spike_factor("safetensors") == 1.15
+    assert memory.load_spike_factor("gguf") == 1.10
     monkeypatch.setenv("LTX25_LOAD_SPIKE_FACTOR", "1.25")
-    assert memory.load_spike_factor() == 1.25
+    assert memory.load_spike_factor("safetensors") == memory.load_spike_factor("gguf") == 1.25
     monkeypatch.setenv("LTX25_LOAD_SPIKE_FACTOR", "0.5")
     with pytest.raises(ConfigError, match="LTX25_LOAD_SPIKE_FACTOR"):
-        memory.load_spike_factor()
+        memory.load_spike_factor("gguf")
+
+
+def test_an_unknown_spike_source_is_a_programming_error():
+    with pytest.raises(ValueError, match="source"):
+        memory.load_spike_factor("pickle")
+
+
+# --------------------------------------------------------------------------
+# giving file-cache pages back
+# --------------------------------------------------------------------------
+
+
+def test_releasing_a_file_read_through_mmap_returns_its_size(tmp_path):
+    import mmap
+
+    target = tmp_path / "weights.bin"
+    target.write_bytes(os.urandom(3 * 1024 * 1024 + 17))
+    with (
+        open(target, "rb") as handle,
+        mmap.mmap(handle.fileno(), 0, access=mmap.ACCESS_READ) as view,
+    ):
+        checksum = sum(view[::4096])
+    released = memory.release_file_cache([target])
+    if sys.platform == "darwin" or sys.platform.startswith("linux"):
+        assert released == target.stat().st_size
+    else:
+        assert released == 0
+    with (
+        open(target, "rb") as handle,
+        mmap.mmap(handle.fileno(), 0, access=mmap.ACCESS_READ) as view,
+    ):
+        assert sum(view[::4096]) == checksum, "the data on disk must be untouched"
+
+
+def test_releasing_follows_symlinks_and_counts_each_file_once(tmp_path):
+    blob = tmp_path / "blob"
+    blob.write_bytes(b"x" * 8192)
+    link = tmp_path / "snapshot-entry.safetensors"
+    link.symlink_to(blob)
+    released = memory.release_file_cache([link, blob, link])
+    assert released in (0, 8192)
+    if sys.platform == "darwin":
+        assert released == 8192
+
+
+def test_releasing_what_is_not_there_gives_back_nothing_and_never_raises(tmp_path):
+    empty = tmp_path / "empty"
+    empty.write_bytes(b"")
+    assert memory.release_file_cache([tmp_path / "missing", empty, None, 42]) == 0
+    assert memory.release_file_cache([]) == 0
 
 
 # --------------------------------------------------------------------------

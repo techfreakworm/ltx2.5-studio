@@ -14,7 +14,9 @@ the pipeline encoding its own prompt) produces.
 from __future__ import annotations
 
 import gc
+import itertools
 import json
+from pathlib import Path
 
 import pytest
 from local_fakes import (
@@ -398,6 +400,88 @@ def test_both_kinds_share_one_set_of_weights():
 
 
 # --------------------------------------------------------------------------
+# file-cache pages: bounded moves and releases
+# --------------------------------------------------------------------------
+
+
+def _local_device():
+    return "mps" if _mps_available() else "cpu"
+
+
+@pytest.mark.parametrize("component", ["transformer", "text_encoder"])
+def test_the_bounded_move_is_value_identical_to_a_plain_move(component, monkeypatch):
+    torch = _torch()
+    pytest.importorskip("diffusers")
+    snapshot = tiny_snapshot()
+    device = _local_device()
+    releases = []
+    monkeypatch.setattr(
+        memory, "release_file_cache", lambda paths, **_: releases.append(list(paths)) or 0
+    )
+
+    def fresh():
+        if component == "transformer":
+            from diffusers import LTX2VideoTransformer3DModel
+
+            return LTX2VideoTransformer3DModel.from_pretrained(
+                snapshot, subfolder="transformer", torch_dtype=torch.float32
+            )
+        import transformers
+
+        cls = getattr(
+            transformers, json.loads((snapshot / "model_index.json").read_text())["text_encoder"][1]
+        )
+        return cls.from_pretrained(snapshot / "text_encoder", dtype=torch.float32)
+
+    plain = fresh().to(device)
+    lines = []
+    files = sorted((snapshot / component).glob("*.safetensors"))
+    bounded = local_runtime.move_to_device(
+        fresh(), device, files=files, label=component, log=lines.append, chunk_bytes=4096
+    )
+    expected = dict(itertools.chain(plain.named_parameters(), plain.named_buffers()))
+    got = dict(itertools.chain(bounded.named_parameters(), bounded.named_buffers()))
+    assert set(got) == set(expected)
+    for name, tensor in got.items():
+        assert tensor.device.type == device, name
+        assert tensor.dtype == expected[name].dtype, name
+        assert torch.equal(tensor.cpu(), expected[name].cpu()), name
+    if device != "cpu":
+        assert len(releases) > 1, "a multi-chunk move releases file pages as it goes"
+    assert releases[-1] == files
+    assert lines[-1] == f"released 0.0 GB of file cache ({component})"
+
+
+def test_every_staged_component_gives_its_file_pages_back(monkeypatch):
+    torch = _torch()
+    released = []
+
+    def spy(paths, **_):
+        released.append({Path(p).parent.name for p in paths})
+        return 0
+
+    monkeypatch.setattr(memory, "release_file_cache", spy)
+    lines = []
+    runner = _runner("text2video", "staged", log=lines.append)
+    for prompt in (PROMPT, "a second, different prompt"):
+        runner(
+            prompt=prompt,
+            width=SIZE,
+            height=SIZE,
+            num_frames=FRAMES,
+            generator=torch.Generator().manual_seed(SEED),
+            output_type="np",
+        )
+    touched = set().union(*released)
+    assert {"connectors", "vae", "audio_vae", "vocoder", "duration_head"} <= touched
+    assert {"text_encoder", "transformer"} <= touched
+    # each text-encoder load is followed by a release, and so is each unload
+    assert sum(s == {"text_encoder"} for s in released) >= 4
+    assert sum(s == {"transformer"} for s in released) >= 2
+    assert "released 0.0 GB of file cache (text_encoder)" in lines
+
+
+# --------------------------------------------------------------------------
 # image-conditioning CRF (recon K H7)
 # --------------------------------------------------------------------------
 
@@ -603,9 +687,13 @@ def test_without_the_rename_the_gguf_load_is_refused_naming_the_key(faithful_ggu
     assert "prompt_adaln" in str(caught.value)
 
 
-def test_with_the_rename_the_gguf_loads_completely_and_runs(faithful_gguf):
+def test_with_the_rename_the_gguf_loads_completely_and_runs(faithful_gguf, monkeypatch):
     torch = _torch()
     path, _ = faithful_gguf
+    released = []
+    monkeypatch.setattr(
+        memory, "release_file_cache", lambda paths, **_: released.append(list(paths)) or 0
+    )
     lines = []
     model = local_runtime.load_transformer(
         tiny_snapshot(), dtype=torch.bfloat16, device="cpu", gguf=path, log=lines.append
@@ -613,6 +701,8 @@ def test_with_the_rename_the_gguf_loads_completely_and_runs(faithful_gguf):
     assert not [n for n, p in model.named_parameters() if p.device.type == "meta"]
     assert any("0 missing, 0 unexpected" in line for line in lines)
     assert any("Q8_0" in line for line in lines), lines
+    # once after the read (the loader has copied everything), once after the move
+    assert sum(paths == [path] for paths in released) >= 2
 
 
 def test_a_staged_run_with_the_gguf_transformer_completes(faithful_gguf, tmp_path):
@@ -714,6 +804,8 @@ def test_the_dry_run_prints_the_plan_and_the_arithmetic_and_loads_nothing(tmp_pa
     phases = [line.split("]")[0].split("[")[1] for line in data["projected_preflight"]]
     assert phases == ["load small set", "load text encoder", "load transformer", "denoise 64x64x9"]
     assert "phases" not in data and "artifacts" not in data
+    assert "file_cache" not in data, "a dry run touches nothing, not even the page cache"
+    assert "left alone (dry run)" in done.stdout
 
 
 def test_a_missing_gguf_exits_2_with_the_download_command(tmp_path):
@@ -755,3 +847,5 @@ def test_a_memory_refusal_exits_2_before_anything_loads(tmp_path):
     assert data["error"]["type"] in ("MemoryPreflightError", "ModelLoadError")
     assert "Not enough memory for 'load small set'" in data["error"]["message"]
     assert not data.get("phases")
+    assert [entry["when"] for entry in data["file_cache"]] == ["before the run", "at exit"]
+    assert all(entry["files"] > 0 for entry in data["file_cache"])

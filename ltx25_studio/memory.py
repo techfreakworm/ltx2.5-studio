@@ -23,6 +23,7 @@ from .errors import ConfigError, LTXStudioError
 __all__ = [
     "DEFAULT_DARWIN_LIMIT_GB",
     "FIXED_ACTIVATION_GB",
+    "LOAD_SPIKE_FACTORS",
     "MemoryPreflightError",
     "PreflightResult",
     "activation_calibration",
@@ -33,6 +34,7 @@ __all__ = [
     "load_spike_factor",
     "mps_stats",
     "parse_vm_stat",
+    "release_file_cache",
     "preflight",
     "video_tokens",
 ]
@@ -45,8 +47,13 @@ SPIKE_ENV = "LTX25_LOAD_SPIKE_FACTOR"
 
 #: The operator's committed-memory ceiling on the Mac.
 DEFAULT_DARWIN_LIMIT_GB = 90.0
-#: Until the lead measures the load spike (recon K §8.5 "worst case k = 2").
-DEFAULT_LOAD_SPIKE_FACTOR = 2.0
+#: Transient committed bytes per resident byte while a component loads, by file
+#: format. Measured 2026-11-16, M5 Max 128 GB, torch 2.11 (vm_stat gauge, real
+#: files): a safetensors component -> MPS with one ``.to("mps")`` peaked at 1.32x
+#: the file size; the GGUF Q8_0 transformer through the runner's recipe at 1.04x.
+#: The runner now moves safetensors weights in ~2 GB chunks, releasing file pages
+#: as it goes (~1.0x plus a chunk), so 1.15 is kept as the conservative bound.
+LOAD_SPIKE_FACTORS = {"safetensors": 1.15, "gguf": 1.10}
 
 # --- activation model constants (recon K §8.2-8.3, real transformer/vae configs) ---
 #: VAE compression: 8x in time, 32x in space (vae config, patch_size 1).
@@ -170,11 +177,110 @@ def activation_calibration() -> float:
     return _env_float(CALIBRATION_ENV, default=1.0, minimum=0.01, legal="a positive number")
 
 
-def load_spike_factor() -> float:
-    """``LTX25_LOAD_SPIKE_FACTOR``: transient bytes per resident byte while loading."""
+def load_spike_factor(source: str = "safetensors") -> float:
+    """Transient bytes per resident byte while loading ``source`` ("safetensors"/"gguf").
+
+    ``LTX25_LOAD_SPIKE_FACTOR`` overrides both.
+    """
+    if source not in LOAD_SPIKE_FACTORS:
+        raise ValueError(
+            f"unknown weight source {source!r}; expected one of {sorted(LOAD_SPIKE_FACTORS)}"
+        )
     return _env_float(
-        SPIKE_ENV, default=DEFAULT_LOAD_SPIKE_FACTOR, minimum=1.0, legal="a number >= 1"
+        SPIKE_ENV, default=LOAD_SPIKE_FACTORS[source], minimum=1.0, legal="a number >= 1"
     )
+
+
+# --------------------------------------------------------------------------
+# giving file-cache pages back
+# --------------------------------------------------------------------------
+
+# macOS <sys/mman.h>
+_PROT_READ = 0x1
+_MAP_SHARED = 0x1
+_MS_INVALIDATE = 0x2
+_LIBC = []
+
+
+def _libc():
+    if not _LIBC:
+        import ctypes
+        import ctypes.util
+
+        libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
+        libc.mmap.restype = ctypes.c_void_p
+        libc.mmap.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_size_t,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_longlong,
+        ]
+        libc.msync.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int]
+        libc.munmap.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+        _LIBC.append((libc, ctypes.c_void_p(-1).value))
+    return _LIBC[0]
+
+
+def _invalidate_darwin(fd: int, size: int) -> bool:
+    libc, failed = _libc()
+    address = libc.mmap(None, size, _PROT_READ, _MAP_SHARED, fd, 0)
+    if address is None or address == failed:
+        return False
+    try:
+        return libc.msync(address, size, _MS_INVALIDATE) == 0
+    finally:
+        libc.munmap(address, size)
+
+
+def _expand(paths) -> list[str]:
+    found = []
+    for raw in paths:
+        try:
+            path = os.path.realpath(os.fspath(raw))
+        except TypeError:
+            continue
+        if os.path.isdir(path):
+            for root, _, names in os.walk(path, followlinks=True):
+                found += [os.path.realpath(os.path.join(root, name)) for name in names]
+        else:
+            found.append(path)
+    return found
+
+
+def release_file_cache(paths, *, platform: str | None = None) -> int:
+    """Drop these files' pages from the OS page cache; return the bytes covered.
+
+    The weights loaders read safetensors through mmap, and macOS keeps those
+    file pages on the active queue long after the tensors are gone, where the
+    committed gauge counts them. The data on disk is untouched. Symlinks (the HF
+    cache's snapshot entries) are resolved, directories are walked, each file is
+    counted once. Never raises: whatever could not be released is not counted.
+    """
+    system = platform or sys.platform
+    released = 0
+    for path in sorted(set(_expand(paths))):
+        try:
+            size = os.path.getsize(path)
+            if not size:
+                continue
+            fd = os.open(path, os.O_RDONLY)
+            try:
+                if system == "darwin":
+                    done = _invalidate_darwin(fd, size)
+                elif system.startswith("linux") and hasattr(os, "posix_fadvise"):
+                    os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
+                    done = True
+                else:
+                    done = False
+            finally:
+                os.close(fd)
+        except Exception:  # noqa: BLE001 - a cache hint must never fail a run
+            continue
+        if done:
+            released += size
+    return released
 
 
 # --------------------------------------------------------------------------

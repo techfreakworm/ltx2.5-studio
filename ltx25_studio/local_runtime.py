@@ -57,6 +57,10 @@ __all__ = [
     "TransformerLoadError",
     "UnsupportedLocalDeviceError",
     "build_local_runner",
+    "component_files",
+    "move_to_device",
+    "release_cache",
+    "run_files",
     "clear_local_cache",
     "download_command",
     "frames_for_estimate",
@@ -329,8 +333,73 @@ def missing_files(snapshot_dir, *, transformer_gguf=None) -> list[tuple[Path, st
 # loaders
 # --------------------------------------------------------------------------
 
+#: Release the file pages behind the weights after about this many bytes moved.
+MOVE_CHUNK_BYTES = 2_000_000_000
 
-def load_text_encoder(snapshot_dir, *, dtype, device):
+
+def component_files(snapshot_dir, component: str) -> list[Path]:
+    """The weight files of ``component`` that are on disk (tokenizer: its json)."""
+    snapshot = Path(snapshot_dir)
+    if component == "tokenizer":
+        files = [snapshot / "tokenizer" / "tokenizer.json"]
+    else:
+        files = _component_files(snapshot, component)[0]
+    return [path for path in files if path.is_file()]
+
+
+def run_files(snapshot_dir, transformer_gguf=None) -> list[Path]:
+    """Every weight file a run loads."""
+    files = [
+        path
+        for component in (*_SMALL_WEIGHTS, "tokenizer", "text_encoder")
+        for path in component_files(snapshot_dir, component)
+    ]
+    if transformer_gguf is None:
+        files += component_files(snapshot_dir, "transformer")
+    elif Path(transformer_gguf).is_file():
+        files.append(Path(transformer_gguf))
+    return files
+
+
+def release_cache(files, label: str, log=None) -> int:
+    """Give the files' page-cache pages back and log one line."""
+    released = memory.release_file_cache(files)
+    (log or _logger.info)(f"released {released / memory.GB:.1f} GB of file cache ({label})")
+    return released
+
+
+def move_to_device(
+    module, device, *, files=(), label="weights", log=None, chunk_bytes=MOVE_CHUNK_BYTES
+):
+    """``module.to(device)`` with a bounded transient.
+
+    The weights are mmap'd from their files, and on macOS the touched file pages
+    stay committed next to the device copy: one ``.to()`` holds both, 2x at the
+    peak. Moving tensor by tensor and releasing the files' pages every
+    ``chunk_bytes`` keeps the extra to about one chunk; one release at the end.
+    """
+    import torch
+
+    target = torch.device(device)
+    pending = 0
+
+    def move(tensor):
+        nonlocal pending
+        if tensor.device.type == target.type:
+            return tensor
+        moved = tensor.to(target)
+        pending += tensor.numel() * tensor.element_size()
+        if pending >= chunk_bytes:
+            memory.release_file_cache(files)
+            pending = 0
+        return moved
+
+    module._apply(move)
+    release_cache(files, label, log)
+    return module
+
+
+def load_text_encoder(snapshot_dir, *, dtype, device, log=None):
     """The text encoder named in ``model_index.json``, on ``device``."""
     import transformers
 
@@ -340,7 +409,13 @@ def load_text_encoder(snapshot_dir, *, dtype, device):
         model = getattr(transformers, class_name).from_pretrained(
             snapshot / "text_encoder", dtype=dtype, local_files_only=True
         )
-        model.to(device)
+        move_to_device(
+            model,
+            device,
+            files=component_files(snapshot, "text_encoder"),
+            label="text_encoder",
+            log=log,
+        )
     except Exception as exc:
         raise ModelLoadError(component="text_encoder", reason=str(exc)) from exc
     return model.eval()
@@ -428,8 +503,9 @@ def load_transformer(snapshot_dir, *, dtype, device, gguf=None, rename=True, log
     except Exception as exc:
         raise TransformerLoadError(reason=str(exc)) from exc
     _require_no_meta(model)
+    files = [Path(gguf)] if gguf is not None else component_files(snapshot, "transformer")
     try:
-        model.to(device)
+        move_to_device(model, device, files=files, label="transformer", log=log)
     except Exception as exc:
         raise TransformerLoadError(reason=f"moving it to {device} failed: {exc}") from exc
     return model.eval()
@@ -441,6 +517,8 @@ def _load_gguf_transformer(snapshot: Path, path: Path, dtype, rope: dict, rename
     from diffusers.models.model_loading_utils import load_gguf_checkpoint
 
     state = load_gguf_checkpoint(str(path))
+    # Every tensor is now a copy in anonymous memory; the file's pages are not needed.
+    release_cache([path], "transformer GGUF, after reading", log)
     if rename:
         state, count = rename_prompt_adaln_keys(state)
         log(f"transformer GGUF: renamed {count} prompt_adaln_single key(s) to prompt_adaln")
@@ -561,7 +639,8 @@ def preflight_plan(
     dtype_bytes: int = 2,
 ) -> list[PlanStep]:
     """The loads and the denoise of one first call, with what each adds. Loads nothing."""
-    spike = memory.load_spike_factor()
+    spike = memory.load_spike_factor("safetensors")
+    transformer_spike = memory.load_spike_factor("gguf" if transformer_gguf else "safetensors")
     sizes = {
         name: size / memory.GB
         for name, (size, _) in weight_sizes(snapshot_dir, transformer_gguf).items()
@@ -574,12 +653,12 @@ def preflight_plan(
     if residency == STAGED:
         steps += [
             PlanStep("load text encoder", small, encoder * spike),
-            PlanStep("load transformer", small, transformer * spike),
+            PlanStep("load transformer", small, transformer * transformer_spike),
             PlanStep(denoise, small + transformer, activations),
         ]
     else:
         steps += [
-            PlanStep("load transformer", small, transformer * spike),
+            PlanStep("load transformer", small, transformer * transformer_spike),
             PlanStep("load text encoder", small + transformer, encoder * spike),
             PlanStep(denoise, small + transformer + encoder, activations),
         ]
@@ -673,7 +752,7 @@ class _LocalWeights:
         from diffusers import LTX2ConditionPipeline
         from diffusers.pipelines.ltx2.connectors import LTX2TextConnectors
 
-        spike = memory.load_spike_factor()
+        spike = memory.load_spike_factor("safetensors")
         need = sum(self._gb[name] for name in (*_SMALL_WEIGHTS, "tokenizer")) * spike
         self._preflight("load small set", need)
         with self.phase("load small set"):
@@ -697,7 +776,17 @@ class _LocalWeights:
                 )
                 # Attached after the load: passed in, diffusers logs the whole module.
                 base.register_modules(connectors=connectors)
-                base.to(self.device)
+                for name in _SMALL_WEIGHTS:
+                    if getattr(base, name, None) is None:
+                        continue
+                    move_to_device(
+                        getattr(base, name),
+                        self.device,
+                        files=component_files(self.snapshot_dir, name),
+                        label=name,
+                        log=self.log,
+                    )
+                base.to(self.device)  # anything else; the weights are already there
             except Exception as exc:
                 raise ModelLoadError(component="small set", reason=str(exc)) from exc
         pipelines.assert_compression_ratios(base.vae)
@@ -751,9 +840,12 @@ class _LocalWeights:
             return self.text_encoder
         if self.residency == STAGED:
             self.release_transformer()
-        self._preflight("load text encoder", self._gb["text_encoder"] * memory.load_spike_factor())
+        need = self._gb["text_encoder"] * memory.load_spike_factor("safetensors")
+        self._preflight("load text encoder", need)
         with self.phase("load text encoder"):
-            model = load_text_encoder(self.snapshot_dir, dtype=self.dtype, device=self.device)
+            model = load_text_encoder(
+                self.snapshot_dir, dtype=self.dtype, device=self.device, log=self.log
+            )
         self.text_encoder = model
         self._attach("text_encoder", model)
         return model
@@ -765,13 +857,16 @@ class _LocalWeights:
         self.text_encoder = None
         self._free()
         self.log("released the text encoder")
+        release_cache(component_files(self.snapshot_dir, "text_encoder"), "text_encoder", self.log)
 
     def ensure_transformer(self):
         if self.transformer is not None:
             return self.transformer
         if self.residency == STAGED:
             self.release_text_encoder()
-        self._preflight("load transformer", self._gb["transformer"] * memory.load_spike_factor())
+        source = "gguf" if self.transformer_gguf is not None else "safetensors"
+        need = self._gb["transformer"] * memory.load_spike_factor(source)
+        self._preflight("load transformer", need)
         with self.phase("load transformer"):
             model = load_transformer(
                 self.snapshot_dir,
@@ -796,12 +891,26 @@ class _LocalWeights:
         self.transformer = None
         self._free()
         self.log("released the transformer")
+        release_cache(self._transformer_files(), "transformer", self.log)
+
+    def _transformer_files(self) -> list[Path]:
+        if self.transformer_gguf is not None:
+            return [self.transformer_gguf]
+        return component_files(self.snapshot_dir, "transformer")
 
     def release_all(self) -> None:
         self.release_text_encoder()
         self.release_transformer()
         self._adapters = None
         self._embeddings.clear()
+        self.pipelines.clear()
+        self._free()
+        small = [
+            p
+            for name in (*_SMALL_WEIGHTS, "tokenizer")
+            for p in component_files(self.snapshot_dir, name)
+        ]
+        release_cache(small, "small set", self.log)
 
     # -- per call -----------------------------------------------------------
 
@@ -1030,7 +1139,6 @@ def clear_local_cache() -> None:
     """Release every local runner's weights."""
     for weights in _WEIGHTS.values():
         weights.release_all()
-        weights.pipelines.clear()
     _WEIGHTS.clear()
     _RUNNERS.clear()
     gc.collect()
