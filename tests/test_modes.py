@@ -97,11 +97,29 @@ EXPECTED_INPUTS = {
     "audio_to_video": ("audio",),
 }
 
+#: What each mode can use without needing it. Modes 04/09/10/11 always sent a
+#: prompt the UI hid; it is declared so the UI can show it. Mode 11's image is
+#: an optional first frame, to be verified on real weights.
+EXPECTED_OPTIONAL_INPUTS = {
+    "text_to_video": (),
+    "image_to_video": (),
+    "image_text_to_video": (),
+    "video_to_video": ("text",),
+    "text_to_audio_video": (),
+    "image_to_audio_video": (),
+    "image_text_to_audio_video": (),
+    "text_to_audio": (),
+    "video_to_audio": ("text",),
+    "audio_to_audio": ("text",),
+    "audio_to_video": ("text", "image"),
+}
+
 REQUIRED_FIELDS = (
     "id",
     "label",
     "pipeline",
     "inputs",
+    "optional_inputs",
     "exports",
     "cost_note",
     "min_resolution",
@@ -164,17 +182,28 @@ def test_every_mode_has_a_callable_kwarg_builder(mode_id):
     assert callable(modes.get_mode(mode_id).build_kwargs)
 
 
+def accepted_request(mode_id, make_request, **overrides):
+    """A request carrying everything ``mode_id`` accepts, and nothing it does not.
+
+    The builders refuse a value their mode does not take, so "feed every mode
+    every medium" is no longer a request any builder will build.
+    """
+    spec = modes.get_mode(mode_id)
+    accepted = set(spec.inputs) | set(spec.optional_inputs)
+    fields = {kind: object() for kind in ("image", "video", "audio") if kind in accepted}
+    if "audio" in accepted:
+        fields["audio_latents"] = object()
+    if "text" not in accepted:
+        fields.update(prompt="", negative_prompt="")
+    fields.update(overrides)
+    return make_request(mode=mode_id, **fields)
+
+
 @pytest.mark.parametrize("mode_id", EXPECTED_MODE_IDS)
 def test_no_dead_modes_every_builder_produces_kwargs(mode_id, make_request):
     """PLAN §7.2: a registered mode that no code path can execute is a lie in the
     UI. Every builder must accept a request and return pipeline kwargs."""
-    request = make_request(
-        mode=mode_id,
-        image=object(),
-        video=object(),
-        audio=object(),
-        audio_latents=object(),
-    )
+    request = accepted_request(mode_id, make_request)
     kwargs = modes.get_mode(mode_id).build_kwargs(request)
     assert isinstance(kwargs, dict) and kwargs, f"{mode_id}: builder returned {kwargs!r}"
 
@@ -215,6 +244,27 @@ def test_every_mode_is_accounted_for_by_a_workflow():
 @pytest.mark.parametrize("mode_id,expected", sorted(EXPECTED_INPUTS.items()))
 def test_mode_declares_its_inputs(mode_id, expected):
     assert set(modes.get_mode(mode_id).inputs) == set(expected)
+
+
+@pytest.mark.parametrize("mode_id,expected", sorted(EXPECTED_OPTIONAL_INPUTS.items()))
+def test_mode_declares_its_optional_inputs(mode_id, expected):
+    assert set(modes.get_mode(mode_id).optional_inputs) == set(expected)
+
+
+@pytest.mark.parametrize("mode_id", EXPECTED_MODE_IDS)
+def test_no_input_is_both_required_and_optional(mode_id):
+    spec = modes.get_mode(mode_id)
+    assert not set(spec.inputs) & set(spec.optional_inputs)
+
+
+@pytest.mark.parametrize("mode_id", EXPECTED_MODE_IDS)
+@pytest.mark.parametrize("kind", ["text", "image", "video", "audio"])
+def test_accepts_and_requires_read_the_registry(mode_id, kind):
+    spec = modes.get_mode(mode_id)
+    assert modes.requires(spec, kind) == (kind in EXPECTED_INPUTS[mode_id])
+    assert modes.accepts(spec, kind) == (
+        kind in EXPECTED_INPUTS[mode_id] or kind in EXPECTED_OPTIONAL_INPUTS[mode_id]
+    )
 
 
 @pytest.mark.parametrize("mode_id,expected", sorted(EXPECTED_EXPORTS.items()))
@@ -331,7 +381,7 @@ def test_text_to_video_builds_a_plain_prompt_call(make_request):
 def test_image_to_video_builds_a_condition_list(make_request):
     """PLAN §3.1a: image and video conditioning are the same mechanism."""
     kwargs = modes.get_mode("image_to_video").build_kwargs(
-        make_request(mode="image_to_video", image=object())
+        make_request(mode="image_to_video", image=object(), prompt="")
     )
     assert kwargs["conditions"], "an image mode must produce at least one condition"
 
@@ -339,9 +389,79 @@ def test_image_to_video_builds_a_condition_list(make_request):
 def test_image_to_video_sends_an_empty_prompt(make_request):
     """§3.2 row 2 is explicit: one condition, empty prompt."""
     kwargs = modes.get_mode("image_to_video").build_kwargs(
-        make_request(mode="image_to_video", image=object(), prompt="ignored")
+        make_request(mode="image_to_video", image=object(), prompt="", negative_prompt="")
     )
-    assert kwargs.get("prompt", "") == ""
+    assert kwargs["prompt"] == ""
+
+
+def test_image_to_video_refuses_a_prompt_rather_than_dropping_it(make_request):
+    """The prompt used to be overwritten here, silently. Dropping it, with a
+    note, is ``generate.scope_request_to_mode``'s job; a builder handed one
+    anyway was called on an unscoped request, which is a bug to surface."""
+    from ltx25_studio.errors import ConstraintError
+
+    with pytest.raises(ConstraintError) as caught:
+        modes.get_mode("image_to_video").build_kwargs(
+            make_request(mode="image_to_video", image=object(), prompt="ignored")
+        )
+    assert "prompt" in str(caught.value)
+
+
+#: A non-default value for every field a builder could wrongly consume.
+FOREIGN = {
+    "text": {"prompt": "a stale prompt"},
+    "image": {"image": object()},
+    "video": {"video": object()},
+    "audio": {"audio": object()},
+}
+
+
+@pytest.mark.parametrize(
+    ("mode_id", "kind"),
+    [
+        (m, k)
+        for m in EXPECTED_MODE_IDS
+        for k in FOREIGN
+        if k not in EXPECTED_INPUTS[m] and k not in EXPECTED_OPTIONAL_INPUTS[m]
+    ],
+)
+def test_a_builder_refuses_a_kind_its_mode_does_not_take(mode_id, kind, make_request):
+    """Defence in depth: a builder called directly must not resurrect K1."""
+    from ltx25_studio.errors import ConstraintError
+
+    request = accepted_request(mode_id, make_request, **FOREIGN[kind])
+    with pytest.raises(ConstraintError):
+        modes.get_mode(mode_id).build_kwargs(request)
+
+
+@pytest.mark.parametrize(
+    "mode_id", [m for m in EXPECTED_MODE_IDS if "audio" not in EXPECTED_INPUTS[m]]
+)
+def test_a_builder_refuses_audio_latents_where_audio_is_not_taken(mode_id, make_request):
+    from ltx25_studio.errors import ConstraintError
+
+    request = accepted_request(mode_id, make_request, audio_latents=object())
+    with pytest.raises(ConstraintError):
+        modes.get_mode(mode_id).build_kwargs(request)
+
+
+def test_a_builder_refuses_a_shot_row(make_request):
+    from ltx25_studio.errors import ConstraintError
+
+    request = make_request(
+        mode="image_to_video", image=object(), prompt="", conditions=(["a shot", 9, 0.5],)
+    )
+    with pytest.raises(ConstraintError):
+        modes.get_mode("image_to_video").build_kwargs(request)
+
+
+def test_audio_to_video_turns_an_optional_image_into_one_first_frame_condition(make_request):
+    kwargs = modes.get_mode("audio_to_video").build_kwargs(
+        make_request(mode="audio_to_video", audio=object(), image="first-frame")
+    )
+    assert [(c.source, c.kind, c.index, c.strength) for c in kwargs["conditions"]] == [
+        ("first-frame", "image", 0, modes.IMAGE_CONDITION_STRENGTH)
+    ]
 
 
 def test_image_text_to_video_keeps_the_prompt(make_request):
@@ -383,13 +503,7 @@ def test_audio_input_modes_pass_latents_and_noise_scale(mode_id, make_request):
 def test_no_builder_passes_a_none_valued_kwarg(mode_id, make_request):
     """A ``None`` in the kwargs is how an unset UI field becomes a confusing
     upstream TypeError several layers away."""
-    request = make_request(
-        mode=mode_id,
-        image=object(),
-        video=object(),
-        audio=object(),
-        audio_latents=object(),
-    )
+    request = accepted_request(mode_id, make_request)
     kwargs = modes.get_mode(mode_id).build_kwargs(request)
     none_valued = [k for k, v in kwargs.items() if v is None]
     assert not none_valued, f"{mode_id} builds None for {none_valued}"
@@ -398,13 +512,7 @@ def test_no_builder_passes_a_none_valued_kwarg(mode_id, make_request):
 @pytest.mark.parametrize("mode_id", EXPECTED_MODE_IDS)
 def test_builders_are_pure(mode_id, make_request):
     """Same request in, same kwargs out — and the request is not mutated."""
-    request = make_request(
-        mode=mode_id,
-        image=object(),
-        video=object(),
-        audio=object(),
-        audio_latents=object(),
-    )
+    request = accepted_request(mode_id, make_request)
     before = vars(request).copy()
     first = modes.get_mode(mode_id).build_kwargs(request)
     second = modes.get_mode(mode_id).build_kwargs(request)

@@ -34,6 +34,7 @@ from __future__ import annotations
 import os
 
 import pytest
+from conftest import inputs_for
 from test_exports_contract import (
     MODE_IDS,
     FakePipe,
@@ -67,10 +68,15 @@ def make_old_run(root, name, *, age_seconds, size=OLD_RUN_BYTES):
     return run_dir
 
 
+#: The audio-input modes load their upload in the worker; stub the loader there.
+pytestmark = pytest.mark.usefixtures("audio_input_ready")
+
+
 def run(tmp_path, *, mode_id="text_to_video", retention_bytes):
     return generate_module.generate(
         mode=mode_id,
         seed=7,
+        **inputs_for(mode_id),
         pipeline_factory=factory_returning(FakePipe()),
         encoder=one_muxed_file_encoder,
         output_root=tmp_path,

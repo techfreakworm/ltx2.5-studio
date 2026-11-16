@@ -28,6 +28,13 @@ What that costs, in PLAN's own words:
   nothing but a ``logger.warning``. The user supplies a shot, the shot does
   nothing, nobody is told, and the metered run is spent anyway.
 
+**The rows themselves are now refused.** A dataframe row carries a prompt
+segment where a condition needs frames, so it became
+``LTX2VideoCondition(frames="<text>")`` and died inside the GPU worker.
+``generate.scope_request_to_mode`` refuses such rows before the dispatch, in
+plain words. What reaches ``conditioning.py`` is a real keyframe -- an image or a
+video at an anchor -- and that is what the seam specs below drive.
+
 **Deliberately not asserted here:** whether the anchor column is a latent index
 or a pixel frame. ``fields.SHOT_COLUMNS`` labels it "Anchor (LATENT index)" and
 ``handlers.on_shots_change`` converts latent→pixel for the readout, while
@@ -39,7 +46,7 @@ design call, not a test's to make. These specs hold under either answer.
 from __future__ import annotations
 
 import pytest
-from conftest import code_tokens, package_python_files
+from conftest import code_tokens, image_input, inputs_for, package_python_files, video_file
 from test_exports_contract import factory_returning, one_muxed_file_encoder
 
 from ltx25_studio import conditioning, modes
@@ -77,12 +84,23 @@ def shot_row(anchor, prompt="a second shot", strength=1.0):
     return row
 
 
+def keyframe(mode_id, anchor, strength=1.0):
+    """A real condition at ``anchor``: an image where the mode takes one, else a video."""
+    if modes.accepts(modes.get_mode(mode_id), "image"):
+        return conditioning.ConditionSpec(
+            source=image_input(), kind="image", index=anchor, strength=strength
+        )
+    return conditioning.ConditionSpec(
+        source=video_file(), kind="video", index=anchor, strength=strength
+    )
+
+
 def run_with_shots(mode_id, rows, tmp_path, *, num_frames=NUM_FRAMES):
     pipe = CapturingPipe()
     generate_module.generate(
         mode=mode_id,
         seed=7,
-        image="conditioning-input.image",
+        **inputs_for(mode_id),
         num_frames=num_frames,
         conditions=rows,
         pipeline_factory=factory_returning(pipe),
@@ -103,23 +121,29 @@ def test_no_raw_dataframe_row_reaches_the_pipeline(mode_id, tmp_path):
     """The observable form of "conditioning.py is not wired in".
 
     A bare ``list`` from ``gr.Dataframe`` is not a condition under any
-    convention. It has no ``source``, no ``index`` and no ``strength`` — it is
-    three cells in display order, and the pipeline cannot read it as anything.
+    convention. It has no frames -- its first cell is prompt text -- so it is
+    refused, in plain words, before the dispatch; it never reaches the pipeline.
     """
-    conditions = run_with_shots(mode_id, [shot_row(3)], tmp_path)
-
-    raw = [c for c in conditions if isinstance(c, (list, tuple))]
-    assert not raw, (
-        f"mode {mode_id!r} handed the pipeline {raw!r} — raw UI dataframe rows, unconverted. "
-        f"conditioning.normalise_condition exists to turn these into conditions and is called "
-        f"by nothing in the package (PLAN §5.7 rows 1 and 2)."
-    )
+    pipe = CapturingPipe()
+    with pytest.raises(LTXStudioError) as caught:
+        generate_module.generate(
+            mode=mode_id,
+            seed=7,
+            **inputs_for(mode_id),
+            conditions=[shot_row(3)],
+            pipeline_factory=factory_returning(pipe),
+            encoder=one_muxed_file_encoder,
+            output_root=tmp_path,
+            retention_bytes=10**9,
+        )
+    assert pipe.kwargs == {}, "a raw dataframe row reached the pipeline"
+    assert "shot" in str(caught.value) and "prompt" in str(caught.value), caught.value
 
 
 @pytest.mark.parametrize("mode_id", CONDITIONABLE_MODES)
 def test_every_condition_reaching_the_pipeline_carries_a_source_and_an_index(mode_id, tmp_path):
     """Whatever the convention, a built condition has these three fields."""
-    conditions = run_with_shots(mode_id, [shot_row(3)], tmp_path)
+    conditions = run_with_shots(mode_id, [keyframe(mode_id, 3)], tmp_path)
 
     for condition in conditions:
         for attribute in ("source", "index", "strength"):
@@ -143,7 +167,7 @@ def test_the_users_shot_actually_arrives_as_a_condition(mode_id, tmp_path):
     row were never there is the quietest possible failure.
     """
     without = run_with_shots(mode_id, [], tmp_path)
-    with_shot = run_with_shots(mode_id, [shot_row(3)], tmp_path)
+    with_shot = run_with_shots(mode_id, [keyframe(mode_id, 3)], tmp_path)
 
     assert len(with_shot) == len(without) + 1, (
         f"mode {mode_id!r}: adding a shot row changed the condition count from "
@@ -166,14 +190,14 @@ def test_an_out_of_range_anchor_is_refused_rather_than_silently_skipped(mode_id,
     anchor column, so this holds whichever convention wins.
     """
     with pytest.raises(LTXStudioError):
-        run_with_shots(mode_id, [shot_row(9999)], tmp_path, num_frames=NUM_FRAMES)
+        run_with_shots(mode_id, [keyframe(mode_id, 9999)], tmp_path, num_frames=NUM_FRAMES)
 
 
 @pytest.mark.parametrize("mode_id", CONDITIONABLE_MODES)
 def test_a_negative_anchor_is_refused(mode_id, tmp_path):
     """The other end of the same range check."""
     with pytest.raises(LTXStudioError):
-        run_with_shots(mode_id, [shot_row(-5)], tmp_path, num_frames=NUM_FRAMES)
+        run_with_shots(mode_id, [keyframe(mode_id, -5)], tmp_path, num_frames=NUM_FRAMES)
 
 
 # --------------------------------------------------------------------------

@@ -668,7 +668,10 @@ class LoRAFakePipe(FakePipe):
 def _staged(source, weight=1.0):
     # The UI stages validated adapters as dicts carrying their report; the
     # report's presence is what lets _apply_loras skip stages 1-6.5, which
-    # would otherwise want a real safetensors file.
+    # would otherwise want a real safetensors file. The file itself must still
+    # exist: generate() refuses a staged adapter whose file has gone.
+    Path(source).parent.mkdir(parents=True, exist_ok=True)
+    Path(source).touch()
     return {"source": str(source), "weight": weight, "report": object()}
 
 
@@ -842,11 +845,14 @@ def _latents(frames):
 
 
 def _audio_request(**overrides):
+    from conftest import audio_file
+
     fields = {
         "mode": "audio_to_video",
         "frame_rate": 25.0,
         "num_frames": 121,
-        "audio": object(),
+        # A real file: generate() opens it with av before the dispatch.
+        "audio": audio_file(),
         "noise_scale": 0.3,
     }
     fields.update(overrides)
@@ -886,18 +892,21 @@ def test_desynced_supplied_latents_are_refused_before_the_metered_call(tmp_path)
     )
 
 
-def test_auto_duration_skips_the_check_because_nothing_governs_the_video(tmp_path):
-    """With num_frames omitted the duration head picks the video length, so
-    there is no independent length for the audio to disagree with."""
+def test_auto_duration_with_latents_and_no_file_is_refused_before_the_model_loads(tmp_path):
+    """In an audio-input mode automatic duration means "match my audio", and
+    pre-encoded latents give nothing to measure. The text-only duration head is
+    not asked instead: it cannot hear the audio. Refused, naming the fix."""
     pipe = FakePipe()
     pipe.audio_vae = _SyncAudioVAE()
-    result = generate(
-        _audio_request(audio_latents=_latents(96), auto_duration=True),
-        pipeline_factory=factory_for(pipe),
-        encoder=good_encoder,
-        output_root=tmp_path,
-    )
-    assert not any("NOT checked" in w for w in result.warnings)
+    with pytest.raises(LTXStudioError) as excinfo:
+        generate(
+            _audio_request(audio=None, audio_latents=_latents(96), auto_duration=True),
+            pipeline_factory=factory_for(pipe),
+            encoder=good_encoder,
+            output_root=tmp_path,
+        )
+    assert "num_frames" in str(excinfo.value)
+    assert pipe.calls == []
 
 
 def test_no_audio_vae_reports_could_not_check_rather_than_passing_silently(tmp_path):
@@ -1041,42 +1050,51 @@ def test_a_short_upload_is_refused_before_the_metered_call(monkeypatch, tmp_path
     assert "num_frames=73" in str(excinfo.value)
 
 
-def test_auto_duration_leaves_the_upload_length_alone(monkeypatch, tmp_path):
-    """No num_frames, no independent video length, nothing to reconcile --
-    the duration head may well derive the length FROM this audio."""
+def test_auto_duration_takes_the_length_from_the_upload(monkeypatch, tmp_path):
+    """The duration head reads only the text and cannot hear the audio, so in an
+    audio-input mode the upload sets the length: 6.0 s at 25 fps is 150 frames,
+    and the longest legal clip inside it is 145 (5.80 s). The upload is then
+    reconciled to that like any fixed-length run."""
+    from conftest import audio_file
+
     pipe = _file_audio_pipe()
     _patched_upload(monkeypatch, samples=96000)
     result = generate(
-        _audio_request(auto_duration=True),
+        _audio_request(auto_duration=True, audio=audio_file(6.0)),
         pipeline_factory=factory_for(pipe),
         encoder=good_encoder,
         output_root=tmp_path,
     )
-    assert pipe.audio_vae.mels[-1].shape[-1] == 96000, "auto_duration must not trim"
-    assert not any("trimmed" in w for w in result.warnings)
+    _, sent = pipe.calls[-1]
+    assert sent["num_frames"] == 145
+    assert "min_seconds" not in sent and "max_seconds" not in sent
+    assert any("length set from your audio: 6.00 s → 145 frames" in w for w in result.warnings)
+    assert pipe.audio_vae.mels[-1].shape[-1] == 92800, "the upload was not reconciled to 5.80 s"
 
 
-def test_auto_duration_says_the_muxed_upload_could_not_be_reconciled(monkeypatch, tmp_path):
-    """"Could not check" must never travel as silence -- the check_mmap_backed rule.
+def test_auto_duration_muxes_a_reconciled_upload(monkeypatch, tmp_path):
+    """The muxed track used to be the raw upload under automatic duration, with
+    a note saying it could not be reconciled. With the length taken from the
+    audio it is reconciled like any other run, and that note has nothing to say."""
+    from conftest import audio_file
 
-    Under automatic duration there is no ``num_frames`` to reconcile against, so
-    the waveform muxed into the container is the upload at its full length and
-    may run longer or shorter than the picture. It is still the better of the
-    two tracks -- the model's is suppressed -- but the user has to be able to
-    learn that this one run was not length-matched, and what to change.
-    """
     pipe = _file_audio_pipe()
     _patched_upload(monkeypatch, samples=96000)
+    seen = {}
+
+    def spy_encoder(*args, **kwargs):
+        seen.update(kwargs)
+        return good_encoder(*args, **kwargs)
+
     result = generate(
-        _audio_request(auto_duration=True),
+        _audio_request(auto_duration=True, audio=audio_file(6.0)),
         pipeline_factory=factory_for(pipe),
-        encoder=good_encoder,
+        encoder=spy_encoder,
         output_root=tmp_path,
     )
 
-    assert any("could NOT be reconciled" in w for w in result.warnings), (
-        f"the upload was muxed unreconciled and the result says nothing: {result.warnings}"
-    )
+    assert seen["supplied_audio"].waveform.shape[-1] == 92800
+    assert not any("could NOT be reconciled" in w for w in result.warnings), result.warnings
 
 
 def test_a_hub_staged_adapter_is_loaded_from_its_fetched_local_path(tmp_path):
@@ -1095,6 +1113,7 @@ def test_a_hub_staged_adapter_is_loaded_from_its_fetched_local_path(tmp_path):
             return super().load_lora_weights(path, adapter_name=adapter_name)
 
     local = tmp_path / "fetched.safetensors"
+    local.touch()
     pipe = RecordingPipe()
     generate(
         a_request(
@@ -1365,23 +1384,25 @@ def test_a_run_that_never_enhances_gets_one_window_and_no_phantom_phase(tmp_path
     assert not any("prompt enhancement" in n for n in notes)
 
 
-def test_enhancement_requested_on_an_empty_prompt_reports_no_enhancement_phase(
+def test_enhancement_requested_on_an_empty_prompt_is_refused_before_any_measurement(
     tmp_path, monkeypatch
 ):
-    """The other way the enhancer does not run. ``enhance_if_requested`` returns
-    without loading anything when the prompt is blank, so the toggle being set
-    is not evidence that a phase existed."""
-    install_fake_torch(monkeypatch, a_cuda())
-    result = generate(
-        a_request(prompt="   ", enhance_prompt=True),
-        pipeline_factory=factory_for(FakePipe()),
-        encoder=good_encoder,
-        output_root=tmp_path,
-        enhancer=lambda prompt, image=None: pytest.fail(
-            "the enhancer must not run on a blank prompt"
-        ),
-    )
-    assert not any("prompt enhancement" in n for n in vram_notes(result))
+    """Enhance on with a blank prompt used to run, enhance nothing, and say so
+    in a note. It is now refused before the dispatch -- so before the probe
+    opens, and before the enhancer could be asked."""
+    cuda = install_fake_torch(monkeypatch, a_cuda())
+    with pytest.raises(LTXStudioError) as excinfo:
+        generate(
+            a_request(prompt="   ", enhance_prompt=True),
+            pipeline_factory=factory_for(FakePipe()),
+            encoder=good_encoder,
+            output_root=tmp_path,
+            enhancer=lambda prompt, image=None: pytest.fail(
+                "the enhancer must not run on a blank prompt"
+            ),
+        )
+    assert "prompt is empty" in str(excinfo.value)
+    assert cuda.calls == []
 
 
 def test_a_probe_that_cannot_measure_never_takes_the_run_down(tmp_path, monkeypatch):
@@ -1443,3 +1464,59 @@ def test_the_probe_is_opened_after_validation_so_a_bad_request_costs_nothing(tmp
         f"a request refused by validation still touched CUDA ({cuda.calls}); the probe is "
         f"above the cheap refusals"
     )
+
+
+# --------------------------------------------------------------------------
+# F15: a failed run keeps its numbers, and a typed failure keeps its type
+# --------------------------------------------------------------------------
+
+
+def test_a_failed_run_still_records_its_peak_vram(tmp_path, monkeypatch, caplog):
+    """An OOM is the run whose numbers matter most, and it never reaches the
+    success path where the second lap used to be taken."""
+    import logging
+
+    cuda = install_fake_torch(monkeypatch, a_cuda())
+    caplog.set_level(logging.INFO, logger=generate_module.__name__)
+    with pytest.raises(DecodeError):
+        generate(
+            a_request(),
+            pipeline_factory=factory_for(FakePipe(raises=RuntimeError("CUDA out of memory"))),
+            encoder=good_encoder,
+            output_root=tmp_path,
+        )
+
+    assert "max_memory_allocated" in cuda.calls, f"the failed run read no peak at all: {cuda.calls}"
+    assert any("failed run" in record.getMessage() for record in caplog.records), [
+        record.getMessage() for record in caplog.records
+    ]
+
+
+def test_a_successful_run_does_not_add_a_failed_run_lap(tmp_path, monkeypatch):
+    install_fake_torch(monkeypatch, a_cuda())
+    notes = vram_notes(run_on(tmp_path))
+    assert not any("failed run" in note for note in notes), notes
+
+
+def test_a_typed_error_from_inside_the_stage_graph_keeps_its_type(tmp_path):
+    """A stage-2 component that fails to load is a ModelLoadError, not a decode failure."""
+    inner = ModelLoadError(component="diffusion_decoder", reason="the NATTEN kernel fetch failed")
+    with pytest.raises(ModelLoadError) as caught:
+        generate(
+            a_request(),
+            pipeline_factory=factory_for(FakePipe(raises=inner)),
+            encoder=good_encoder,
+            output_root=tmp_path,
+        )
+    assert caught.value is inner
+
+
+def test_an_untyped_failure_inside_the_pipeline_is_still_a_decode_error(tmp_path):
+    with pytest.raises(DecodeError) as caught:
+        generate(
+            a_request(),
+            pipeline_factory=factory_for(FakePipe(raises=RuntimeError("NaN in the latents"))),
+            encoder=good_encoder,
+            output_root=tmp_path,
+        )
+    assert "NaN in the latents" in str(caught.value)

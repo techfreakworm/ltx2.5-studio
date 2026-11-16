@@ -33,7 +33,7 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 
 from .conditioning import ConditionSpec
-from .errors import UnknownModeError
+from .errors import ConstraintError, UnknownModeError
 
 __all__ = [
     "IMAGE_CONDITION_STRENGTH",
@@ -43,9 +43,13 @@ __all__ = [
     "PIPELINE_KINDS",
     "ConditionSpec",
     "ModeSpec",
+    "accepted_kinds",
+    "accepts",
+    "condition_kind",
     "counterpart_label_for",
     "get_mode",
     "modes_for_pipeline",
+    "requires",
 ]
 
 #: Upstream's workflow vocabulary, from ``_workflow_map`` in
@@ -89,7 +93,7 @@ class ModeSpec:
     label: str
     #: Which upstream workflow executes it.
     pipeline: str
-    #: Input kinds the UI must collect.
+    #: Input kinds the mode REQUIRES. A run missing one is refused.
     inputs: tuple[str, ...]
     #: Tracks written to disk. A mode exporting only audio still renders video.
     exports: tuple[str, ...]
@@ -108,6 +112,24 @@ class ModeSpec:
     #: architecture spec forbids.
     audio_counterpart: str | None = None
     aliases: tuple[str, ...] = field(default_factory=tuple)
+    #: Input kinds the mode can use but does not need. Anything in neither
+    #: tuple is dropped from the request before the run (generate.py).
+    optional_inputs: tuple[str, ...] = ()
+
+
+def accepts(spec: ModeSpec, kind: str) -> bool:
+    """True when the mode uses ``kind`` at all, required or optional."""
+    return kind in spec.inputs or kind in spec.optional_inputs
+
+
+def requires(spec: ModeSpec, kind: str) -> bool:
+    """True when a run of this mode cannot start without ``kind``."""
+    return kind in spec.inputs
+
+
+def accepted_kinds(spec: ModeSpec) -> frozenset[str]:
+    """Every input kind the mode uses, required or optional."""
+    return frozenset(spec.inputs) | frozenset(spec.optional_inputs)
 
 
 # ---------------------------------------------------------------------------
@@ -176,14 +198,57 @@ def _with_audio(request, kwargs: dict) -> dict:
     return kwargs
 
 
-def _conditions(request) -> tuple[ConditionSpec, ...]:
+def condition_kind(entry) -> str:
+    """The input kind a programmatic condition entry carries (image unless it says)."""
+    if isinstance(entry, Mapping):
+        return str(entry.get("kind", "image"))
+    return str(getattr(entry, "kind", "image"))
+
+
+def _unaccepted(request, accepted: frozenset[str]) -> list[str]:
+    """Every field on ``request`` that carries a kind outside ``accepted``."""
+    found = []
+    for kind in ("image", "video", "audio"):
+        if kind not in accepted and getattr(request, kind, None) is not None:
+            found.append(kind)
+    if "audio" not in accepted and getattr(request, "audio_latents", None) is not None:
+        found.append("audio_latents")
+    if "text" not in accepted:
+        for name in ("prompt", "negative_prompt"):
+            if str(getattr(request, name, "") or "").strip():
+                found.append(name)
+    for entry in getattr(request, "conditions", ()) or ():
+        if isinstance(entry, (list, tuple)):
+            found.append("conditions (a shot-list row)")
+        elif condition_kind(entry) not in accepted:
+            found.append(f"conditions ({condition_kind(entry)})")
+    return found
+
+
+def _refuse_unaccepted(request, accepted: frozenset[str], label: str) -> None:
+    """Defence in depth behind ``generate.scope_request_to_mode``.
+
+    The scoped request never trips this. A builder called with an unscoped one
+    must fail rather than quietly use a value its mode does not take.
+    """
+    found = _unaccepted(request, accepted)
+    if found:
+        raise ConstraintError(
+            f"{label} was handed {', '.join(found)}, which it does not use. The request must "
+            f"be scoped to the mode before its arguments are built."
+        )
+
+
+def _conditions(request, accepted: frozenset[str]) -> tuple[ConditionSpec, ...]:
     """Build the condition list. Image and video share one mechanism (§3.1a)."""
     specs: list[ConditionSpec] = []
     image = getattr(request, "image", None)
-    if image is not None:
-        specs.append(ConditionSpec(source=image, kind="image", index=0))
+    if image is not None and "image" in accepted:
+        specs.append(
+            ConditionSpec(source=image, kind="image", index=0, strength=IMAGE_CONDITION_STRENGTH)
+        )
     video = getattr(request, "video", None)
-    if video is not None:
+    if video is not None and "video" in accepted:
         strength = getattr(request, "strength", None)
         if strength is None:
             strength = MAX_VIDEO_CONDITION_STRENGTH
@@ -195,27 +260,26 @@ def _conditions(request) -> tuple[ConditionSpec, ...]:
                 strength=min(float(strength), MAX_VIDEO_CONDITION_STRENGTH),
             )
         )
-    specs.extend(getattr(request, "conditions", ()) or ())
+    specs.extend(
+        entry
+        for entry in getattr(request, "conditions", ()) or ()
+        if condition_kind(entry) in accepted
+    )
     return tuple(specs)
 
 
 def _text_builder(*, min_resolution: bool = False, audio: bool = False) -> Callable:
-    def build(request) -> dict:
+    def build(request, accepted: frozenset[str]) -> dict:
         kwargs = _base_kwargs(request, min_resolution=min_resolution)
         return _with_audio(request, kwargs) if audio else kwargs
 
     return build
 
 
-def _condition_builder(
-    *, keep_prompt: bool = True, min_resolution: bool = False, audio: bool = False
-) -> Callable:
-    def build(request) -> dict:
+def _condition_builder(*, min_resolution: bool = False, audio: bool = False) -> Callable:
+    def build(request, accepted: frozenset[str]) -> dict:
         kwargs = _base_kwargs(request, min_resolution=min_resolution)
-        if not keep_prompt:
-            # PLAN §3.2 row 2 is explicit: one condition, empty prompt.
-            kwargs["prompt"] = ""
-        conditions = _conditions(request)
+        conditions = _conditions(request, accepted)
         if conditions:
             kwargs["conditions"] = conditions
         if audio:
@@ -225,97 +289,116 @@ def _condition_builder(
     return build
 
 
+def _mode(builder: Callable, **fields) -> ModeSpec:
+    """A registry entry whose builder knows, from the entry itself, what it accepts."""
+    accepted = frozenset(fields["inputs"]) | frozenset(fields.get("optional_inputs", ()))
+    label = fields["label"]
+
+    def build_kwargs(request) -> dict:
+        _refuse_unaccepted(request, accepted, label)
+        kwargs = builder(request, accepted)
+        if "text" not in accepted:
+            # PLAN §3.2 row 2: one condition, empty prompt.
+            kwargs["prompt"] = ""
+        return kwargs
+
+    return ModeSpec(build_kwargs=build_kwargs, **fields)
+
+
 _SPECS = (
     # -- 1-7: first class ----------------------------------------------------
-    ModeSpec(
+    _mode(
+        _text_builder(),
         id="text_to_video",
         label="Text to video",
         pipeline="text2video",
         inputs=("text",),
         exports=("video",),
-        build_kwargs=_text_builder(),
         audio_counterpart="text_to_audio_video",
     ),
-    ModeSpec(
+    _mode(
+        _condition_builder(),
         id="image_to_video",
         label="Image to video",
         pipeline="condition",
         inputs=("image",),
         exports=("video",),
-        build_kwargs=_condition_builder(keep_prompt=False),
         audio_counterpart="image_to_audio_video",
     ),
-    ModeSpec(
+    _mode(
+        _condition_builder(),
         id="image_text_to_video",
         label="Image + text to video",
         pipeline="condition",
         inputs=("image", "text"),
         exports=("video",),
-        build_kwargs=_condition_builder(),
         audio_counterpart="image_text_to_audio_video",
     ),
-    ModeSpec(
+    _mode(
+        _condition_builder(),
         id="video_to_video",
         label="Video to video",
         pipeline="condition",
         inputs=("video",),
+        optional_inputs=("text",),
         exports=("video",),
-        build_kwargs=_condition_builder(),
     ),
-    ModeSpec(
+    _mode(
+        _text_builder(),
         id="text_to_audio_video",
         label="Text to video with sound",
         pipeline="text2video",
         inputs=("text",),
         exports=("audio", "video"),
-        build_kwargs=_text_builder(),
     ),
-    ModeSpec(
+    _mode(
+        _condition_builder(),
         id="image_to_audio_video",
         label="Image to video with sound",
         pipeline="condition",
         inputs=("image",),
         exports=("audio", "video"),
-        build_kwargs=_condition_builder(keep_prompt=False),
     ),
-    ModeSpec(
+    _mode(
+        _condition_builder(),
         id="image_text_to_audio_video",
         label="Image + text to video with sound",
         pipeline="condition",
         inputs=("image", "text"),
         exports=("audio", "video"),
-        build_kwargs=_condition_builder(),
     ),
     # -- 8-10: audio only, and they still render video -----------------------
-    ModeSpec(
+    _mode(
+        _text_builder(min_resolution=True),
         id="text_to_audio",
         label="Text to audio",
         pipeline="text2video",
         inputs=("text",),
         exports=("audio",),
-        build_kwargs=_text_builder(min_resolution=True),
         cost_note=_AUDIO_ONLY_NOTE,
         min_resolution=True,
         skip_stage_2=True,
     ),
-    ModeSpec(
+    _mode(
+        _condition_builder(min_resolution=True),
         id="video_to_audio",
         label="Video to audio",
         pipeline="condition",
         inputs=("video",),
+        optional_inputs=("text",),
         exports=("audio",),
-        build_kwargs=_condition_builder(min_resolution=True),
         cost_note=_AUDIO_ONLY_NOTE,
         min_resolution=True,
         skip_stage_2=True,
     ),
-    ModeSpec(
+    _mode(
+        _condition_builder(min_resolution=True, audio=True),
         id="audio_to_audio",
         label="Audio to audio",
         pipeline="condition",
         inputs=("audio",),
+        optional_inputs=("text",),
         exports=("audio",),
-        build_kwargs=_condition_builder(min_resolution=True, audio=True),
         cost_note=_AUDIO_ONLY_NOTE,
         min_resolution=True,
         skip_stage_2=True,
@@ -421,13 +504,16 @@ _SPECS = (
     # that has not changed: the note now says the audio is his own AND says why,
     # because "here is your audio back" without the suppression finding invites
     # the next person to re-derive the six reasons and flip it again.
-    ModeSpec(
+    _mode(
+        _condition_builder(audio=True),
         id="audio_to_video",
         label="Audio to video",
         pipeline="condition",
         inputs=("audio",),
+        # The image is an optional first frame (index 0, strength 1.0). To be
+        # verified on real weights before it is kept.
+        optional_inputs=("text", "image"),
         exports=("audio", "video"),
-        build_kwargs=_condition_builder(audio=True),
         cost_note=_AUDIO_TO_VIDEO_NOTE,
     ),
 )

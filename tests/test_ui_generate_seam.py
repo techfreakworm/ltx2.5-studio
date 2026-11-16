@@ -34,7 +34,7 @@ from functools import lru_cache
 from pathlib import Path
 
 import pytest
-from conftest import STUB_WAVEFORM
+from conftest import STUB_WAVEFORM, audio_file, inputs_for
 from test_exports_contract import (
     MODE_IDS,
     MODE_TRACK_PAIRS,
@@ -104,11 +104,12 @@ def values_for(mode_id: str, **overrides) -> tuple:
     """One positional value per ``FIELD_KEYS`` entry, as Gradio would send them."""
     values = {spec.key: spec.default for spec in FIELDS}
     values["seed"] = 7
-    # Hand the mode the media it declares it takes, so the request that reaches
-    # the registry's kwarg builder is the shape the UI would really produce.
-    for kind in modes.get_mode(mode_id).inputs:
-        if kind in MEDIA_KINDS:
-            values[kind] = conditioning_video() if kind == "video" else f"conditioning-input.{kind}"
+    # Hand the mode what it REQUIRES -- a prompt, a PIL image, a real mp4, a real
+    # wav -- because generate() refuses a run missing one, and opens the audio,
+    # before it reserves a GPU.
+    values.update(inputs_for(mode_id))
+    if "video" in modes.get_mode(mode_id).inputs:
+        values["video"] = conditioning_video()
     values.update(overrides)
     return tuple(values[key] for key in FIELD_KEYS)
 
@@ -453,7 +454,7 @@ def test_an_audio_input_with_no_audio_vae_is_refused_loudly(monkeypatch, tmp_pat
         generate_module.generate(
             mode="audio_to_audio",
             seed=7,
-            audio="an-upload.wav",
+            audio=audio_file(),
             pipeline_factory=factory_returning(pipe),
             encoder=one_muxed_file_encoder,
             output_root=tmp_path,
@@ -486,7 +487,7 @@ def test_a_mono_upload_is_reported_to_the_user_not_only_the_log(monkeypatch, tmp
     result = generate_module.generate(
         mode="audio_to_audio",
         seed=7,
-        audio="a-mono-recording.wav",
+        audio=audio_file(),
         pipeline_factory=factory_returning(pipe),
         encoder=one_muxed_file_encoder,
         output_root=tmp_path,
@@ -570,7 +571,7 @@ def _uploaded(mode_id, tmp_path, monkeypatch, *, encoder=one_muxed_file_encoder,
     return generate_module.generate(
         mode=mode_id,
         seed=7,
-        audio="a-song-the-user-cares-about.wav",
+        audio=audio_file(),
         pipeline_factory=factory_returning(FakePipe()),
         encoder=encoder,
         output_root=tmp_path,
@@ -793,7 +794,15 @@ def test_which_track_a_mode_gets_is_derived_from_exports_not_from_a_registry_fla
         "image_to_audio_video",
         "image_text_to_audio_video",
         "audio_to_video",
-    ], "the joint modes are the predicate's whole reach; only mode 11 ever supplies audio"
+    ], "the joint modes are the predicate's whole reach"
+    # And of those, only a mode that TAKES audio can ever be handed a track to
+    # mux: generate() drops an audio upload every other mode does not take
+    # (scope_request_to_mode), so a stale upload never reaches 05/06/07.
+    assert [
+        m
+        for m in MODE_IDS
+        if muxes(modes.get_mode(m).exports) and modes.accepts(modes.get_mode(m), "audio")
+    ] == ["audio_to_video"]
 
 
 def test_the_writer_refuses_a_substitute_track_for_a_mode_with_no_container(tmp_path):
@@ -836,10 +845,12 @@ def test_a_mode_given_no_audio_is_told_nothing_about_whose_audio_it_is(mode_id, 
     nobody asked -- and warnings that fire when nothing is wrong are how a
     warnings channel stops being read.
     """
+    fields = inputs_for(mode_id)
+    fields.pop("audio", None)
     result = generate_module.generate(
         mode=mode_id,
         seed=7,
-        prompt="a prompt",
+        **fields,
         pipeline_factory=factory_returning(FakePipe()),
         encoder=one_muxed_file_encoder,
         output_root=tmp_path,
@@ -880,6 +891,7 @@ def test_the_seed_reaches_the_pipeline_not_only_the_sidecar(monkeypatch, tmp_pat
     pipe = FakePipe()
     generate_module.generate(
         mode="text_to_video",
+        prompt="a lighthouse in fog",
         seed=1234,
         pipeline_factory=factory_returning(pipe),
         encoder=one_muxed_file_encoder,

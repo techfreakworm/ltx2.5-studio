@@ -31,6 +31,7 @@ not and the readout must say where it actually lands.
 from __future__ import annotations
 
 import pytest
+from conftest import image_input, inputs_for
 from test_exports_contract import FakePipe, factory_returning, one_muxed_file_encoder
 
 from ltx25_studio import conditioning
@@ -60,12 +61,22 @@ def shot_row(frame, prompt="a second shot", strength=1.0):
     return row
 
 
+def keyframe(frame, strength=1.0):
+    """An image anchored at a pixel ``frame``, as a programmatic caller supplies one.
+
+    End to end, a shot-list ROW is refused before the run (its first cell is
+    prompt text, not frames), so the convention is driven with a real keyframe:
+    same anchor field, same single conversion in ``conditioning.py``.
+    """
+    return {"source": image_input(), "index": frame, "strength": strength}
+
+
 def conditions_reaching_the_pipeline(rows, tmp_path, *, num_frames=NUM_FRAMES):
     pipe = FakePipe()
     generate_module.generate(
         mode="image_text_to_video",
         seed=7,
-        image="conditioning-input.image",
+        **inputs_for("image_text_to_video"),
         num_frames=num_frames,
         conditions=rows,
         pipeline_factory=factory_returning(pipe),
@@ -130,7 +141,7 @@ def test_a_frame_the_user_types_arrives_as_that_frames_latent(frame, latent, tmp
     converted once is 4, converted twice is 1. A test that only checked "it is
     an int" or "it is not the frame" would pass on the double conversion.
     """
-    conditions = conditions_reaching_the_pipeline([shot_row(frame)], tmp_path)
+    conditions = conditions_reaching_the_pipeline([keyframe(frame)], tmp_path)
     shot = conditions[-1]
 
     assert shot.index == latent, (
@@ -144,7 +155,7 @@ def test_a_frame_the_user_types_arrives_as_that_frames_latent(frame, latent, tmp
 def test_the_anchor_is_not_converted_twice(frame, tmp_path):
     """Stated separately, because double conversion is the specific failure the
     contradicted instruction produced — and it looks like a working conversion."""
-    conditions = conditions_reaching_the_pipeline([shot_row(frame)], tmp_path)
+    conditions = conditions_reaching_the_pipeline([keyframe(frame)], tmp_path)
 
     once = conditioning.latent_index_for(frame)
     twice = conditioning.latent_index_for(once)
@@ -162,7 +173,7 @@ def test_the_anchor_is_converted_at_all(frame, tmp_path):
     Upstream would then anchor the shot ~8x further into the clip than the user
     asked, or skip it entirely — with a log line, and a completed metered run.
     """
-    conditions = conditions_reaching_the_pipeline([shot_row(frame)], tmp_path)
+    conditions = conditions_reaching_the_pipeline([keyframe(frame)], tmp_path)
     assert conditions[-1].index != frame, (
         f"frame {frame} reached the pipeline unconverted. LTX2VideoCondition.index is a "
         f"latent index (PLAN §5.7 row 1)."
@@ -374,13 +385,13 @@ def test_an_anchor_past_the_end_of_the_clip_is_refused_before_the_run(tmp_path):
     be made.
     """
     with pytest.raises(LTXStudioError):
-        conditions_reaching_the_pipeline([shot_row(NUM_FRAMES + 50)], tmp_path)
+        conditions_reaching_the_pipeline([keyframe(NUM_FRAMES + 50)], tmp_path)
 
 
 def test_the_last_legal_frame_is_accepted(tmp_path):
     """The boundary, in the direction that matters: off-by-one here rejects a
     legitimate anchor and the user has no way to know why."""
-    conditions = conditions_reaching_the_pipeline([shot_row(NUM_FRAMES - 1)], tmp_path)
+    conditions = conditions_reaching_the_pipeline([keyframe(NUM_FRAMES - 1)], tmp_path)
     assert conditions[-1].index == conditioning.latent_index_for(NUM_FRAMES - 1)
 
 

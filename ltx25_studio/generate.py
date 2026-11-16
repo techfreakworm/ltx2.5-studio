@@ -30,6 +30,7 @@ depth is testable with no GPU and no weights.
 from __future__ import annotations
 
 import contextvars
+import inspect
 import logging
 import secrets
 import uuid
@@ -44,6 +45,9 @@ from .errors import (
     EmptyOutputError,
     EncodeError,
     GenerationError,
+    LoRAError,
+    LTXStudioError,
+    MissingInputError,
     ModelLoadError,
 )
 
@@ -145,7 +149,8 @@ class GenerationRequest:
     #: Forced off for modes whose video is discarded anyway.
     enable_stage_2: bool = False
     #: Let ``duration_head`` choose the length: ``num_frames`` is omitted and
-    #: ``min_seconds`` / ``max_seconds`` are passed instead.
+    #: ``min_seconds`` / ``max_seconds`` are passed instead. In a mode that
+    #: requires audio it means "match my audio" instead; see `_length_from_audio`.
     auto_duration: bool = False
     min_seconds: float = 1.0
     max_seconds: float = 5.0
@@ -238,15 +243,320 @@ def _validated(request: GenerationRequest) -> GenerationRequest:
     would receive a different one with no signal.
     """
     constraints.validate_dimensions(request.width, request.height)
+    constraints.validate_dimension_limit(request.width, name="width")
+    constraints.validate_dimension_limit(request.height, name="height")
     if request.auto_duration:
         if request.max_seconds <= request.min_seconds:
             raise constraints.ConstraintError(
                 f"max_seconds ({request.max_seconds}) must be greater than min_seconds "
                 f"({request.min_seconds}) for automatic duration."
             )
+        constraints.validate_seconds_limit(request.max_seconds)
     else:
         constraints.validate_num_frames(request.num_frames)
+        constraints.validate_num_frames_limit(request.num_frames)
     return request
+
+
+# --------------------------------------------------------------------------
+# scoping and pre-dispatch checks -- run before a GPU is reserved
+# --------------------------------------------------------------------------
+
+#: How a dropped input is described: (subject, what the mode does not use).
+_DROPPED_MEDIA = {
+    "image": ("An image", "images"),
+    "video": ("A video", "videos"),
+    "audio": ("An audio file", "audio"),
+}
+
+
+def _condition_entries(value) -> tuple:
+    """The shot-list payload as a tuple of entries, empty tables and blank rows removed."""
+    if value is None:
+        return ()
+    if isinstance(value, dict) and "data" in value:
+        value = value.get("data") or ()
+    elif isinstance(value, dict):
+        value = (value,)
+    entries = []
+    for entry in value:
+        if isinstance(entry, (list, tuple)) and all(
+            cell is None or not str(cell).strip() for cell in entry
+        ):
+            continue
+        entries.append(entry)
+    return tuple(entries)
+
+
+def scope_request_to_mode(request: GenerationRequest, spec) -> tuple[GenerationRequest, tuple]:
+    """Drop every field the mode does not take. Returns ``(request, notes)``.
+
+    The UI keeps the values of fields it hides, and forwards them all; this is
+    where they stop. Derived from ``spec.inputs`` and ``spec.optional_inputs``
+    only. Idempotent: the worker re-runs it on an already-scoped request and
+    gets no notes back.
+    """
+
+    def accepts(kind: str) -> bool:
+        return modes.accepts(spec, kind)
+
+    label = spec.label
+    defaults = GenerationRequest(mode=request.mode)
+    changes: dict = {}
+    notes: list[str] = []
+
+    for kind, (subject, plural) in _DROPPED_MEDIA.items():
+        if getattr(request, kind) is not None and not accepts(kind):
+            changes[kind] = None
+            notes.append(
+                f"{subject} was supplied, but {label} does not use {plural}, so it was ignored."
+            )
+    if request.audio_latents is not None and not accepts("audio"):
+        changes["audio_latents"] = None
+        notes.append(
+            f"Pre-encoded audio was supplied, but {label} does not use audio, so it was ignored."
+        )
+
+    if accepts("text"):
+        if request.enhance_prompt and not (request.prompt or "").strip():
+            raise constraints.ConstraintError(
+                "Enhance is on but the prompt is empty, so there is nothing to enhance. Type a "
+                "prompt, or turn prompt enhancement off."
+            )
+    else:
+        for name, subject in (("prompt", "A prompt"), ("negative_prompt", "A negative prompt")):
+            value = getattr(request, name)
+            if (value or "").strip():
+                notes.append(
+                    f"{subject} was supplied, but {label} does not take a prompt, so it was "
+                    f"ignored."
+                )
+            if value != "":
+                changes[name] = ""
+        if request.enhance_prompt:
+            changes["enhance_prompt"] = False
+            notes.append(
+                f"Prompt enhancement was on, but {label} does not take a prompt, so it was not run."
+            )
+
+    entries = _condition_entries(request.conditions)
+    if entries and not (accepts("image") or accepts("video")):
+        entries = ()
+        notes.append(f"A shot list was supplied, but {label} does not use one, so it was ignored.")
+    if any(isinstance(entry, (list, tuple)) for entry in entries):
+        raise constraints.ConstraintError(
+            "The shot list carried prompt text, and the model cannot take text as frames: each "
+            "shot row needs an image or a video to anchor. To prompt several shots, write them "
+            "into the prompt itself, one after another. Clear the shot list to run."
+        )
+    kept = tuple(entry for entry in entries if accepts(modes.condition_kind(entry)))
+    if len(kept) != len(entries):
+        notes.append(
+            f"A condition was supplied for an input {label} does not use, so it was ignored."
+        )
+    if kept != request.conditions:
+        changes["conditions"] = kept
+
+    if not accepts("video") and request.strength != defaults.strength:
+        changes["strength"] = defaults.strength
+    if not accepts("audio") and request.noise_scale != defaults.noise_scale:
+        changes["noise_scale"] = defaults.noise_scale
+    if spec.skip_stage_2 and request.enable_stage_2:
+        changes["enable_stage_2"] = False
+
+    return (replace(request, **changes) if changes else request), tuple(notes)
+
+
+def _supplied_kinds(request: GenerationRequest) -> frozenset[str]:
+    """The input kinds a request carries, whatever the mode."""
+    kinds = {kind for kind in ("image", "video", "audio") if getattr(request, kind) is not None}
+    if request.audio_latents is not None:
+        kinds.add("audio")
+    if (request.prompt or "").strip():
+        kinds.add("text")
+    return frozenset(kinds)
+
+
+def _alternative_label(spec, missing, supplied) -> str | None:
+    """A mode with the same exports that needs none of what is missing.
+
+    Prefers one whose inputs the user has already supplied, then one that needs
+    only a prompt.
+    """
+    candidates = [
+        other
+        for other in modes.MODES.values()
+        if other.id != spec.id
+        and set(other.exports) == set(spec.exports)
+        and not set(other.inputs) & set(missing)
+    ]
+    for prefer in (
+        lambda other: set(other.inputs) <= supplied,
+        lambda other: set(other.inputs) == {"text"},
+        lambda other: True,
+    ):
+        for other in candidates:
+            if prefer(other):
+                return other.label
+    return None
+
+
+def require_inputs(request: GenerationRequest, spec, *, supplied=frozenset()) -> None:
+    """Refuse a run that lacks an input its mode requires."""
+    present = _supplied_kinds(request)
+    missing = tuple(kind for kind in spec.inputs if kind not in present)
+    if missing:
+        raise MissingInputError(
+            mode=spec.label,
+            missing=missing,
+            alternative=_alternative_label(spec, missing, frozenset(supplied) | present),
+        )
+
+
+def _audio_seconds(source) -> float:
+    """Open an audio file with ``av`` and measure it. No model, no decode if avoidable."""
+    import av
+
+    name = Path(str(source)).name
+    seconds = None
+    try:
+        with av.open(str(source)) as container:
+            if not container.streams.audio:
+                raise constraints.ConstraintError(
+                    f"{name} has no audio stream, so there is nothing to condition on. Upload an "
+                    f"audio file."
+                )
+            stream = container.streams.audio[0]
+            if stream.duration is not None and stream.time_base is not None:
+                seconds = float(stream.duration * stream.time_base)
+            elif container.duration is not None:
+                seconds = container.duration / av.time_base
+            else:
+                samples = sum(frame.samples for frame in container.decode(stream))
+                seconds = samples / float(stream.rate) if stream.rate else None
+    except constraints.ConstraintError:
+        raise
+    except Exception as exc:  # noqa: BLE001 -- every open failure has one answer here
+        raise constraints.ConstraintError(
+            f"{name} could not be opened as audio ({type(exc).__name__}). Upload a WAV, MP3, "
+            f"FLAC or AAC file."
+        ) from exc
+    if not seconds or seconds <= 0:
+        raise constraints.ConstraintError(
+            f"{name} opened, but its length could not be measured. Re-export it as a WAV file."
+        )
+    return seconds
+
+
+def _length_from_audio(
+    request: GenerationRequest, spec, seconds: float | None
+) -> tuple[GenerationRequest, tuple]:
+    """In a mode that requires audio, automatic duration means "match my audio".
+
+    The duration head reads only the text, so it cannot hear the upload; it
+    never chooses the length here. The frame count is derived from the file
+    instead and the request becomes a fixed-length one.
+    """
+    if not (request.auto_duration and modes.requires(spec, "audio")):
+        return request, ()
+    if seconds is None:
+        raise constraints.ConstraintError(
+            f"Automatic duration in {spec.label} measures the audio file you supply, and this run "
+            f"carries pre-encoded audio_latents instead. Turn automatic duration off and set the "
+            f"frame count (num_frames)."
+        )
+    fps = float(request.frame_rate)
+    num_frames = constraints.largest_num_frames_within(seconds, frame_rate=fps)
+    note = (
+        f"length set from your audio: {seconds:.2f} s → {num_frames} frames "
+        f"({num_frames / fps:.2f} s at {fps:g} fps)."
+    )
+    if seconds * fps > constraints.MAX_NUM_FRAMES:
+        note += (
+            f" Your audio is longer than the {constraints.MAX_SECONDS:g} s maximum, so it is "
+            f"trimmed to fit."
+        )
+    return replace(request, auto_duration=False, num_frames=num_frames), (note,)
+
+
+def _anchor_bound(request: GenerationRequest) -> int:
+    """Frames an anchor must fall inside: the clip, or the shortest the head can pick."""
+    if not request.auto_duration:
+        return int(request.num_frames)
+    shortest, _longest = constraints.duration_head_frame_range(
+        min_seconds=request.min_seconds,
+        max_seconds=request.max_seconds,
+        frame_rate=float(request.frame_rate),
+    )
+    return shortest
+
+
+def _decode_cap(request: GenerationRequest) -> int:
+    """How many frames of a conditioning video are worth decoding."""
+    if not request.auto_duration:
+        return int(request.num_frames)
+    _shortest, longest = constraints.duration_head_frame_range(
+        min_seconds=request.min_seconds,
+        max_seconds=request.max_seconds,
+        frame_rate=float(request.frame_rate),
+    )
+    return max(round(request.max_seconds * float(request.frame_rate)), longest)
+
+
+def _checked_conditions(request: GenerationRequest, spec) -> None:
+    """Anchor range and source presence, without decoding anything."""
+    for condition in spec.build_kwargs(request).get("conditions", ()):
+        conditioning.normalise_condition(condition, num_frames=_anchor_bound(request))
+
+
+def _checked_lora_files(request: GenerationRequest) -> None:
+    """Every staged adapter is still a file on disk."""
+    for entry in getattr(request, "loras", ()) or ():
+        if isinstance(entry, dict):
+            path = entry.get("path") or entry.get("source")
+            shown = entry.get("source") or path
+        else:
+            path = shown = entry
+        if path is None or not Path(str(path)).is_file():
+            raise LoRAError(
+                f"The LoRA {Path(str(shown)).name} is no longer on disk, so it cannot be "
+                f"applied. Validate it again, or clear it, before generating."
+            )
+
+
+def _prepare_request(request: GenerationRequest):
+    """Every cheap check, in order, before a GPU is reserved.
+
+    Returns ``(request, spec, notes)``. Runs on the web side of the dispatch
+    and again in the worker; each step is idempotent, so the second pass
+    changes nothing and says nothing.
+    """
+    spec = modes.get_mode(request.mode)
+    supplied = _supplied_kinds(request)
+    request, scope_notes = scope_request_to_mode(request, spec)
+    require_inputs(request, spec, supplied=supplied)
+    request = _validated(request)
+    seconds = _audio_seconds(request.audio) if request.audio is not None else None
+    request, length_notes = _length_from_audio(request, spec, seconds)
+    _checked_conditions(request, spec)
+    _checked_lora_files(request)
+    return request, spec, scope_notes + length_notes
+
+
+def _unwrapped(exc: BaseException) -> BaseException:
+    """The real error inside a ``spaces`` 0.52 ``ZeroGPUTaskException``, or ``exc``."""
+    inner = getattr(exc, "exception", None)
+    return inner if isinstance(inner, BaseException) and inner is not exc else exc
+
+
+def _with_notes(result, notes: tuple):
+    """Put the web side's notes in front of the worker's."""
+    if not notes:
+        return result
+    if not isinstance(result, GenerationResult):
+        logger.warning("dropping %d notes: the dispatch returned %r", len(notes), type(result))
+        return result
+    return replace(result, warnings=tuple(notes) + tuple(result.warnings))
 
 
 def stage_2_enabled(spec, request: GenerationRequest) -> bool:
@@ -293,11 +603,78 @@ def _prepared_conditions(kwargs: dict, request: GenerationRequest) -> None:
     raw = kwargs.get("conditions")
     if not raw:
         return
+    cap = _decode_cap(request)
     kwargs["conditions"] = conditioning.build_conditions(
-        raw,
-        num_frames=request.num_frames,
+        tuple(_decoded_video_condition(entry, cap, request.frame_rate) for entry in raw),
+        num_frames=_anchor_bound(request),
         temporal_compression_ratio=constraints.DEFAULT_TEMPORAL_COMPRESSION_RATIO,
     )
+
+
+def _decode_options(frame_rate) -> dict:
+    """``frame_rate=`` for the video decode, when the decoder takes it."""
+    try:
+        parameters = inspect.signature(conditioning.decode_video_frames).parameters
+    except (TypeError, ValueError):
+        return {}
+    return {"frame_rate": float(frame_rate)} if "frame_rate" in parameters else {}
+
+
+def _decoded_video_condition(entry, cap: int, frame_rate):
+    """A video condition with its frames decoded, capped at ``cap``; anything else as-is.
+
+    Decoded here rather than inside ``build_conditions`` so the cap can be the
+    longest clip the duration head may pick, while anchors are still checked
+    against the shortest.
+    """
+    if modes.condition_kind(entry) != "video":
+        return entry
+    if isinstance(entry, dict):
+        source = entry.get("source", entry.get("frames"))
+        index, strength = entry.get("index", 0), entry.get("strength", 1.0)
+    else:
+        source = getattr(entry, "source", getattr(entry, "frames", None))
+        index, strength = getattr(entry, "index", 0), getattr(entry, "strength", 1.0)
+    if not isinstance(source, (str, Path)):
+        return entry
+    frames = conditioning.decode_video_frames(
+        source, max_frames=cap if cap and cap > 0 else None, **_decode_options(frame_rate)
+    )
+    return conditioning.ConditionSpec(
+        source=frames, kind="video", index=int(index or 0), strength=float(strength)
+    )
+
+
+def _count_from_shape(shape) -> int | None:
+    dims = list(shape)
+    while len(dims) > 4 and dims[0] == 1:
+        dims.pop(0)
+    return int(dims[0]) if len(dims) == 4 else None
+
+
+def _frame_count(output) -> int | None:
+    """Frames in a pipeline output, read off its shape; None when it cannot be read."""
+    frames = getattr(output, "frames", None)
+    if getattr(frames, "shape", None) is not None:
+        return _count_from_shape(frames.shape)
+    if isinstance(frames, (list, tuple)) and frames:
+        first = frames[0]
+        if len(frames) == 1 and isinstance(first, (list, tuple)):
+            return len(first)
+        if len(frames) == 1 and getattr(first, "shape", None) is not None:
+            return _count_from_shape(first.shape)
+        return len(frames)
+    return None
+
+
+def _chosen_length_note(output, request: GenerationRequest) -> tuple[str, ...]:
+    """Under automatic duration, say what length the model picked."""
+    if not request.auto_duration:
+        return ()
+    count = _frame_count(output)
+    if count is None:
+        return ("the model chose the length itself, and its frame count could not be read.",)
+    return (f"the model chose {count} frames ({count / float(request.frame_rate):.2f} s).",)
 
 
 def _seeded_generator(pipe, seed: int):
@@ -446,7 +823,7 @@ def _supplied_latents_note(mode: str, exports) -> tuple[str, ...]:
     )
 
 
-def _prepared_audio(kwargs: dict, request: GenerationRequest, pipe, *, exports=()):
+def _prepared_audio(kwargs: dict, request: GenerationRequest, pipe, *, spec):
     """Encode the user's audio file into the latents the pipeline actually takes.
 
     Returns ``(notes, supplied_audio)``. ``supplied_audio`` is an
@@ -456,8 +833,8 @@ def _prepared_audio(kwargs: dict, request: GenerationRequest, pipe, *, exports=(
     given at all, and the programmatic ``audio_latents`` route, where no waveform
     exists in this process to hand back.
 
-    **Audio in does not mean that audio out**, and ``exports`` is threaded in so
-    this layer can say so. See :func:`_supplied_audio_note`: whenever audio
+    **Audio in does not mean that audio out**, and ``spec`` is threaded in so
+    this layer can say so (and refuse audio its mode does not take). See :func:`_supplied_audio_note`: whenever audio
     actually entered a run whose mode exports audio, the result carries one
     sentence naming which track the file contains. Mode 11 shipped without it
     and returned mp4s with no audio stream at all; the fix is not only to mux a
@@ -487,6 +864,15 @@ def _prepared_audio(kwargs: dict, request: GenerationRequest, pipe, *, exports=(
     programmatic route, which needs no file -- but that route is **checked**,
     not waved through: see :func:`_checked_supplied_audio_latents`.
     """
+    exports = spec.exports
+    if not modes.accepts(spec, "audio") and (
+        kwargs.get("audio_latents") is not None or getattr(request, "audio", None) is not None
+    ):
+        # Defence in depth: scope_request_to_mode has already dropped these.
+        raise constraints.ConstraintError(
+            f"{spec.label} does not use audio, and audio reached the encode step. The request "
+            f"must be scoped to the mode first."
+        )
     # Both routes are "the user gave us audio", so both get the note. The
     # early return below is the only path where no audio entered at all, and it
     # is the only one that must stay silent.
@@ -1275,6 +1661,13 @@ def generate(
     elif params:
         request = replace(request, **params)
 
+    # --- every cheap check, BEFORE the dispatch -----------------------------
+    # Scope the request to its mode, require its inputs, validate geometry and
+    # length, open the audio, check anchors and staged LoRA files. Both the
+    # reservation estimate and the worker see the scoped request; a refusal
+    # here costs no ZeroGPU slot. The worker repeats it, idempotently.
+    request, spec, notes = _prepare_request(request)
+
     # Route through the ZeroGPU entrypoint when one is registered and we are not
     # already inside the worker. Without this the UI calls straight through and
     # no generation ever reserves a GPU slot.
@@ -1288,27 +1681,31 @@ def generate(
     # live path, which is what keeps the payload picklable.
     dispatch = _GPU_DISPATCH
     if dispatch is not None and not _IN_GPU_WORKER.get():
-        return dispatch(
-            request=request,
-            pipeline_factory=pipeline_factory,
-            encoder=encoder,
-            enhancer=enhancer,
-            output_root=output_root,
-            retention_bytes=retention_bytes,
-            # `progress` joins the seams here for the same reason `enhancer`
-            # did: the work it reports on happens on the FAR side of this
-            # branch, so a handle dropped here is a handle that only ever
-            # reports the two lines above it. It pickles -- a fresh
-            # `gr.Progress` is `{"track_tqdm": bool, "iterables": []}` and
-            # `spaces` already carries one in `GradioPartialContext` -- and
-            # `tests/test_request_fork_boundary.py` holds that.
-            progress=progress,
-        )
-
-    # --- everything cheap first: unknown mode and illegal geometry must not
-    # --- cost a model load.
-    spec = modes.get_mode(request.mode)
-    request = _validated(request)
+        try:
+            result = dispatch(
+                request=request,
+                pipeline_factory=pipeline_factory,
+                encoder=encoder,
+                enhancer=enhancer,
+                output_root=output_root,
+                retention_bytes=retention_bytes,
+                # `progress` joins the seams here for the same reason `enhancer`
+                # did: the work it reports on happens on the FAR side of this
+                # branch, so a handle dropped here is a handle that only ever
+                # reports the two lines above it. It pickles -- a fresh
+                # `gr.Progress` is `{"track_tqdm": bool, "iterables": []}` and
+                # `spaces` already carries one in `GradioPartialContext` -- and
+                # `tests/test_request_fork_boundary.py` holds that.
+                progress=progress,
+            )
+        except Exception as exc:
+            # spaces 0.52 raises ZeroGPUTaskException(exception=<the real one>)
+            # for every worker failure; the UI must see the real one.
+            inner = _unwrapped(exc)
+            if inner is exc:
+                raise
+            raise inner from exc
+        return _with_notes(result, notes)
 
     # --- peak-VRAM instrumentation, opened HERE ----------------------------
     # Below the dispatch branch, so on a Space this is the first line of the
@@ -1322,203 +1719,216 @@ def generate(
     # as the run's.
     probe = _VramProbe()
     probe.start()
+    finished = False
+    try:
+        # Constructed unconditionally, exactly like the probe above and for the same
+        # reason: a reporter built only when a UI is attached is a code path the
+        # offline gate never walks. With no handle every method is a no-op, so the
+        # call sites below stay branch-free.
+        reporter = ProgressReporter(progress)
 
-    # Constructed unconditionally, exactly like the probe above and for the same
-    # reason: a reporter built only when a UI is attached is a code path the
-    # offline gate never walks. With no handle every method is a no-op, so the
-    # call sites below stay branch-free.
-    reporter = ProgressReporter(progress)
-
-    # --- prompt enhancement, HERE and nowhere else -------------------------
-    # BELOW the dispatch branch, so on a Space this executes inside the
-    # `@spaces.GPU` worker. That placement is a correction, and the reason is
-    # measured rather than argued: on the CPU in the web process the 600-token
-    # greedy decode took ~538 s, against ~1-2 s on the GPU. See `enhance.py`'s
-    # docstring for the numbers and for why moving it to CUDA does NOT put the
-    # enhancer back into the ZeroGPU packing window.
-    #
-    # Three properties come from this one line's position:
-    #
-    #   * it is past `get_mode` and `_validated`, so "everything cheap first"
-    #     covers it for free -- a request with an unknown mode or an illegal
-    #     frame count is refused before a 2.5 GB load, with no duplicated
-    #     validation to keep in step;
-    #   * it is above the pipeline factory, so a failed enhancement never first
-    #     spends a model load it is going to throw away;
-    #   * the note it produces is built on the same side of the fork as the
-    #     GenerationResult that carries it, so it rides home in
-    #     `warnings` like every other note instead of being grafted on
-    #     afterwards.
-    #
-    # Called unconditionally -- `enhance_if_requested` returns immediately when
-    # the toggle is off -- so `enhance.py` is executed on every generation and
-    # cannot become a module that only a non-default checkbox reaches.
-    from . import enhance as enhance_module
-
-    # ~21 s of dead air before sampling even starts, and until now the only
-    # thing on screen said "Running". Announced BEFORE the call rather than
-    # after it, which is the whole point -- a label that appears once the phase
-    # is over reports history, not progress. Gated on the toggle so a run that
-    # does no enhancement does not claim to be doing some; `enhance_if_requested`
-    # itself stays unconditional.
-    if request.enhance_prompt:
-        reporter.phase("enhancing the prompt")
-    enhanced, enhancement_notes = enhance_module.enhance_if_requested(request, enhancer=enhancer)
-    if enhanced is not None:
-        request = replace(request, prompt=enhanced)
-        # The split that answers the open question about this feature: is the
-        # enhancer's ~2.49 GB *additive* to the transformer's peak, or absorbed
-        # in allocator slack the denoise was going to hold anyway? One lap each
-        # side and the two figures say which. Taken only when the enhancer
-        # actually ran -- `enhanced is None` covers both "toggle off" and
-        # "prompt was empty", and in neither case did a rewrite happen, so a lap
-        # there would report the baseline under a label claiming otherwise.
+        # --- prompt enhancement, HERE and nowhere else -------------------------
+        # BELOW the dispatch branch, so on a Space this executes inside the
+        # `@spaces.GPU` worker. That placement is a correction, and the reason is
+        # measured rather than argued: on the CPU in the web process the 600-token
+        # greedy decode took ~538 s, against ~1-2 s on the GPU. See `enhance.py`'s
+        # docstring for the numbers and for why moving it to CUDA does NOT put the
+        # enhancer back into the ZeroGPU packing window.
         #
-        # It stays interesting now that the enhancer is RESIDENT rather than
-        # freed per call: this lap is what would show the 2.49 GB becoming a
-        # permanent floor under every subsequent generation in the worker, if it
-        # ever did. A load happens only on the first enhanced call in a worker,
-        # so on later calls this lap reports the decode alone -- which is the
-        # measurement that confirms the cache is hitting.
-        probe.split("prompt enhancement")
+        # Three properties come from this one line's position:
+        #
+        #   * it is past `get_mode` and `_validated`, so "everything cheap first"
+        #     covers it for free -- a request with an unknown mode or an illegal
+        #     frame count is refused before a 2.5 GB load, with no duplicated
+        #     validation to keep in step;
+        #   * it is above the pipeline factory, so a failed enhancement never first
+        #     spends a model load it is going to throw away;
+        #   * the note it produces is built on the same side of the fork as the
+        #     GenerationResult that carries it, so it rides home in
+        #     `warnings` like every other note instead of being grafted on
+        #     afterwards.
+        #
+        # Called unconditionally -- `enhance_if_requested` returns immediately when
+        # the toggle is off -- so `enhance.py` is executed on every generation and
+        # cannot become a module that only a non-default checkbox reaches.
+        from . import enhance as enhance_module
 
-    seed = _resolve_seed(request.seed)
-
-    run_id = uuid.uuid4().hex[:12]
-    root = Path(output_root) if output_root is not None else configured_output_root()
-    run_dir = root / f"run-{run_id}"
-
-    factory = pipeline_factory or _default_pipeline_factory
-    write = encoder or _default_encoder
-
-    reporter.phase("loading the model")
-    try:
-        pipe = factory(pipeline=spec.pipeline)
-    except Exception as exc:
-        raise ModelLoadError(component=spec.pipeline, reason=str(exc)) from exc
-
-    # Everything between the load and the first denoise step: the pixel-to-latent
-    # condition conversion, the peft walk over ~3320 transformer modules for a
-    # staged adapter, and the audio encode. None of it is instantaneous and
-    # leaving "loading the model" on screen through it would be a label that is
-    # simply wrong rather than merely coarse.
-    reporter.phase("preparing the inputs")
-    kwargs = _pipeline_kwargs(spec, request)
-    _prepared_conditions(kwargs, request)
-    lora_reports = _apply_loras(pipe, request)
-    try:
-        # Before `_prepared_audio`, because the audio encode samples from a
-        # distribution and must draw from the same seeded stream as the pipeline.
-        generator = _seeded_generator(pipe, seed)
-        if generator is not None:
-            kwargs["generator"] = generator
-
-        # After the pipeline exists, because encoding needs its `audio_vae`.
-        # `supplied_audio` is the user's own reconciled waveform when this mode's
-        # container is the one it belongs in, and None everywhere else; see
-        # `_muxes_supplied_audio`.
-        audio_notes, supplied_audio = _prepared_audio(
-            kwargs, request, pipe, exports=spec.exports
+        # ~21 s of dead air before sampling even starts, and until now the only
+        # thing on screen said "Running". Announced BEFORE the call rather than
+        # after it, which is the whole point -- a label that appears once the phase
+        # is over reports history, not progress. Gated on the toggle so a run that
+        # does no enhancement does not claim to be doing some; `enhance_if_requested`
+        # itself stays unconditional.
+        if request.enhance_prompt:
+            reporter.phase("enhancing the prompt")
+        enhanced, enhancement_notes = enhance_module.enhance_if_requested(
+            request, enhancer=enhancer
         )
-        # Consumed by `StageRunner`, never forwarded to diffusers -- the same
-        # treatment `enable_stage_2` gets, and for the same reason: it is ours.
-        # Only when somebody is listening, so an injected fake in the offline
-        # gate is handed exactly the kwargs it was handed before.
-        if reporter:
-            kwargs["progress"] = reporter
+        if enhanced is not None:
+            request = replace(request, prompt=enhanced)
+            # The split that answers the open question about this feature: is the
+            # enhancer's ~2.49 GB *additive* to the transformer's peak, or absorbed
+            # in allocator slack the denoise was going to hold anyway? One lap each
+            # side and the two figures say which. Taken only when the enhancer
+            # actually ran -- `enhanced is None` covers both "toggle off" and
+            # "prompt was empty", and in neither case did a rewrite happen, so a lap
+            # there would report the baseline under a label claiming otherwise.
+            #
+            # It stays interesting now that the enhancer is RESIDENT rather than
+            # freed per call: this lap is what would show the 2.49 GB becoming a
+            # permanent floor under every subsequent generation in the worker, if it
+            # ever did. A load happens only on the first enhanced call in a worker,
+            # so on later calls this lap reports the decode alone -- which is the
+            # measurement that confirms the cache is hitting.
+            probe.split("prompt enhancement")
 
-        size_notes = ()
-        if stage_2_enabled(spec, request):
-            from . import pipelines
+        seed = _resolve_seed(request.seed)
 
-            size_notes = (pipelines.stage_2_size_note(request.width, request.height),)
+        run_id = uuid.uuid4().hex[:12]
+        root = Path(output_root) if output_root is not None else configured_output_root()
+        run_dir = root / f"run-{run_id}"
+
+        factory = pipeline_factory or _default_pipeline_factory
+        write = encoder or _default_encoder
+
+        reporter.phase("loading the model")
         try:
-            output = pipe(**kwargs)
+            pipe = factory(pipeline=spec.pipeline)
         except Exception as exc:
-            raise DecodeError(mode=request.mode, reason=f"the pipeline raised {exc!r}") from exc
+            raise ModelLoadError(component=spec.pipeline, reason=str(exc)) from exc
 
-        output = _decoded(output, request.mode)
-
-        reporter.phase("writing the file")
+        # Everything between the load and the first denoise step: the pixel-to-latent
+        # condition conversion, the peft walk over ~3320 transformer modules for a
+        # staged adapter, and the audio encode. None of it is instantaneous and
+        # leaving "loading the model" on screen through it would be a label that is
+        # simply wrong rather than merely coarse.
+        reporter.phase("preparing the inputs")
+        kwargs = _pipeline_kwargs(spec, request)
+        _prepared_conditions(kwargs, request)
+        lora_reports = _apply_loras(pipe, request)
         try:
-            # The sink is additive: an encoder that ignores it behaves identically.
-            # Without it the dropped-audio note reaches the Space logs only, and the
-            # user gets a silent video with no on-screen explanation -- which is most
-            # of what the warning was for.
-            encoder_warnings: list[str] = []
-            encoder_kwargs = {
-                "run_dir": run_dir,
-                "mode": request.mode,
-                "exports": spec.exports,
-                "seed": seed,
-                "frame_rate": request.frame_rate,
-                "warnings": encoder_warnings,
-                "counterpart_label": modes.counterpart_label_for(request.mode),
-            }
-            if supplied_audio is not None:
-                # Conditional rather than always-present, like `sampling_rate`
-                # below: an injected encoder in a test sees the kwarg only on the
-                # runs where a substitution really happened, so "was the user's
-                # audio muxed" is answerable by looking rather than by inferring.
-                encoder_kwargs["supplied_audio"] = supplied_audio
-            sampling_rate = _export_sampling_rate(pipe)
-            if sampling_rate is not None:
-                encoder_kwargs["sampling_rate"] = sampling_rate
-            elif "audio" in spec.exports and encoder is None:
-                # Only fatal on the production path: an injected encoder in a test
-                # has no vocoder to read and does not need one.
-                raise EncodeError(
-                    path=str(run_dir),
-                    reason=(
-                        f"mode {request.mode!r} exports audio but the pipeline exposes no vocoder "
-                        f"to read output_sampling_rate from. Refusing to assume a rate, which would "
-                        f"silently resample every export."
-                    ),
-                )
-            written = write(output, **encoder_kwargs)
-        except EncodeError:
-            # Already one of ours and already names its target; re-wrapping would
-            # read "failed to write output <run_dir>: failed to write output
-            # <target>: <reason>" and bury the reason a layer deeper.
-            raise
-        except Exception as exc:
-            raise EncodeError(path=str(run_dir), reason=str(exc)) from exc
+            # Before `_prepared_audio`, because the audio encode samples from a
+            # distribution and must draw from the same seeded stream as the pipeline.
+            generator = _seeded_generator(pipe, seed)
+            if generator is not None:
+                kwargs["generator"] = generator
 
-        artifacts = _artifacts_for(
-            written, spec=spec, mode=request.mode, run_dir=run_dir, notes=encoder_warnings
-        )
+            # After the pipeline exists, because encoding needs its `audio_vae`.
+            # `supplied_audio` is the user's own reconciled waveform when this mode's
+            # container is the one it belongs in, and None everywhere else; see
+            # `_muxes_supplied_audio`.
+            audio_notes, supplied_audio = _prepared_audio(kwargs, request, pipe, spec=spec)
+            # Consumed by `StageRunner`, never forwarded to diffusers -- the same
+            # treatment `enable_stage_2` gets, and for the same reason: it is ours.
+            # Only when somebody is listening, so an injected fake in the offline
+            # gate is handed exactly the kwargs it was handed before.
+            if reporter:
+                kwargs["progress"] = reporter
 
-        # The second lap: model load, denoise, decode and encode. Closed here
-        # rather than at the pipeline call so nothing CUDA-touching falls into a
-        # window that is never read -- the whole-call figure is only the largest
-        # lap, so an unclosed window is silently missing from it.
-        probe.split("generation (model load through encode)")
+            size_notes = ()
+            if stage_2_enabled(spec, request):
+                from . import pipelines
 
-        warnings = (
-            enhancement_notes
-            + _sweep(root, retention_bytes)
-            + tuple(encoder_warnings)
-            + audio_notes
-            + size_notes
-            # Last, because it is diagnostic rather than something the user has
-            # to act on -- but present on every run, because the one flagship
-            # generation that finally gives this build a headroom number is not
-            # going to be the run somebody remembered to turn a flag on for.
-            + probe.notes()
-        )
+                size_notes = (pipelines.stage_2_size_note(request.width, request.height),)
+            try:
+                output = pipe(**kwargs)
+            except LTXStudioError:
+                # Already typed -- a stage-2 ModelLoadError is not a decode failure.
+                raise
+            except Exception as exc:
+                raise DecodeError(mode=request.mode, reason=f"the pipeline raised {exc!r}") from exc
 
-        return GenerationResult(
-            output_path=artifacts["primary"],
-            run_id=run_id,
-            run_dir=run_dir,
-            mode=request.mode,
-            seed=seed,
-            video_path=artifacts.get("video"),
-            audio_path=artifacts.get("audio"),
-            warnings=warnings,
-        )
+            output = _decoded(output, request.mode)
+            length_notes = _chosen_length_note(output, request)
+
+            reporter.phase("writing the file")
+            try:
+                # The sink is additive: an encoder that ignores it behaves identically.
+                # Without it the dropped-audio note reaches the Space logs only, and the
+                # user gets a silent video with no on-screen explanation -- which is most
+                # of what the warning was for.
+                encoder_warnings: list[str] = []
+                encoder_kwargs = {
+                    "run_dir": run_dir,
+                    "mode": request.mode,
+                    "exports": spec.exports,
+                    "seed": seed,
+                    "frame_rate": request.frame_rate,
+                    "warnings": encoder_warnings,
+                    "counterpart_label": modes.counterpart_label_for(request.mode),
+                }
+                if supplied_audio is not None:
+                    # Conditional rather than always-present, like `sampling_rate`
+                    # below: an injected encoder in a test sees the kwarg only on the
+                    # runs where a substitution really happened, so "was the user's
+                    # audio muxed" is answerable by looking rather than by inferring.
+                    encoder_kwargs["supplied_audio"] = supplied_audio
+                sampling_rate = _export_sampling_rate(pipe)
+                if sampling_rate is not None:
+                    encoder_kwargs["sampling_rate"] = sampling_rate
+                elif "audio" in spec.exports and encoder is None:
+                    # Only fatal on the production path: an injected encoder in a test
+                    # has no vocoder to read and does not need one.
+                    raise EncodeError(
+                        path=str(run_dir),
+                        reason=(
+                            f"mode {request.mode!r} exports audio but the pipeline exposes no "
+                            f"vocoder to read output_sampling_rate from. Refusing to assume a "
+                            f"rate, which would silently resample every export."
+                        ),
+                    )
+                written = write(output, **encoder_kwargs)
+            except EncodeError:
+                # Already one of ours and already names its target; re-wrapping would
+                # read "failed to write output <run_dir>: failed to write output
+                # <target>: <reason>" and bury the reason a layer deeper.
+                raise
+            except Exception as exc:
+                raise EncodeError(path=str(run_dir), reason=str(exc)) from exc
+
+            artifacts = _artifacts_for(
+                written, spec=spec, mode=request.mode, run_dir=run_dir, notes=encoder_warnings
+            )
+
+            # The second lap: model load, denoise, decode and encode. Closed here
+            # rather than at the pipeline call so nothing CUDA-touching falls into a
+            # window that is never read -- the whole-call figure is only the largest
+            # lap, so an unclosed window is silently missing from it.
+            probe.split("generation (model load through encode)")
+
+            warnings = (
+                notes
+                + enhancement_notes
+                + _sweep(root, retention_bytes)
+                + tuple(encoder_warnings)
+                + audio_notes
+                + length_notes
+                + size_notes
+                # Last, because it is diagnostic rather than something the user has
+                # to act on -- but present on every run, because the one flagship
+                # generation that finally gives this build a headroom number is not
+                # going to be the run somebody remembered to turn a flag on for.
+                + probe.notes()
+            )
+
+            result = GenerationResult(
+                output_path=artifacts["primary"],
+                run_id=run_id,
+                run_dir=run_dir,
+                mode=request.mode,
+                seed=seed,
+                video_path=artifacts.get("video"),
+                audio_path=artifacts.get("audio"),
+                warnings=warnings,
+            )
+            finished = True
+            return result
+        finally:
+            # Success or failure, the singleton goes back to base state. See
+            # _unload_loras for why this is a raise-on-failure cleanup, not a
+            # best-effort one.
+            _unload_loras(pipe, lora_reports)
     finally:
-        # Success or failure, the singleton goes back to base state. See
-        # _unload_loras for why this is a raise-on-failure cleanup, not a
-        # best-effort one.
-        _unload_loras(pipe, lora_reports)
+        if not finished:
+            # A failed run's peak is the one worth having; log it before the error leaves.
+            probe.split("failed run")
