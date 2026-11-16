@@ -5,9 +5,10 @@
     python scripts/space_matrix.py --plan scripts/space_plan.example.json \\
         --assets-dir ~/assets --quota-ledger ~/space-ledger.jsonl
 
-    # the same plan, executed
+    # the same plan, executed; when it stops at the ceiling (exit 3), the same command with
+    # --resume on the next UTC day runs what is left (calls with an outcome in --out are skipped)
     python scripts/space_matrix.py --plan plan.json --assets-dir ~/assets \\
-        --quota-ledger ~/space-ledger.jsonl --out ~/space-runs/day1 --live
+        --quota-ledger ~/space-ledger.jsonl --out ~/space-runs/matrix --live [--resume]
 
     # one call from flags; the historical 11-mode loop is --plan default
     python scripts/space_matrix.py --mode text_to_video --width 704 --height 480 --num-frames 49
@@ -48,6 +49,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from dataclasses import fields as dataclass_fields
 from datetime import UTC, datetime, timedelta
@@ -76,23 +78,32 @@ __all__ = [
     "EXIT_ILLEGAL",
     "EXIT_OK",
     "EXIT_QUOTA",
+    "GATE_ACCEPTED",
+    "GATE_DEFERRED",
     "LORA_ENDPOINT",
+    "UNBILLED_CATEGORIES",
     "Call",
     "Ledger",
     "PlanError",
     "QuotaLedgerUnreadable",
     "Secret",
+    "app_gate",
+    "as_the_space",
+    "classify",
     "default_plan",
     "generate_contract_problems",
     "load_plan",
     "main",
     "measure_audio",
     "measure_video",
+    "platform_refusal",
     "quota_multiplier",
     "quota_refusal",
     "read_token",
     "redact",
     "reservation_seconds",
+    "resume_split",
+    "schedule_days",
     "utc_day",
 ]
 
@@ -134,18 +145,33 @@ EXIT_CEILING = 3
 EXIT_QUOTA = 4
 EXIT_CALL_FAILED = 5
 
-#: Every wording of a ZeroGPU quota refusal in ``spaces`` (``zero/client.py``): the error title,
-#: the PRO/free/IP message, the runs limit, the Space-wide limit and the pending-credits refusal.
-_QUOTA_REFUSAL = re.compile(
-    r"ZeroGPU quota exceeded"
-    r"|exceeded your [\w ]*?ZeroGPU quota"
-    r"|exceeded your ZeroGPU runs limit"
-    r"|exceeded [\w ]*GPU quota"
-    r"|reached its GPU limit"
-    r"|ZeroGPU pending credits exceeded"
-    r"|too many ZeroGPU credits allocated",
-    re.IGNORECASE,
+#: How the ZeroGPU platform words its refusals (``spaces`` ``zero/client.py``, 0.50-0.52): each
+#: error's title and the message under it. The app's failure card quotes only the MESSAGE; a
+#: title reaches the API only when an error escapes the handler. Checked in this order.
+_PLATFORM_REFUSALS: tuple[tuple[str, re.Pattern], ...] = (
+    # the PRO/free/IP quota, the runs limit, the Space-wide limit, pending credits
+    ("quota", re.compile(
+        r"ZeroGPU quota exceeded"
+        r"|exceeded your [\w ]*?ZeroGPU quota"
+        r"|exceeded your ZeroGPU runs limit"
+        r"|exceeded [\w ]*GPU quota"
+        r"|reached its GPU limit"
+        r"|ZeroGPU pending credits exceeded"
+        r"|too many ZeroGPU credits allocated",
+        re.IGNORECASE,
+    )),
+    # the reservation is more than one call may ask for; nothing ran
+    ("limit", re.compile(
+        r"ZeroGPU illegal duration|requested GPU duration \([\d.]+s\) is larger than the maximum allowed",
+        re.IGNORECASE,
+    )),
+    # no GPU was free in time; nothing ran
+    ("queue", re.compile(r"ZeroGPU queue timeout|No GPU was available", re.IGNORECASE)),
 )
+
+#: Failure categories by their string values (``ltx25_studio.errors``). These two mean the
+#: platform refused before a GPU was used: recorded with zero billed seconds.
+UNBILLED_CATEGORIES = ("limit", "queue")
 
 # ---------------------------------------------------------------------------
 # content thresholds (measurements, reported with their thresholds; never stop a plan)
@@ -509,6 +535,15 @@ def _skip_stage_2(spec) -> bool:
     return bool(getattr(spec, "skip_stage_2", False))
 
 
+def _varies_clip(spec) -> bool:
+    """The clip is a variation source (mode 04): its length is the run's length."""
+    return getattr(spec, "video_conditioning", None) == "variation"
+
+
+def _varies_audio(spec) -> bool:
+    return getattr(spec, "audio_conditioning", None) == "variation"
+
+
 @dataclass(frozen=True)
 class MediaInput:
     kind: str
@@ -531,11 +566,32 @@ class MediaInput:
         return {"chained": False, "path": str(self.path), "bytes": size}
 
 
+#: ``lora.staging.DEFAULT_WEIGHT``: the strength ``/on_validate_lora`` stages an adapter at.
+#: Read lazily (the LoRA package imports the Hub client); 1.0 where it cannot be read.
+_STAGED_WEIGHT: list[float] = []
+
+
+def staged_lora_weight() -> float:
+    if not _STAGED_WEIGHT:
+        try:
+            from ltx25_studio.lora import staging
+
+            _STAGED_WEIGHT.append(float(staging.DEFAULT_WEIGHT))
+        except Exception:  # noqa: BLE001
+            _STAGED_WEIGHT.append(1.0)
+    return _STAGED_WEIGHT[0]
+
+
 @dataclass(frozen=True)
 class LoraInput:
     source: str
     weight: float = 1.0
     local: Path | None = None
+
+    @property
+    def needs_weight_route(self) -> bool:
+        """A strength other than the one ``/on_validate_lora`` stages at."""
+        return self.weight != staged_lora_weight()
 
     @property
     def label(self) -> str:
@@ -550,6 +606,12 @@ class LoraInput:
         }
 
 
+#: ``Call.gate``: the app's own gate accepted the call as the Space would run it, or the call
+#: takes an input an earlier call produces, so the gate runs when that file exists.
+GATE_ACCEPTED = "accepted"
+GATE_DEFERRED = "deferred"
+
+
 @dataclass(frozen=True)
 class Call:
     label: str
@@ -559,10 +621,16 @@ class Call:
     loras: tuple = ()
     expect: dict = field(default_factory=dict)
     note: str = ""
+    #: :data:`GATE_ACCEPTED`, :data:`GATE_DEFERRED`, or "" before the gate was asked.
+    gate: str = ""
     #: From ``generate.prepare_request``: the frame count the app will run (None: the model
     #: chooses) and the notes it will carry ("length set from your audio ...").
     app_frames: int | None = None
     app_notes: tuple = ()
+    #: ``(key, sent, what the app runs)`` for every field the app's scoping changes.
+    app_changes: tuple = ()
+    #: The variation level the app snaps ``noise_scale`` to (modes 04 and 10), else None.
+    app_level: float | None = None
 
     @property
     def spec(self):
@@ -573,6 +641,17 @@ class Call:
             return self.values[key]
         spec = _field(key)
         return None if spec is None else spec.default
+
+    def runs(self, key: str) -> Any:
+        """The value the app runs with: after its scoping when the gate ran, else as sent."""
+        for name, _sent, ran in self.app_changes:
+            if name == key:
+                return ran
+        return self.value(key)
+
+    @property
+    def chained(self) -> tuple[str, ...]:
+        return tuple(kind for kind, item in self.media.items() if item.chained)
 
     @property
     def min_resolution(self) -> bool:
@@ -603,17 +682,18 @@ class Call:
     def expected_frames(self) -> int | None:
         if "frames" in self.expect:
             return int(self.expect["frames"])
-        if "video" not in self.exports or _accepts(self.spec, "video"):
-            # A clip can set the length; only the plan can say what to expect.
+        if "video" not in self.exports:
             return None
         if self.app_frames is not None:
             return self.app_frames
-        if self.value("auto_duration"):
+        if self.value("auto_duration") or _varies_clip(self.spec):
+            # The model, the audio or the clip sets the length: known once the gate has run.
             return None
         return int(self.value("num_frames"))
 
 
-def _check_value(spec, value, problems: list[str], where: str) -> None:
+def _check_value(spec, value, problems: list[str], where: str) -> Any:
+    """``value`` as it is sent; a choice may be named by its label ("Best quality")."""
     kind = spec.kind
     if kind == "text" and not isinstance(value, str):
         problems.append(f"{where}: {spec.key} must be text")
@@ -622,18 +702,24 @@ def _check_value(spec, value, problems: list[str], where: str) -> None:
     elif kind in ("number", "slider"):
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             problems.append(f"{where}: {spec.key} must be a number")
-            return
+            return value
         low, high = spec.options.get("minimum"), spec.options.get("maximum")
         if low is not None and value < low or high is not None and value > high:
             problems.append(f"{where}: {spec.key}={value} is outside {low}..{high}")
     elif kind in ("dropdown", "radio"):
         choices = spec.options.get("choices")
         if choices:
-            allowed = [c[1] if isinstance(c, (list, tuple)) else c for c in choices]
+            pairs = [tuple(c) if isinstance(c, (list, tuple)) else (c, c) for c in choices]
+            by_label = {label: sent for label, sent in pairs}
+            allowed = [sent for _label, sent in pairs]
+            if value not in allowed and value in by_label:
+                return by_label[value]
             if value not in allowed:
-                problems.append(f"{where}: {spec.key}={value!r} is not one of {allowed}")
+                shown = ", ".join(f"{sent!r} ({label})" if label != sent else repr(sent) for label, sent in pairs)
+                problems.append(f"{where}: {spec.key}={value!r} is not one of {shown}")
     elif kind == "dataframe" and not isinstance(value, list):
         problems.append(f"{where}: {spec.key} must be a list of rows")
+    return value
 
 
 def _resolve_path(raw: str, base: Path) -> Path:
@@ -708,8 +794,7 @@ def _parse_call(raw: dict, *, index: int, base: Path, earlier: dict, problems: l
             if item is not None:
                 media[spec_field.kind] = item
             continue
-        _check_value(spec_field, value, problems, where)
-        values[key] = value
+        values[key] = _check_value(spec_field, value, problems, where)
 
     call = Call(label=label, mode=spec.id, values=values, media=media, loras=tuple(loras), expect=expect,
                 note=str(raw.get("note", "")))
@@ -743,20 +828,82 @@ def _parse_call(raw: dict, *, index: int, base: Path, earlier: dict, problems: l
         problems.append(f"{where}: {exc}")
     if len(problems) > before:
         return call
-    chained_audio = "audio" in media and media["audio"].chained
-    if chained_audio:
-        # Its length is only known once the earlier call has produced it; checked again live.
-        return call
+    if call.chained:
+        # The app's gate opens its inputs; a file an earlier call produces does not exist yet.
+        # It runs on that file, before anything is sent, once the producer has run.
+        return replace(call, gate=GATE_DEFERRED)
     try:
-        frames, notes = app_gate(call, {k: str(v.path) if not v.chained else f"<from {v.from_call}>"
-                                        for k, v in media.items()})
+        return gated(call, {kind: item.path for kind, item in media.items()})
+    except PlanError as exc:
+        problems.append(f"{where}: {exc}")
     except Exception as exc:  # noqa: BLE001 -- the app's own words
         problems.append(f"{where}: the app would refuse this call before reserving a GPU: {exc}")
-        return call
-    return replace(call, app_frames=frames, app_notes=notes)
+    return call
 
 
-def _app_request(call: Call, media_paths: dict[str, str]):
+@dataclass(frozen=True)
+class Gate:
+    """What ``generate.prepare_request`` said about one call."""
+
+    frames: int | None
+    notes: tuple[str, ...]
+    changes: tuple
+    level: float | None
+
+
+class _Platform:
+    """Stands for the ``spaces`` package the Space imports: ``zerogpu.is_zerogpu`` says yes."""
+
+    is_stub = False
+
+
+@contextmanager
+def as_the_space():
+    """``device.current()`` answers as on the Space (ZeroGPU, CUDA) while the app's gate runs.
+
+    The gate refuses some requests by device (stage 2, and the diffusion decoder off CUDA); left
+    alone it would apply THIS machine's ``LTX25_DEVICE`` to a call that runs on the Space.
+    """
+    from ltx25_studio import config, device
+
+    resolve = getattr(device, "resolve", None)
+    if resolve is None or not hasattr(device, "current"):
+        yield None
+        return
+    try:
+        settings = replace(config.load_config(), device="auto")
+        resolution = resolve(spaces_module=_Platform(), runtime_config=settings)
+    except Exception as exc:  # noqa: BLE001 -- a local setting, not the Space's
+        raise PlanError(
+            f"the app's gate cannot be run as the Space runs it, because this machine's LTX25_* "
+            f"settings do not load: {exc}"
+        ) from None
+    original = device.current
+    device.current = lambda: resolution
+    try:
+        yield resolution
+    finally:
+        device.current = original
+
+
+def _space_input(kind: str, path) -> Any:
+    """A media file as the Space's handler receives it: images as PIL (``gr.Image(type="pil")``),
+    video and audio as file paths."""
+    if kind != "image":
+        return str(path)
+    from PIL import Image
+
+    try:
+        with Image.open(path) as image:
+            return image.convert("RGB")
+    except Exception as exc:  # noqa: BLE001
+        raise PlanError(
+            f"image {Path(path).name} could not be read as a picture ({type(exc).__name__}); the "
+            f"Space's image input would refuse it"
+        ) from None
+
+
+def _app_request(call: Call, media: dict):
     """The ``GenerationRequest`` the Space's handler would build from this call's fields."""
     from ltx25_studio import generate
 
@@ -767,7 +914,8 @@ def _app_request(call: Call, media_paths: dict[str, str]):
         if spec.key not in known:
             continue
         if spec.kind in MEDIA_KINDS:
-            kwargs[spec.key] = media_paths.get(spec.kind)
+            path = media.get(spec.kind)
+            kwargs[spec.key] = None if path is None else _space_input(spec.kind, path)
         elif spec.key in ("width", "height"):
             kwargs[spec.key] = width if spec.key == "width" else height
         elif spec.kind == "dataframe":
@@ -777,17 +925,48 @@ def _app_request(call: Call, media_paths: dict[str, str]):
     return generate.GenerationRequest(**kwargs)
 
 
-def app_gate(call: Call, media_paths: dict[str, str]) -> tuple[int | None, tuple[str, ...]]:
-    """``generate.prepare_request``, the checks the app runs before it reserves a GPU.
+def _variation_level(spec, scoped) -> float | None:
+    """The level a variation mode runs at, as the mode's own ``build_kwargs`` decides it (the
+    nearest supported level to ``noise_scale``, or the mode's default); None for other modes."""
+    if not (_varies_clip(spec) or _varies_audio(spec)):
+        return None
+    kwargs = spec.build_kwargs(scoped)
+    clip = kwargs.get("video_variation")
+    level = getattr(clip, "level", None) if clip is not None else kwargs.get("audio_noise_level")
+    return None if level is None else float(level)
 
-    Raises what the Space would refuse the call with. Returns the frame count the run will use
-    (``None`` when the model chooses) and the notes the run will carry.
+
+def app_gate(call: Call, media: dict) -> Gate:
+    """``generate.prepare_request``, the checks the app runs before it reserves a GPU, run as
+    the Space runs them (:func:`as_the_space`), on the files themselves.
+
+    Raises what the Space would refuse the call with.
     """
     from ltx25_studio import generate
 
-    scoped, _spec, notes = generate.prepare_request(_app_request(call, media_paths))
-    frames = None if scoped.auto_duration else int(scoped.num_frames)
-    return frames, tuple(str(note) for note in notes)
+    request = _app_request(call, media)
+    with as_the_space():
+        scoped, spec, notes = generate.prepare_request(request)
+    changes = []
+    for key in (f.key for f in api_fields() if f.kind not in MEDIA_KINDS):
+        if not hasattr(request, key):
+            continue
+        sent, ran = getattr(request, key), getattr(scoped, key)
+        if sent != ran:
+            changes.append((key, sent, ran))
+    return Gate(
+        frames=None if scoped.auto_duration else int(scoped.num_frames),
+        notes=tuple(str(note) for note in notes),
+        changes=tuple(changes),
+        level=_variation_level(spec, scoped),
+    )
+
+
+def gated(call: Call, media: dict) -> Call:
+    """``call`` with what the app's gate said; raises its refusal."""
+    gate = app_gate(call, media)
+    return replace(call, gate=GATE_ACCEPTED, app_frames=gate.frames, app_notes=gate.notes,
+                   app_changes=gate.changes, app_level=gate.level)
 
 
 def _parse_media(kind, value, *, base, where, earlier, problems) -> MediaInput | None:
@@ -831,10 +1010,20 @@ def _parse_lora(entry, *, base, where, problems) -> LoraInput | None:
     extra = set(entry) - {"source", "weight"}
     if extra:
         problems.append(f"{where}: LoRA: unknown key(s) {sorted(extra)}")
-    weight = entry.get("weight", 1.0)
+    weight = entry.get("weight", staged_lora_weight())
     if isinstance(weight, bool) or not isinstance(weight, (int, float)) or weight <= 0:
         problems.append(f"{where}: LoRA weight must be a positive number")
         return None
+    if weight != staged_lora_weight():
+        try:
+            from ltx25_studio.lora import staging
+
+            staging.check_weight(weight, source=entry["source"])
+        except ImportError:
+            pass
+        except Exception as exc:  # noqa: BLE001 -- the app's own words
+            problems.append(f"{where}: {exc}")
+            return None
     source = entry["source"].strip()
     candidate = _resolve_path(source, base)
     if source.endswith(".safetensors") and candidate.is_file():
@@ -932,26 +1121,35 @@ def quota_multiplier(size: str = DEFAULT_ZEROGPU_SIZE) -> float:
 
 
 def reservation_seconds(call: Call, *, base_seconds: int) -> int:
-    """The app's own estimator, at the Space's base duration."""
+    """The app's own estimator, at the Space's base duration, for the request as the app runs it."""
     return int(
         zerogpu.estimate_duration(
             gpu_duration_seconds=int(base_seconds),
-            enable_stage_2=call.stage_2,
+            enable_stage_2=call.stage_2 and bool(call.runs("enable_stage_2")),
             loras=[lora.describe() for lora in call.loras] or None,
-            enhance_prompt=bool(call.value("enhance_prompt")),
+            enhance_prompt=bool(call.runs("enhance_prompt")),
         )
     )
 
 
+def platform_refusal(*texts: Any) -> tuple[str, str] | None:
+    """``(category, the platform's words)`` for the first refusal wording in ``texts``, or ``None``.
+
+    Quota is looked for first, in every text, because it ends the whole invocation.
+    """
+    plain = [html.unescape(str(text)) for text in texts if text]
+    for category, pattern in _PLATFORM_REFUSALS:
+        for text in plain:
+            found = pattern.search(text)
+            if found:
+                return category, found.group(0)
+    return None
+
+
 def quota_refusal(*texts: Any) -> str | None:
     """The first platform quota-refusal wording in ``texts``, or ``None``."""
-    for text in texts:
-        if not text:
-            continue
-        found = _QUOTA_REFUSAL.search(html.unescape(str(text)))
-        if found:
-            return found.group(0)
-    return None
+    found = platform_refusal(*texts)
+    return found[1] if found and found[0] == "quota" else None
 
 
 # ---------------------------------------------------------------------------
@@ -960,10 +1158,16 @@ def quota_refusal(*texts: Any) -> str | None:
 
 
 class Ledger:
-    """Append-only spend records. The day's total is the sum of ``billed_conservative``."""
+    """Append-only spend records. The day's total is the sum of ``billed_conservative``.
 
-    SCHEMA = 2
+    A call that may spend is written down BEFORE it is sent (``call_start``, at its full
+    reservation) and settled by its ``call`` record afterwards. A start with no settling record
+    (the invocation was killed mid-call) counts at its full reservation.
+    """
+
+    SCHEMA = 3
     UNIT = "GPU-seconds: an UPPER BOUND from wall clock x size multiplier, NOT billed seconds"
+    _SPENDING = ("call", "call_start")
 
     def __init__(self, path: str | Path):
         self.path = Path(path).expanduser()
@@ -983,7 +1187,7 @@ class Ledger:
                 record = json.loads(line)
                 if not isinstance(record, dict) or "kind" not in record or "utc_day" not in record:
                     raise ValueError("not a ledger record")
-                if record["kind"] == "call":
+                if record["kind"] in self._SPENDING:
                     float(record["billed_conservative"])
             except (ValueError, KeyError, TypeError) as exc:
                 raise QuotaLedgerUnreadable(
@@ -994,15 +1198,23 @@ class Ledger:
             records.append(record)
         return records
 
+    def _spending(self) -> list[dict]:
+        """Settled calls, plus every start that was never settled."""
+        records = self.records()
+        settled = {r.get("call_id") for r in records if r["kind"] == "call" and r.get("call_id")}
+        return [r for r in records if r["kind"] == "call"
+                or r["kind"] == "call_start" and r.get("call_id") not in settled]
+
+    def unsettled(self) -> list[dict]:
+        return [r for r in self._spending() if r["kind"] == "call_start"]
+
     def spent(self, day: str) -> float:
-        return sum(
-            float(r["billed_conservative"]) for r in self.records() if r["kind"] == "call" and r["utc_day"] == day
-        )
+        return sum(float(r["billed_conservative"]) for r in self._spending() if r["utc_day"] == day)
 
     def previous_day(self, day: str) -> tuple[str, float] | None:
         days: dict[str, float] = {}
-        for record in self.records():
-            if record["kind"] == "call" and record["utc_day"] < day:
+        for record in self._spending():
+            if record["utc_day"] < day:
                 days[record["utc_day"]] = days.get(record["utc_day"], 0.0) + float(record["billed_conservative"])
         if not days:
             return None
@@ -1159,13 +1371,14 @@ def lora_contract_problems(route: LoraRoute | None, calls: list[Call]) -> list[s
                 problems.append(f"{call.label}: {LORA_ENDPOINT} has no upload parameter for {lora.source}")
             if lora.local is None and route.source_slot is None:
                 problems.append(f"{call.label}: {LORA_ENDPOINT} has no Hub repo id parameter for {lora.source}")
-            if lora.weight != 1.0 and route.weight_slot is None and route.weight_endpoint is None:
+            if lora.needs_weight_route and route.weight_slot is None and route.weight_endpoint is None:
                 names = [p.get("parameter_name") for p in route.endpoint.parameters]
                 problems.append(
                     f"{call.label}: {lora.source} asks for strength {lora.weight:g}, and the Space exposes no "
-                    f"public way to set an adapter's strength ({LORA_ENDPOINT} takes {names}; there is no "
-                    f"{LORA_WEIGHT_ENDPOINT} with 'index' and 'weight'). Drop the weight (the adapter runs at "
-                    f"its staged default) or publish that route."
+                    f"public way to set an adapter's strength ({LORA_ENDPOINT} takes {names} and stages at "
+                    f"{staged_lora_weight():g}; there is no {LORA_WEIGHT_ENDPOINT} with 'index' and 'weight'). "
+                    f"Run the rest with --skip {call.label}, set its weight to {staged_lora_weight():g}, or "
+                    f"publish that route."
                 )
     return problems
 
@@ -1668,18 +1881,13 @@ class CeilingReached(RuntimeError):
     pass
 
 
-class QuotaRefused(RuntimeError):
-    pass
-
-
 def _find_record(data: list, status: str) -> dict | None:
-    """A structured run record: an extra dict output, or JSON embedded in the status."""
+    """A structured run record, if the API carries one: an output beyond the three published
+    ones, or JSON embedded in the status. The report's prose is never read for facts."""
     for extra in data[3:]:
         if isinstance(extra, dict):
             return extra
     found = re.search(r'<script[^>]*type="application/json"[^>]*>(.*?)</script>', status or "", re.S)
-    if found is None:
-        found = re.search(r"<!--\s*run-record\s*(\{.*?\})\s*-->", status or "", re.S)
     if found is None:
         return None
     try:
@@ -1701,21 +1909,41 @@ def _record_value(record: dict | None, *names) -> Any:
     return None
 
 
-#: The success report states the worker's own GPU time this way (``render.run_summary``).
-_REPORTED_GPU_TIME = re.compile(r"<dt>Took</dt><dd>(?:<span[^>]*>)?([\d.]+)(?:</span>)? s, GPU time</dd>")
+class _Reported(Exception):
+    """What reached the API, shaped for ``errors.categorise``: the title (when one came) and the
+    message. The exception's own type does not cross the API."""
+
+    def __init__(self, title: str, message: str):
+        super().__init__(message)
+        self.title = title
+        self.message = message
 
 
-def _reported_gpu_seconds(status: str) -> float | None:
-    found = _REPORTED_GPU_TIME.search(status or "")
-    return float(found.group(1)) if found else None
-
-
-def _category(record: dict | None, status: str) -> str | None:
+def classify(record: dict | None, *, title: Any = None, error: Any = None, status: str = "") -> dict:
+    """A failed call's category, as it came: the run's structured record's when the API carries
+    one, else the platform's own refusal wording, else ``errors.categorise`` (the app's
+    classifier) on the text that reached the API. An unknown string is kept as it is."""
     value = _record_value(record, "category")
     if value:
-        return str(value)
-    found = re.search(r'data-(?:failure-)?category="([\w-]+)"', status or "")
-    return found.group(1) if found else None
+        return {"category": str(value), "source": "the run's structured record"}
+    found = platform_refusal(title, error, status)
+    if found:
+        return {"category": found[0], "source": "the platform's refusal wording", "platform_words": found[1]}
+    from ltx25_studio import errors
+
+    words = " ".join(str(text) for text in (error, _plain(status)) if text)
+    failure = errors.categorise(_Reported(str(title or ""), words))
+    return {"category": str(failure.category), "gpu_used": bool(failure.gpu_used),
+            "source": "errors.categorise on the text that reached the API"}
+
+
+def _refusal_category(exc: BaseException) -> str:
+    """The category of a refusal raised here, before anything was sent: the app's own."""
+    if isinstance(exc, PlanError):
+        return "input"
+    from ltx25_studio import errors
+
+    return str(errors.categorise(exc).category)
 
 
 def _plain(markdown: str) -> str:
@@ -1805,7 +2033,7 @@ def _validate_loras(ctx: Session, call: Call, evidence: Evidence, session_hash: 
         if message.get("success") is False or message.get("msg") == "unexpected_error":
             staged = False
         entry = {**lora.describe(), "verdict": verdict, "staged_list": staged_list, "staged": staged}
-        if staged and lora.weight != 1.0 and route.weight_slot is None and route.weight_endpoint is not None:
+        if staged and lora.needs_weight_route and route.weight_slot is None and route.weight_endpoint is not None:
             weights = {"index": index, "weight": lora.weight}
             names = [str(p.get("parameter_name") or "").lower() for p in route.weight_endpoint.parameters]
             data = build_data(route.weight_endpoint.input_types, [weights.get(n) for n in names])
@@ -1881,35 +2109,51 @@ def run_call(ctx: Session, call: Call) -> Outcome:
     session_hash = uuid.uuid4().hex
     outcome = Outcome(label=call.label, status="failed", reserved=reserved)
     message: dict | None = None
-    ledger_record = {"kind": "call", "utc_day": day, "invocation": ctx.invocation, "label": call.label,
-                     "mode": call.mode, "reserved_seconds": reserved, "multiplier": ctx.multiplier,
-                     "billed_conservative": 0.0, "billed_worker": None, "space_sha": ctx.space_sha}
+    call_id = uuid.uuid4().hex[:16]
+    ledger_record = {"kind": "call", "call_id": call_id, "utc_day": day, "invocation": ctx.invocation,
+                     "label": call.label, "mode": call.mode, "reserved_seconds": reserved,
+                     "multiplier": ctx.multiplier, "billed_conservative": 0.0, "billed_worker": None,
+                     "space_sha": ctx.space_sha}
+    sent = False
+
+    def settle(status: str, billed: float, **extra) -> None:
+        """The call's one closing ledger record."""
+        outcome.billed_conservative = billed
+        ctx.ledger.append({**ledger_record, "at": _utcnow().isoformat(), "outcome": status,
+                           "billed_conservative": round(billed, 3), **extra})
+
+    def unsent(detail: str, category: str, **extra) -> Outcome:
+        """Refused here, before the run was sent: nothing billed."""
+        outcome.detail, outcome.category = detail, category
+        settle("failed", 0.0, error=detail, category=category)
+        evidence.write("result.json", {"outcome": "failed", "sent": False, "detail": detail,
+                                       "category": category, **extra})
+        return outcome
+
+    def no_completion() -> float:
+        """No completion was seen: the window so far, never less than the reservation."""
+        start_t = timing.get("generate_process_starts_t", timing.get("generate_event_id_t", 0.0))
+        return max(_monotonic() - started - start_t, reserved) * ctx.multiplier
+
     try:
         try:
             media = _resolve_media(ctx, call, evidence)
         except Exception as exc:  # noqa: BLE001
             request["media"] = {"error": redact(str(exc))}
             evidence.write("request.json", request)
-            outcome.detail = f"input could not be prepared: {redact(exc)}"
-            outcome.category = "input"
-            ctx.ledger.append({**ledger_record, "at": _utcnow().isoformat(), "outcome": "failed",
-                               "error": outcome.detail})
-            return outcome
+            return unsent(f"input could not be prepared: {redact(exc)}", "input")
         request["media"] = {k: {kk: str(vv) if isinstance(vv, Path) else vv for kk, vv in v.items()}
                             for k, v in media.items()}
         try:
-            frames, notes = app_gate(call, {k: str(v["local"]) for k, v in media.items()})
+            # The app's own gate on the real files, as the Space runs it: what a dry run could
+            # only defer for a chained input is checked here, before anything is sent.
+            call = gated(call, {k: v["local"] for k, v in media.items()})
         except Exception as exc:  # noqa: BLE001 -- refused before dispatch: nothing billed
-            outcome.detail = f"the app refuses this call before reserving a GPU: {redact(exc)}"
-            outcome.category = "input"
             evidence.write("request.json", request)
-            ctx.ledger.append({**ledger_record, "at": _utcnow().isoformat(), "outcome": "failed",
-                               "error": outcome.detail})
-            evidence.write("result.json", {"outcome": "failed", "detail": outcome.detail})
-            return outcome
-        call = replace(call, app_frames=frames, app_notes=notes)
-        request["app_notes"] = list(notes)
-        request["app_frames"] = frames
+            return unsent(f"the app refuses this call before reserving a GPU: {redact(exc)}",
+                          _refusal_category(exc))
+        request.update(app_notes=list(call.app_notes), app_frames=call.app_frames, app_level=call.app_level,
+                       app_changes=[{"field": k, "sent": s, "runs": r} for k, s, r in call.app_changes])
         evidence.write("request.json", request)
 
         if call.loras:
@@ -1918,75 +2162,76 @@ def run_call(ctx: Session, call: Call) -> Outcome:
             evidence.write("request.json", request)
             rejected = [v for v in verdicts if v["staged"] is False]
             if rejected:
-                outcome.detail = f"LoRA not staged: {_plain(rejected[0]['verdict'])[:400]}"
-                outcome.category = "adapter"
-                ctx.ledger.append({**ledger_record, "at": _utcnow().isoformat(), "outcome": "failed",
-                                   "error": outcome.detail})
-                evidence.write("result.json", {"outcome": "failed", "detail": outcome.detail, "loras": verdicts})
-                return outcome
+                return unsent(f"LoRA not staged: {_plain(rejected[0]['verdict'])[:400]}", "adapter", loras=verdicts)
 
         uploaded = {kind: ctx.app.upload(item["local"]) for kind, item in media.items()}
         timing["uploaded_t"] = round(_monotonic() - started, 4)
         data = build_data(ctx.generate.input_types, generate_values(call, uploaded))
         deadline = _monotonic() + ctx.call_timeout
+        # Written down at its full reservation BEFORE it is sent, settled below: a call this
+        # process never comes back from still counts against the day.
+        ctx.ledger.append({**ledger_record, "kind": "call_start", "at": _utcnow().isoformat(),
+                           "billed_conservative": round(worst, 3)})
+        sent = True
+        evidence.write("result.json", {"outcome": "sent", "sent": True,
+                                       "note": "sent to the Space; replaced when the call completes"})
         try:
             message = _run_events(ctx, evidence, ctx.generate, data, session_hash, started, deadline, timing,
                                   "generate")
         except (CallTimeout, TransportError) as exc:
-            window = _monotonic() - started - timing.get("generate_process_starts_t", timing.get("generate_event_id_t", 0.0))
-            billed = max(window, reserved) * ctx.multiplier
+            billed = no_completion()
             outcome.status = "timeout" if isinstance(exc, CallTimeout) else "failed"
             outcome.detail = redact(str(exc))
             outcome.category = "timeout" if isinstance(exc, CallTimeout) else "transport"
-            outcome.billed_conservative = billed
-            timing.update(billed_conservative=billed, billed_rule="max(window, reservation) x multiplier: no completion")
-            ctx.ledger.append({**ledger_record, "at": _utcnow().isoformat(), "outcome": outcome.status,
-                               "billed_conservative": round(billed, 3), "error": outcome.detail})
+            timing.update(billed_conservative=round(billed, 3),
+                          billed_rule="max(window, reservation) x multiplier: no completion")
+            settle(outcome.status, billed, error=outcome.detail, category=outcome.category)
             evidence.write("timing.json", timing)
-            evidence.write("result.json", {"outcome": outcome.status, "detail": outcome.detail})
+            evidence.write("result.json", {"outcome": outcome.status, "sent": True, "detail": outcome.detail,
+                                           "category": outcome.category})
             return outcome
 
         start_t = timing.get("generate_process_starts_t", timing.get("generate_event_id_t", 0.0))
         window = max(0.0, timing["generate_completed_t"] - start_t)
-        billed = window * ctx.multiplier
         output = message.get("output") or {}
         data_out = list(output.get("data") or [])
         status = str(data_out[2]) if len(data_out) > 2 and data_out[2] is not None else ""
         record = _find_record(data_out, status)
-        worker = _record_value(record, "worker_seconds", "worker_elapsed_seconds", "elapsed_seconds")
-        worker_source = "record" if worker is not None else None
-        if worker is None:
-            worker = _reported_gpu_seconds(status)
-            worker_source = "the report's 'Took ... s, GPU time' (whole seconds)" if worker is not None else None
+        # The worker's own GPU time only from a structured record; the report's prose is not read.
+        worker = _record_value(record, "elapsed_seconds")
         billed_worker = None if worker is None else float(worker) * ctx.multiplier
         error = None
         if message.get("success") is False or message.get("msg") == "unexpected_error":
             error = output.get("error") or message.get("message") or (
                 "the Space raised an error and did not say what (its show_error is off)"
             )
-        refusal = quota_refusal(status, error, output.get("title"))
-        category = "quota" if refusal else _category(record, status)
-        if category == "quota" and refusal is None:
-            refusal = "the app classified the failure as quota"
+        missing = [index for index, track in enumerate(("video", "audio"))
+                   if track in call.exports and not (index < len(data_out) and _file_path(data_out[index]))]
+        failure = classify(record, title=output.get("title"), error=error, status=status) if error or missing \
+            else None
+        category = failure["category"] if failure else None
+        billed = 0.0 if category in UNBILLED_CATEGORIES else window * ctx.multiplier
         timing.update(window_seconds=round(window, 4), billed_conservative=round(billed, 3),
                       billed_worker=None if billed_worker is None else round(billed_worker, 3),
-                      worker_elapsed_seconds=worker, worker_seconds_source=worker_source,
-                      billed_rule="(completed - process_starts) x multiplier")
-        outcome.billed_conservative = billed
+                      worker_elapsed_seconds=worker,
+                      billed_rule=f"zero: the platform refused ({category}) before a GPU was used"
+                      if category in UNBILLED_CATEGORIES else "(completed - process_starts) x multiplier")
         outcome.category = category
-        ctx.ledger.append({**ledger_record, "at": _utcnow().isoformat(),
-                           "outcome": "quota_refusal" if refusal else "completed",
-                           "billed_conservative": round(billed, 3),
-                           "billed_worker": None if billed_worker is None else round(billed_worker, 3),
-                           "error": redact(refusal or error or "") or None, "category": category})
+        words = (failure or {}).get("platform_words")
+        closing = ("quota_refusal" if category == "quota" else "platform_refusal" if category in UNBILLED_CATEGORIES
+                   else "failed" if failure else "completed")
+        settle(closing, billed,
+               billed_worker=None if billed_worker is None else round(billed_worker, 3),
+               error=redact(words or error or (_plain(status)[:600] if failure else "")) or None,
+               category=category)
         evidence.write("timing.json", timing)
         result = {"success": message.get("success"), "status_markdown": status, "status_text": _plain(status),
                   "error": error, "title": output.get("title"), "record": record, "category": category,
-                  "outputs": data_out}
+                  "classified": failure, "outputs": data_out}
 
-        if refusal:
+        if category == "quota":
             outcome.status = "quota"
-            outcome.detail = redact(error or _plain(status) or refusal)
+            outcome.detail = redact(error or _plain(status) or words)
             evidence.write("result.json", {**result, "outcome": "quota"})
             return outcome
 
@@ -2002,9 +2247,9 @@ def run_call(ctx: Session, call: Call) -> Outcome:
         timing["downloaded_t"] = round(_monotonic() - started, 4)
         evidence.write("timing.json", timing)
         result["artifacts"] = {k: {"path": str(v), "bytes": v.stat().st_size, "sha256": _sha256(v)} for k, v in artifacts.items()}
-        missing = [track for track in call.exports if track not in artifacts]
-        if error or missing:
-            outcome.detail = redact(error or f"no {' and '.join(missing)} file; the Space said: {_plain(status)[:600]}")
+        if failure:
+            tracks = " and ".join(("video", "audio")[index] for index in missing)
+            outcome.detail = redact(error or f"no {tracks} file; the Space said: {_plain(status)[:600]}")
             outcome.status = "failed"
             evidence.write("result.json", {**result, "outcome": "failed", "detail": outcome.detail})
             return outcome
@@ -2019,16 +2264,22 @@ def run_call(ctx: Session, call: Call) -> Outcome:
         evidence.write("result.json", {**result, "outcome": outcome.status, "detail": outcome.detail})
         ctx.produced[call.label] = {k: str(v) for k, v in artifacts.items()}
         return outcome
+    except KeyboardInterrupt:
+        # Recorded, then the invocation stops. A sent call is charged as one that never completed.
+        if sent and message is None:
+            settle("interrupted", no_completion(), error="interrupted while the Space was running it")
+        evidence.write("result.json", {"outcome": "interrupted", "sent": sent,
+                                       "completed": message is not None})
+        raise
     except Exception as exc:  # noqa: BLE001 -- recorded, then the plan stops (or keeps going)
         outcome.status = "failed"
         outcome.category = outcome.category or "harness"
         outcome.detail = redact(f"{type(exc).__name__}: {exc}")
-        if message is None and "generate_event_id_t" in timing:
-            billed = max(_monotonic() - started, reserved) * ctx.multiplier
-            outcome.billed_conservative = billed
-            ctx.ledger.append({**ledger_record, "at": _utcnow().isoformat(), "outcome": "failed",
-                               "billed_conservative": round(billed, 3), "error": outcome.detail})
-        evidence.write("result.json", {"outcome": "failed", "detail": outcome.detail,
+        if sent and message is None:
+            settle("failed", no_completion(), error=outcome.detail, category=outcome.category)
+        elif not sent:
+            settle("failed", 0.0, error=outcome.detail, category=outcome.category)
+        evidence.write("result.json", {"outcome": "failed", "sent": sent, "detail": outcome.detail,
                                        "traceback": redact("".join(traceback.format_exception(exc)))})
         return outcome
     finally:
@@ -2045,8 +2296,50 @@ def _duration(delta: timedelta) -> str:
 # ---------------------------------------------------------------------------
 
 
+def schedule_days(costs: list[float], *, spent: float, ceiling: float) -> list[list[int]]:
+    """The calls (by index) each UTC day can run at worst case, every call billed its full
+    reservation: today first, from what the ledger already holds, then whole days from zero."""
+    days: list[list[int]] = [[]]
+    running = spent
+    for index, cost in enumerate(costs):
+        if running + cost > ceiling and (days[-1] or running > 0):
+            days.append([])
+            running = 0.0
+        days[-1].append(index)
+        running += cost
+    return days
+
+
+def _span(indexes: list[int], calls: list[Call], offset: int) -> str:
+    first, last = indexes[0], indexes[-1]
+    numbers = f"#{first + 1 + offset}" if first == last else f"#{first + 1 + offset}-{last + 1 + offset}"
+    labels = calls[first].label if first == last else f"{calls[first].label} .. {calls[last].label}"
+    return f"calls {numbers:<7} {labels}"
+
+
+def _levels_line(call: Call) -> str | None:
+    if call.app_level is None:
+        return None
+    from ltx25_studio import audio_conditioning
+
+    name = "VIDEO_VARIATION_LEVELS" if _varies_clip(call.spec) else "VARIATION_LEVELS"
+    levels = getattr(audio_conditioning, name, ())
+    shown = f"; the mode's levels: {', '.join(f'{v:g}' for v in levels)}" if levels else ""
+    return f"      level     {call.app_level:g} (noise_scale {call.value('noise_scale')!r}{shown})"
+
+
+def _gate_line(call: Call) -> str | None:
+    if call.gate == GATE_ACCEPTED:
+        return "      app gate  generate.prepare_request accepts it, run as on the Space (ZeroGPU, CUDA)"
+    if call.gate == GATE_DEFERRED:
+        sources = ", ".join(f"{kind} from {call.media[kind].from_call}" for kind in call.chained)
+        return (f"      app gate  checked when it exists: its {sources} is made by that call, and "
+                f"generate.prepare_request runs on the file before anything is sent (a refusal bills nothing)")
+    return None
+
+
 def render_plan(calls: list[Call], *, base_seconds: int, multiplier: float, spent: float, ceiling: float,
-                live: bool, ledger_note: str) -> list[str]:
+                live: bool, ledger_note: str, resume_command: str = "", skipped=(), offset: int = 0) -> list[str]:
     lines = [
         "=== PLAN — LIVE: this WILL spend GPU-seconds ===" if live
         else "=== PLAN — DRY RUN: nothing is contacted and nothing is spent ===",
@@ -2054,25 +2347,26 @@ def render_plan(calls: list[Call], *, base_seconds: int, multiplier: float, spen
         f"multiplier x{multiplier:g} · ceiling {ceiling:.0f} GPU-s/UTC day",
         f"  {ledger_note}",
     ]
+    if skipped:
+        lines.append(f"  resume       {len(skipped)} call(s) already have an outcome in --out and are skipped, "
+                     f"never re-run: " + ", ".join(f"{label} ({state})" for label, state in skipped))
+    costs: list[float] = []
     running = spent
-    binds = None
-    for number, call in enumerate(calls, start=1):
+    for number, call in enumerate(calls, start=1 + offset):
         reserved = reservation_seconds(call, base_seconds=base_seconds)
         worst = reserved * multiplier
+        costs.append(worst)
         running += worst
-        if binds is None and running > ceiling:
-            binds = number
         parts = [f"base {base_seconds}"]
         if call.stage_2:
             parts.append("x1.5 stage 2")
         if call.loras:
             parts.append(f"+{zerogpu.LORA_DURATION_SECONDS} LoRA")
-        if call.value("enhance_prompt"):
+        if call.runs("enhance_prompt"):
             parts.append(f"+{zerogpu.ENHANCE_DURATION_SECONDS} enhancer")
         lines.append("")
         lines.append(f"  {number:>2}. {call.label}  [{call.mode}]")
-        request = {k: v for k, v in resolved_request(call).items()}
-        lines.append(f"      request   {json.dumps(request, sort_keys=False, default=str)}")
+        lines.append(f"      request   {json.dumps(resolved_request(call), sort_keys=False, default=str)}")
         for kind, item in call.media.items():
             if item.chained:
                 where = f"chained from {item.from_call}" + (f" (frame {item.frame})" if kind == "image" else "")
@@ -2080,31 +2374,69 @@ def render_plan(calls: list[Call], *, base_seconds: int, multiplier: float, spen
                 where = str(item.path)
             lines.append(f"      {kind:<9} {where}")
         for lora in call.loras:
-            lines.append(f"      lora      {lora.source} at {lora.weight:g} via {'upload' if lora.local else 'Hub id'}")
+            line = f"      lora      {lora.source} at {lora.weight:g} via {'upload' if lora.local else 'Hub id'}"
+            if lora.needs_weight_route:
+                line += (f": a strength other than {staged_lora_weight():g} needs a public route that sets it "
+                         f"({LORA_WEIGHT_ENDPOINT} with index and weight). --live checks the Space for one "
+                         f"before anything is spent and refuses the plan without it (exit 2); "
+                         f"--skip {call.label} runs the rest")
+            lines.append(line)
+        gate = _gate_line(call)
+        if gate:
+            lines.append(gate)
+        shown = [f"{key} {ran!r} (sent {sent!r})" for key, sent, ran in call.app_changes
+                 if key in call.values or key in ("num_frames", "auto_duration")]
+        if shown:
+            lines.append(f"      app runs  {' · '.join(shown)}")
+        level = _levels_line(call)
+        if level:
+            lines.append(level)
+        for note in call.app_notes:
+            lines.append(f"      app       {note}")
         geometry = call.expected_geometry()
         expect = {"geometry": f"{geometry[0]}x{geometry[1]}" if geometry else None,
                   "frames": call.expected_frames(),
                   **{k: v for k, v in call.expect.items() if k not in ("width", "height", "frames")}}
         lines.append(f"      expect    {json.dumps({k: v for k, v in expect.items() if v is not None})}")
-        for note in call.app_notes:
-            lines.append(f"      app       {note}")
         lines.append(f"      reserve   {reserved} s ({', '.join(parts)}) -> worst case <= {worst:.0f} GPU-s; "
                      f"day total <= {running:.0f}")
+        if worst > ceiling:
+            lines.append(f"      NEVER RUNS under this ceiling: its worst case alone passes {ceiling:.0f} GPU-s")
     plan_total = running - spent
+    days = schedule_days(costs, spent=spent, ceiling=ceiling)
+    today = _utcnow()
     lines += [
         "",
         f"  this plan    <= {plan_total:.0f} GPU-s worst case (every call at its full reservation)",
-        f"  today        <= {spent:.1f} GPU-s already on the ledger (UTC {utc_day()})",
+        f"  today        <= {spent:.1f} GPU-s already on the ledger (UTC {utc_day(today)})",
         f"  remaining    {max(0.0, ceiling - spent):.1f} GPU-s before the {ceiling:.0f} ceiling",
+        f"  days         {len(days)} UTC day(s) at worst case under the {ceiling:.0f} GPU-s ceiling:",
     ]
-    if binds is None:
+    for index, members in enumerate(days):
+        when = utc_day(today + timedelta(days=index)) + (" (today)" if index == 0 else "")
+        if not members:
+            lines.append(f"                 day {index + 1}  UTC {when:<18}  nothing fits in what is left today")
+            continue
+        total = sum(costs[i] for i in members)
+        lines.append(f"                 day {index + 1}  UTC {when:<18}  <= {total:>4.0f} GPU-s  "
+                     f"{_span(members, calls, offset)}")
+    if len(days) == 1:
         lines.append(f"  verdict      FITS, with {ceiling - running:.0f} GPU-s to spare at worst case")
     else:
+        stop = days[1][0]
         lines.append(
-            f"  verdict      DOES NOT FIT: call #{binds} ({calls[binds - 1].label}) is where the ceiling binds. "
-            f"It and everything after it will be refused, not started. The UTC day rolls over at "
-            f"{next_utc_midnight().isoformat().replace('+00:00', 'Z')}."
+            f"  verdict      DOES NOT FIT: call #{stop + 1 + offset} ({calls[stop].label}) is where the ceiling "
+            f"binds at worst case. A live run checks the ledger before every call and refuses, with exit 3 "
+            f"and nothing sent, the first call that could pass the ceiling; a call bills its measured window, "
+            f"usually far less than its reservation, so a live day usually runs further than this. The UTC day "
+            f"rolls over at {next_utc_midnight(today).isoformat().replace('+00:00', 'Z')}."
         )
+        if resume_command:
+            lines += [
+                "  resume       on the next UTC day, run the same plan with --resume: every call that has an "
+                "outcome in --out is skipped by label, never re-run, and the rest runs:",
+                f"                 {resume_command}",
+            ]
     lines.append("  Every figure is an UPPER BOUND, not measured billing.")
     return lines
 
@@ -2139,10 +2471,17 @@ read-only subcommands (one GET each, no GPU time; see `<command> --help`):
   logs --out FILE   save the Space's runtime (or build) log
 
 plan file: a JSON list of calls, or {{"defaults": {{...}}, "calls": [...]}}. A call has a "label",
-a "mode", any {ENDPOINT} field by its key, input media as file paths under --assets-dir
-("image", "video", "audio") or {{"from_call": "<earlier label>", "frame": 0}}, optional "loras"
-([{{"source": "<hub id>" | "<file.safetensors>", "weight": 1.0}}]) and optional "expect"
-({", ".join(sorted(_EXPECT_KEYS))}).
+a "mode", any {ENDPOINT} field by its key (a choice by its value or its label, e.g. "decoder":
+"Best quality"), input media as file paths under --assets-dir ("image", "video", "audio") or
+{{"from_call": "<earlier label>", "frame": 0}}, optional "loras" ([{{"source": "<hub id>" |
+"<file.safetensors>", "weight": 0.8}}]) and optional "expect" ({", ".join(sorted(_EXPECT_KEYS))}).
+Every call whose inputs exist goes through the app's own gate (generate.prepare_request) in the
+dry run, as the Space runs it; a call with an input made by an earlier call is gated when that
+file exists, before anything is sent.
+
+a plan longer than one day: run it with --out DIR; when it stops at the ceiling (exit 3), run the
+same command with --resume on the next UTC day. Calls with an outcome in DIR are skipped by
+label, never re-run; a failed one is re-run only if you move its folder out of DIR.
 
 exit codes: 0 plan complete · 2 illegal plan or contract mismatch (nothing spent) · 3 stopped at
 the ceiling · 4 platform quota refusal · 5 a call failed (still 5 with --keep-going)
@@ -2162,6 +2501,7 @@ def _run_parser() -> argparse.ArgumentParser:
                       "(the default when no --mode is given)")
     plan.add_argument("--modes", help="with --plan default: comma-separated mode ids, run in that order")
     plan.add_argument("--only", help="comma-separated call labels: run only these calls of the plan")
+    plan.add_argument("--skip", help="comma-separated call labels: leave these calls of the plan out")
     plan.add_argument("--assets-dir", help="where relative media and LoRA paths resolve (default: the plan "
                       "file's folder)")
     plan.add_argument("--mode", help="a single call from flags: the mode id")
@@ -2195,6 +2535,8 @@ def _run_parser() -> argparse.ArgumentParser:
                      help=f"the Space's LTX25_ZEROGPU_SIZE; zerogpu.quota_multiplier turns it into the quota "
                      f"factor (default {DEFAULT_ZEROGPU_SIZE}, which counts double)")
     run.add_argument("--out", help="evidence directory, one folder per call label. Required with --live.")
+    run.add_argument("--resume", action="store_true", help="continue a plan in its --out: every call with an "
+                     "outcome there is skipped by label and never re-run (a dry run shows what is left)")
     run.add_argument("--keep-going", action="store_true", help="after a failed call, run the rest of the plan "
                      "(a quota refusal or the ceiling still stops at once)")
     run.add_argument("--call-timeout", type=float, default=DEFAULT_CALL_TIMEOUT_SECONDS,
@@ -2255,6 +2597,10 @@ def _flag_values(args) -> dict:
     return {k: v for k, v in values.items() if v is not None}
 
 
+def _labels(text: str | None) -> list[str]:
+    return [label.strip() for label in (text or "").split(",") if label.strip()]
+
+
 def build_calls(args) -> list[Call]:
     flags = _flag_values(args)
     single = args.mode is not None
@@ -2289,18 +2635,20 @@ def build_calls(args) -> list[Call]:
             raise PlanError(f"{', '.join('--' + k.replace('_', '-') for k in flags)}: a plan file sets its own "
                             "fields; edit the file")
         calls = load_plan(args.plan, assets_dir=Path(args.assets_dir).expanduser() if args.assets_dir else None)
-    if args.only:
-        wanted = [label.strip() for label in args.only.split(",") if label.strip()]
-        known = {c.label for c in calls}
+    known = {c.label for c in calls}
+    for flag, wanted in (("--only", _labels(args.only)), ("--skip", _labels(args.skip))):
         unknown = [label for label in wanted if label not in known]
         if unknown:
-            raise PlanError(f"--only: no call labelled {unknown} (labels: {sorted(known)})")
-        calls = [c for c in calls if c.label in wanted]
-        chosen = {c.label for c in calls}
-        for call in calls:
-            for item in call.media.values():
-                if item.chained and item.from_call not in chosen:
-                    raise PlanError(f"--only: {call.label} chains from {item.from_call}, which is not selected")
+            raise PlanError(f"{flag}: no call labelled {unknown} (labels: {sorted(known)})")
+    if args.only:
+        calls = [c for c in calls if c.label in _labels(args.only)]
+    if args.skip:
+        calls = [c for c in calls if c.label not in _labels(args.skip)]
+    chosen = {c.label for c in calls}
+    for call in calls:
+        for item in call.media.values():
+            if item.chained and item.from_call not in chosen:
+                raise PlanError(f"{call.label} chains from {item.from_call}, which --only/--skip leaves out")
     return calls
 
 
@@ -2310,6 +2658,62 @@ def _is_number(text: str) -> bool:
     except ValueError:
         return False
     return True
+
+
+# ---------------------------------------------------------------------------
+# resuming a plan in its --out
+# ---------------------------------------------------------------------------
+
+
+def evidence_state(folder: Path) -> dict | None:
+    """What an earlier invocation left in ``--out/<label>/``; None when it holds nothing."""
+    if not folder.is_dir() or not any(folder.iterdir()):
+        return None
+    try:
+        result = json.loads((folder / "result.json").read_text())
+    except FileNotFoundError:
+        # A call writes result.json before it is sent: nothing of this one reached the Space.
+        return {"outcome": "unsent", "sent": False}
+    except (OSError, ValueError):
+        return {"outcome": "unreadable", "sent": True}
+    if not isinstance(result, dict):
+        return {"outcome": "unreadable", "sent": True}
+    artifacts = {track: info.get("path") for track, info in (result.get("artifacts") or {}).items()
+                 if isinstance(info, dict) and info.get("path")}
+    return {"outcome": str(result.get("outcome") or "unknown"), "sent": result.get("sent", True) is not False,
+            "artifacts": artifacts}
+
+
+def _runs_again(state: dict | None) -> bool:
+    """Only a call nothing of which reached the Space runs on --resume; nothing is retried."""
+    return state is None or state["outcome"] == "unsent" or (state["outcome"] == "interrupted" and not state["sent"])
+
+
+def resume_split(out_dir: Path, calls: list[Call]) -> tuple[list[Call], list[tuple[str, str]], dict]:
+    """``(calls still to run, (label, outcome) of those skipped, artifacts of the finished ones)``."""
+    remaining, skipped, produced = [], [], {}
+    for call in calls:
+        state = evidence_state(out_dir / call.label)
+        if _runs_again(state):
+            remaining.append(call)
+            continue
+        skipped.append((call.label, state["outcome"]))
+        if state["outcome"] in ("ok", "mismatch") and state.get("artifacts"):
+            produced[call.label] = state["artifacts"]
+    return remaining, skipped, produced
+
+
+def _resume_command(argv: list[str]) -> str:
+    """The command that continues this plan on the next UTC day."""
+    import shlex
+
+    words = [w for w in argv if w not in ("--dry-run", "--live", "--resume")]
+    extra = []
+    if not any(w == "--out" or w.startswith("--out=") for w in words):
+        extra += ["--out", "<DIR>"]
+    if not any(w == "--quota-ledger" or w.startswith("--quota-ledger=") for w in words):
+        extra += ["--quota-ledger", "<LEDGER>"]
+    return " ".join(["python scripts/space_matrix.py", shlex.join(words), *extra, "--live", "--resume"]).replace("  ", " ")
 
 
 class _Out:
@@ -2347,9 +2751,17 @@ def main(argv=None, *, log=print) -> int:
     if live and not args.out:
         out("--live needs --out DIR for the per-call evidence.")
         return EXIT_ILLEGAL
+    if args.resume and not args.out:
+        out("--resume needs --out DIR: the evidence folder of the run it continues.")
+        return EXIT_ILLEGAL
+    skipped: list = []
+    produced: dict = {}
+    if args.resume:
+        calls, skipped, produced = resume_split(Path(args.out).expanduser(), calls)
     try:
         spent = ledger.spent(utc_day()) if ledger else 0.0
         previous = ledger.previous_day(utc_day()) if ledger else None
+        unsettled = ledger.unsettled() if ledger else []
     except QuotaLedgerUnreadable as exc:
         out(str(exc))
         return EXIT_ILLEGAL
@@ -2359,23 +2771,36 @@ def main(argv=None, *, log=print) -> int:
         note = f"ledger {ledger.path}: <= {spent:.1f} GPU-s on UTC {utc_day()}"
         if previous:
             note += f" (the last earlier day, UTC {previous[0]}, ended at <= {previous[1]:.1f})"
+        if unsettled:
+            note += (f"; {len(unsettled)} call(s) sent and never settled ("
+                     f"{', '.join(str(r.get('label')) for r in unsettled)}) count at their full reservation")
+    if not calls:
+        out(f"  {note}")
+        out(f"nothing left to run: every call of the plan has an outcome in {args.out}"
+            if skipped else "nothing to run")
+        return EXIT_OK
     for line in render_plan(calls, base_seconds=args.reservation_seconds, multiplier=multiplier, spent=spent,
-                            ceiling=args.quota_ceiling, live=live, ledger_note=note):
+                            ceiling=args.quota_ceiling, live=live, ledger_note=note,
+                            resume_command=_resume_command(argv), skipped=skipped):
         out(line)
     if not live:
         out("")
         out("DRY RUN: every call above was validated offline. Nothing was contacted, ZERO GPU-seconds were "
             "spent, and the ledger was read, not written. Add --live to execute.")
         return EXIT_OK
-    return _live(args, calls, ledger, multiplier, out)
+    return _live(args, calls, ledger, multiplier, out, skipped=skipped, produced=produced,
+                 resume_command=_resume_command(argv))
 
 
-def _live(args, calls: list[Call], ledger: Ledger, multiplier: float, out) -> int:
+def _live(args, calls: list[Call], ledger: Ledger, multiplier: float, out, *, skipped=(), produced=None,
+          resume_command: str = "") -> int:
     out_dir = Path(args.out).expanduser()
-    taken = [c.label for c in calls if (out_dir / c.label).exists() and any((out_dir / c.label).iterdir())]
-    if taken:
-        out(f"{out_dir} already holds evidence for {taken}; use a fresh --out so runs never mix.")
-        return EXIT_ILLEGAL
+    if not args.resume:
+        taken = [c.label for c in calls if (out_dir / c.label).exists() and any((out_dir / c.label).iterdir())]
+        if taken:
+            out(f"{out_dir} already holds evidence for {taken}; use a fresh --out so runs never mix, or "
+                f"--resume to run only the calls that have no outcome there.")
+            return EXIT_ILLEGAL
     secret = read_token()
     if secret is None:
         out(f"no token: set HF_TOKEN or log in so {token_path()} exists. The Space is private.")
@@ -2431,15 +2856,24 @@ def _live(args, calls: list[Call], ledger: Ledger, multiplier: float, out) -> in
 
     invocation = uuid.uuid4().hex[:12]
     ledger.append({"kind": "invocation", "utc_day": utc_day(), "at": _utcnow().isoformat(), "invocation": invocation,
-                   "space": args.space, "space_sha": sha, "calls": [c.label for c in calls]})
+                   "space": args.space, "space_sha": sha, "calls": [c.label for c in calls],
+                   "skipped": [label for label, _state in skipped], "out": str(out_dir)})
     ctx = Session(app=app, generate=generate, lora=route, ledger=ledger, out=out_dir, log=out,
                   invocation=invocation, ceiling=args.quota_ceiling, base_seconds=args.reservation_seconds,
                   multiplier=multiplier, call_timeout=args.call_timeout, read_timeout=args.read_timeout,
-                  sampling_rate=args.sampling_rate, space_sha=sha)
+                  sampling_rate=args.sampling_rate, space_sha=sha, produced=dict(produced or {}))
+    for label, state in skipped:
+        out(f"  {label:<32} skipped: it has an outcome in {out_dir} ({state})")
     outcomes: list[Outcome] = []
     code = EXIT_OK
     stop = ""
     for call in calls:
+        folder = out_dir / call.label
+        if folder.exists() and any(folder.iterdir()):
+            # --resume: an earlier attempt nothing of which reached the Space; kept, moved aside.
+            aside = folder.with_name(f"{folder.name}.unsent-{invocation}")
+            folder.rename(aside)
+            out(f"  {call.label}: its earlier attempt was never sent; its folder is now {aside.name}")
         try:
             outcome = run_call(ctx, call)
         except CeilingReached as exc:
@@ -2481,6 +2915,7 @@ def _live(args, calls: list[Call], ledger: Ledger, multiplier: float, out) -> in
         "space_sha": sha,
         "exit_code": code,
         "stopped": stop or None,
+        "skipped": [{"label": label, "outcome": state} for label, state in skipped],
         "calls": [{"label": o.label, "status": o.status, "category": o.category, "detail": o.detail,
                    "reserved_seconds": o.reserved, "billed_conservative": round(o.billed_conservative, 3),
                    "flags": o.flags, "audio": o.audio or None} for o in outcomes],
@@ -2491,6 +2926,7 @@ def _live(args, calls: list[Call], ledger: Ledger, multiplier: float, out) -> in
         "ceiling": args.quota_ceiling,
     }
     (out_dir / "summary.json").write_text(_redacted_json(summary))
+    (out_dir / f"summary-{invocation}.json").write_text(_redacted_json(summary))
     out("\n=== SUMMARY ===")
     for o in outcomes:
         out(f"  {o.label:<32} {o.status:<9} <= {o.billed_conservative:7.1f} GPU-s"
@@ -2500,6 +2936,8 @@ def _live(args, calls: list[Call], ledger: Ledger, multiplier: float, out) -> in
     out(f"  this invocation <= {this_run:.1f} GPU-s · today (UTC {day}) <= {spent_today:.1f} of {args.quota_ceiling:.0f}"
         " · UPPER BOUNDS from wall clock, not measured billing")
     out(f"  evidence {out_dir} · ledger {ledger.path}")
+    if summary["not_run"] and code == EXIT_CEILING and resume_command:
+        out(f"  the rest runs after the UTC day rolls over, with:\n    {resume_command}")
     return code
 
 

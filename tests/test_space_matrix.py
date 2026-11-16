@@ -458,7 +458,52 @@ def test_the_default_plan_covers_every_mode_and_writes_its_chains_out():
             assert item.chained, f"{call.label}: the default plan's {kind} must be an explicit chain"
             assert {"image": "video", "video": "video", "audio": "audio"}[kind] in produced
         produced |= set(call.exports)
+        # A chained input does not exist yet: the app's gate runs on it once it does.
+        assert call.gate == (space_matrix.GATE_DEFERRED if call.media else space_matrix.GATE_ACCEPTED), call.label
     assert calls[0].render_size == (space_matrix.CHEAPEST_SIZE, space_matrix.CHEAPEST_SIZE)
+    code, lines = run(["--plan", "default"])
+    assert code == space_matrix.EXIT_OK
+    assert sum("app gate  checked when it exists" in line for line in lines) == sum(bool(c.media) for c in calls)
+
+
+def test_a_chained_input_waits_for_its_file_and_real_files_still_pass_the_gate(tmp_path, monkeypatch):
+    """Deferring a chained input never weakens the check of a file that exists, and a call whose
+    inputs all exist always goes through ``generate.prepare_request``."""
+    from ltx25_studio import generate
+
+    (tmp_path / "not-a-video.mp4").write_bytes(b"not a video")
+    write_video(tmp_path / "clip.mp4")
+    seen: list[str] = []
+    real = generate.prepare_request
+    monkeypatch.setattr(generate, "prepare_request", lambda request: (seen.append(request.mode), real(request))[1])
+    v2v = {"label": "v2v", "mode": "video_to_video", "width": SIZE, "height": SIZE, "noise_scale": 0.725}
+    calls = space_matrix.parse_plan(
+        [t2v(), {**v2v, "video": {"from_call": "t2v"}}, {**v2v, "label": "file", "video": "clip.mp4"}], base=tmp_path)
+    assert [c.gate for c in calls] == [space_matrix.GATE_ACCEPTED, space_matrix.GATE_DEFERRED,
+                                       space_matrix.GATE_ACCEPTED]
+    assert seen == ["text_to_video", "video_to_video"], "the gate ran on every call whose inputs exist"
+    assert calls[2].app_frames == 9 and calls[1].expected_frames() is None, "a clip sets the length once it exists"
+    with pytest.raises(space_matrix.PlanError) as caught:
+        space_matrix.parse_plan([t2v(), {**v2v, "video": {"from_call": "t2v"}},
+                                 {**v2v, "label": "file", "video": "not-a-video.mp4"}], base=tmp_path)
+    assert "file" in str(caught.value) and "could not be opened as a video" in str(caught.value)
+    assert "'v2v'" not in str(caught.value)
+
+
+def test_a_chained_input_is_gated_on_its_file_before_anything_is_sent(tmp_path, space):
+    """Live, the app's gate runs on the produced file; a refusal there sends nothing and bills nothing."""
+    short = write_wav(tmp_path / "short.wav", blocks=16)  # 0.34 s
+    fake = space().reply(Reply(audio=short))
+    calls = [{"label": "t2a", "mode": "text_to_audio", "prompt": "rain"},
+             {"label": "a2v", "mode": "audio_to_video", "audio": {"from_call": "t2a"}, "width": SIZE,
+              "height": SIZE, "num_frames": 121}]
+    code, lines, out, ledger = live(tmp_path, fake, calls)
+    assert code == space_matrix.EXIT_CALL_FAILED, "\n".join(lines)
+    assert len(fake.joins_for("/on_generate")) == 1 and sum(p == "/gradio_api/upload" for p in fake.paths()) == 0
+    record = call_records(ledger)[-1]
+    assert record["label"] == "a2v" and record["billed_conservative"] == 0.0 and record["category"] == "input"
+    result = json.loads((out / "a2v" / "result.json").read_text())
+    assert result["sent"] is False and "shorter than the 5.04 s video" in result["detail"]
 
 
 def test_an_unknown_mode_and_an_illegal_override_are_usage_errors():
@@ -552,6 +597,83 @@ def test_an_audio_mode_takes_its_length_from_the_audio(tmp_path, space):
     assert json.loads((out / "a2v" / "verify.json").read_text())["expected"]["frames"] == frames
 
 
+@pytest.mark.parametrize("device", ["cpu", "mps", None])
+def test_the_gate_runs_as_the_space_whatever_this_machine_is(device, monkeypatch):
+    """Stage 2 and the diffusion decoder are refused off CUDA. The gate answers for the Space
+    (ZeroGPU, CUDA), never for this machine's LTX25_DEVICE, and leaves this machine as it was."""
+    from ltx25_studio import device as device_module
+    from ltx25_studio import generate
+
+    if device is None:
+        monkeypatch.delenv("LTX25_DEVICE", raising=False)
+    else:
+        monkeypatch.setenv("LTX25_DEVICE", device)
+        monkeypatch.setattr(device_module, "host_has_mps", lambda: True)
+    before = device_module.current
+    stage_2 = t2v("s2", width=704, height=480, num_frames=49, enable_stage_2=True)
+    best = t2v("best", width=704, height=480, num_frames=121, decoder="diffusion")
+    for call in space_matrix.parse_plan([stage_2, best], base=Path.cwd()):
+        assert call.gate == space_matrix.GATE_ACCEPTED
+    assert device_module.current is before
+    if device is not None:
+        (call,) = space_matrix.parse_plan([stage_2], base=Path.cwd())
+        with pytest.raises(Exception, match="CUDA"):
+            generate.prepare_request(space_matrix._app_request(call, {}))
+
+
+def test_a_choice_is_sent_by_its_value_whichever_name_the_plan_uses(tmp_path, space):
+    # Above the diffusion decoder's smallest size, which the gate checks where its config is cached.
+    fake = space().reply(*[Reply(video=write_video(tmp_path / "v.mp4", frames=17, size=256))] * 3)
+    shape = {"width": 256, "height": 256, "num_frames": 17}
+    calls = [t2v("best", decoder="Best quality", **shape), t2v("fast", decoder="Fast", **shape),
+             t2v("value", decoder="conv", **shape)]
+    code, lines, _out, _ = live(tmp_path, fake, calls)
+    assert code == space_matrix.EXIT_OK, "\n".join(lines)
+    assert [c["params"]["decoder"] for c in fake.generate_calls] == ["diffusion", "conv", "conv"]
+    with pytest.raises(space_matrix.PlanError) as caught:
+        space_matrix.parse_plan([t2v(decoder="Turbo")], base=tmp_path)
+    assert "'diffusion' (Best quality)" in str(caught.value) and "'conv' (Fast)" in str(caught.value)
+
+
+def test_a_variation_mode_shows_the_level_the_app_runs(tmp_path):
+    """The level comes from the mode's own kwargs; the published noise_scale default (0.5) is not
+    the clip's default level, so a plan states the level it means."""
+    from ltx25_studio import audio_conditioning
+
+    write_video(tmp_path / "clip.mp4")
+    write_wav(tmp_path / "sound.wav", blocks=60)
+    v2v = {"label": "v2v", "mode": "video_to_video", "video": "clip.mp4", "width": SIZE, "height": SIZE}
+    a2a = {"label": "a2a", "mode": "audio_to_audio", "audio": "sound.wav", "auto_duration": True}
+    plan = [{**v2v, "noise_scale": audio_conditioning.DEFAULT_VIDEO_LEVEL}, {**v2v, "label": "v2v-default"},
+            {**a2a, "noise_scale": 0.73}, t2v()]
+    calls = space_matrix.parse_plan(plan, base=tmp_path)
+    assert [c.app_level for c in calls] == [audio_conditioning.DEFAULT_VIDEO_LEVEL, 0.421875, 0.725, None]
+    path = tmp_path / "plan.json"
+    path.write_text(json.dumps(plan))
+    text = "\n".join(run(["--plan", str(path), "--assets-dir", str(tmp_path)])[1])
+    assert "level     0.909375 (noise_scale 0.909375; the mode's levels: 0.421875, 0.725, 0.909375)" in text
+    assert "level     0.725 (noise_scale 0.73" in text
+
+
+def test_skip_leaves_calls_out_and_refuses_a_broken_chain(tmp_path):
+    plan = tmp_path / "p.json"
+    plan.write_text(json.dumps([t2v(), t2v("b"), {"label": "c", "mode": "image_to_video", "width": SIZE,
+                                                   "height": SIZE, "image": {"from_call": "t2v"}}]))
+    code, lines = run(["--plan", str(plan), "--skip", "b"])
+    text = "\n".join(lines)
+    assert code == space_matrix.EXIT_OK and "1. t2v" in text and "2. c" in text and ". b " not in text
+    assert run(["--plan", str(plan), "--skip", "t2v"])[0] == space_matrix.EXIT_ILLEGAL
+    assert run(["--plan", str(plan), "--skip", "nope"])[0] == space_matrix.EXIT_ILLEGAL
+
+
+def test_a_lora_weight_outside_the_apps_range_is_refused_offline(tmp_path):
+    with pytest.raises(space_matrix.PlanError) as caught:
+        space_matrix.parse_plan([t2v(loras=[{"source": "org/style", "weight": 2.5}])], base=tmp_path)
+    assert "2" in str(caught.value) and "org/style" in str(caught.value)
+    (call,) = space_matrix.parse_plan([t2v(loras=[{"source": "org/style", "weight": 2.0}])], base=tmp_path)
+    assert call.loras[0].needs_weight_route
+
+
 # ---------------------------------------------------------------------------
 # the dry run: the default, and it spends nothing
 # ---------------------------------------------------------------------------
@@ -629,6 +751,41 @@ def test_the_dry_run_says_where_the_ceiling_binds(tmp_path):
     assert "DOES NOT FIT: call #3 (c)" in text and "2026-11-17T00:00:00Z" in text
 
 
+def test_the_dry_run_schedules_the_days_and_says_how_to_resume(tmp_path):
+    """At worst case 5 calls of 360 fit a 1920 day: 7 calls take two days, and the second day's
+    command is the same one with --live --resume."""
+    plan = tmp_path / "plan.json"
+    plan.write_text(json.dumps([t2v(f"c{i}") for i in range(1, 8)]))
+    ledger, out = tmp_path / "ledger.jsonl", tmp_path / "runs"
+    code, lines = run(["--plan", str(plan), "--quota-ledger", str(ledger), "--out", str(out)])
+    text = "\n".join(lines)
+    assert code == space_matrix.EXIT_OK
+    assert "2 UTC day(s) at worst case" in text
+    assert "day 1  UTC 2026-11-16 (today)" in text and "<= 1800 GPU-s  calls #1-5    c1 .. c5" in text
+    assert "day 2  UTC 2026-11-17" in text and "<=  720 GPU-s  calls #6-7    c6 .. c7" in text
+    assert "DOES NOT FIT: call #6 (c6)" in text
+    assert (f"python scripts/space_matrix.py --plan {plan} --quota-ledger {ledger} --out {out} --live --resume"
+            in text)
+    assert not out.exists() and not ledger.exists(), "a dry run writes nothing"
+
+    seed_ledger(ledger, billed=1700.0)
+    text = "\n".join(run(["--plan", str(plan), "--quota-ledger", str(ledger)])[1])
+    assert "day 1  UTC 2026-11-16 (today)  nothing fits in what is left today" in text
+    assert "3 UTC day(s)" in text and "DOES NOT FIT: call #1 (c1)" in text and "--out <DIR>" in text
+    assert space_matrix.schedule_days([360.0] * 3, spent=0.0, ceiling=700.0) == [[0], [1], [2]]
+    assert space_matrix.schedule_days([2000.0, 10.0], spent=0.0, ceiling=1920.0) == [[0], [1]]
+
+
+def test_the_dry_run_never_reads_the_token(tmp_path, monkeypatch):
+    def refuse():
+        raise AssertionError("a dry run read the token")
+
+    monkeypatch.setattr(space_matrix, "read_token", refuse)
+    plan = tmp_path / "plan.json"
+    plan.write_text(json.dumps([t2v(), t2v("lora", loras=[{"source": "org/x"}])]))
+    assert run(["--plan", str(plan), "--quota-ledger", str(tmp_path / "l.jsonl")])[0] == space_matrix.EXIT_OK
+
+
 def test_the_safe_direction_wins_when_both_flags_are_given(tmp_path, space):
     fake = space()
     code, _lines = run(["--live", "--dry-run", "--modes", "text_to_video"], fake=fake)
@@ -690,8 +847,12 @@ def test_the_ledger_survives_invocations_and_is_append_only(tmp_path, space):
     first = ledger.read_text()
     assert live(tmp_path, fake, [t2v("b")], ledger=ledger)[0] == 0
     assert ledger.read_text().startswith(first), "records are appended, never rewritten"
-    kinds = [r["kind"] for r in ledger_lines(ledger)]
-    assert kinds == ["invocation", "call", "invocation", "call"]
+    records = ledger_lines(ledger)
+    assert [r["kind"] for r in records] == ["invocation", "call_start", "call"] * 2, (
+        "a call is written down at its full reservation before it is sent, then settled"
+    )
+    for start, settled in ((records[1], records[2]), (records[4], records[5])):
+        assert start["call_id"] == settled["call_id"] and start["billed_conservative"] == 360.0
     spent = space_matrix.Ledger(ledger).spent("2026-11-16")
     assert spent == pytest.approx(sum(r["billed_conservative"] for r in call_records(ledger)))
 
@@ -710,6 +871,111 @@ def test_a_new_utc_day_starts_from_zero_and_says_what_the_last_day_spent(tmp_pat
     assert code == space_matrix.EXIT_OK, text
     assert "UTC 2026-11-16, ended at <= 1900.0" in text
     assert call_records(ledger)[-1]["utc_day"] == "2026-11-17"
+
+
+def test_a_call_that_was_sent_and_never_settled_counts_at_its_full_reservation(tmp_path, space):
+    """A process killed mid-call leaves only its start record: the day counts its whole reservation."""
+    ledger = space_matrix.Ledger(tmp_path / "ledger.jsonl")
+    start = {"kind": "call_start", "call_id": "k1", "utc_day": "2026-11-16", "label": "killed",
+             "billed_conservative": 360.0}
+    ledger.append(start)
+    assert ledger.spent("2026-11-16") == 360.0 and [r["label"] for r in ledger.unsettled()] == ["killed"]
+    ledger.append({**start, "kind": "call", "billed_conservative": 41.5})
+    assert ledger.spent("2026-11-16") == 41.5 and ledger.unsettled() == []
+    ledger.append({**start, "call_id": "k2", "utc_day": "2026-11-15"})
+    assert ledger.previous_day("2026-11-16") == ("2026-11-15", 360.0)
+
+    fake = space()
+    killed = tmp_path / "killed.jsonl"
+    seed_ledger(killed, billed=1400.0)
+    space_matrix.Ledger(killed).append(start)
+    code, lines, _out, _ = live(tmp_path, fake, [t2v()], ledger=killed)
+    assert code == space_matrix.EXIT_CEILING and fake.joins == [], "1400 + 360 unsettled + 360 > 1920"
+    assert any("1 call(s) sent and never settled (killed)" in line for line in lines)
+
+
+def test_an_interrupted_call_is_charged_and_recorded(tmp_path, space, monkeypatch):
+    real = space_matrix._run_events
+
+    def interrupted(ctx, evidence, endpoint, data, session_hash, started, deadline, timing, key):
+        if key == "generate":
+            ctx.app.join(endpoint.fn_index, data, session_hash)
+            raise KeyboardInterrupt
+        return real(ctx, evidence, endpoint, data, session_hash, started, deadline, timing, key)
+
+    monkeypatch.setattr(space_matrix, "_run_events", interrupted)
+    fake = space()
+    with pytest.raises(KeyboardInterrupt):
+        live(tmp_path, fake, [t2v("a"), t2v("b")], out=tmp_path / "out")
+    records = ledger_lines(tmp_path / "ledger.jsonl")
+    assert [r["kind"] for r in records] == ["invocation", "call_start", "call"]
+    assert records[2]["outcome"] == "interrupted" and records[2]["billed_conservative"] >= 360.0
+    assert json.loads((tmp_path / "out" / "a" / "result.json").read_text())["outcome"] == "interrupted"
+    assert len(fake.joins_for("/on_generate")) == 1
+
+
+def test_a_failure_after_the_run_completed_still_charges_it(tmp_path, space, monkeypatch):
+    def broken(self, server_path, dest):
+        raise space_matrix.TransportError("the download broke")
+
+    monkeypatch.setattr(space_matrix.SpaceApp, "download", broken)
+    fake = space(step_delay=0.01).reply(Reply(video=write_video(tmp_path / "v.mp4")))
+    code, lines, out, ledger = live(tmp_path, fake, [t2v()])
+    assert code == space_matrix.EXIT_CALL_FAILED, "\n".join(lines)
+    (record,) = call_records(ledger)
+    timing = json.loads((out / "t2v" / "timing.json").read_text())
+    assert record["billed_conservative"] > 0 and record["outcome"] == "completed"
+    assert record["billed_conservative"] == pytest.approx(timing["window_seconds"] * 2, abs=1e-3)
+    assert space_matrix.Ledger(ledger).unsettled() == []
+    assert "the download broke" in json.loads((out / "t2v" / "result.json").read_text())["detail"]
+
+
+def test_a_plan_stopped_at_the_ceiling_resumes_the_next_day_without_rerunning(tmp_path, space, monkeypatch):
+    video = write_video(tmp_path / "v.mp4")
+    fake = space(step_delay=0.005).reply(*[Reply(video=video)] * 3)
+    ledger, out = tmp_path / "ledger.jsonl", tmp_path / "runs"
+    seed_ledger(ledger, billed=1559.99)
+    calls = [t2v("a"), {"label": "b", "mode": "image_to_video", "width": SIZE, "height": SIZE, "num_frames": 9,
+                         "image": {"from_call": "a", "frame": 0}}, t2v("c")]
+    code, lines, _out, _ = live(tmp_path, fake, calls, ledger=ledger, out=out)
+    text = "\n".join(lines)
+    assert code == space_matrix.EXIT_CEILING, text
+    assert "--live --resume" in text and len(fake.joins_for("/on_generate")) == 1
+    first = (out / "a" / "result.json").read_text()
+
+    monkeypatch.setattr(space_matrix, "_utcnow", lambda: datetime(2026, 11, 17, 0, 10, tzinfo=UTC))
+    dry = "\n".join(run(["--plan", str(next(tmp_path.glob("plan-*.json"))), "--out", str(out), "--resume"])[1])
+    assert "resume       1 call(s) already have an outcome in --out" in dry and "a (ok)" in dry
+    assert "1. b" in dry and "2. c" in dry
+    code, lines, _out, _ = live(tmp_path, fake, calls, "--resume", ledger=ledger, out=out)
+    assert code == space_matrix.EXIT_OK, "\n".join(lines)
+    assert [c["mode"] for c in fake.generate_calls] == ["text_to_video", "image_to_video", "text_to_video"]
+    assert (out / "a" / "result.json").read_text() == first, "a finished call is never re-run"
+    assert json.loads((out / "b" / "request.json").read_text())["media"]["image"]["from_call"] == "a"
+    summary = json.loads((out / "summary.json").read_text())
+    assert summary["skipped"] == [{"label": "a", "outcome": "ok"}]
+    assert [c["label"] for c in summary["calls"]] == ["b", "c"]
+    assert len(list(out.glob("summary-*.json"))) == 2
+
+
+def test_resume_never_retries_a_call_that_reached_the_space(tmp_path, space):
+    video = write_video(tmp_path / "v.mp4")
+    out = tmp_path / "runs"
+    fake = space().reply(Reply(kind="foreign_error", message="boom"), Reply(video=video), Reply(video=video))
+    calls = [t2v("failed"), t2v("killed"), t2v("unsent"), t2v("fresh")]
+    assert live(tmp_path, fake, calls[:1], out=out)[0] == space_matrix.EXIT_CALL_FAILED
+    (out / "killed").mkdir()
+    (out / "killed" / "result.json").write_text('{"outcome": "sent", "sent": true}')
+    (out / "unsent").mkdir()
+    (out / "unsent" / "request.json").write_text("{}")
+    code, lines, _out, _ = live(tmp_path, fake, calls, "--resume", out=out)
+    text = "\n".join(lines)
+    assert code == space_matrix.EXIT_OK, text
+    assert f"{'failed':<32} skipped: it has an outcome" in text and f"{'killed':<32} skipped" in text
+    assert [c["params"]["prompt"] for c in fake.generate_calls].count("a tram") == 3, "failed once, then two"
+    assert json.loads((out / "unsent" / "result.json").read_text())["outcome"] == "ok"
+    assert len(list(out.glob("unsent.unsent-*"))) == 1, "the earlier unsent attempt is kept, moved aside"
+    assert run(["--plan", "default", "--resume"])[0] == space_matrix.EXIT_ILLEGAL, "--resume needs --out"
 
 
 @pytest.mark.parametrize("content", ["{ not json", '{"utc_day": "2026-11-16", "spent_upper_bound": 3}\n',
@@ -763,9 +1029,83 @@ def test_other_text_is_not_a_quota_refusal(text):
     assert space_matrix.quota_refusal(text) is None
 
 
+#: The platform's words as ``spaces`` (zero/client.py) raises them, title then message.
+LIMIT_TITLE, LIMIT_MESSAGE = "ZeroGPU illegal duration", "The requested GPU duration (1020s) is larger than the maximum allowed"
+QUEUE_TITLE, QUEUE_MESSAGE = "ZeroGPU queue timeout", "No GPU was available after 60s. Retry later"
+
+
+def platform_card(message):
+    """A failure card as ``render.failure`` renders a ``gr.Error``: only its message survives."""
+    return ("### The run did not finish\n\nNothing ran. No GPU time was used. Press Generate again.\n\n"
+            f'<details class="mr-detail" open><summary>Detail</summary><p>&#x27;{message}&#x27;</p></details>')
+
+
+@pytest.mark.parametrize(
+    "text, category",
+    [(LIMIT_TITLE, "limit"), (LIMIT_MESSAGE, "limit"), (QUEUE_TITLE, "queue"), (QUEUE_MESSAGE, "queue"),
+     (platform_card(LIMIT_MESSAGE), "limit"), (QUOTA_MESSAGE, "quota"),
+     ("You have exceeded your ZeroGPU runs limit. ", "quota")],
+)
+def test_every_platform_refusal_is_named_by_its_category(text, category):
+    assert space_matrix.platform_refusal(text)[0] == category
+
+
+@pytest.mark.parametrize(
+    "reply, category",
+    [
+        (Reply(kind="app_error", status=platform_card(LIMIT_MESSAGE)), "limit"),
+        (Reply(kind="app_error", status=platform_card(QUEUE_MESSAGE)), "queue"),
+        (Reply(kind="raised", title=LIMIT_TITLE, message="larger than allowed"), "limit"),
+        (Reply(kind="app_error", status="### Busy", record={"category": "queue"}), "queue"),
+    ],
+)
+def test_a_limit_or_queue_refusal_bills_nothing_and_stops_like_a_failed_call(tmp_path, space, reply, category):
+    video = write_video(tmp_path / "v.mp4")
+    fake = space(step_delay=0.01).reply(reply)
+    code, lines, out, ledger = live(tmp_path, fake, [t2v("a"), t2v("b")])
+    assert code == space_matrix.EXIT_CALL_FAILED, "\n".join(lines)
+    assert len(fake.joins_for("/on_generate")) == 1, "stopped, never retried"
+    (record,) = call_records(ledger)
+    assert record["category"] == category and record["billed_conservative"] == 0.0
+    assert record["outcome"] == "platform_refusal" and space_matrix.Ledger(ledger).spent("2026-11-16") == 0.0
+    assert json.loads((out / "a" / "timing.json").read_text())["window_seconds"] > 0, "measured, not billed"
+    fake.reply(reply, Reply(video=video))
+    code, _lines, out, _ = live(tmp_path, fake, [t2v("a"), t2v("b")], "--keep-going")
+    assert code == space_matrix.EXIT_CALL_FAILED
+    assert [c["status"] for c in json.loads((out / "summary.json").read_text())["calls"]] == ["failed", "ok"]
+
+
+def test_an_unknown_category_is_recorded_as_it_came_and_billed(tmp_path, space):
+    fake = space(step_delay=0.01).reply(Reply(kind="app_error", status="### Odd", record={"category": "brand_new"}))
+    code, lines, out, ledger = live(tmp_path, fake, [t2v()])
+    assert code == space_matrix.EXIT_CALL_FAILED
+    (record,) = call_records(ledger)
+    assert record["category"] == "brand_new" and record["billed_conservative"] > 0
+    result = json.loads((out / "t2v" / "result.json").read_text())
+    assert result["classified"] == {"category": "brand_new", "source": "the run's structured record"}
+
+
+def test_a_failure_card_is_classified_by_the_apps_own_classifier(tmp_path, space, monkeypatch):
+    """With no structured record and no platform words, ``errors.categorise`` names it."""
+    from ltx25_studio import errors
+
+    seen = []
+    real = errors.categorise
+    monkeypatch.setattr(errors, "categorise", lambda exc: (seen.append(str(exc)), real(exc))[1])
+    card = ('### The GPU ran out of memory\n\nAny GPU time this run used is billed.\n\n'
+            '<details class="mr-detail"><summary>Detail</summary><p>CUDA out of memory at 1408x960</p></details>')
+    fake = space().reply(Reply(kind="app_error", status=card))
+    code, _lines, out, ledger = live(tmp_path, fake, [t2v()])
+    assert code == space_matrix.EXIT_CALL_FAILED
+    assert call_records(ledger)[-1]["category"] == "oom" and any("CUDA out of memory" in s for s in seen)
+    classified = json.loads((out / "t2v" / "result.json").read_text())["classified"]
+    assert classified["source"] == "errors.categorise on the text that reached the API"
+
+
 def test_the_ledger_holds_reservation_conservative_and_worker_figures(tmp_path, space):
+    """The worker's own GPU time comes only from a structured record, by RunRecord's field name."""
     fake = space(step_delay=0.01).reply(
-        Reply(video=write_video(tmp_path / "v.mp4"), record={"worker_elapsed_seconds": 12.5, "category": None})
+        Reply(video=write_video(tmp_path / "v.mp4"), record={"elapsed_seconds": 12.5, "category": None})
     )
     code, lines, out, ledger = live(tmp_path, fake, [t2v()])
     assert code == space_matrix.EXIT_OK, "\n".join(lines)
@@ -779,17 +1119,21 @@ def test_the_ledger_holds_reservation_conservative_and_worker_figures(tmp_path, 
     assert space_matrix.Ledger(ledger).spent("2026-11-16") == pytest.approx(record["billed_conservative"])
 
 
-def test_the_reports_gpu_time_is_read_when_no_record_is_published(tmp_path, space):
-    """Today the run record reaches the API only as the report's "Took N s, GPU time" line."""
-    gpu = '<dl class="mr-done-grid"><dt>Took</dt><dd><span class="mr-num">41</span> s, GPU time</dd></dl>'
-    wall = '<dl class="mr-done-grid"><dt>Took</dt><dd><span class="mr-num">55</span> s, wall-clock</dd></dl>'
+def test_the_report_is_kept_verbatim_and_its_prose_is_never_read_for_figures(tmp_path, space):
+    """The status the API returns (the report, its diagnostics) is saved whole; no figure is parsed
+    out of its prose, so with no structured record there is no worker figure."""
+    gpu = ('<p class="mr-report-head">Done: Text → video. Seed 7.</p>\n<details class="mr-diagnostics">'
+           '<summary>Diagnostics</summary><p>Peak GPU memory reserved: 55.91 GiB</p></details>'
+           '<dl class="mr-done-grid"><dt>Took</dt><dd><span class="mr-num">41</span> s, GPU time</dd></dl>')
     video = write_video(tmp_path / "v.mp4")
-    fake = space().reply(Reply(video=video, status=gpu), Reply(video=video, status=wall))
-    code, lines, out, ledger = live(tmp_path, fake, [t2v("gpu"), t2v("wall")])
+    fake = space().reply(Reply(video=video, status=gpu))
+    code, lines, out, ledger = live(tmp_path, fake, [t2v("gpu")])
     assert code == space_matrix.EXIT_OK, "\n".join(lines)
-    first, second = call_records(ledger)[-2:]
-    assert first["billed_worker"] == pytest.approx(82.0) and second["billed_worker"] is None
-    assert "whole seconds" in json.loads((out / "gpu" / "timing.json").read_text())["worker_seconds_source"]
+    assert call_records(ledger)[-1]["billed_worker"] is None
+    timing = json.loads((out / "gpu" / "timing.json").read_text())
+    assert timing["billed_worker"] is None and timing["worker_elapsed_seconds"] is None
+    result = json.loads((out / "gpu" / "result.json").read_text())
+    assert result["status_markdown"] == gpu and result["record"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -1123,7 +1467,7 @@ def test_the_token_appears_nowhere_on_any_path(tmp_path, space):
 
     leaky = SENTINEL + " leaked"
     fake = space(log_lines=(f"token={SENTINEL}", "fine"))
-    fake.reply(Reply(video=video, status=f"Done. {SENTINEL}"), Reply(kind="timeout"),
+    fake.reply(Reply(video=video, status=f"Done. {SENTINEL}", log=f"queue note {SENTINEL}"), Reply(kind="timeout"),
                Reply(kind="app_error", message=leaky), Reply(kind="foreign_error", message=leaky),
                Reply(kind="quota", message=QUOTA_MESSAGE + SENTINEL))
     assert go(fake, [t2v("ok", loras=[{"source": "a.safetensors"}, {"source": "org/x"}])]) == 0
@@ -1148,6 +1492,40 @@ def test_the_token_appears_nowhere_on_any_path(tmp_path, space):
         assert request["headers"].get("authorization") == f"Bearer {SENTINEL}"
         assert SENTINEL not in request["raw_path"] and SENTINEL.encode() not in request["body"]
         assert not any(SENTINEL in v for k, v in request["headers"].items() if k != "authorization")
+
+
+def test_the_token_goes_to_the_space_and_the_hub_only_and_never_across_a_redirect(space):
+    trusted, elsewhere = space(), space(token=None)
+    http = space_matrix.Http(space_matrix.Secret(SENTINEL), trusted=(trusted.url,))
+    http.get_json(f"{trusted.url}/config")
+    http.get_json(f"{elsewhere.url}/config")
+    http.get_json(f"{trusted.url}/redirect?to={elsewhere.url}/gradio_api/info")
+    assert trusted.requests[0]["headers"]["authorization"] == f"Bearer {SENTINEL}"
+    assert [r["path"] for r in elsewhere.requests] == ["/config", "/gradio_api/info"]
+    assert all("authorization" not in r["headers"] for r in elsewhere.requests), "an untrusted host got the token"
+
+
+def test_a_server_that_echoes_the_token_never_gets_it_written_down(tmp_path, space):
+    """An error body carrying the Authorization header back: the error, the traceback, the
+    ledger, every evidence file and every printed line hold <redacted> instead."""
+    assets = tmp_path / "assets"
+    assets.mkdir()
+    write_png(assets / "picture.png")
+    fake = space(echo_token_on_upload=True)
+    call = {"label": "i2v", "mode": "image_to_video", "image": "picture.png", "width": SIZE, "height": SIZE,
+            "num_frames": 9}
+    code, lines, out, ledger = live(tmp_path, fake, [call], assets=assets)
+    assert code == space_matrix.EXIT_CALL_FAILED, "\n".join(lines)
+    result = json.loads((out / "i2v" / "result.json").read_text())
+    assert "HTTP 500" in result["detail"] and "upload refused for Bearer <redacted>" in result["detail"]
+    assert "<redacted>" in result["traceback"] and result["sent"] is False
+    written = [ledger, *(p for p in out.rglob("*") if p.is_file())]
+    for path in written:
+        assert SENTINEL not in path.read_text(errors="replace"), f"{path} carries the token"
+    assert SENTINEL not in "\n".join(lines)
+    assert call_records(ledger)[-1]["billed_conservative"] == 0.0 and fake.joins_for("/on_generate") == []
+    error = space_matrix.HttpError(500, f"{fake.url}/upload?sig={SENTINEL}", f"echo: Bearer {SENTINEL}")
+    assert SENTINEL not in str(error) and SENTINEL not in repr(error) and "<redacted>" in str(error)
 
 
 def test_the_source_holds_no_token():
@@ -1368,29 +1746,100 @@ def test_a_frozen_copy_of_a_real_frame_fails_the_freeze_floor_where_the_render_d
     assert checks(held)["freeze_floor"] == "fail" and checks(source)["freeze_floor"] == "pass"
 
 
-def test_the_example_plan_resolves_against_the_lead_assets_layout(tmp_path):
-    """Every call of the shipped example is legal, and every mode appears."""
-    example = REPO_ROOT / "scripts" / "space_plan.example.json"
-    document = json.loads(example.read_text())
-    paths = set()
-    for call in document["calls"]:
-        for kind in ("image", "video", "audio"):
-            if isinstance(call.get(kind), str):
-                paths.add(call[kind])
-        for lora in call.get("loras", []):
-            if lora["source"].endswith(".safetensors"):
-                paths.add(lora["source"])
-    for relative in paths:
-        target = tmp_path / relative
+EXAMPLE_PLAN = REPO_ROOT / "scripts" / "space_plan.example.json"
+
+#: The lead's assets as the app's gate reads them (measured with ``av`` on 2026-11-16): an audio
+#: file's length, rate and channels, a clip's frames and rate. A plan that names a new file must
+#: say here what it is, because its length decides whether a call is legal.
+LEAD_ASSETS = {
+    "sfx/ocean_waves_gulls_48k_stereo.wav": {"seconds": 5.0, "rate": 48000, "channels": 2},
+    "speech/captain_storm_male_48k_stereo.wav": {"seconds": 4.8298, "rate": 48000, "channels": 2},
+    "operator/captain_designed.wav": {"seconds": 8.16, "rate": 24000, "channels": 1},
+    "video/cabin_panright_704x480_121f.mp4": {"frames": 121},
+    "video/tram_pushin_704x480_121f.mp4": {"frames": 121},
+}
+
+
+def example_media() -> set[str]:
+    document = json.loads(EXAMPLE_PLAN.read_text())
+    return {call[kind] for call in document["calls"] for kind in ("image", "video", "audio")
+            if isinstance(call.get(kind), str)}
+
+
+def write_lead_assets(root: Path) -> Path:
+    """Stand-ins with the lengths, rates and channels of the lead's files (images: any picture)."""
+    for relative in example_media():
+        target = root / relative
         target.parent.mkdir(parents=True, exist_ok=True)
-        if target.suffix == ".wav":
-            write_wav(target)
-        elif target.suffix == ".mp4":
-            write_video(target)
-        elif target.suffix == ".png":
+        facts = LEAD_ASSETS.get(relative)
+        if target.suffix == ".png":
             write_png(target)
+        elif target.suffix == ".mp4":
+            write_frames(target, moving_stack(facts["frames"]))
         else:
-            target.write_bytes(b"x")
-    calls = space_matrix.load_plan(example, assets_dir=tmp_path)
-    assert {c.mode for c in calls} == set(modes.MODES)
-    assert any(c.stage_2 for c in calls) and any(c.loras for c in calls) and any(c.value("auto_duration") for c in calls)
+            n = int(round(facts["seconds"] * facts["rate"]))
+            t = np.arange(n) / facts["rate"]
+            tone = 0.3 * np.sin(2 * np.pi * 220.0 * t)
+            write_samples(target, np.stack([tone] * facts["channels"]), rate=facts["rate"])
+    return root
+
+
+def test_the_example_plan_is_the_leads_matrix_and_every_call_passes_the_apps_gate(tmp_path):
+    """Every call goes through ``generate.prepare_request`` on files with the lead's lengths, and
+    the plan is the matrix the lead asked for."""
+    assert all(p.endswith(".png") or p in LEAD_ASSETS for p in example_media()), "describe new files in LEAD_ASSETS"
+    from ltx25_studio import audio_conditioning
+
+    calls = {c.label: c for c in space_matrix.load_plan(EXAMPLE_PLAN, assets_dir=write_lead_assets(tmp_path))}
+    assert {c.mode for c in calls.values()} == set(modes.MODES)
+    assert {c.gate for c in calls.values()} == {space_matrix.GATE_ACCEPTED}, "no input is chained"
+    assert not any("strength" in c.values for c in calls.values()), "no mode reads strength"
+
+    eleven = [c for label, c in calls.items() if label.startswith("m")]
+    assert {c.mode for c in eleven} == set(modes.MODES)
+    for call in eleven:
+        assert not call.stage_2 and (call.min_resolution or call.render_size in ((704, 480), (480, 704)))
+    v2v = calls["m04_video_to_video"]
+    assert v2v.app_level == audio_conditioning.DEFAULT_VIDEO_LEVEL and v2v.value("prompt")
+    assert v2v.app_frames == 121, "the clip sets the length"
+    assert calls["m10_audio_to_audio"].app_level == 0.725
+    a2v = [c for c in eleven if c.mode == "audio_to_video"]
+    assert {(c.render_size, "image" in c.media) for c in a2v} == {((704, 480), False), ((480, 704), True)}
+    assert all(c.value("prompt") for c in a2v)
+
+    upscaled = [c for c in calls.values() if c.stage_2]
+    assert {c.mode for c in upscaled} == {"text_to_audio_video", "audio_to_video"}
+    for call in upscaled:
+        assert call.render_size == (704, 480) and call.expected_geometry() == (1408, 960)
+    assert calls["x2_m05_text_to_audio_video"].expected_frames() == 49
+
+    best, fast = calls["dec_m01_best_quality"], calls["dec_m01_fast"]
+    assert (best.value("decoder"), fast.value("decoder")) == ("diffusion", "conv"), "sent by value"
+    assert {k: v for k, v in best.values.items() if k != "decoder"} == {
+        k: v for k, v in fast.values.items() if k != "decoder"}, "the same request and seed"
+
+    picks = calls["len_m05_512x960_model_picks"]
+    assert (picks.mode, picks.render_size, picks.value("min_seconds"), picks.value("max_seconds")) == (
+        "text_to_audio_video", (512, 960), 5.0, 10.0)
+    assert picks.app_frames is None, "the model chooses the length"
+    (lora,) = calls["lora_m01_bts_w080"].loras
+    assert (calls["lora_m01_bts_w080"].mode, lora.source, lora.weight) == (
+        "text_to_video", "SOLRICKS/LTX-2.5-BTS-Movie-Set", 0.8)
+    assert calls["enh_m05_text_to_audio_video"].runs("enhance_prompt") is True
+    operator = calls["op_m11_operator_audio"]
+    assert operator.media["audio"].path.name == "captain_designed.wav" and operator.mode == "audio_to_video"
+    assert operator.app_frames == 193, "8.16 s of audio sets 193 frames"
+    for call in calls.values():
+        if "audio" in call.media and call.value("auto_duration"):
+            assert any("length set from your audio" in note for note in call.app_notes), call.label
+
+
+def test_the_example_plan_against_the_real_assets():
+    """Opt-in: LTX25_SPACE_ASSETS_DIR=<the lead's assets folder>."""
+    import os
+
+    folder = os.environ.get("LTX25_SPACE_ASSETS_DIR")
+    if not folder:
+        pytest.skip("set LTX25_SPACE_ASSETS_DIR to the lead's assets folder to gate the example plan on its files")
+    calls = space_matrix.load_plan(EXAMPLE_PLAN, assets_dir=Path(folder).expanduser())
+    assert {c.gate for c in calls} == {space_matrix.GATE_ACCEPTED}
