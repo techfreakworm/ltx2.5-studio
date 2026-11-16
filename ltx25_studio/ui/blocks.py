@@ -637,6 +637,9 @@ def build_ui() -> gr.Blocks:
         # The frame count the user set. "Match my clip" writes a clip's count into
         # the shared frames field; a mode without a timed input gets this back.
         user_frames = gr.State(_DEFAULT_FRAMES)
+        # The failure card on screen, as {"mode", "at", "headline"}; None when the status
+        # holds anything else. A switch to another mode collapses the card to one line.
+        last_failure = gr.State(None)
 
         field_inputs = [pool[key] for key in FIELD_KEYS]
         parked_keys = [spec.key for spec in PARKED_FIELDS]
@@ -706,6 +709,8 @@ def build_ui() -> gr.Blocks:
             monitor_caption,
             monitor_state,
             sample_jump,
+            status,
+            last_failure,
         ]
         #: What a switch reads besides the mode it goes to; the first is the mode it leaves.
         switch_state = [
@@ -719,6 +724,7 @@ def build_ui() -> gr.Blocks:
             pool["num_frames"],
             pool["enable_stage_2"],
             user_frames,
+            last_failure,
             *parked_components,
         ]
 
@@ -734,6 +740,7 @@ def build_ui() -> gr.Blocks:
             num_frames: Any,
             upscale: Any,
             frames_user: Any,
+            failure: dict | None,
             *parked_values: Any,
             restored: dict | None = None,
         ) -> list[Any]:
@@ -743,7 +750,8 @@ def build_ui() -> gr.Blocks:
             ``handlers.mode_switch`` against the mode actually left. With
             ``restored`` (a recent run's settings), that run's own fields are
             written over the result; its media are not, so what the restored
-            mode does not take stays parked.
+            mode does not take stays parked. A failure card from another mode's
+            run becomes one line naming that run.
             """
             view = handlers.mode_view(mode_id)
             mode = modes.get_mode(mode_id)
@@ -825,6 +833,15 @@ def build_ui() -> gr.Blocks:
                 updates.append(gr.update(**kwargs))
             example_updates = _example_updates(show, mode_id, len(example_buttons), example_note)
             monitor_updates, monitor_next = _monitor_for_mode(show, mode, monitor)
+            if failure and failure.get("mode") != mode_id:
+                status_update = render.last_run_line(
+                    mode=modes.get_mode(failure["mode"]),
+                    at=failure["at"],
+                    headline=failure["headline"],
+                )
+                failure = None
+            else:
+                status_update = gr.update()
             return [
                 mode_id,
                 parked_next,
@@ -858,6 +875,8 @@ def build_ui() -> gr.Blocks:
                 *monitor_updates,
                 monitor_next,
                 gr.update(visible=monitor_next.get("kind") == "sample"),
+                status_update,
+                failure,
             ]
 
         def _switch(mode_id: str, *state: Any) -> list[Any]:
@@ -1204,6 +1223,7 @@ def build_ui() -> gr.Blocks:
             use_prompt,
             monitor_state,
             sample_jump,
+            last_failure,
         ]
 
         def _start(
@@ -1231,6 +1251,7 @@ def build_ui() -> gr.Blocks:
                 gr.update(visible=False),
                 {"kind": "running", "mode": mode_id},
                 gr.update(visible=False),
+                None,
             ]
 
         finish_outputs = [
@@ -1254,6 +1275,7 @@ def build_ui() -> gr.Blocks:
             *[c for row in recent_rows for c in row],
             status,
             sample_jump,
+            last_failure,
         ]
 
         def _ended(
@@ -1264,10 +1286,11 @@ def build_ui() -> gr.Blocks:
             shown: handlers.RunOutcome | None,
             status_update: Any,
             caption: str | None = None,
+            report: str | None = None,
         ) -> list:
             """Every finish output once a run has ended, with Generate back. ``shown`` is a
             run whose result goes on the monitor; without one the monitor is idle and
-            holds no file."""
+            holds no file, and ``report`` is the card the status holds."""
             mode = modes.get_mode(mode_id)
             review_out = _review(mode_id, False, source, *values)
             entries = list(recent_now or [])
@@ -1292,6 +1315,7 @@ def build_ui() -> gr.Blocks:
                 prompt_button = gr.update(visible=differs)
                 prompt_value = sent if differs else None
                 monitor_next = {"kind": "run", "mode": mode_id}
+                failure = None
             else:
                 monitor = [
                     gr.update(value=render.monitor_idle(mode), visible=True),
@@ -1305,6 +1329,12 @@ def build_ui() -> gr.Blocks:
                 prompt_button = gr.update(visible=False)
                 prompt_value = None
                 monitor_next = {"kind": "failed", "mode": mode_id}
+                headline = render.card_headline(report)
+                failure = (
+                    {"mode": mode_id, "at": time.strftime("%H:%M"), "headline": headline}
+                    if headline
+                    else None
+                )
             return [
                 gr.update(value="Generate", interactive=review_out[2]["interactive"]),
                 review_out[3],
@@ -1323,6 +1353,7 @@ def build_ui() -> gr.Blocks:
                 *_recent_rows(entries),
                 status_update,
                 gr.update(visible=False),
+                failure,
             ]
 
         def _finish(
@@ -1332,11 +1363,16 @@ def build_ui() -> gr.Blocks:
             monitor under the report it returned."""
             outcome = _recall(request)
             # Nothing was remembered for this page: say so rather than leave "Running".
-            status_update = (
-                gr.update(value=render.lost_run(), visible=True) if outcome is None else gr.update()
-            )
+            lost = render.lost_run() if outcome is None else None
+            status_update = gr.update(value=lost, visible=True) if lost else gr.update()
             shown = outcome if handlers.has_result(outcome) else None
-            return _ended(mode_id, recent_now, source, values, shown, status_update)
+            caption = render.monitor_caption(
+                kind="refused" if handlers.ran_nothing(outcome) else "failed"
+            )
+            report = lost if outcome is None else outcome.status
+            return _ended(
+                mode_id, recent_now, source, values, shown, status_update, caption, report
+            )
 
         def _finish_failed(
             request: gr.Request, mode_id: str, recent_now: list, source: str, *values: Any
@@ -1351,11 +1387,15 @@ def build_ui() -> gr.Blocks:
                 report = handlers.unshown_report(outcome, message)
             except Exception as exc:  # noqa: BLE001 -- Generate comes back whatever the report
                 report = render.lost_run(message or str(exc))
-            caption = render.monitor_caption(
-                kind="unshown" if handlers.has_result(outcome) else "failed"
-            )
+            if handlers.has_result(outcome):
+                kind = "unshown"
+            else:
+                kind = "refused" if handlers.ran_nothing(outcome) else "failed"
+            caption = render.monitor_caption(kind=kind)
             status_update = gr.update(value=report, visible=True)
-            return _ended(mode_id, recent_now, source, values, None, status_update, caption)
+            return _ended(
+                mode_id, recent_now, source, values, None, status_update, caption, report
+            )
 
         generation = generate_button.click(
             fn=_start,
@@ -1643,21 +1683,21 @@ def _sample_caption(mode: Any, sample: showcase.Sample | None) -> str:
 
 
 def _monitor_for_mode(show: showcase.Showcase, mode: Any, monitor: dict) -> tuple[list, dict]:
-    """Swap the idle monitor to the new mode's sample; never hide a finished run."""
+    """Swap the idle monitor to the new mode's sample; never hide a finished run. A failed
+    run's caption stays only in its own mode: elsewhere its card is one line naming it."""
     kind = (monitor or {}).get("kind")
-    if kind in ("run", "running"):
+    if kind in ("run", "running") or (kind == "failed" and monitor.get("mode") == mode.id):
         return [gr.update(), gr.update(), gr.update(), gr.update()], monitor
     sample = show.sample_for(mode.id)
     if sample is None:
-        caption = render.READY if kind != "failed" else render.monitor_caption(kind="failed")
         return (
             [
                 gr.update(value=render.monitor_idle(mode), visible=True),
                 gr.update(value=None, visible=False),
                 gr.update(value=None, visible=False),
-                caption,
+                render.READY,
             ],
-            {"kind": "idle" if kind != "failed" else "failed", "mode": mode.id},
+            {"kind": "idle", "mode": mode.id},
         )
     return (
         [

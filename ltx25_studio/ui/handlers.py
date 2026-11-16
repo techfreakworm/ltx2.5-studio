@@ -56,6 +56,7 @@ __all__ = [
     "on_validate_start",
     "preset_for",
     "quota_multiplier",
+    "ran_nothing",
     "review",
     "run",
     "run_platform",
@@ -916,6 +917,16 @@ def has_result(outcome: RunOutcome | None) -> bool:
         and outcome.error is None
         and (outcome.video is not None or outcome.audio is not None)
     )
+
+
+def ran_nothing(outcome: RunOutcome | None) -> bool:
+    """True for a run refused before anything ran: by this page before dispatch, or by the
+    backend or the platform with no GPU time used (``errors.categorise``)."""
+    if outcome is None or outcome.error is None:
+        return False
+    from .. import errors
+
+    return bool(outcome.refused) or not errors.categorise(outcome.error).gpu_used
 
 
 def unshown_report(outcome: RunOutcome | None, server_message: str | None) -> str:

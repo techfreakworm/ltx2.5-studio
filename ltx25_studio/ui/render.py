@@ -51,12 +51,14 @@ __all__ = [
     "CostFacts",
     "RunFacts",
     "applied_loras",
+    "card_headline",
     "commit_line",
     "cost_panel",
     "dimension_hint",
     "empty_output_bug",
     "failure",
     "frame_hint",
+    "last_run_line",
     "lora_accepted",
     "lora_duplicate",
     "lora_idle",
@@ -770,9 +772,23 @@ def monitor_caption(
         return f"**Running.** {mode.label}. Progress shows on the monitor."
     if kind == "failed":
         return "**This run failed.** The report below says why."
+    if kind == "refused":
+        return "**Refused before running.** The report below says why."
     if kind == "unshown":
         return "**The result could not be shown.** The report below says why."
     return READY
+
+
+def card_headline(report: str | None) -> str | None:
+    """The headline of a failure card (its ``### `` line), or None for any other report."""
+    first = str(report or "").lstrip().split("\n", 1)[0]
+    return (first[4:].strip() or None) if first.startswith("### ") else None
+
+
+def last_run_line(*, mode: Any, at: str, headline: str) -> str:
+    """A failure card collapsed to one line once the page moves to another mode: whose run
+    it was, when, and its headline."""
+    return f"**Last run:** {mode.label}, {at}. {headline}."
 
 
 # ---------------------------------------------------------------------------
