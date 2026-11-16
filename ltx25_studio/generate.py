@@ -1460,6 +1460,11 @@ def _apply_loras(pipe, request: GenerationRequest):
                     transformer=getattr(target, "transformer", None),
                     **_manifest_override(),
                 )
+            # Checked like any other load, and outside apply_lora, which would
+            # report a memory refusal as an unreadable file (review local-runtime-7).
+            preflight_adapter = getattr(pipe, "preflight_adapter", None)
+            if callable(preflight_adapter):
+                preflight_adapter(source)
             reports.append(
                 lora_apply.apply_lora(
                     target,
@@ -1781,6 +1786,11 @@ class _VramProbe:
         except Exception as exc:
             logger.debug("peak-VRAM probe could not start: %r", exc)
             self._cuda = None
+            return
+        # Logged here, not only in the run's notes: a run that runs out of memory
+        # builds no result, and this is what points at the size (review space-path-2).
+        for note in _partition_note_for(self._total):
+            logger.warning("GPU partition: %s", note)
 
     def split(self, phase: str) -> None:
         """Close the current window as ``phase`` and open the next one."""
@@ -2028,8 +2038,12 @@ class ProgressReporter:
 
 def _partition_notes(probe) -> tuple[str, ...]:
     """Say so when the GPU slice is smaller than the size that was asked for."""
-    total = probe.total_bytes
-    if total is None:
+    return _partition_note_for(probe.total_bytes)
+
+
+def _partition_note_for(total) -> tuple[str, ...]:
+    """The partition note for ``total`` bytes against the requested size, if any."""
+    if not total:
         return ()
     from . import zerogpu
     from .config import load_config

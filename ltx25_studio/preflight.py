@@ -89,9 +89,16 @@ def ensure_weights(
     """
     import logging
 
+    log = logging.getLogger("ltx25_studio")
+    override = snapshot_override()
+    if override is not None:
+        # Nothing loads the pinned repo under the override (review space-path-3):
+        # fetching it would download 72 GB for nothing, or stop start-up on a 401.
+        log.info("LTX25_MODEL_SNAPSHOT_DIR is set: weights load from %s; nothing fetched", override)
+        return ()
+
     from huggingface_hub import hf_hub_download
 
-    log = logging.getLogger("ltx25_studio")
     # Each path at the revision its component is pinned to (model_files.REVISION
     # for all but the diffusion decoder): download_plan groups them.
     plan = [

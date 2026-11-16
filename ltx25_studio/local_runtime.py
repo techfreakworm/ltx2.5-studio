@@ -37,13 +37,14 @@ import json
 import logging
 import re
 import time
+import traceback
 from collections import Counter, OrderedDict
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
 
-from . import memory, pipelines
+from . import constraints, memory, pipelines
 from .errors import ConstraintError, LoRAError, LTXStudioError, ModelLoadError
 
 __all__ = [
@@ -409,11 +410,16 @@ def move_to_device(
 
     target = torch.device(device)
     pending = 0
+    moved_any = False
+    kept_dtypes: Counter = Counter()
 
     def move(tensor):
-        nonlocal pending
+        nonlocal pending, moved_any
         if tensor.device.type == target.type:
+            if tensor.is_floating_point():
+                kept_dtypes[tensor.dtype] += tensor.numel() * tensor.element_size()
             return tensor
+        moved_any = True
         moved = tensor.to(target)
         pending += tensor.numel() * tensor.element_size()
         if pending >= chunk_bytes:
@@ -422,8 +428,64 @@ def move_to_device(
         return moved
 
     module._apply(move)
+    if not moved_any and _are_file_pages(kept_dtypes, files):
+        # On the CPU at the file's own dtype the weights ARE the file's mapped
+        # pages: releasing them evicts the live model, which the denoise then
+        # faults back in uncounted (review local-runtime-9).
+        if log is not None:
+            log(f"kept {label}'s file pages: they are the weights on {target.type}")
+        return module
     release_cache(files, label, log)
     return module
+
+
+#: torch dtype name -> safetensors dtype tag.
+_SAFETENSORS_TAG = {"float32": "F32", "bfloat16": "BF16", "float16": "F16"}
+
+
+def _are_file_pages(dtypes, files) -> bool:
+    """True when most of what stayed in place is at the files' dtype: views of their pages.
+
+    ``dtypes`` maps each dtype left in place to its bytes; a few buffers kept
+    in float32 next to converted weights do not make them file pages.
+    """
+    stored = _files_dtype(files)
+    total = sum(dtypes.values())
+    if stored is None or not total:
+        return False
+    same = sum(
+        size
+        for dtype, size in dtypes.items()
+        if _SAFETENSORS_TAG.get(str(dtype).removeprefix("torch.")) == stored
+    )
+    return same * 2 > total
+
+
+def _files_dtype(files) -> str | None:
+    """The dtype tag of the first tensor in the first readable safetensors file."""
+    for path in files:
+        path = Path(path)
+        if not (path.is_file() and path.name.endswith(_WEIGHTS_SUFFIX)):
+            continue
+        try:
+            with open(path, "rb") as handle:
+                length = int.from_bytes(handle.read(8), "little")
+                header = json.loads(handle.read(length))
+        except (OSError, ValueError):
+            continue
+        for key, entry in header.items():
+            if key != "__metadata__" and isinstance(entry, dict):
+                return str(entry.get("dtype"))
+    return None
+
+
+def _clear_tracebacks(exc: BaseException) -> None:
+    """Drop the locals held by a failure's frames, so what they loaded can be freed."""
+    seen: set[int] = set()
+    while exc is not None and id(exc) not in seen:
+        seen.add(id(exc))
+        traceback.clear_frames(exc.__traceback__)
+        exc = exc.__cause__ or exc.__context__
 
 
 def load_text_encoder(snapshot_dir, *, dtype, device, log=None):
@@ -646,11 +708,17 @@ def frames_for_estimate(call: dict, defaults: dict) -> int:
     if frames:
         return int(frames)
     seconds = float(call.get("max_seconds", defaults.get("max_seconds", 20.0)))
+    shortest = float(call.get("min_seconds", defaults.get("min_seconds", 1.0)))
     rate = float(call.get("frame_rate", defaults.get("frame_rate", 24.0)))
-    return max(
-        1,
-        (int(seconds * rate) - 1) // memory.TEMPORAL_COMPRESSION * memory.TEMPORAL_COMPRESSION + 1,
+    # The duration head ROUNDS seconds x rate (review local-runtime-10): the
+    # longest clip it can return, not one latent frame short of it.
+    _shortest, longest = constraints.duration_head_frame_range(
+        min_seconds=min(shortest, seconds),
+        max_seconds=seconds,
+        frame_rate=rate,
+        temporal_compression_ratio=memory.TEMPORAL_COMPRESSION,
     )
+    return max(1, longest)
 
 
 def preflight_plan(
@@ -707,19 +775,23 @@ _SAFETENSORS_BYTES = {"F64": 8, "I64": 8, "F32": 4, "I32": 4, "BF16": 2, "F16": 
 def _stored_dtype_bytes(snapshot: Path, component: str) -> int:
     """Bytes per element the component is stored at, read from a safetensors header (else 2)."""
     files, _declared = _component_files(Path(snapshot), component)
-    for path in files:
-        if not (path.is_file() and path.name.endswith(_WEIGHTS_SUFFIX)):
-            continue
-        try:
-            with open(path, "rb") as handle:
-                length = int.from_bytes(handle.read(8), "little")
-                header = json.loads(handle.read(length))
-        except (OSError, ValueError):
-            continue
-        for key, entry in header.items():
-            if key != "__metadata__" and isinstance(entry, dict):
-                return _SAFETENSORS_BYTES.get(str(entry.get("dtype")), 1)
-    return 2
+    return _tag_bytes(_files_dtype(files))
+
+
+def _tag_bytes(tag: str | None) -> int:
+    """Bytes per element of a safetensors dtype tag (2, the checkpoint's bf16, when unknown)."""
+    return 2 if tag is None else _SAFETENSORS_BYTES.get(tag, 1)
+
+
+def _adapter_bytes(captured) -> int:
+    """Bytes the captured adapters take once re-created on the device."""
+    if not captured:
+        return 0
+    return sum(
+        value.numel() * value.element_size()
+        for _name, _config, state in captured["adapters"]
+        for value in state.values()
+    )
 
 
 def _load_need_gb(file_gb: float, spike: float, target_bytes: int, stored_bytes: int) -> float:
@@ -808,6 +880,20 @@ class _LocalWeights:
 
             torch.mps.empty_cache()
 
+    @contextmanager
+    def freed_on_failure(self):
+        """On any failure, drop what the failed step held and empty the device cache.
+
+        Without it a refusal or an out-of-memory error left the freed weights'
+        Metal buffers allocated to the idle app (review local-runtime-8).
+        """
+        try:
+            yield
+        except BaseException as exc:
+            _clear_tracebacks(exc)
+            self._free()
+            raise
+
     def _attach(self, name: str, module) -> None:
         for pipeline in self.pipelines.values():
             setattr(pipeline, name, module)
@@ -832,7 +918,7 @@ class _LocalWeights:
             for name in _SMALL_WEIGHTS
         )
         self._preflight("load small set", need)
-        with self.phase("load small set"):
+        with self.phase("load small set"), self.freed_on_failure():
             try:
                 connectors = LTX2TextConnectors.from_pretrained(
                     self.snapshot_dir,
@@ -898,15 +984,14 @@ class _LocalWeights:
         return built
 
     def _guard_adapter_loading(self, pipeline) -> None:
-        if self.residency != STAGED:
-            return
         original = pipeline.load_lora_weights
         weights = self
 
         def load_lora_weights(*args, **kwargs):
             if weights.transformer is None:
                 raise AdapterNeedsTransformerError()
-            return original(*args, **kwargs)
+            with weights.freed_on_failure():
+                return original(*args, **kwargs)
 
         pipeline.load_lora_weights = load_lora_weights
         original_delete = pipeline.delete_adapters
@@ -919,6 +1004,21 @@ class _LocalWeights:
             return original_delete(adapter_names)
 
         pipeline.delete_adapters = delete_adapters
+
+    def preflight_adapter(self, source) -> None:
+        """An adapter file is checked like any other load before it is attached."""
+        try:
+            path = Path(source)
+            file_gb = path.stat().st_size / memory.GB
+        except (TypeError, OSError):
+            return  # a state dict in memory, or a hub id resolved later: already counted
+        need = _load_need_gb(
+            file_gb,
+            memory.load_spike_factor("safetensors"),
+            self.dtype_bytes,
+            _tag_bytes(_files_dtype([path])),
+        )
+        self._preflight(f"attach LoRA {path.name}", need)
 
     def forget_adapters(self, names) -> None:
         """Drop ``names`` from the adapters captured at a release, if any."""
@@ -948,7 +1048,7 @@ class _LocalWeights:
             _stored_dtype_bytes(self.snapshot_dir, "text_encoder"),
         )
         self._preflight("load text encoder", need)
-        with self.phase("load text encoder"):
+        with self.phase("load text encoder"), self.freed_on_failure():
             model = load_text_encoder(
                 self.snapshot_dir, dtype=self.dtype, device=self.device, log=self.log
             )
@@ -979,8 +1079,11 @@ class _LocalWeights:
                 self.dtype_bytes,
                 _stored_dtype_bytes(self.snapshot_dir, "transformer"),
             )
+        if self._adapters is not None:
+            # Re-created on the device inside this phase (review local-runtime-7).
+            need += _adapter_bytes(self._adapters) / memory.GB
         self._preflight("load transformer", need)
-        with self.phase("load transformer"):
+        with self.phase("load transformer"), self.freed_on_failure():
             model = load_transformer(
                 self.snapshot_dir,
                 dtype=self.dtype,
@@ -989,7 +1092,11 @@ class _LocalWeights:
                 log=self.log,
             )
             if self._adapters is not None:
-                _restore_adapters(model, self._adapters)
+                try:
+                    _restore_adapters(model, self._adapters)
+                except BaseException:
+                    model = None  # dropped before the cache is emptied
+                    raise
                 self.log(f"re-attached LoRA adapter(s) {self._adapters['active']}")
                 self._adapters = None
         self.transformer = model
@@ -1149,6 +1256,10 @@ class LocalStageRunner:
         """Load the transformer now (before attaching a LoRA, for instance)."""
         return self._weights.ensure_transformer()
 
+    def preflight_adapter(self, source) -> None:
+        """Check attaching the adapter at ``source`` fits, before it is loaded."""
+        self._weights.preflight_adapter(source)
+
     def __call__(self, *, enable_stage_2: bool = False, progress=None, **kwargs):
         weights = self._weights
         if enable_stage_2:
@@ -1181,7 +1292,7 @@ class LocalStageRunner:
                     width, height, frames, dtype_bytes=weights.dtype_bytes
                 ),
             )
-            with weights.phase("encode clip"), torch.inference_mode():
+            with weights.phase("encode clip"), weights.freed_on_failure(), torch.inference_mode():
                 first = pipelines.variation_kwargs(
                     self.pipeline,
                     variation.source,
@@ -1208,7 +1319,11 @@ class LocalStageRunner:
             weights.pipelines[f"{self.kind}+audio"] = self._audio_pipeline
             pipeline = self._audio_pipeline
         weights.preflight_denoise(pipeline, call)
-        with weights.phase("denoise and decode"), torch.inference_mode():
+        with (
+            weights.phase("denoise and decode"),
+            weights.freed_on_failure(),
+            torch.inference_mode(),
+        ):
             return pipeline(**call)
 
 
@@ -1283,10 +1398,17 @@ def build_local_runner(
             f"local runner: {device_type}/{_dtype_label(torch_dtype)}, {residency} residency, "
             f"transformer from {gguf if gguf else 'the snapshot'}"
         )
-        weights.load_small_set()
-        if residency == RESIDENT:
-            weights.ensure_transformer()
-            weights.ensure_text_encoder()
+        try:
+            weights.load_small_set()
+            if residency == RESIDENT:
+                weights.ensure_transformer()
+                weights.ensure_text_encoder()
+        except BaseException as exc:
+            # A failed build is not cached: release what it loaded now rather than
+            # leave it allocated to an idle app (review local-runtime-8).
+            _clear_tracebacks(exc)
+            weights.release_all()
+            raise
         _WEIGHTS[key] = weights
     elif log is not None:
         weights.log = log

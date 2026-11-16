@@ -336,6 +336,7 @@ def test_the_startup_download_asks_for_each_file_at_its_revision(monkeypatch):
     hub = types.ModuleType("huggingface_hub")
     hub.hf_hub_download = lambda **kwargs: asked.append(kwargs) or f"/x/{kwargs['filename']}"
     monkeypatch.setitem(sys.modules, "huggingface_hub", hub)
+    monkeypatch.delenv("LTX25_MODEL_SNAPSHOT_DIR", raising=False)
 
     preflight.ensure_weights()
 
@@ -477,3 +478,21 @@ def test_anything_else_off_the_class_is_a_load_error(tiny_decoder_dir, change):
     with pytest.raises(ModelLoadError) as caught:
         _load_decoder()
     assert "diffusion_decoder" in str(caught.value)
+
+
+def test_nothing_is_fetched_when_the_snapshot_override_is_set(monkeypatch, tmp_path):
+    """Review space-path-3: nothing loads the pinned repo under the override."""
+    import sys
+    import types
+
+    from ltx25_studio import preflight
+
+    asked = []
+    hub = types.ModuleType("huggingface_hub")
+    hub.hf_hub_download = lambda **kwargs: asked.append(kwargs) or pytest.fail("fetched")
+    monkeypatch.setitem(sys.modules, "huggingface_hub", hub)
+    (tmp_path / "model_index.json").write_text("{}")
+    monkeypatch.setenv("LTX25_MODEL_SNAPSHOT_DIR", str(tmp_path))
+
+    assert preflight.ensure_weights(token=None) == ()
+    assert asked == []

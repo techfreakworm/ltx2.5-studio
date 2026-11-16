@@ -514,11 +514,40 @@ def test_the_bounded_move_is_value_identical_to_a_plain_move(component, monkeypa
         assert torch.equal(tensor.cpu(), expected[name].cpu()), name
     if device != "cpu":
         assert len(releases) > 1, "a multi-chunk move releases file pages as it goes"
-    assert releases[-1] == files
-    assert lines[-1] == f"released 0.0 GB of file cache ({component})"
+        assert releases[-1] == files
+        assert lines[-1] == f"released 0.0 GB of file cache ({component})"
+    else:
+        # On the CPU at the file's own dtype the weights are its pages (local-runtime-9).
+        assert releases == [], "the live weights' pages were released"
+        assert lines[-1] == f"kept {component}'s file pages: they are the weights on cpu"
 
 
-def test_every_staged_component_gives_its_file_pages_back(monkeypatch):
+def test_a_converting_cpu_load_still_gives_the_read_pages_back(monkeypatch):
+    """Converted copies are not the file: its pages are released as before."""
+    torch = _torch()
+    pytest.importorskip("diffusers")
+    from diffusers import LTX2VideoTransformer3DModel
+
+    releases = []
+    monkeypatch.setattr(
+        memory, "release_file_cache", lambda paths, **_: releases.append(list(paths)) or 0
+    )
+    model = LTX2VideoTransformer3DModel.from_pretrained(
+        tiny_snapshot(), subfolder="transformer", torch_dtype=torch.bfloat16
+    )
+    files = sorted((tiny_snapshot() / "transformer").glob("*.safetensors"))
+    local_runtime.move_to_device(model, "cpu", files=files, label="transformer")
+
+    assert releases == [files]
+
+
+@pytest.mark.parametrize("dtype", ["bfloat16", "float32"])
+def test_every_staged_component_gives_its_file_pages_back(monkeypatch, dtype):
+    """Each converting load and each unload releases its file's pages.
+
+    At the checkpoint's own dtype (the tiny one is fp32) a CPU load keeps them:
+    they are the weights (local-runtime-9). The unloads still release.
+    """
     torch = _torch()
     released = []
 
@@ -528,7 +557,7 @@ def test_every_staged_component_gives_its_file_pages_back(monkeypatch):
 
     monkeypatch.setattr(memory, "release_file_cache", spy)
     lines = []
-    runner = _runner("text2video", "staged", log=lines.append)
+    runner = _runner("text2video", "staged", dtype=dtype, log=lines.append)
     for prompt in (PROMPT, "a second, different prompt"):
         runner(
             prompt=prompt,
@@ -539,12 +568,16 @@ def test_every_staged_component_gives_its_file_pages_back(monkeypatch):
             output_type="np",
         )
     touched = set().union(*released)
-    assert {"connectors", "vae", "audio_vae", "vocoder", "duration_head"} <= touched
     assert {"text_encoder", "transformer"} <= touched
-    # each text-encoder load is followed by a release, and so is each unload
-    assert sum(s == {"text_encoder"} for s in released) >= 4
-    assert sum(s == {"transformer"} for s in released) >= 2
     assert "released 0.0 GB of file cache (text_encoder)" in lines
+    if dtype == "bfloat16":
+        assert {"connectors", "vae", "audio_vae", "vocoder", "duration_head"} <= touched
+        # each text-encoder load is followed by a release, and so is each unload
+        assert sum(s == {"text_encoder"} for s in released) >= 4
+        assert sum(s == {"transformer"} for s in released) >= 2
+    else:
+        assert sum(s == {"text_encoder"} for s in released) >= 2
+        assert "kept text_encoder's file pages: they are the weights on cpu" in lines
 
 
 # --------------------------------------------------------------------------
@@ -1138,20 +1171,19 @@ def test_an_adapter_from_a_failed_staged_run_is_not_restored_into_the_next(tmp_p
     pytest.importorskip("peft")
     lora = _tiny_adapter(tmp_path)
     runner = _runner("text2video", "staged")
-    real_ensure = runner.ensure_transformer
+    real_preflight = runner._weights._preflight
 
-    def ensure_then_starve():
-        model = real_ensure()
-        monkeypatch.setenv("LTX25_MEMORY_LIMIT_GB", "1")  # the text encoder now refuses
-        return model
+    def text_encoder_refuses(phase, need_gb):
+        if phase == "load text encoder":  # after the adapter attached
+            raise memory.MemoryPreflightError(reason="the text encoder does not fit (stand-in)")
+        return real_preflight(phase, need_gb)
 
-    monkeypatch.setattr(runner, "ensure_transformer", ensure_then_starve)
+    monkeypatch.setattr(runner._weights, "_preflight", text_encoder_refuses)
     with pytest.raises(memory.MemoryPreflightError):
         _run(runner, tmp_path, "a", prompt="a first prompt", loras=(lora,))
     assert runner.pipeline.transformer is None, "the failed run released the transformer"
 
-    monkeypatch.delenv("LTX25_MEMORY_LIMIT_GB")
-    monkeypatch.setattr(runner, "ensure_transformer", real_ensure)
+    monkeypatch.setattr(runner._weights, "_preflight", real_preflight)
     result = _run(runner, tmp_path, "b", prompt="a second prompt")
 
     assert not getattr(runner.pipeline.transformer, "peft_config", None), (
@@ -1188,3 +1220,173 @@ def test_a_converting_load_promises_the_converted_copy_and_the_read_pages():
     )
     by_phase = {step.phase: step for step in native}
     assert converting[0].need_gb > by_phase["load small set"].need_gb
+
+
+# --------------------------------------------------------------------------
+# review minors: local-runtime-7 (adapter bytes), -8 (freed on failure),
+# -10 (the duration head's longest clip)
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("seconds, frames", [(3.7, 89), (2.7, 65), (4.36, 105), (5.0, 113)])
+def test_the_auto_duration_estimate_is_the_longest_clip_the_head_can_return(seconds, frames):
+    from ltx25_studio import constraints
+
+    got = local_runtime.frames_for_estimate({"max_seconds": seconds}, {"frame_rate": 24.0})
+
+    assert got == frames
+    assert (
+        got
+        == constraints.duration_head_frame_range(
+            min_seconds=1.0, max_seconds=seconds, frame_rate=24.0
+        )[1]
+    )
+
+
+def _phases(monkeypatch):
+    seen = []
+    real = local_runtime._LocalWeights._preflight
+
+    def spy(self, phase, need_gb):
+        seen.append((phase, need_gb))
+        return real(self, phase, need_gb)
+
+    monkeypatch.setattr(local_runtime._LocalWeights, "_preflight", spy)
+    return seen
+
+
+@pytest.mark.parametrize("residency", ["staged", "resident"])
+def test_attaching_an_adapter_is_preflighted_like_any_load(tmp_path, monkeypatch, residency):
+    pytest.importorskip("peft")
+    lora = _tiny_adapter(tmp_path)
+    runner = _runner("text2video", residency)
+    seen = _phases(monkeypatch)
+
+    _run(runner, tmp_path, "a", prompt=PROMPT, loras=(lora,))
+
+    phases = [phase for phase, _ in seen]
+    ((phase, need),) = [entry for entry in seen if entry[0].startswith("attach LoRA")]
+    assert phase == "attach LoRA look.safetensors"
+    assert need >= Path(lora["path"]).stat().st_size / memory.GB
+    assert phases.index(phase) < next(i for i, p in enumerate(phases) if p.startswith("denoise"))
+
+
+def test_an_adapter_that_does_not_fit_is_refused_as_memory_not_as_a_bad_file(tmp_path, monkeypatch):
+    pytest.importorskip("peft")
+    lora = _tiny_adapter(tmp_path)
+    runner = _runner("text2video", "staged")
+    runner.ensure_transformer()
+    monkeypatch.setenv("LTX25_MEMORY_LIMIT_GB", "1")
+
+    with pytest.raises(memory.MemoryPreflightError) as caught:
+        _run(runner, tmp_path, "a", prompt=PROMPT, loras=(lora,))
+    assert "attach LoRA look.safetensors" in str(caught.value)
+
+
+def test_reloading_the_transformer_promises_the_adapter_it_puts_back(tmp_path, monkeypatch):
+    pytest.importorskip("peft")
+    lora = _tiny_adapter(tmp_path)
+    runner = _runner("text2video", "staged")
+    runner.ensure_transformer()
+    runner.pipeline.load_lora_weights(lora["path"], adapter_name="look")
+    weights = runner._weights
+    weights.ensure_text_encoder()  # releases the transformer, capturing the adapter
+    adapter_gb = local_runtime._adapter_bytes(weights._adapters) / memory.GB
+    assert adapter_gb > 0
+    seen = _phases(monkeypatch)
+
+    weights.ensure_transformer()
+
+    ((_, need),) = [entry for entry in seen if entry[0] == "load transformer"]
+    bare = local_runtime._load_need_gb(
+        weights._gb["transformer"],
+        memory.load_spike_factor("safetensors"),
+        weights.dtype_bytes,
+        local_runtime._stored_dtype_bytes(weights.snapshot_dir, "transformer"),
+    )
+    assert need == pytest.approx(bare + adapter_gb)
+
+
+def _frees(monkeypatch):
+    calls = []
+    real = local_runtime._LocalWeights._free
+
+    def spy(self):
+        calls.append(self)
+        return real(self)
+
+    monkeypatch.setattr(local_runtime._LocalWeights, "_free", spy)
+    return calls
+
+
+def test_a_failed_load_empties_the_device_cache(monkeypatch):
+    runner = _runner("text2video", "staged")
+    frees = _frees(monkeypatch)
+
+    def fail(*args, **kwargs):
+        raise RuntimeError("MPS backend out of memory (stand-in)")
+
+    monkeypatch.setattr(local_runtime, "load_transformer", fail)
+    with pytest.raises(RuntimeError):
+        runner.ensure_transformer()
+
+    assert frees, "the failed load left the device cache as it was"
+
+
+def test_a_failed_denoise_empties_the_device_cache(monkeypatch):
+    torch = _torch()
+    runner = _runner("text2video", "staged")
+    frees = _frees(monkeypatch)
+    reached = []
+    real = runner._weights.preflight_denoise
+
+    def preflight_then_watch(pipeline, call):
+        real(pipeline, call)
+        reached.append(True)
+        frees.clear()  # only what happens from the denoise on counts
+
+    monkeypatch.setattr(runner._weights, "preflight_denoise", preflight_then_watch)
+    with pytest.raises(ValueError):
+        runner(
+            prompt=PROMPT,
+            width=SIZE + 1,
+            height=SIZE,
+            num_frames=FRAMES,
+            generator=torch.Generator().manual_seed(SEED),
+            output_type="np",
+        )
+
+    assert reached, "the run failed before the denoise"
+    assert frees, "the failed denoise left the device cache as it was"
+
+
+def test_a_failed_resident_build_releases_what_it_loaded(monkeypatch):
+    """The designed refusal: the transformer fits, the text encoder does not."""
+    import weakref
+
+    _torch()
+    pytest.importorskip("diffusers")
+    local_runtime.clear_local_cache()
+    built = []
+    real = local_runtime.load_transformer
+
+    def load(*args, **kwargs):
+        model = real(*args, **kwargs)
+        built.append(weakref.ref(model))
+        return model
+
+    def refuse(*args, **kwargs):
+        raise RuntimeError("the text encoder does not fit (stand-in)")
+
+    monkeypatch.setattr(local_runtime, "load_transformer", load)
+    monkeypatch.setattr(local_runtime, "load_text_encoder", refuse)
+    frees = _frees(monkeypatch)
+    try:
+        with pytest.raises(RuntimeError, match="does not fit"):
+            _runner("text2video", "resident")
+    finally:
+        local_runtime.clear_local_cache()
+    gc.collect()
+
+    assert frees
+    assert built and built[0]() is None, "the failed build kept the transformer alive"

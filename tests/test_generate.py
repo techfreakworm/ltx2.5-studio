@@ -1523,3 +1523,35 @@ def test_an_untyped_failure_inside_the_pipeline_is_still_a_decode_error(tmp_path
             output_root=tmp_path,
         )
     assert "NaN in the latents" in str(caught.value)
+
+
+def test_a_gpu_slice_smaller_than_requested_is_logged_when_the_run_starts(
+    tmp_path, monkeypatch, caplog
+):
+    """Review space-path-2: a run that runs out of memory builds no result, so the
+    run's notes cannot be the only place this is said."""
+    import logging
+
+    monkeypatch.setenv("LTX25_ZEROGPU_SIZE", "xlarge")
+    install_fake_torch(monkeypatch, a_cuda(total=int(47.375 * _GiB)))
+    probe = generate_module._VramProbe()
+
+    with caplog.at_level(logging.WARNING, logger="ltx25_studio.generate"):
+        probe.start()
+
+    (record,) = [r for r in caplog.records if "GPU partition" in r.getMessage()]
+    assert record.levelno == logging.WARNING
+    assert "xlarge was requested" in record.getMessage()
+
+
+def test_a_full_gpu_slice_logs_nothing_when_the_run_starts(tmp_path, monkeypatch, caplog):
+    import logging
+
+    monkeypatch.setenv("LTX25_ZEROGPU_SIZE", "xlarge")
+    install_fake_torch(monkeypatch, a_cuda(total=int(94.971 * _GiB)))
+    probe = generate_module._VramProbe()
+
+    with caplog.at_level(logging.WARNING, logger="ltx25_studio.generate"):
+        probe.start()
+
+    assert not [r for r in caplog.records if "GPU partition" in r.getMessage()]
