@@ -390,6 +390,8 @@ UI instead, start `app.py` from that environment with `LTX25_DEVICE=mps` and
 text to video with sound was refused by the memory check's early reading, fixed since (above),
 and has not been run through the UI again yet.
 
+<!-- For the lead: one sentence is needed here on what the page shows about cost when it runs on this machine (no reservation, quota or billing), once the UI's local wording (F75) has landed. -->
+
 **What it costs in memory, as measured** (the whole machine's committed memory — active,
 wired and compressed pages — on the 128 GB Mac): 57–61 GB at 704×480 with 49–121 frames,
 and 70 GB at 193 frames (8 s); across that day's earlier runs, at 704×480 or 480×704 with up to
