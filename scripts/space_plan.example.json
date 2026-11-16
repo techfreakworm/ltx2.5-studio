@@ -1,0 +1,196 @@
+{
+  "note": "The 11-mode verification matrix plus stage 2, a LoRA run, the duration head and the operator's own audio. Paths are relative to --assets-dir (the lead's assets folder). Inputs are independent assets, never this harness's own outputs. At worst case it does not fit one day's 1920 GPU-s: split it with --only.",
+  "defaults": {
+    "seed": 7,
+    "width": 704,
+    "height": 480,
+    "num_frames": 121
+  },
+  "calls": [
+    {
+      "label": "m01_text_to_video",
+      "mode": "text_to_video",
+      "prompt": "A red vintage tram climbs a steep cobbled street at golden hour, slow push-in. The tram bell rings twice and steel wheels grind on the rails.",
+      "expect": {
+        "width": 704,
+        "height": 480,
+        "frames": 121,
+        "has_audio": false
+      }
+    },
+    {
+      "label": "m02_image_to_video",
+      "mode": "image_to_video",
+      "image": "images/tram/tram_landscape.png",
+      "expect": {
+        "width": 704,
+        "height": 480,
+        "frames": 121,
+        "has_audio": false
+      }
+    },
+    {
+      "label": "m03_image_text_to_video",
+      "mode": "image_text_to_video",
+      "image": "images/tram/tram_landscape.png",
+      "prompt": "A red vintage tram climbs a steep cobbled street at golden hour, slow push-in. The tram bell rings twice and steel wheels grind on the rails.",
+      "expect": {
+        "width": 704,
+        "height": 480,
+        "frames": 121,
+        "has_audio": false
+      }
+    },
+    {
+      "label": "m04_video_to_video",
+      "mode": "video_to_video",
+      "video": "video/cabin_panright_704x480_121f.mp4",
+      "prompt": "The same cabin in heavy snowfall at dusk, warm light glowing in the windows.",
+      "strength": 0.8,
+      "expect": {
+        "width": 704,
+        "height": 480,
+        "frames": 121,
+        "has_audio": false
+      }
+    },
+    {
+      "label": "m05_text_to_audio_video",
+      "mode": "text_to_audio_video",
+      "prompt": "A weathered sea captain in a yellow raincoat stands on the deck of a ship in a storm and shouts: \"The storm is coming! All hands on deck!\" Thunder rolls and waves crash against the hull.",
+      "expect": {
+        "width": 704,
+        "height": 480,
+        "frames": 121,
+        "has_audio": true
+      }
+    },
+    {
+      "label": "m06_image_to_audio_video",
+      "mode": "image_to_audio_video",
+      "image": "images/cabin/cabin_landscape.png",
+      "expect": {
+        "width": 704,
+        "height": 480,
+        "frames": 121,
+        "has_audio": true
+      }
+    },
+    {
+      "label": "m07_image_text_to_audio_video",
+      "mode": "image_text_to_audio_video",
+      "image": "images/captain/captain_portrait.png",
+      "width": 480,
+      "height": 704,
+      "prompt": "A weathered sea captain in a yellow raincoat stands on the deck of a ship in a storm and shouts: \"The storm is coming! All hands on deck!\" Thunder rolls and waves crash against the hull.",
+      "expect": {
+        "width": 480,
+        "height": 704,
+        "frames": 121,
+        "has_audio": true
+      }
+    },
+    {
+      "label": "m08_text_to_audio",
+      "mode": "text_to_audio",
+      "prompt": "A calm male voice says: \"Welcome aboard. Mind the gap between the train and the platform.\" A two-tone door chime follows.",
+      "expect": {
+        "has_audio": true,
+        "has_video": false
+      }
+    },
+    {
+      "label": "m09_video_to_audio",
+      "mode": "video_to_audio",
+      "video": "video/tram_pushin_704x480_121f.mp4",
+      "prompt": "A tram bell, steel wheels on rails, city street ambience.",
+      "expect": {
+        "has_audio": true,
+        "has_video": false
+      }
+    },
+    {
+      "label": "m10_audio_to_audio",
+      "mode": "audio_to_audio",
+      "audio": "sfx/ocean_waves_gulls_48k_stereo.wav",
+      "prompt": "Heavy rain on a tin roof with distant rolling thunder.",
+      "noise_scale": 0.73,
+      "expect": {
+        "has_audio": true,
+        "has_video": false
+      }
+    },
+    {
+      "label": "m11_audio_to_video",
+      "mode": "audio_to_video",
+      "audio": "speech/captain_storm_male_48k_stereo.wav",
+      "prompt": "Close-up of a weathered sea captain shouting on the deck of a ship in a storm, rain on his face.",
+      "noise_scale": 0.5,
+      "expect": {
+        "width": 704,
+        "height": 480,
+        "has_audio": true
+      },
+      "auto_duration": true
+    },
+    {
+      "label": "s2_text_to_video_stage2",
+      "mode": "text_to_video",
+      "prompt": "A red vintage tram climbs a steep cobbled street at golden hour, slow push-in. The tram bell rings twice and steel wheels grind on the rails.",
+      "num_frames": 49,
+      "enable_stage_2": true,
+      "expect": {
+        "width": 1408,
+        "height": 960,
+        "frames": 49,
+        "has_audio": false
+      }
+    },
+    {
+      "label": "x2_lora_bts",
+      "mode": "text_to_video",
+      "prompt": "btssetstyle, a film crew sets up lights around a red vintage tram on a cobbled street at golden hour.",
+      "num_frames": 49,
+      "loras": [
+        {
+          "source": "SOLRICKS/LTX-2.5-BTS-Movie-Set",
+          "weight": 1.0
+        }
+      ],
+      "expect": {
+        "width": 704,
+        "height": 480,
+        "frames": 49
+      }
+    },
+    {
+      "label": "x1_auto_duration",
+      "mode": "text_to_audio_video",
+      "width": 512,
+      "height": 960,
+      "auto_duration": true,
+      "min_seconds": 5.0,
+      "max_seconds": 10.0,
+      "prompt": "A weathered sea captain in a yellow raincoat stands on the deck of a ship in a storm and shouts: \"The storm is coming! All hands on deck!\" Thunder rolls and waves crash against the hull.",
+      "expect": {
+        "width": 512,
+        "height": 960,
+        "has_audio": true
+      }
+    },
+    {
+      "label": "x1b_audio_to_video_operator_audio",
+      "mode": "audio_to_video",
+      "audio": "operator/captain_designed.wav",
+      "width": 512,
+      "height": 960,
+      "auto_duration": true,
+      "prompt": "Close-up of a weathered sea captain shouting on the deck of a ship in a storm, rain on his face.",
+      "expect": {
+        "width": 512,
+        "height": 960,
+        "has_audio": true
+      }
+    }
+  ]
+}
