@@ -56,10 +56,12 @@ __all__ = [
     "card_headline",
     "column_notes",
     "commit_line",
+    "commit_markup",
     "cost_panel",
     "dimension_hint",
     "empty_output_bug",
     "failure",
+    "figure_line",
     "frame_hint",
     "last_run_line",
     "lora_accepted",
@@ -764,6 +766,14 @@ def commit_line(facts: CostFacts) -> str:
         if facts.missing:
             return "Needs " + _and([_MISSING_WORDS.get(kind, kind) for kind in facts.missing])
         return "Not ready. The cost panel says why."
+    return figure_line(facts)
+
+
+def figure_line(facts: CostFacts) -> str:
+    """The cost panel's figure in one line: the size, the length and the quota needed (on
+    ZeroGPU) or where it runs. Empty for a request that won't run (it has no figure)."""
+    if facts.state == "refused":
+        return ""
     parts = []
     if facts.render_size:
         parts.append(_size(*facts.render_size))
@@ -776,6 +786,16 @@ def commit_line(facts: CostFacts) -> str:
     elif facts.reserve is not None:
         parts.append(f"needs {facts.reserve * facts.multiplier} s quota")
     return ", ".join(parts)
+
+
+def commit_markup(facts: CostFacts) -> str:
+    """The line in the commit: below 1024 px the phone bar's (:func:`commit_line`); on a
+    desktop the panel's figure (:func:`figure_line`), shown above Generate when the panel
+    runs under it. The stylesheet shows the one for the width."""
+    return (
+        f'<span class="mr-commit-phone">{_e(commit_line(facts))}</span>'
+        f'<span class="mr-commit-desk">{_e(figure_line(facts))}</span>'
+    )
 
 
 def readiness_reason(facts: CostFacts, *, running: bool = False) -> str:

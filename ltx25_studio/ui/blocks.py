@@ -687,7 +687,7 @@ def build_ui() -> gr.Blocks:
             )
             return [
                 render.cost_panel(facts),
-                render.commit_line(facts),
+                render.commit_markup(facts),
                 gr.update(interactive=ready),
                 text,
                 upscale,
@@ -1490,6 +1490,7 @@ def build_ui() -> gr.Blocks:
                 fn=lambda entries, *state, i=index: _restore(i, entries, *state),
                 inputs=[recent, *switch_state],
                 outputs=restore_outputs,
+                js=_SCROLL_TO_PURPOSE,
                 **_PRIVATE,
             )
             reuse.click(
@@ -1536,6 +1537,7 @@ def build_ui() -> gr.Blocks:
                 fn=lambda entries, monitor, i=index: _show(i, entries, monitor),
                 inputs=[recent, monitor_state],
                 outputs=[*show_outputs, show_run, sample_jump],
+                js=_SCROLL_TO_MONITOR,
                 **_PRIVATE,
             )
 
@@ -1589,10 +1591,27 @@ _SCROLL_TO_SAMPLE = """
 }
 """
 
+#: Generate and Show change the monitor: it comes into view at once, before the step's
+#: outputs reflow the rail. On desktop that scrolls the rail as little as it takes; below
+#: 1024 px, the page, to the monitor's top.
 _SCROLL_TO_MONITOR = """
 (...args) => {
-  if (window.innerWidth < 1024) {
-    document.getElementById('monitor')?.scrollIntoView({behavior: 'instant', block: 'start'});
+  const wide = window.innerWidth >= 1024;
+  document.getElementById('monitor')?.scrollIntoView(
+    {behavior: 'instant', block: wide ? 'nearest' : 'start'});
+  return args;
+}
+"""
+
+#: Restore settings rewrites the matrix and the form, far above its row on a phone: the
+#: purpose line, which names the restored mode, comes into view.
+_SCROLL_TO_PURPOSE = """
+(...args) => {
+  const purpose = document.getElementById('purpose');
+  if (purpose) {
+    const still = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    const wide = window.innerWidth >= 1024;
+    purpose.scrollIntoView({behavior: still ? 'auto' : 'smooth', block: wide ? 'nearest' : 'center'});
   }
   return args;
 }

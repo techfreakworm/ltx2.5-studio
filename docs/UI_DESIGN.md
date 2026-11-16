@@ -22,25 +22,42 @@ At 1024 px and wider the page has two columns under a one-line identity bar.
   to three example buttons, then the selected mode's inputs: media first, each with
   its one lever, then the prompt with Enhance. After those come shape, length and
   Upscale, the LoRA row and Advanced.
-- **The rail.** It is sticky at `top: 12px`. Its height is the viewport less the
-  offset where the columns start (a small script measures it), so at scroll 0 it ends
-  12 px above the bottom of the window at any desktop size. Its content never wraps:
-  Gradio gives every Row child `flex-wrap: wrap`, and a rail that wrapped sent its
-  overflow into a second column off the right edge, so the rail sets `nowrap` and its
-  children never shrink. When the content is taller than the rail, the rail scrolls
-  inside itself with a real scrollbar, drawn in a gutter outside the aligned right
-  edge. Generate is sticky at the rail's bottom, so it never leaves the rail's visible
-  area. From the top the rail holds the monitor, its caption, the cost panel, Generate
-  with its reason line, the "What you got" card with its actions, the run report and
-  Recent runs. A 4 px padding keeps focus rings unclipped; negative margins keep the
-  content edges level with the identity bar.
+- **The rail.** From the top it holds the monitor, its caption, the cost panel,
+  Generate with its reason line, the "What you got" card with its actions, the run
+  report and Recent runs. It is sticky at `top: 12px`. A small script sizes it: at page
+  scroll 0 it ends 12 px above the bottom of the window at any desktop size, and once
+  the page scrolls and the rail sticks it grows to the window less 24 px, so no dead
+  band is left under it. Its content never wraps: Gradio gives every Row child
+  `flex-wrap: wrap`, and a rail that wrapped sent its overflow into a second column off
+  the right edge, so the rail sets `nowrap` and its children never shrink. When the
+  content is taller than the rail, the rail scrolls inside itself with a real
+  scrollbar, drawn in a gutter outside the aligned right edge. A 4 px padding keeps
+  focus rings unclipped; negative margins keep the content edges level with the
+  identity bar.
+- **Generate never leaves the rail.** It is sticky at both of the rail's edges, flush
+  with them, so nothing shows past it. A row that passes under its top edge (the cost
+  panel, on a short window) or its bottom edge (the report, with Generate stuck at the
+  top) runs into a 12 px ink fade instead of being cut.
+- **The cost figure stays beside Generate on a short window.** The script fits the
+  monitor, the caption, the cost panel and Generate into the rail at rail scroll 0.
+  When they are taller than the rail, the monitor gives up height first, down to
+  180 px, letterboxed. If the panel still runs under Generate, the panel's figure line
+  stands above the button: "704 × 480, 5.0 s, needs 360 s quota" (off ZeroGPU, "on the
+  CPU"). When there is room to spare, the caption keeps four lines less the panel's
+  notes, so Generate stays where it is from mode to mode.
+- **What a click changes comes into view.** Generate and Show scroll the rail as little
+  as it takes to show the monitor; when a run ends, the head of its report (the Done
+  card's head, or a failure's headline and next step) is brought into view clear of
+  Generate.
 
 Below 1024 px the page is one column. The inputs come first, then the cost panel,
 monitor and report. A fixed bottom bar holds one short line (the cost, or why
 Generate is off: "Needs a prompt", "Won't run: 2 problems (width, frames)") and the
 same Generate button, restyled. There is never a second Generate in the DOM. Pressing
-Generate on a narrow screen scrolls the monitor into view, and while the monitor
-shows a sample a "See an example output" button under the purpose line jumps to it.
+Generate or Show on a narrow screen scrolls the monitor into view; Restore settings
+brings the purpose line, which names the restored mode, into view; and while the
+monitor shows a sample a "See an example output" button under the purpose line jumps
+to it.
 
 ## The matrix
 
@@ -285,8 +302,9 @@ loads after ours. Where a Gradio rule out-ranks a class (its `h1`–`h6` reset i
 
 - Chakra Petch 600 for the wordmark (20), matrix headers (14), panel titles (16),
   Generate (16) and lamps (12).
-- Spline Sans for prose (14/21; help text 13/19, at most 70 characters a line) and for
-  figures inside sentences, with tabular figures.
+- Spline Sans for prose (14/21; help text 13/19) and for figures inside sentences, with
+  tabular figures. Help lines are capped at `70ch`, which at 13 px is about 89
+  characters a line, not 70 (review round 3, P7; not changed this round).
 - Spline Sans Mono 500, with tabular figures, for number inputs and the two tungsten
   figures.
 

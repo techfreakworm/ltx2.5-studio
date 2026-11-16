@@ -353,8 +353,9 @@ footer .run-history, footer .run-history + .divider { display: none !important; 
 #rail { min-width: 0 !important; gap: 12px !important; flex-wrap: nowrap !important; }
 #rail > * { flex-shrink: 0 !important; }
 @media (min-width: 1024px) {
-  /* Sized to fit the viewport from where it starts; scrolls inside itself with a
-     real scrollbar, in a gutter outside the aligned edge. The 4 px padding keeps
+  /* Sized to fit the viewport from where it starts (the script measures it, and grows it
+     to the viewport less 24 px once the page scrolls and it sticks); scrolls inside itself
+     with a real scrollbar, in a gutter outside the aligned edge. The 4 px padding keeps
      focus rings unclipped; the negative margins keep the content edges aligned. */
   #rail { flex: 0 0 clamp(400px, 38vw, 560px) !important; position: sticky; top: 12px;
     align-self: flex-start; max-height: calc(100vh - var(--mr-rail-offset));
@@ -365,11 +366,32 @@ footer .run-history, footer .run-history + .divider { display: none !important; 
   #rail::-webkit-scrollbar-track { background: transparent; }
   #rail::-webkit-scrollbar-thumb { background: var(--mr-line-strong); border-radius: 6px;
     border: 2px solid var(--mr-ink); }
-  /* the caption keeps two lines, so a one-line caption does not move Generate */
-  #rail > #monitor-caption { min-height: 38px; }
-  /* Generate never leaves the rail's visible area */
-  #rail > #commit { position: sticky; bottom: 0; z-index: 3; background: var(--mr-ink);
-    padding: 8px 0 4px !important; margin-top: -8px !important; }
+  /* the caption keeps the lines the script reserves (two by default), so Generate does not
+     move from mode to mode */
+  #rail > #monitor-caption { min-height: var(--mr-caption-min, 38px); }
+  /* a short window: the monitor gives up height first (180 px at least), letterboxed */
+  #rail.mr-monitor-fit > #monitor { aspect-ratio: auto; height: var(--mr-monitor-h); }
+  /* Generate never leaves the rail's visible area: sticky at both edges, flush with the
+     rail's own edges, so nothing shows past it */
+  #rail > #commit { position: sticky; top: -4px; bottom: -4px; z-index: 3;
+    background: var(--mr-ink); padding: 8px 0 8px !important; margin-top: -8px !important; }
+  /* a row passing under Generate fades into it, never cut */
+  #rail > #commit::before, #rail > #commit::after { content: ""; position: absolute; left: 0;
+    right: 0; height: 12px; pointer-events: none; display: none; }
+  #rail > #commit::before { top: -12px;
+    background: linear-gradient(to bottom, rgba(18, 22, 27, 0), var(--mr-ink)); }
+  #rail > #commit::after { bottom: -12px;
+    background: linear-gradient(to top, rgba(18, 22, 27, 0), var(--mr-ink)); }
+  #rail.mr-under-commit > #commit::before, #rail.mr-over-commit > #commit::after {
+    display: block; }
+  /* the cost panel runs under Generate: its figure stands above the button */
+  #rail.mr-figure-under #commit-line { display: block; }
+  #commit-line p { margin: 0; font-size: 13px; line-height: 19px; color: var(--mr-paper); }
+  #commit-line .mr-commit-phone { display: none; }
+  /* a run's report, which follows Generate in the rail, comes into view clear of it even
+     when Generate is stuck at the rail's top */
+  #run-summary .mr-done-head, #run-status h3, #run-status h3 + p {
+    scroll-margin-top: calc(var(--mr-commit-h, 80px) + 12px); scroll-margin-bottom: 12px; }
 }
 @supports not selector(::-webkit-scrollbar) {
   #rail { scrollbar-width: thin; scrollbar-color: var(--mr-line-strong) transparent; }
@@ -722,6 +744,7 @@ button:disabled { cursor: not-allowed !important; }
   #commit-line { display: block; }
   #commit-line p { margin: 0; font-size: 13px; line-height: 18px; color: var(--mr-paper);
     display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  #commit-line .mr-commit-desk { display: none; }
   #generate-reason { display: none !important; }
   .mr-cost-pending { display: block; }
   .gradio-container { padding-bottom: calc(var(--mr-bar-h) + env(safe-area-inset-bottom) + 16px) !important; }
@@ -775,19 +798,133 @@ _SCRIPT = """
     obs.observe(document.body, { childList: true, subtree: true });
     run();
   };
-  // The rail fits the viewport from where the columns start: its height is the
-  // viewport less that offset (the CSS default is the offset measured at 1440).
-  const railOffset = () => {
-    const column = document.getElementById('commission');
-    if (!column) return false;
-    const top = Math.round(column.getBoundingClientRect().top + window.scrollY);
-    document.documentElement.style.setProperty('--mr-rail-offset', (top + 8) + 'px');
-    return true;
+  const byId = (id) => document.getElementById(id);
+  const wide = () => window.matchMedia('(min-width: 1024px)').matches;
+  const still = () => window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const px = (value) => parseFloat(value) || 0;
+
+  // == the desktop rail ====================================================
+  // Its home is where the columns start: at page scroll 0 it ends 12 px above the
+  // viewport's bottom; once the page scrolls and it sticks at 12 px it grows to the
+  // viewport less 24 px, so no dead band is left under it. At the page's end it stops at
+  // its row's bottom (the footer is below), so the row never pushes its top out of view.
+  const home = () => {
+    const column = byId('commission');
+    return column ? Math.round(column.getBoundingClientRect().top + window.scrollY) - 4 : null;
   };
-  let railMeasured = false;
-  window.addEventListener('resize', railOffset);
+  const placeRail = () => {
+    const top = home(), shell = byId('shell');
+    if (top === null) return;
+    const now = Math.max(12, top - window.scrollY);
+    const floor = window.innerHeight - 12;
+    const end = shell ? Math.min(floor, Math.floor(shell.getBoundingClientRect().bottom)) : floor;
+    document.documentElement.style.setProperty(
+      '--mr-rail-offset', (now + window.innerHeight - end) + 'px');
+  };
+  // At rail scroll 0 the rail holds the monitor, its caption, the cost panel and Generate.
+  // Taller than the rail (a short window): the monitor gives up height first, down to
+  // 180 px, letterboxed; if the panel still runs under Generate, the panel's figure line
+  // stands above the button. With room to spare, the caption keeps four lines less the
+  // panel's notes, so Generate stays put from mode to mode.
+  const MONITOR_FLOOR = 180;
+  const CAPTION_LINES = 4;
+  const fit = () => {
+    const rail = byId('rail'), monitor = byId('monitor'), caption = byId('monitor-caption');
+    const cost = byId('cost'), commit = byId('commit'), line = byId('commit-line');
+    if (!rail || !monitor || !caption || !cost || !commit) return;
+    if (!wide()) {
+      rail.classList.remove('mr-monitor-fit', 'mr-figure-under');
+      rail.style.removeProperty('--mr-caption-min');
+      return;
+    }
+    const top = home();
+    if (top === null) return;
+    const rs = getComputedStyle(rail), ks = getComputedStyle(commit);
+    const gap = px(rs.rowGap) || 12;
+    const avail = window.innerHeight - 12 - top - px(rs.paddingTop) - px(rs.paddingBottom);
+    const natural = monitor.offsetWidth * 9 / 16;
+    const lines = [...caption.querySelectorAll('p')].filter((p) => p.offsetHeight > 0);
+    const captionH = lines.length
+      ? lines[lines.length - 1].getBoundingClientRect().bottom - lines[0].getBoundingClientRect().top
+      : 0;
+    const lineH = lines.length ? px(getComputedStyle(lines[0]).lineHeight) || 19 : 19;
+    const notesH = [...cost.querySelectorAll('.mr-cost-note')]
+      .reduce((sum, note) => sum + note.offsetHeight + px(getComputedStyle(note).marginTop), 0);
+    const lineShown = rail.classList.contains('mr-figure-under') && !!line && line.offsetHeight > 0;
+    const commitH = commit.offsetHeight - (lineShown ? line.offsetHeight + px(ks.rowGap) : 0);
+    const above = (m, c) => m + gap + c + gap + cost.offsetHeight + gap + px(ks.marginTop) + commitH;
+    let monitorH = natural, captionMin = captionH;
+    const over = above(natural, captionH) - avail;
+    if (over > 0) monitorH = Math.max(MONITOR_FLOOR, natural - over);
+    else captionMin = captionH + Math.min(-over, Math.max(0, CAPTION_LINES * lineH - notesH - captionH));
+    const under = above(monitorH, captionMin) - avail > 0.5;
+    const figure = !!line && (line.querySelector('.mr-commit-desk')?.textContent || '').trim() !== '';
+    rail.classList.toggle('mr-monitor-fit', monitorH < natural - 0.5);
+    rail.style.setProperty('--mr-monitor-h', Math.round(monitorH) + 'px');
+    rail.style.setProperty('--mr-caption-min', Math.round(captionMin) + 'px');
+    rail.classList.toggle('mr-figure-under', under && figure);
+    rail.style.setProperty('--mr-commit-h', commit.offsetHeight + 'px');
+  };
+  // A row under Generate's top edge (the panel, at a short window) or under its bottom
+  // edge (the report, with Generate stuck at the top) fades into it.
+  const shade = () => {
+    const rail = byId('rail'), commit = byId('commit'), cost = byId('cost');
+    if (!rail || !commit || !cost) return;
+    if (!wide()) {
+      rail.classList.remove('mr-under-commit', 'mr-over-commit');
+      return;
+    }
+    const edge = commit.getBoundingClientRect();
+    rail.classList.toggle('mr-under-commit', cost.getBoundingClientRect().bottom > edge.top + 0.5);
+    // the next row in the rail's flow (not the visually hidden live region)
+    let next = commit.nextElementSibling;
+    while (next && (next.offsetHeight < 2 || getComputedStyle(next).position === 'absolute')) {
+      next = next.nextElementSibling;
+    }
+    rail.classList.toggle('mr-over-commit', !!next && next.getBoundingClientRect().top < edge.bottom - 0.5);
+  };
+  // When a run ends on desktop, the head of its report comes into view just clear of
+  // Generate: the Done card's head, or a failure's headline and next step.
+  let lastReport = '';
+  const follow = () => {
+    const summary = byId('run-summary'), status = byId('run-status');
+    const head = status ? status.querySelector('h3') : null;
+    let key = '', target = null;
+    if (summary && summary.offsetHeight > 0 && summary.textContent.trim()) {
+      key = 'done:' + summary.textContent.trim().slice(0, 300);
+      target = summary.querySelector('.mr-done-head') || summary;
+    } else if (head) {
+      key = 'failed:' + status.textContent.trim().slice(0, 300);
+      const step = head.nextElementSibling;
+      target = step && step.tagName === 'P' ? step : head;
+    }
+    if (key === lastReport) return;
+    lastReport = key;
+    if (target && wide()) target.scrollIntoView({ block: 'nearest', behavior: still() ? 'auto' : 'smooth' });
+  };
+  let queued = false;
+  const settle = () => {
+    if (queued) return;
+    queued = true;
+    requestAnimationFrame(() => {
+      queued = false;
+      try { placeRail(); fit(); shade(); follow(); } catch (e) { console.warn(e); }
+    });
+  };
+  window.addEventListener('resize', settle);
+  window.addEventListener('scroll', () => { placeRail(); shade(); }, { passive: true });
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(settle);
   ready(() => {
-    if (!railMeasured) railMeasured = railOffset();
+    settle();
+    const rail = byId('rail');
+    if (rail && !rail.dataset.mrFit) {
+      rail.dataset.mrFit = '1';
+      rail.addEventListener('scroll', shade, { passive: true });
+      if (window.ResizeObserver) {
+        const watch = new ResizeObserver(settle);
+        ['rail', 'monitor', 'monitor-caption', 'cost', 'commit'].forEach((id) => byId(id) && watch.observe(byId(id)));
+      }
+    }
     const status = document.getElementById('run-status');
     if (status && !status.dataset.mrLive) {
       status.dataset.mrLive = '1';
