@@ -135,11 +135,12 @@ audio is encoded to `audio_latents`, and then:
 - With automatic length on, these two modes take their length from your audio file: the
   duration predictor reads only the text, so it cannot hear the upload.
 
-> **Known issue (2026-11-16, being investigated).** Audio that goes through the app's audio
-> encoding comes back about 9 dB quieter and duller, measured on real weights even with no
-> generation in between. It shows in audio to audio's output, and it is the version of your
-> audio that audio to video's picture is made to; the soundtrack in audio to video's file is
-> your own file and is not affected.
+> **Known issue (2026-11-16; cause found, fix in progress).** Audio that goes through the app's
+> audio encoding comes back about 9 dB quieter and duller, measured on real weights even with no
+> generation in between. The cause is the app's own mel transform, built with the wrong FFT
+> size. It shows in audio to audio's output, and it is the version of your audio that audio to
+> video's picture is made to; the soundtrack in audio to video's file is your own file and is
+> not affected.
 
 ---
 
@@ -231,8 +232,8 @@ fails at startup (seen in the log of 2026-11-13, for a reason that applies to ev
 the first enhanced run in each container pays the download too. The cause is fixed in the
 code; this is not verified on the Space yet. The pinned transformers
 (5.23.0) refuses one per-layer scale table of the enhancer's checkpoint, so the app reads that
-one weight back from the cached checkpoint and refuses any other mismatch; enhancement on real
-weights has not been re-checked since that fix.
+one weight back from the cached checkpoint and refuses any other mismatch. With that, both the
+text and the image route rewrite prompts on real weights (verified on a Mac, 2026-11-16).
 
 There is deliberately **no seed control** for it. LTX-2.5 enhancement decodes greedily, so
 `prompt_enhancement_seed` changes nothing — an advertised lever attached to nothing is a
