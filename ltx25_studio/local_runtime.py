@@ -22,7 +22,8 @@ What differs from the Space path, and why:
   applied to the connectors once and to the transformer after every load.
 * **The image-conditioning CRF is set explicitly**, because upstream derives it
   from the text encoder, which is absent during a staged denoise.
-* **Memory preflight** before every heavy load and before each denoise.
+* **Memory preflight** before every heavy load and before each denoise; after a
+  release it judges the gauge once it has settled (``memory.preflight``).
 * Stage 2 and the diffusion decoder follow the Space runner's rules: off CUDA
   the decoder runs on the CPU, at very small sizes only
   (``device.check_stage_2_size``, ``pipelines.check_cpu_decoder_size``).
@@ -105,6 +106,10 @@ _PROMPT_ADALN_NEW = "prompt_adaln"
 _HF_CACHE_PATH = re.compile(
     r"models--(?P<org>[^/]+?)--(?P<name>[^/]+)/snapshots/(?P<rev>[^/]+)(?:/(?P<rel>.*))?$"
 )
+
+#: This process freed device memory since a judgement last read the gauge, so
+#: the next judgement waits for the gauge to settle. Process-wide, as the gauge is.
+_freed_since_reading = False
 
 
 # --------------------------------------------------------------------------
@@ -850,17 +855,24 @@ class _LocalWeights:
             self.log(line)
 
     def _preflight(self, phase: str, need_gb: float) -> None:
+        global _freed_since_reading
         limit = {} if self.memory_limit_gb is None else {"limit_gb": float(self.memory_limit_gb)}
-        result = memory.preflight(phase, need_gb=need_gb, **limit)
+        result = memory.preflight(phase, need_gb=need_gb, released=_freed_since_reading, **limit)
+        _freed_since_reading = False
+        if result.settled is not None:
+            self.log(result.settled.describe())
         self.log(result.describe())
         result.require()
 
     def _free(self) -> None:
+        global _freed_since_reading
         gc.collect()
         if _device_type(self.device) == "mps":
             import torch
 
             torch.mps.empty_cache()
+        # Freed MPS pages leave the gauge over a few hundred ms, not at once.
+        _freed_since_reading = True
 
     @contextmanager
     def freed_on_failure(self):
@@ -983,7 +995,10 @@ class _LocalWeights:
             # release must not be restored into a later run (review local-runtime-2).
             names = [adapter_names] if isinstance(adapter_names, str) else list(adapter_names)
             weights.forget_adapters(names)
-            return original_delete(adapter_names)
+            try:
+                return original_delete(adapter_names)
+            finally:
+                weights._free()  # the adapter's layers go back, like any release
 
         pipeline.delete_adapters = delete_adapters
 

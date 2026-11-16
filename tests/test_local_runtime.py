@@ -16,6 +16,8 @@ from __future__ import annotations
 import gc
 import itertools
 import json
+import re
+import sys
 from pathlib import Path
 
 import pytest
@@ -47,10 +49,15 @@ def _fresh_runtime():
 
 @pytest.fixture(autouse=True)
 def _no_limit_surprises(monkeypatch):
-    """The tiny runs need well under a GB; the gauge itself stays live."""
+    """The tiny runs need well under a GB; the gauge itself stays live.
+
+    Settling and reading again are off (0 s) except where a test scripts the
+    gauge and the clock: on this live gauge they would really sleep.
+    """
     monkeypatch.delenv("LTX25_MEMORY_LIMIT_GB", raising=False)
     monkeypatch.delenv("LTX25_LOAD_SPIKE_FACTOR", raising=False)
     monkeypatch.delenv("LTX25_ACTIVATION_CALIBRATION", raising=False)
+    monkeypatch.setenv("LTX25_MEMORY_SETTLE_SECONDS", "0")
 
 
 def _torch():
@@ -1636,3 +1643,222 @@ def test_a_staged_stage_2_run_encodes_the_prompt_once_and_keeps_the_transformer(
     assert loads.count("load_transformer") <= 1, loads
     phases = [entry["phase"] for entry in runner.timings]
     assert "denoise (stage 1)" in phases and "denoise (stage 2)" in phases
+
+
+# --------------------------------------------------------------------------
+# F73: after a release, the preflight judges a settled gauge
+#
+# The session's first run was refused at "load transformer" on a gauge read
+# 10-400 ms after the text encoder was released (67.3 GB; 38.8 GB eight seconds
+# later): the kernel un-wires freed MPS pages over 0.1-0.35 s. These run the
+# real staged runner on the tiny checkpoint with the gauge scripted around the
+# runner's own releases; the clock moves only when the preflight sleeps.
+# --------------------------------------------------------------------------
+
+
+class ScriptedGauge:
+    """The committed gauge as the runner reads it.
+
+    ``before`` until the runner frees memory; from each release on, ``after`` in
+    order (the last one repeats). The limit is the Mac's 90 GB unless a test
+    sets another, so the judgements are the same on every platform.
+    """
+
+    def __init__(self, monkeypatch, *, before, after):
+        self.before = before
+        self.after = list(after)
+        self.since_release = None
+        self.reads = 0
+        self.frees = 0
+        self.now = 0.0
+        self.slept: list[float] = []
+        real_free = local_runtime._LocalWeights._free
+
+        def free(weights):
+            real_free(weights)
+            self.frees += 1
+            self.since_release = 0
+
+        monkeypatch.setattr(local_runtime._LocalWeights, "_free", free)
+        monkeypatch.setattr(memory, "committed_gb", self.read)
+        monkeypatch.setattr(memory, "_clock", lambda: self.now, raising=False)
+        monkeypatch.setattr(memory, "_sleep", self.sleep, raising=False)
+        # Earlier tests' clean-up released memory; nothing this test did has.
+        monkeypatch.setattr(local_runtime, "_freed_since_reading", False, raising=False)
+        monkeypatch.delenv("LTX25_MEMORY_SETTLE_SECONDS")
+        monkeypatch.setenv("LTX25_MEMORY_LIMIT_GB", "90")
+
+    def read(self, **_):
+        self.reads += 1
+        if self.since_release is None:
+            return self.before
+        value = self.after[min(self.since_release, len(self.after) - 1)]
+        self.since_release += 1
+        return value
+
+    def sleep(self, seconds):
+        self.slept.append(seconds)
+        self.now += seconds
+
+    def log(self, lines: list, taken: list):
+        """A runner log that records, per preflight line, the readings and sleeps so far."""
+
+        def log(line):
+            lines.append(line)
+            if line.startswith("preflight["):
+                phase = line.split("]")[0].removeprefix("preflight[")
+                taken.append((phase, self.reads, len(self.slept)))
+
+        return log
+
+
+def _per_judgement(taken):
+    """``[(phase, readings, sleeps)]`` each judgement took."""
+    out, reads, sleeps = [], 0, 0
+    for phase, total_reads, total_sleeps in taken:
+        out.append((phase, total_reads - reads, total_sleeps - sleeps))
+        reads, sleeps = total_reads, total_sleeps
+    return out
+
+
+def _run_once(runner, prompt=PROMPT):
+    torch = _torch()
+    return runner(
+        prompt=prompt,
+        width=SIZE,
+        height=SIZE,
+        num_frames=FRAMES,
+        generator=torch.Generator().manual_seed(SEED),
+        output_type="np",
+    )
+
+
+def _line_index(lines, prefix):
+    return next(i for i, line in enumerate(lines) if line.startswith(prefix))
+
+
+def test_the_transformer_is_judged_on_the_settled_gauge_after_the_text_encoder_is_released(
+    monkeypatch,
+):
+    """The session's refused run: over a 66 GB limit at the first reading, not once settled."""
+    ScriptedGauge(monkeypatch, before=35.2, after=[67.3, 64.1, 51.2, 40.1, 38.8, 38.8])
+    monkeypatch.setenv("LTX25_MEMORY_LIMIT_GB", "66")
+    lines = []
+    runner = _runner("text2video", "staged", log=lines.append)
+
+    _run_once(runner)
+
+    judged = _line_index(lines, "preflight[load transformer]")
+    assert lines.index("released the text encoder") < judged - 1
+    assert lines[judged - 1] == "memory settled in 0.25 s: 67.3 → 38.8 GB"
+    assert lines[judged].startswith("preflight[load transformer]: committed 38.8 + need ")
+    assert " <= 66.0 GB OK (headroom " in lines[judged]
+    assert runner.pipeline.transformer is not None
+
+
+@pytest.mark.parametrize("residency", ["staged", "resident"])
+def test_only_a_judgement_after_a_release_reads_more_than_once_or_waits(monkeypatch, residency):
+    gauge = ScriptedGauge(monkeypatch, before=35.2, after=[52.0, 40.0, 39.9])
+    lines, taken = [], []
+    runner = _runner("text2video", residency, log=gauge.log(lines, taken))
+
+    _run_once(runner)
+
+    denoise = f"denoise {SIZE}x{SIZE}x{FRAMES}"
+    if residency == "resident":
+        assert _per_judgement(taken) == [
+            ("load small set", 1, 0),
+            ("load transformer", 1, 0),
+            ("load text encoder", 1, 0),
+            (denoise, 1, 0),
+        ]
+        assert not any(line.startswith("memory settled") for line in lines)
+    else:
+        assert _per_judgement(taken) == [
+            ("load small set", 1, 0),
+            ("load text encoder", 1, 0),
+            ("load transformer", 3, 2),  # after the text encoder's release
+            (denoise, 1, 0),
+        ]
+
+
+def test_a_failed_step_settles_the_gauge_before_the_next_runs_first_reading(monkeypatch):
+    ScriptedGauge(monkeypatch, before=35.2, after=[61.0, 48.0, 39.0, 38.9])
+    lines = []
+    runner = _runner("text2video", "staged", log=lines.append)
+    real_load = local_runtime.load_transformer
+
+    def fails(*args, **kwargs):
+        raise RuntimeError("MPS backend out of memory (stand-in)")
+
+    monkeypatch.setattr(local_runtime, "load_transformer", fails)
+    with pytest.raises(RuntimeError, match="stand-in"):
+        _run_once(runner)
+    monkeypatch.setattr(local_runtime, "load_transformer", real_load)
+    monkeypatch.setenv("LTX25_MEMORY_LIMIT_GB", "60")  # over it only before the gauge settles
+    lines.clear()
+
+    _run_once(runner)  # the prompt is cached, so the transformer's is the first reading
+
+    judged = _line_index(lines, "preflight[")
+    assert lines[judged].startswith("preflight[load transformer]: committed 38.9 + need ")
+    assert lines[judged - 1] == "memory settled in 0.15 s: 61.0 → 38.9 GB"
+
+
+def test_removing_an_adapter_frees_it_and_the_next_judgement_settles(tmp_path, monkeypatch):
+    pytest.importorskip("peft")
+    lora = _tiny_adapter(tmp_path)
+    gauge = ScriptedGauge(monkeypatch, before=35.2, after=[44.0, 40.2, 40.1])
+    lines = []
+    runner = _runner("text2video", "staged", log=lines.append)
+    _run(runner, tmp_path, "a", prompt=PROMPT, loras=(lora,))
+    assert not getattr(runner.pipeline.transformer, "peft_config", None), "the adapter stayed"
+    frees = gauge.frees
+    lines.clear()
+
+    _run(runner, tmp_path, "b", prompt=PROMPT)  # cached prompt, resident transformer
+
+    judged = _line_index(lines, "preflight[")
+    assert lines[judged].startswith(f"preflight[denoise {SIZE}x{SIZE}x{FRAMES}]")
+    assert lines[judged - 1] == "memory settled in 0.10 s: 44.0 → 40.1 GB"
+    assert gauge.frees == frees, "nothing was released in the second run before its judgement"
+
+
+def test_zero_settle_seconds_judges_the_first_reading_as_before(monkeypatch):
+    gauge = ScriptedGauge(monkeypatch, before=35.2, after=[67.3, 64.1, 51.2, 40.1, 38.8])
+    monkeypatch.setenv("LTX25_MEMORY_LIMIT_GB", "66")
+    monkeypatch.setenv("LTX25_MEMORY_SETTLE_SECONDS", "0")
+    runner = _runner("text2video", "staged")
+
+    with pytest.raises(memory.MemoryPreflightError) as caught:
+        _run_once(runner)
+
+    assert str(caught.value).startswith("Not enough memory for 'load transformer': 67.3 GB")
+    assert gauge.slept == []
+    assert runner.pipeline.transformer is None
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="the live gauge is vm_stat, on macOS")
+def test_on_the_live_gauge_a_release_is_settled_without_really_sleeping(monkeypatch):
+    clock, slept = [0.0], []
+
+    def sleep(seconds):
+        slept.append(seconds)
+        clock[0] += seconds
+
+    monkeypatch.setattr(memory, "_clock", lambda: clock[0], raising=False)
+    monkeypatch.setattr(memory, "_sleep", sleep, raising=False)
+    monkeypatch.setattr(local_runtime, "_freed_since_reading", False, raising=False)
+    monkeypatch.delenv("LTX25_MEMORY_SETTLE_SECONDS")
+    lines = []
+    runner = _runner("text2video", "staged", log=lines.append)
+
+    _run_once(runner)
+
+    judged = _line_index(lines, "preflight[load transformer]")
+    assert re.fullmatch(
+        r"memory (settled in|still moving after) \d+\.\d\d s: \d+\.\d → \d+\.\d GB"
+        r"(; judged on the last reading)?",
+        lines[judged - 1],
+    ), lines[judged - 1]
+    assert slept and sum(slept) <= memory.DEFAULT_SETTLE_SECONDS + 1e-9

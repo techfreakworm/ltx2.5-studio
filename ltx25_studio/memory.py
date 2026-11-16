@@ -6,6 +6,10 @@ memory plus what the next step adds stays at or under 90 GB**. "Committed" is
 size: never RSS (it misses MPS allocations and double-counts nothing useful)
 and never "available" (it counts reclaimable cache as free).
 
+A judgement on the live gauge waits for it where a reading would be early:
+after a release, until the gauge stops falling, and on a FAIL, until a reading
+fits or the wait is over (:func:`preflight`).
+
 Stdlib only; torch is imported lazily by :func:`mps_stats` alone, so this module
 imports in the torch-less environment.
 """
@@ -17,12 +21,14 @@ import os
 import re
 import subprocess
 import sys
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, replace
 
 from .errors import ConfigError, LTXStudioError
 
 __all__ = [
     "DEFAULT_DARWIN_LIMIT_GB",
+    "DEFAULT_SETTLE_SECONDS",
     "FIXED_ACTIVATION_GB",
     "LOAD_SPIKE_FACTORS",
     "MemoryPreflightError",
@@ -30,6 +36,7 @@ __all__ = [
     "MpsWatermarks",
     "mps_watermarks",
     "PreflightResult",
+    "Settle",
     "activation_calibration",
     "activation_estimate_gb",
     "activation_terms",
@@ -40,6 +47,7 @@ __all__ = [
     "parse_vm_stat",
     "release_file_cache",
     "preflight",
+    "settle_seconds",
     "video_tokens",
 ]
 
@@ -48,6 +56,7 @@ GB = 1e9  # decimal GB throughout, as the 90 GB rule and the Hub's file sizes ar
 LIMIT_ENV = "LTX25_MEMORY_LIMIT_GB"
 CALIBRATION_ENV = "LTX25_ACTIVATION_CALIBRATION"
 SPIKE_ENV = "LTX25_LOAD_SPIKE_FACTOR"
+SETTLE_ENV = "LTX25_MEMORY_SETTLE_SECONDS"
 
 #: The operator's committed-memory ceiling on the Mac.
 DEFAULT_DARWIN_LIMIT_GB = 90.0
@@ -58,6 +67,22 @@ DEFAULT_DARWIN_LIMIT_GB = 90.0
 #: The runner now moves safetensors weights in ~2 GB chunks, releasing file pages
 #: as it goes (~1.0x plus a chunk), so 1.15 is kept as the conservative bound.
 LOAD_SPIKE_FACTORS = {"safetensors": 1.15, "gguf": 1.10}
+
+#: The longest a live judgement waits for the gauge. Freed MPS memory is wired:
+#: the kernel un-wires it over 0.1-0.35 s after the release (measured 2026-11-16,
+#: 24 GB of text encoder: 62.3, 59.3, 46.3, 38.3 GB at 0.1 s steps, then flat).
+#: File pages given back leave the gauge at once (measured the same day).
+DEFAULT_SETTLE_SECONDS = 2.0
+MAX_SETTLE_SECONDS = 60.0
+#: After a release: read every 50 ms (a reading costs about 5 ms) until two
+#: consecutive readings are this close.
+SETTLE_STEP_SECONDS = 0.05
+SETTLE_TOLERANCE_GB = 0.25
+#: A live FAIL is read again at this step.
+REREAD_STEP_SECONDS = 0.1
+#: The clock and the sleep a live judgement waits on (tests replace them).
+_clock = time.monotonic
+_sleep = time.sleep
 
 # --- activation model constants (recon K §8.2-8.3, real transformer/vae configs) ---
 #: VAE compression: 8x in time, 32x in space (vae config, patch_size 1).
@@ -157,7 +182,7 @@ def _live_committed(platform: str | None) -> float | None:
 # --------------------------------------------------------------------------
 
 
-def _env_float(name: str, *, default, minimum: float, legal: str):
+def _env_float(name: str, *, default, minimum: float, legal: str, maximum: float | None = None):
     raw = os.environ.get(name)
     if raw is None or raw.strip() == "":
         return default
@@ -165,7 +190,12 @@ def _env_float(name: str, *, default, minimum: float, legal: str):
         value = float(raw)
     except ValueError:
         value = None
-    if value is None or value != value or value < minimum:
+    if (
+        value is None
+        or value != value
+        or value < minimum
+        or (maximum is not None and value > maximum)
+    ):
         raise ConfigError(variable=name, value=raw, legal=(legal,))
     return value
 
@@ -179,6 +209,17 @@ def default_limit_gb(*, platform: str | None = None) -> float | None:
 def activation_calibration() -> float:
     """``LTX25_ACTIVATION_CALIBRATION``: the lead's measured/estimated ratio, default 1.0."""
     return _env_float(CALIBRATION_ENV, default=1.0, minimum=0.01, legal="a positive number")
+
+
+def settle_seconds() -> float:
+    """``LTX25_MEMORY_SETTLE_SECONDS``: the longest a live judgement waits; 0 is one reading."""
+    return _env_float(
+        SETTLE_ENV,
+        default=DEFAULT_SETTLE_SECONDS,
+        minimum=0.0,
+        maximum=MAX_SETTLE_SECONDS,
+        legal=f"a number of seconds from 0 to {MAX_SETTLE_SECONDS:g} (0 turns the wait off)",
+    )
 
 
 def load_spike_factor(source: str = "safetensors") -> float:
@@ -348,6 +389,24 @@ def activation_estimate_gb(
 
 
 @dataclass(frozen=True)
+class Settle:
+    """The gauge read after a release until two consecutive readings agreed, or the bound."""
+
+    first: float
+    last: float
+    seconds: float
+    steady: bool
+
+    def describe(self) -> str:
+        moved = f"{self.first:.1f} → {self.last:.1f} GB"
+        if self.steady:
+            return f"memory settled in {self.seconds:.2f} s: {moved}"
+        return (
+            f"memory still moving after {self.seconds:.2f} s: {moved}; judged on the last reading"
+        )
+
+
+@dataclass(frozen=True)
 class PreflightResult:
     phase: str
     committed: float | None
@@ -355,21 +414,33 @@ class PreflightResult:
     limit: float | None
     headroom: float | None
     verdict: str  # "OK", "FAIL" or "REPORT"
+    #: How the gauge settled after a release, when this judgement waited for it.
+    settled: Settle | None = None
+    #: The first reading's FAIL, when the gauge was read again, and for how long.
+    first: PreflightResult | None = None
+    reread_seconds: float | None = None
 
     @property
     def total(self) -> float | None:
         return None if self.committed is None else self.committed + self.need
 
     def describe(self) -> str:
-        head = f"preflight[{self.phase}]: "
+        if self.first is not None:
+            return (
+                f"{self.first.describe()}; read again for {self.reread_seconds:.1f} s: "
+                f"{self._judgement()}"
+            )
+        return f"preflight[{self.phase}]: {self._judgement()}"
+
+    def _judgement(self) -> str:
         if self.committed is None:
-            return f"{head}committed n/a + need {self.need:.1f} GB (not measured here; report only)"
+            return f"committed n/a + need {self.need:.1f} GB (not measured here; report only)"
         sum_text = f"committed {self.committed:.1f} + need {self.need:.1f} = {self.total:.1f} GB"
         if self.limit is None:
-            return f"{head}{sum_text} (no limit; report only)"
+            return f"{sum_text} (no limit; report only)"
         if self.verdict == "OK":
-            return f"{head}{sum_text} <= {self.limit:.1f} GB OK (headroom {self.headroom:.1f})"
-        return f"{head}{sum_text} > {self.limit:.1f} GB FAIL (short by {-self.headroom:.1f})"
+            return f"{sum_text} <= {self.limit:.1f} GB OK (headroom {self.headroom:.1f})"
+        return f"{sum_text} > {self.limit:.1f} GB FAIL (short by {-self.headroom:.1f})"
 
     def require(self) -> PreflightResult:
         if self.verdict == "FAIL":
@@ -387,20 +458,83 @@ def preflight(
     limit_gb: float | None | object = _MEASURE,
     committed_gb: float | None | object = _MEASURE,
     platform: str | None = None,
+    released: bool = False,
+    read=None,
+    clock=None,
+    sleep=None,
 ) -> PreflightResult:
     """Judge one step. ``limit_gb`` defaults to :func:`default_limit_gb`.
 
     ``committed_gb`` defaults to the live gauge; pass a number to judge a
-    projected state (the dry run does).
+    projected state (the dry run does), which never waits.
+
+    On the live gauge, with a limit, within ``LTX25_MEMORY_SETTLE_SECONDS`` in
+    all: ``released`` (this process freed memory since the gauge was last read
+    for a judgement) first reads every 50 ms until two consecutive readings are
+    within 0.25 GB, and that reading is judged; a FAIL is read again every 0.1 s
+    and passes as soon as a reading fits, else it fails on the last reading.
+    ``read``, ``clock`` and ``sleep`` stand in for the gauge and the time.
     """
     limit = default_limit_gb(platform=platform) if limit_gb is _MEASURE else limit_gb
-    committed = _live_committed(platform) if committed_gb is _MEASURE else committed_gb
     need = float(need_gb)
+    if committed_gb is not _MEASURE:
+        return _judged(phase, committed_gb, need, limit)
+    read = read or (lambda: _live_committed(platform))
+    clock = clock or _clock
+    sleep = sleep or _sleep
+    started = clock()
+    committed = read()
+    if committed is None or limit is None:
+        return _judged(phase, committed, need, limit)
+    bound = settle_seconds()
+    settled = None
+    if released and bound > 0:
+        settled = _settle(read, committed, started, bound, clock, sleep)
+        committed = settled.last
+    result = _judged(phase, committed, need, limit)
+    if result.verdict == "FAIL" and bound > 0:
+        result = _read_again(result, read, started, bound, clock, sleep)
+    return replace(result, settled=settled)
+
+
+def _judged(phase: str, committed, need: float, limit) -> PreflightResult:
     if committed is None or limit is None:
         return PreflightResult(phase, committed, need, limit, None, "REPORT")
     headroom = float(limit) - (float(committed) + need)
     verdict = "OK" if headroom >= 0 else "FAIL"
     return PreflightResult(phase, float(committed), need, float(limit), headroom, verdict)
+
+
+def _settle(read, first: float, started: float, bound: float, clock, sleep) -> Settle:
+    previous = first
+    while True:
+        elapsed = clock() - started
+        if elapsed >= bound:
+            return Settle(first, previous, elapsed, steady=False)
+        sleep(min(SETTLE_STEP_SECONDS, bound - elapsed))
+        current = read()
+        if current is None:
+            return Settle(first, previous, clock() - started, steady=False)
+        if abs(current - previous) <= SETTLE_TOLERANCE_GB:
+            return Settle(first, current, clock() - started, steady=True)
+        previous = current
+
+
+def _read_again(failed: PreflightResult, read, started: float, bound: float, clock, sleep):
+    since = clock()
+    result = failed
+    while result.verdict == "FAIL":
+        elapsed = clock() - started
+        if elapsed >= bound:
+            break
+        sleep(min(REREAD_STEP_SECONDS, bound - elapsed))
+        reading = read()
+        if reading is None:
+            break
+        result = _judged(failed.phase, reading, failed.need, failed.limit)
+    if result is failed:
+        return failed  # no time was left to read again
+    return replace(result, first=failed, reread_seconds=clock() - since)
 
 
 HIGH_WATERMARK_ENV = "PYTORCH_MPS_HIGH_WATERMARK_RATIO"
