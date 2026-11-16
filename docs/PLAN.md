@@ -1941,7 +1941,9 @@ a code path that works on ZeroGPU works on MPS, or vice versa.
 > Upscale ×2 or an explicit diffusion decode runs only at very small sizes and is refused before
 > dispatch at real ones; bitsandbytes int8 needs CUDA. Verified on real weights for all eleven
 > modes (`SPACE_MODE_MATRIX.md` §10.2); most of those runs predate `c712e7e`, and the lip-sync
-> runs (`aa7ff84`, `482800d`) ran on it.
+> runs (`aa7ff84`, `482800d`) ran on it, as did the final pass, which repeated every mode on
+> `e59944e` (three of its runs on `ba2d582`): every output compared with a run made after the
+> RoPE fix was identical to it.
 
 ---
 

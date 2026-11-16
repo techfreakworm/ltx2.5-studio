@@ -974,14 +974,16 @@ evidence directory, outside this repo.
   says otherwise. **The app's own UI was not part of these runs.**
 - The code is named per row. Most runs predate `c712e7e`, which made the local runner a
   `StageRunner`, one stage graph with the Space's (the local side supplies only the
-  residency); the lip-sync runs below (`aa7ff84`, `482800d`) ran after it.
+  residency); the lip-sync runs below (`aa7ff84`, `482800d`) ran after it, and so did the
+  final pass, which repeated every mode on `e59944e` (below).
 - The lead opened every output: six native-resolution frames per video; per soundtrack the
   loudness, a spectrogram and a transcript; for conditioned modes, frame 0 against the
   supplied image (SSIM, PSNR). Inputs were files prepared for the test (generated images, synthetic
   clips, recorded speech, the operator's own recording); the video-to-sound clips were two
   outputs of earlier runs.
 
-**Per mode.** All eleven verified.
+**Per mode.** All eleven verified, and all eleven again on the final code (the final pass,
+below).
 
 | # | mode | run id(s) and code | what was seen and heard | measured | verdict |
 |---|---|---|---|---|---|
@@ -1082,6 +1084,53 @@ LoRA if Lightricks publishes one for 2.5.
 - **Not checked yet on real weights:** the duration head at the operator's failing size
   (512×960, 5–10 s), which does not fit this Mac's memory budget.
 
+**The final pass, on the final code** (the lead's run log, 2026-11-16, 19:16–20:16). Fourteen
+runs on `e59944e`, the commit at which the backend was declared finished: every mode once more,
+the adapter, the enhancer and the model-chosen length, each with the inputs, prompt, size and
+seed of the run it is compared with, one at a time under the 90 GB watchdog; each output looked
+at as a frame sheet, measured, and compared with that run. Eleven ran there. The other three
+were refused there by the memory check's early reading and ran on `ba2d582`, which fixed it
+(below). Two new audio-to-video runs on `e59944e` were added for the page's examples.
+
+| # | mode | run | compared with | result |
+|---|---|---|---|---|
+| 01 | Text to video | `F01_t2v` | `S01_tram_silent` (`7cf1547`) | identical |
+| 02 | Image to video | `F02_i2v` | `M02_i2v` (`75d0c53`) | the same scene, the tram approaching, framed slightly differently; frame 0 against the image 0.7507, as before |
+| 03 | Image + text to video | `F03_it2v` | `S03_tram_silent` (`7cf1547`) | identical |
+| 04 | Video to video | `F04_v2v` | `S04_summer_l091` (`7cf1547`) | identical; level 0.91 without the flag, the command line's default since `419e0a5` |
+| 05 | Text to video with sound | `F05_t2av` | `M05_t2av` (`75d0c53`) | the same scene, a ship at sea, framed slightly differently; transcript exact |
+| 06 | Image to video with sound | `F06_i2av` | `M06_i2av` (`75d0c53`) | the same scene, the cabin under the aurora, with its sound |
+| 07 | Image + text to video with sound | `F07_it2av` | `M07_it2av` (`75d0c53`) | the captain speaks; transcript exact; mouth vs speech +0.845 |
+| 08 | Text to audio | `F08_t2a` (`ba2d582`) | its earlier run | the announcement, transcript exact; the same sound (level 0.0 dB, envelope 1.000) |
+| 09 | Video to audio | `F09_v2a` | `S09_captain_voice` (`7cf1547`) | identical |
+| 10 | Audio to audio | `F10_a2a` | `M10f_ocean_l073` (`7cf1547`) | identical |
+| 11 | Audio to video | `F11_a2v` | `M11h_a2v_firstframe` (`7cf1547`) | identical; mouth vs speech −0.379 |
+| 11 | Audio to video: the ocean recording, a beach prompt | `F11b_ocean` | (new) | waves rolling onto a beach at sunset with gulls, in full colour; the sound track is the recording itself (level +0.1 dB against it) |
+| 11 | Audio to video: the same recording, the captain's portrait as first frame, a prompt in which nobody speaks | `F11c_rail` | (new) | his lips closed, gulls passing behind him; frame 0 against the portrait SSIM 0.86 |
+| | LoRA: `SOLRICKS/LTX-2.5-BTS-Movie-Set` at 0.8 | `F12_lora` | `X2b_t2v_bts08` (`5e4829a`) | identical; the run record says "on 1632 layers" |
+| | Prompt enhancer | `F13_enh` (`ba2d582`) | `X3c_t2av_enhanced_F67` (`2f356b5`) | identical |
+| | Model-chosen length | `F14_auto` (`ba2d582`, up to 8 s) | `X1_duration_head` (`5e4829a`, up to 10 s) | identical; the model chose 5.0 s (121 frames) both times; "Light the lamp!" |
+
+Identical means SSIM 1.000 and, with sound, sound correlation 1.000: nothing that landed after
+those runs changed an output. The four compared with runs made one commit before the float64
+RoPE fix (`5e4829a`) show the same scenes framed slightly differently (SSIM 0.78–0.94), the same
+words and sound (levels within 0.2 dB) and the same first-frame fidelity. The lip-sync figures
+on these outputs are the ones in the tables above: +0.845 where the model writes the speech
+itself, −0.379 in audio to video. `F11b_ocean` is mode 11's shipped sample, made from its first
+example ("Waves, pictured"), and `F11c_rail` ran its second ("A portrait over the sea"); no one
+speaks in either.
+
+**The three runs the early memory reading refused** on `e59944e`, while test suites and a
+browser session shared the machine:
+
+| run | refused on `e59944e` | on `ba2d582` |
+|---|---|---|
+| `F08_t2a`, text to audio | `69.0 + 25.1 = 94.1` and `65.2 + 25.1 = 90.3 GB` > 90, at the transformer load | "memory settled in 0.16 s: 51.1 → 47.7 GB", then `47.7 + 25.1 = 72.8` OK |
+| `F13_enh`, the enhancer | `70.8 + 25.1 = 95.9`, at the transformer load | settled in 0.36 s, 67.0 → 54.0 GB; `54.0 + 25.1 = 79.0` OK |
+| `F14_auto`, the model-chosen length | `64.0 + 27.6 = 91.6` at the denoise check, which budgets for the longest clip the model may return: 233 frames for up to 10 s | settled in 0.26 s, 55.6 → 52.7 GB; with up to 8 s the denoise check is `65.1 + 20.0 = 85.1` OK |
+
+The settled readings were 3 to 13 GB below the first ones, reached in 0.16–0.36 s.
+
 **Memory and time.** Committed memory is the whole machine's active + wired + compressed
 pages, sampled through each run; the operator's limit for these runs was 90 GB.
 
@@ -1091,6 +1140,8 @@ pages, sampled through each run; the operator's limit for these runs was 90 GB.
 | batch B1: ten runs up to 704×480×121 | 59.9–61.3 GB | ≤ 42.3 GB | |
 | `X1b_a2v_operator_audio`: 704×480×193 (8 s) | 70.1 GB | | 563 s |
 | runs made while other jobs' test suites ran on the same machine | up to 74.8 GB | | |
+| the final pass on `e59944e`, 13 runs, other jobs' test suites coming and going | 66.5–78.2 GB | | |
+| `F08_t2a`, `F13_enh`, `F14_auto` on `ba2d582` | 77.0 / 77.6 / 84.5 GB; `F14_auto` (model-chosen length, up to 8 s) at a base load of about 46 GB | | |
 
 The lead records no swap growth for `G0b`, `G3` and batches B1–B4. `G3`'s 333 s was taken
 while five test suites ran; repeated on a quieter machine (`G3r_rope64`) it took 142 s.
