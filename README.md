@@ -16,9 +16,11 @@ app_file: app.py
 suggested_hardware: zero-a10g
 #
 # DO NOT REMOVE OR SHORTEN — this is not padding.
-# The field DEFAULTS TO 30 MINUTES. This Space downloads 72.19 GB at build time
-# and then ZeroGPU packs every tensor to disk with O_DIRECT before the app reports
-# healthy; 30 minutes does not cover that. When it blows, the Space is simply
+# The field DEFAULTS TO 30 MINUTES. This Space downloads 72.19 GB at start-up, not
+# at build time, and then ZeroGPU packs every tensor to disk with O_DIRECT before
+# the app reports healthy: the one cold start measured, on 2026-11-13, took
+# 13 min 59 s, 11 min 26 s of it the download, and 1h keeps a margin for a slower
+# download. When it blows, the Space is simply
 # flagged unhealthy and the logs show a download progressing normally and then
 # ceasing to matter — there is NO error message saying the timeout was too short.
 # It is the one failure on this deploy that looks like something else entirely,
