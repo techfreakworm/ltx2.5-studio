@@ -1049,7 +1049,7 @@ def build_ui() -> gr.Blocks:
                     render.monitor_caption(kind="run", mode=mode, seed=result.seed),
                 ]
                 summary = gr.update(value=render.run_summary(facts), visible=True)
-                seed_button = gr.update(value=f"Reuse seed {result.seed}", visible=True)
+                seed_button = gr.update(value="Reuse seed", visible=True)
                 seed_value = int(result.seed)
                 sent = facts.prompt_sent
                 differs = bool(sent) and sent.strip() != str(params.get("prompt") or "").strip()
