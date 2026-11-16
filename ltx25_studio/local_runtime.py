@@ -1084,6 +1084,8 @@ def build_local_runner(
         raise ConstraintError(f"residency must be 'staged' or 'resident', not {residency!r}")
     if kind not in KINDS:
         raise ConstraintError(f"pipeline kind must be one of {', '.join(KINDS)}, not {kind!r}")
+    if device_type == "mps":
+        memory.mps_watermarks().require()
     import torch
 
     if device_type == "mps" and not torch.backends.mps.is_available():

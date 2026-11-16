@@ -171,6 +171,17 @@ def test_cuda_is_refused_the_space_keeps_its_own_runner(tmp_path):
     assert "cuda" in str(caught.value).lower()
 
 
+def test_an_mps_runner_refuses_a_watermark_setting_that_breaks_freeing_memory(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("PYTORCH_MPS_HIGH_WATERMARK_RATIO", "0.5")
+    monkeypatch.delenv("PYTORCH_MPS_LOW_WATERMARK_RATIO", raising=False)
+    with pytest.raises(memory.MpsWatermarkError):
+        local_runtime.build_local_runner(
+            kind="condition", device="mps", dtype="bfloat16", snapshot_dir=tmp_path
+        )
+
+
 def test_an_unknown_residency_is_refused(tmp_path):
     with pytest.raises(ConstraintError, match="residency"):
         local_runtime.build_local_runner(
@@ -830,6 +841,27 @@ def test_a_missing_gguf_exits_2_with_the_download_command(tmp_path):
     command = "hf download unsloth/LTX-2.5-GGUF distilled/x-Q8_0.gguf --revision ac3c540c"
     assert command in done.stdout
     assert data["missing"] == [{"path": str(gguf), "command": command}]
+
+
+def test_the_plan_shows_the_mps_watermarks_and_a_bad_pair_exits_2(tmp_path, monkeypatch):
+    monkeypatch.setenv("PYTORCH_MPS_HIGH_WATERMARK_RATIO", "0.5")
+    monkeypatch.setenv("PYTORCH_MPS_LOW_WATERMARK_RATIO", "0.4")
+    done, data = _script(
+        *TINY_ARGS, "--snapshot-dir", str(tiny_snapshot()), "--dry-run", tmp_path=tmp_path
+    )
+    assert done.returncode == 0, done.stdout[-2000:] + done.stderr[-2000:]
+    assert data["plan"]["mps_watermarks"] == {"high": 0.5, "low": 0.4}
+    assert "recommended_max_gb" in data["plan"]
+
+    monkeypatch.delenv("PYTORCH_MPS_LOW_WATERMARK_RATIO")
+    for extra in (("--dry-run",), ()):
+        done, data = _script(
+            *TINY_ARGS, "--snapshot-dir", str(tiny_snapshot()), *extra, tmp_path=tmp_path
+        )
+        assert done.returncode == 2, done.stdout[-2000:] + done.stderr[-2000:]
+        assert data["error"]["type"] == "MpsWatermarkError"
+        assert "PYTORCH_MPS_LOW_WATERMARK_RATIO" in data["error"]["message"]
+        assert not data.get("phases") and "file_cache" not in data
 
 
 def test_a_memory_refusal_exits_2_before_anything_loads(tmp_path):

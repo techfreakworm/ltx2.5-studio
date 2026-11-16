@@ -46,6 +46,7 @@ EXIT_OK, EXIT_REFUSED, EXIT_ERROR = 0, 2, 3
 #: operator can act on. Everything else is a generation error.
 REFUSALS = (
     memory.MemoryPreflightError,
+    memory.MpsWatermarkError,
     ConstraintError,
     ConfigError,
     LoRAError,
@@ -205,6 +206,7 @@ def _plan(args, report: _Report) -> tuple[list[tuple[str, str]], bool]:
     sizes = local_runtime.weight_sizes(args.snapshot_dir, args.transformer_gguf)
     missing = local_runtime.missing_files(args.snapshot_dir, transformer_gguf=args.transformer_gguf)
     limit = args.memory_limit_gb if args.memory_limit_gb is not None else memory.default_limit_gb()
+    watermarks = memory.mps_watermarks()
 
     report.line("== plan")
     plan = {
@@ -225,6 +227,8 @@ def _plan(args, report: _Report) -> tuple[list[tuple[str, str]], bool]:
         },
         "activation_calibration": memory.activation_calibration(),
         "stage_2": "not available locally (CUDA-only decoder)",
+        "mps_watermarks": {"high": watermarks.high, "low": watermarks.low},
+        "recommended_max_gb": (memory.mps_stats() or {}).get("recommended_max_gb"),
         "loras": [_lora(item) for item in args.lora],
         "weights_gb": {name: round(size / memory.GB, 3) for name, (size, _) in sizes.items()},
         "weights_source": {name: source for name, (_, source) in sizes.items()},
@@ -411,6 +415,14 @@ def main(argv=None) -> int:
         for item in args.lora:
             if not Path(_lora(item)["source"]).is_file():
                 raise ConstraintError(f"--lora {item}: no such file")
+        watermarks = memory.mps_watermarks()
+        report.line(
+            f"== MPS allocator: {memory.HIGH_WATERMARK_ENV}="
+            f"{watermarks.high if watermarks.high is not None else 'unset'}, "
+            f"{memory.LOW_WATERMARK_ENV}={watermarks.low if watermarks.low is not None else 'unset'}"
+        )
+        if not args.dry_run:
+            watermarks.require()  # before anything is touched
         if args.dry_run:
             report.line(
                 "== file cache: left alone (dry run); a live run first gives back the page-cache "
@@ -423,6 +435,7 @@ def main(argv=None) -> int:
         missing, fits = _plan(args, report)
         if args.dry_run:
             report.line("== dry run: nothing was loaded")
+            watermarks.require()
             code = EXIT_REFUSED if (missing or not fits) else EXIT_OK
         elif missing:
             raise local_runtime.LocalFilesMissingError(missing=missing)

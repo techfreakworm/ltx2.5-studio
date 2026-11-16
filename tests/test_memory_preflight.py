@@ -344,3 +344,52 @@ def test_the_module_imports_without_torch():
     )
     assert done.returncode == 0, done.stderr[-2000:]
     assert done.stdout.strip() == "ok"
+
+
+# --------------------------------------------------------------------------
+# MPS allocator watermarks: a high ratio below 1.4 needs a low ratio too
+# --------------------------------------------------------------------------
+
+HIGH = "PYTORCH_MPS_HIGH_WATERMARK_RATIO"
+LOW = "PYTORCH_MPS_LOW_WATERMARK_RATIO"
+
+
+@pytest.mark.parametrize(
+    ("environ", "high", "low"),
+    [
+        ({}, None, None),
+        ({HIGH: "0.5", LOW: "0.4"}, 0.5, 0.4),
+        ({HIGH: "0.5", LOW: "0.5"}, 0.5, 0.5),
+        ({LOW: "0.4"}, None, 0.4),
+    ],
+)
+def test_watermark_settings_that_work_are_reported_and_accepted(environ, high, low):
+    marks = memory.mps_watermarks(environ)
+    assert (marks.high, marks.low, marks.problem) == (high, low, None)
+    marks.require()
+
+
+@pytest.mark.parametrize(
+    ("environ", "words"),
+    [
+        ({HIGH: "0.5"}, ("is not set", "1.4")),
+        ({HIGH: "0.5", LOW: "0.6"}, ("0.6", "above", "0.5")),
+        ({HIGH: "half", LOW: "0.4"}, ("'half'", "not a number")),
+    ],
+)
+def test_a_high_watermark_without_a_lower_low_one_is_refused_naming_the_fix(environ, words):
+    marks = memory.mps_watermarks(environ)
+    assert marks.problem is not None
+    with pytest.raises(memory.MpsWatermarkError) as caught:
+        marks.require()
+    message = str(caught.value)
+    assert isinstance(caught.value, LTXStudioError)
+    for word in (*words, HIGH, LOW):
+        assert word in message
+    assert "PYTORCH_MPS_LOW_WATERMARK_RATIO=0.4" in message or "below" in message
+
+
+def test_the_watermarks_are_read_from_the_process_environment(monkeypatch):
+    monkeypatch.setenv(HIGH, "0.5")
+    monkeypatch.delenv(LOW, raising=False)
+    assert memory.mps_watermarks().problem is not None
