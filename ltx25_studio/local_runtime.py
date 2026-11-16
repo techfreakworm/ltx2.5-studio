@@ -87,6 +87,7 @@ _SMALL_WEIGHTS = ("connectors", "vae", "audio_vae", "vocoder", "duration_head")
 #: 1024 tokens x 188,160 features x bf16), so the cache is kept small.
 EMBEDDING_CACHE_SIZE = 4
 
+_WEIGHTS_SUFFIX = ".safetensors"
 _PROMPT_ADALN_OLD = "prompt_adaln_single"
 _PROMPT_ADALN_NEW = "prompt_adaln"
 
@@ -257,22 +258,21 @@ def download_command(path, *, component: str | None = None) -> str:
 
 
 def _component_files(snapshot: Path, component: str) -> tuple[list[Path], int | None]:
-    """Weight files a component needs, and the index's declared byte total if any."""
+    """Weight files a component needs, and the index's declared byte total if any.
+
+    Read off disk (the shard index, else the weight files present) rather than
+    off ``model_files``' pinned names, so the tiny checkpoint works too. A
+    component with neither is reported by its folder.
+    """
     folder = snapshot / component
-    index = (
-        next(iter(sorted(folder.glob("*.safetensors.index.json"))), None)
-        if folder.is_dir()
-        else None
-    )
+    if not folder.is_dir():
+        return [folder], None
+    index = next(iter(sorted(folder.glob(f"*{_WEIGHTS_SUFFIX}.index.json"))), None)
     if index is not None:
         data = json.loads(index.read_text())
         names = sorted(set(data.get("weight_map", {}).values()))
         return [folder / name for name in names], data.get("metadata", {}).get("total_size")
-    if folder.is_dir():
-        found = sorted(folder.glob("*.safetensors"))
-        if found:
-            return found, None
-    return [folder / "diffusion_pytorch_model.safetensors"], None
+    return sorted(folder.glob(f"*{_WEIGHTS_SUFFIX}")) or [folder], None
 
 
 def _component_bytes(snapshot: Path, component: str) -> tuple[int, str]:
