@@ -322,6 +322,10 @@ def test_a_kohya_named_adapter_is_refused_before_the_dispatch(refused, tmp_path)
 
     assert "lora_down" in str(error) and "lora_A" in str(error), str(error)
     assert errors.categorise(error) == errors.Failure(errors.ADAPTER, False)
+
+
+# --------------------------------------------------------------------------
+# F05: when audio is the input, the audio sets the length
 # --------------------------------------------------------------------------
 
 
