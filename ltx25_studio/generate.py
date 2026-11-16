@@ -99,6 +99,7 @@ __all__ = [
     "GenerationResult",
     "ProgressReporter",
     "configured_output_root",
+    "decoder_policy",
     "generate",
     "gpu_dispatch",
     "prepare_request",
@@ -167,6 +168,10 @@ class GenerationRequest:
     #: for it would be an inert lever, and this build has found seven of those.
     enhance_prompt: bool = False
     extras: dict = field(default_factory=dict)
+    #: Which decoder finishes the frames: ``"auto"``, ``"diffusion"`` or
+    #: ``"conv"``; None takes ``LTX25_DECODER`` (default ``auto``). Stage 2
+    #: always finishes with the diffusion decoder.
+    decoder: str | None = None
 
 
 @dataclass(frozen=True)
@@ -246,6 +251,13 @@ def _validated(request: GenerationRequest) -> GenerationRequest:
     Snapping silently would be worse than refusing: the user asked for a size and
     would receive a different one with no signal.
     """
+    if request.decoder is not None:
+        from .config import DECODER_CHOICES
+
+        if request.decoder not in DECODER_CHOICES:
+            raise constraints.ConstraintError(
+                f"decoder={request.decoder!r} is not one of {', '.join(DECODER_CHOICES)}."
+            )
     constraints.validate_dimensions(request.width, request.height)
     constraints.validate_dimension_limit(request.width, name="width")
     constraints.validate_dimension_limit(request.height, name="height")
@@ -587,10 +599,28 @@ def stage_2_enabled(spec, request: GenerationRequest) -> bool:
     return bool(request.enable_stage_2) and not spec.skip_stage_2
 
 
+def decoder_policy(spec, request: GenerationRequest) -> str:
+    """The decode policy for this run: the request's, else ``LTX25_DECODER``.
+
+    A mode that discards its video always decodes with conv.
+    """
+    if "video" not in spec.exports:
+        return "conv"
+    if request.decoder is not None:
+        return request.decoder
+    from .config import load_config
+
+    return load_config().decoder
+
+
 def _pipeline_kwargs(spec, request: GenerationRequest) -> dict:
     kwargs = spec.build_kwargs(request)
     if stage_2_enabled(spec, request):
         kwargs["enable_stage_2"] = True
+    policy = decoder_policy(spec, request)
+    if policy != "auto":
+        # Consumed by the runner, like enable_stage_2; absent means auto.
+        kwargs["video_decoder"] = policy
     if request.auto_duration:
         # duration_head picks the length, so num_frames must not be sent at all.
         kwargs.pop("num_frames", None)
@@ -1457,7 +1487,7 @@ _PHASE_BANDS = {
     "enhancing the prompt": (0.00, 0.06),
     "loading the model": (0.06, 0.10),
     "preparing the inputs": (0.10, 0.12),
-    "sampling": (0.12, 0.88),
+    "sampling": (0.12, 0.82),
     "sampling — pass 1 of 2": (0.12, 0.55),
     "upscaling the latents": (0.55, 0.60),
     "sampling — pass 2 of 2": (0.60, 0.82),
@@ -1791,6 +1821,12 @@ def generate(
 
             output = _decoded(output, request.mode)
             length_notes = _chosen_length_note(output, request)
+            run_facts = getattr(pipe, "last_run", None)
+            decoder_notes = ()
+            if isinstance(run_facts, dict) and "video" in spec.exports:
+                from . import pipelines
+
+                decoder_notes = (pipelines.decoder_note(run_facts),)
 
             reporter.phase("writing the file")
             try:
@@ -1855,6 +1891,7 @@ def generate(
                 + audio_notes
                 + length_notes
                 + size_notes
+                + decoder_notes
                 # Last, because it is diagnostic rather than something the user has
                 # to act on -- but present on every run, because the one flagship
                 # generation that finally gives this build a headroom number is not

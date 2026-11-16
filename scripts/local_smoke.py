@@ -420,6 +420,26 @@ def build_cases(device: str, media: Path, stage_2_ready: str | None) -> list[dic
         if stage_2_ready is not None:
             case["skip"] = stage_2_ready
         cases.append(case)
+    # The single-stage diffusion decode, chosen explicitly: off CUDA it runs on
+    # the CPU up to its size limit (128x128x9 is also the tiny decoder's minimum).
+    for mode_id in ("text_to_audio_video", "image_to_video", "audio_to_video"):
+        case = {
+            "id": f"diffusion_decode:{mode_id}",
+            "mode": mode_id,
+            "request": dict(
+                mode=mode_id,
+                seed=SEED,
+                width=SIZE,
+                height=SIZE,
+                num_frames=STAGE_2_FRAMES,
+                frame_rate=FRAME_RATE,
+                decoder="diffusion",
+                **_media_for(mode_id, media, SIZE, STAGE_2_FRAMES),
+            ),
+        }
+        if stage_2_ready is not None:
+            case["skip"] = stage_2_ready
+        cases.append(case)
     # Off CUDA a stage-2 request above the CPU decoder's limit is refused, typed.
     cases.append(
         {

@@ -302,6 +302,8 @@ _BASE_CACHE_KEY = "__base__"
 #: base is. They are ~2.1 GB of weights that no other component shares, so
 #: building them per workflow would pay for them twice.
 _STAGE_2_CACHE_KEY = "__stage_2__"
+#: The diffusion decoder alone: a single-stage diffusion decode needs no upsampler.
+_DECODER_CACHE_KEY = "__decoder__"
 
 
 def derive_pipeline(base, target_cls):
@@ -874,23 +876,66 @@ def _stage_2_parts(base, *, dtype=None, device: str | None = None):
 
     Both stage-2 pipelines are thin wrappers: the upsampler shares the base's
     ``vae`` and the decoder shares its ``scheduler``, so the only new weights are
-    the two model checkpoints themselves.
-
-    Off CUDA the decoder keeps its default FlexAttention processor and stays on
-    the CPU: NATTEN has no macOS build and FlexAttention refuses MPS tensors.
-    That path is dense, so ``device.check_stage_2_size`` bounds it.
+    the two model checkpoints themselves. The decoder is the same object a
+    single-stage diffusion decode uses (:func:`_decoder_part`).
     """
     if _STAGE_2_CACHE_KEY in _CACHE:
         return _CACHE[_STAGE_2_CACHE_KEY]
+    try:
+        from diffusers import LTX2LatentUpsamplePipeline
+        from diffusers.pipelines.ltx2.latent_upsampler import LTX2LatentUpsamplerModel
+    except ImportError as exc:
+        raise ModelLoadError(
+            component="latent_upsampler",
+            reason=f"the stage-2 classes are not importable ({exc}).",
+        ) from exc
+
+    decoder = _decoder_part(base, dtype=dtype, device=device)
+    upsampler_model = _load_part(
+        LTX2LatentUpsamplerModel, "latent_upsampler", dtype=dtype, device=device
+    )
+    if device:
+        # Not shared with the base, so `_base_pipeline`'s `.to(device)` does not
+        # reach it.
+        upsampler_model.to(device)
+    upsampler = LTX2LatentUpsamplePipeline(vae=base.vae, latent_upsampler=upsampler_model)
+
+    parts = (upsampler, decoder)
+    _CACHE[_STAGE_2_CACHE_KEY] = parts
+    return parts
+
+
+def _load_part(cls, component, *, dtype=None, device=None):
+    """One stage-2 checkpoint from the local snapshot, at the checkpoint's dtype."""
+    import torch
+
     from . import device as device_module
 
+    # Same rule as the base load, and the same reason: the checkpoints are bf16,
+    # so this is a no-op rather than a conversion. See `_base_pipeline`.
+    weight_dtype = dtype or getattr(torch, device_module.weight_dtype_for(device))
+    spec = model_files.get_component(component)
     try:
-        import torch
-        from diffusers import LTX2LatentUpsamplePipeline, LTX2VideoDiffusionDecoderModel
+        return cls.from_pretrained(_snapshot_path(), subfolder=spec.subfolder, dtype=weight_dtype)
+    except Exception as exc:
+        raise ModelLoadError(component=component, reason=str(exc)) from exc
+
+
+def _decoder_part(base, *, dtype=None, device: str | None = None):
+    """The diffusion decoder pipeline, built once and shared by every decode.
+
+    Off CUDA the decoder keeps its default FlexAttention processor and stays on
+    the CPU: NATTEN has no macOS build and FlexAttention refuses MPS tensors.
+    That path is dense, so its size is bounded (``device.check_stage_2_size``,
+    and the single-stage decode policy).
+    """
+    if _DECODER_CACHE_KEY in _CACHE:
+        return _CACHE[_DECODER_CACHE_KEY]
+    try:
+        from diffusers import LTX2VideoDiffusionDecoderModel
         from diffusers.models.autoencoders.ltx2_diffusion_decoder import (
             LTX2VideoVaeNeighborhoodNattenProcessor,
         )
-        from diffusers.pipelines.ltx2.latent_upsampler import LTX2LatentUpsamplerModel
         from diffusers.pipelines.ltx2.pipeline_ltx2_diffusion_decode import (
             LTX2VideoDiffusionDecodePipeline,
         )
@@ -898,32 +943,17 @@ def _stage_2_parts(base, *, dtype=None, device: str | None = None):
         raise ModelLoadError(
             component="diffusion_decoder",
             reason=(
-                f"the stage-2 classes are not importable ({exc}). The diffusion decoder also "
+                f"the decoder classes are not importable ({exc}). The diffusion decoder also "
                 f"needs the `kernels` package, which fetches the NATTEN kernel from the Hub; "
                 f"a local `natten` install is explicitly not used."
             ),
         ) from exc
 
-    # Same rule as the base load, and the same reason: the checkpoints are bf16,
-    # so this is a no-op rather than a conversion. See `_base_pipeline`.
-    weight_dtype = dtype or getattr(torch, device_module.weight_dtype_for(device))
     on_cuda = device in (None, "cuda")
-
-    def _load(cls, component):
-        spec = model_files.get_component(component)
-        try:
-            return cls.from_pretrained(
-                _snapshot_path(),
-                subfolder=spec.subfolder,
-                dtype=weight_dtype,
-            )
-        except Exception as exc:
-            raise ModelLoadError(component=component, reason=str(exc)) from exc
-
-    upsampler_model = _load(LTX2LatentUpsamplerModel, "latent_upsampler")
-    decoder_model = _load(LTX2VideoDiffusionDecoderModel, "diffusion_decoder")
-
-    # ⚠️ Neither of these is an optimisation; both are required to run at all.
+    decoder_model = _load_part(
+        LTX2VideoDiffusionDecoderModel, "diffusion_decoder", dtype=dtype, device=device
+    )
+    # ⚠️ Not an optimisation; required to run at all on CUDA.
     #
     # The decoder's default FlexAttention processor is uncompiled, so it
     # materialises the full score matrix and needs **tens of GB** at video
@@ -939,28 +969,25 @@ def _stage_2_parts(base, *, dtype=None, device: str | None = None):
     #   * `DIFFUSERS_DISABLE_REMOTE_CODE` set in the environment makes this raise.
     # Constructing it lazily is what keeps both of those out of app startup.
     if on_cuda:
-        decoder_model.set_attn_processor(LTX2VideoVaeNeighborhoodNattenProcessor())
+        try:
+            decoder_model.set_attn_processor(LTX2VideoVaeNeighborhoodNattenProcessor())
+        except Exception as exc:
+            raise ModelLoadError(
+                component="diffusion_decoder",
+                reason=f"its NATTEN attention kernel could not be built ({exc})",
+            ) from exc
     # Tiling bounds peak memory by the tile size rather than by the video size.
     decoder_model.enable_tiling()
-
     if device:
-        # These weights are NOT shared with the base, so `_base_pipeline`'s
-        # `.to(device)` does not reach them. Without this the stage-2 path dies
-        # on a CPU/CUDA mismatch the first time anyone ticks the box.
-        upsampler_model.to(device)
         # Off CUDA the decoder stays on the CPU (FlexAttention refuses MPS).
         decoder_model.to(device if on_cuda else "cpu")
-
-    upsampler = LTX2LatentUpsamplePipeline(vae=base.vae, latent_upsampler=upsampler_model)
     # `vae` is deliberately omitted: it is optional here and consulted only to
     # denormalize, which `DIFFUSION_DECODE_DENORMALIZE` never asks for.
     decoder = LTX2VideoDiffusionDecodePipeline(
         diffusion_decoder=decoder_model, scheduler=base.scheduler
     )
-
-    parts = (upsampler, decoder)
-    _CACHE[_STAGE_2_CACHE_KEY] = parts
-    return parts
+    _CACHE[_DECODER_CACHE_KEY] = decoder
+    return decoder
 
 
 def get_pipeline(*, pipeline: str = BASE_KIND, dtype=None, device: str | None = None):
@@ -1017,6 +1044,7 @@ def get_pipeline(*, pipeline: str = BASE_KIND, dtype=None, device: str | None = 
         kind=pipeline,
         device=device,
         stage_2_factory=lambda: _stage_2_parts(base, dtype=dtype, device=device),
+        decoder_factory=lambda: _decoder_part(base, dtype=dtype, device=device),
     )
     _CACHE[pipeline] = runner
     return runner
@@ -1305,7 +1333,15 @@ class StageRunner:
     """
 
     def __init__(
-        self, pipeline, *, kind, upsampler=None, decoder=None, stage_2_factory=None, device=None
+        self,
+        pipeline,
+        *,
+        kind,
+        upsampler=None,
+        decoder=None,
+        stage_2_factory=None,
+        decoder_factory=None,
+        device=None,
     ):
         self.pipeline = pipeline
         self.kind = kind
@@ -1319,8 +1355,14 @@ class StageRunner:
         #: turned a dependency of one branch into a hard requirement for every
         #: mode -- when NATTEN could not resolve, nothing loaded at all.
         self._stage_2_factory = stage_2_factory
+        #: The diffusion decoder alone, for a single-stage diffusion decode.
+        self._decoder_factory = decoder_factory
+        #: Why the decoder could not be built, once that has been found out.
+        self._decoder_unavailable: str | None = None
         #: The audio-conditioned derivative of ``pipeline``, built on first use.
         self._audio_pipeline = None
+        #: What the last call actually did (builtins only): see :func:`run_facts`.
+        self.last_run: dict | None = None
 
     def _stage_2_ready(self):
         """Obtain the stage-2 parts, building them if this is the first request."""
@@ -1335,6 +1377,72 @@ class StageRunner:
                     "which would look like it worked and be visibly worse."
                 ),
             )
+
+    def _decoder_ready(self):
+        """Obtain the diffusion decoder alone, building it on first use."""
+        if self.decoder is None and self._decoder_unavailable is None:
+            try:
+                if self._decoder_factory is not None:
+                    self.decoder = self._decoder_factory()
+                elif self._stage_2_factory is not None:
+                    self.upsampler, self.decoder = self._stage_2_factory()
+            except ModelLoadError as exc:
+                self._decoder_unavailable = str(exc.reason)
+                raise
+        if self.decoder is None:
+            raise ModelLoadError(
+                component="diffusion_decoder",
+                reason=self._decoder_unavailable or "no diffusion decoder was supplied",
+            )
+
+    def _single_stage_decoder(self, policy, kwargs) -> tuple[str, str | None]:
+        """``(decoder, why conv)`` for a single-stage run; raises for an unusable explicit choice."""
+        from .config import DECODER_CHOICES
+        from .errors import ConstraintError, DecoderTooSmallError, DecoderUnavailableError
+
+        if policy not in DECODER_CHOICES:
+            raise ConstraintError(f"decoder={policy!r} is not one of {', '.join(DECODER_CHOICES)}.")
+        if policy == "conv":
+            return "conv", None
+        width, height = kwargs.get("width"), kwargs.get("height")
+        frames = _frames_lower_bound(kwargs)
+        if self.device != "cuda":
+            if policy == "auto":
+                return "conv", OFF_CUDA_DECODER_NOTE
+            from . import device as device_module
+
+            tokens = (
+                int(frames) * (int(height) // 4) * (int(width) // 4)
+                if width and height and frames
+                else None
+            )
+            limit = device_module.OFF_CUDA_DECODER_TOKEN_LIMIT
+            if tokens is None or tokens > limit:
+                raise DecoderUnavailableError(
+                    reason=(
+                        f"without an NVIDIA (CUDA) GPU it runs only on the CPU, for very small "
+                        f"videos (up to {limit} decoder positions; this one needs {tokens})"
+                    )
+                )
+        try:
+            self._decoder_ready()
+        except ModelLoadError as exc:
+            if policy == "auto":
+                return "conv", f"the diffusion decoder could not be loaded here ({exc.reason})"
+            raise DecoderUnavailableError(reason=f"it could not be loaded ({exc.reason})") from exc
+        try:
+            check_decoder_size(
+                self.decoder, width=width, height=height, num_frames=frames, scale=1, stage_2=False
+            )
+        except DecoderTooSmallError as exc:
+            if policy == "auto":
+                w, h, f = exc.minimum
+                return "conv", (
+                    f"this video is smaller than the diffusion decoder's minimum of {w}×{h} "
+                    f"pixels and {f} frames"
+                )
+            raise
+        return "diffusion", None
 
     def __call__(self, *, enable_stage_2: bool = False, progress=None, **kwargs):
         """Run the graph. ``progress`` is consumed here and never reaches diffusers.
@@ -1354,14 +1462,29 @@ class StageRunner:
         ``scripts/`` harnesses) is unaffected.
         """
         kwargs = dict(_with_real_conditions(kwargs))
-        # Ours, like enable_stage_2: the audio stream's own noise level.
-        pipeline, audio_kwargs = self._pipeline_for(kwargs.pop("audio_noise_level", None))
+        # Ours, like enable_stage_2: the audio stream's own noise level, and
+        # which decoder finishes the frames.
+        audio_noise_level = kwargs.pop("audio_noise_level", None)
+        policy = kwargs.pop("video_decoder", None) or "auto"
+        pipeline, audio_kwargs = self._pipeline_for(audio_noise_level)
         kwargs.update(audio_kwargs)
+        self.last_run = None
         if not enable_stage_2:
-            # The distilled recipe applies here too. It used to apply ONLY on
-            # the stage-2 path, which is how eleven of twelve host runs were
-            # generated with a linear schedule and SFT guidance.
-            return pipeline(**_merged(kwargs, distilled_kwargs(), _sampling_kwargs(progress)))
+            decoder, why_conv = self._single_stage_decoder(policy, kwargs)
+            self.last_run = run_facts(
+                stage_2=False,
+                decoder=decoder,
+                why_conv=why_conv,
+                policy=policy,
+                audio_noise_level=audio_noise_level,
+            )
+            if decoder == "conv":
+                # The distilled recipe applies here too. It used to apply ONLY
+                # on the stage-2 path, which is how eleven of twelve host runs
+                # were generated with a linear schedule and SFT guidance.
+                return pipeline(**_merged(kwargs, distilled_kwargs(), _sampling_kwargs(progress)))
+            single = pipeline(**_merged(kwargs, stage_1_kwargs(), _sampling_kwargs(progress)))
+            return self._diffusion_decoded(single, kwargs, progress)
         from . import device as device_module
 
         device_module.check_stage_2_size(
@@ -1398,13 +1521,24 @@ class StageRunner:
                 _sampling_kwargs(progress, index=2, passes=2),
             )
         )
+        self.last_run = run_facts(
+            stage_2=True,
+            decoder="diffusion",
+            why_conv=None,
+            policy=policy,
+            audio_noise_level=audio_noise_level,
+        )
+        return self._diffusion_decoded(stage_2, kwargs, progress)
+
+    def _diffusion_decoded(self, staged, kwargs, progress):
+        """Decode a latent-output call with the diffusion decoder and reunite its audio."""
         if progress is not None:
             progress.decoding()
-        latents, generator = _latents_of(stage_2), kwargs.get("generator")
+        latents, generator = _latents_of(staged), kwargs.get("generator")
         if self.device == "mps":
             latents, generator = _for_the_cpu_decoder(latents, generator)
         decoded = self.decoder(**decode_kwargs(latents, generator=generator))
-        return self._with_audio(decoded, stage_2)
+        return self._with_audio(decoded, staged)
 
     def _pipeline_for(self, audio_noise_level):
         """The pipeline for this call, and any kwargs it must also be given.
@@ -1478,6 +1612,31 @@ class StageRunner:
         # default local gate. A branch that cannot be exercised offline is how
         # the audio came to be dropped in the first place.
         return type(stage_2)(frames=_latents_of(decoded), audio=audio)
+
+
+#: Why ``auto`` decodes with the conv VAE off CUDA.
+OFF_CUDA_DECODER_NOTE = "the model's diffusion decoder runs only on an NVIDIA (CUDA) GPU here"
+
+
+def run_facts(*, stage_2, decoder, why_conv, policy, audio_noise_level) -> dict:
+    """What one runner call did, as builtins (it crosses the ZeroGPU fork)."""
+    return {
+        "stage_2": bool(stage_2),
+        "decoder": decoder,
+        "decoder_policy": policy,
+        "why_conv": why_conv,
+        "audio_noise_level": None if audio_noise_level is None else float(audio_noise_level),
+    }
+
+
+def decoder_note(facts: dict) -> str:
+    """The run note naming the decoder that finished the frames."""
+    if facts.get("decoder") == "diffusion":
+        return "the frames were decoded by the model's diffusion decoder."
+    why = facts.get("why_conv")
+    if why:
+        return f"the frames were decoded by the standard (convolutional) decoder: {why}."
+    return "the frames were decoded by the standard (convolutional) decoder, as chosen."
 
 
 def _frames_upper_bound(kwargs) -> int:

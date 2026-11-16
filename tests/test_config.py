@@ -140,6 +140,17 @@ def test_residency_defaults_to_staged_on_macos_and_resident_elsewhere(monkeypatc
         config.load_config()
 
 
+def test_the_decoder_policy_defaults_to_auto_and_refuses_anything_else(monkeypatch):
+    monkeypatch.delenv(config.ENV_DECODER, raising=False)
+    assert config.load_config().decoder == "auto"
+    for value in ("auto", "diffusion", "conv"):
+        monkeypatch.setenv(config.ENV_DECODER, value)
+        assert config.load_config().decoder == value
+    monkeypatch.setenv(config.ENV_DECODER, "vae")
+    with pytest.raises(config.ConfigError):
+        config.load_config()
+
+
 def test_a_gguf_transformer_is_optional_and_must_be_a_gguf_file(monkeypatch, tmp_path):
     assert config.load_config().transformer_gguf is None
 

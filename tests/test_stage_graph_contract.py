@@ -86,14 +86,21 @@ def make_runner(*, with_stage_2_parts=True):
 # --------------------------------------------------------------------------
 
 
-def test_a_default_call_runs_exactly_one_denoise():
-    runner, pipeline, upsampler, decoder = make_runner()
+@pytest.mark.parametrize("policy,decoded", [("conv", 0), ("diffusion", 1), ("auto", 1)])
+def test_a_default_call_runs_exactly_one_denoise_and_decodes_by_its_policy(policy, decoded):
+    """One denoise, never the upsampler; the diffusion decoder exactly when the policy says.
 
-    runner(prompt="a lighthouse", num_frames=121)
+    On CUDA ``auto`` is the diffusion decoder (the model's native one); the
+    decoder stand-in here has no size config, so no minimum applies.
+    """
+    runner, pipeline, upsampler, decoder = make_runner()
+    runner.device = "cuda"
+
+    runner(prompt="a lighthouse", num_frames=121, video_decoder=policy)
 
     assert len(pipeline.calls) == 1, f"the pipeline ran {len(pipeline.calls)} times, not once"
     assert not upsampler.calls, "the upsampler ran on a single-stage call"
-    assert not decoder.calls, "the diffusion decoder ran on a single-stage call"
+    assert len(decoder.calls) == decoded, (policy, decoder.calls)
 
 
 def test_the_stage_2_flag_is_consumed_and_never_reaches_diffusers():
@@ -112,18 +119,33 @@ def test_the_stage_2_flag_is_consumed_and_never_reaches_diffusers():
     )
 
 
-def test_a_single_stage_call_does_not_ask_for_latents():
-    """Single stage is decoded by the pipeline itself, so it wants frames back.
+@pytest.mark.parametrize("device", ["cpu", "mps", None])
+def test_a_single_stage_call_off_cuda_does_not_ask_for_latents(device):
+    """Off CUDA ``auto`` is the conv VAE, decoded by the pipeline itself.
 
-    Requesting ``output_type="latent"`` here would hand ``outputs.py`` latents
-    where it expects pixels — which fails as a shape error at the writer, several
-    layers from the cause.
+    Requesting ``output_type="latent"`` there would hand ``outputs.py`` latents
+    where it expects pixels — a shape error at the writer, layers from the cause.
     """
-    runner, pipeline, _upsampler, _decoder = make_runner()
+    runner, pipeline, _upsampler, decoder = make_runner()
+    runner.device = device
 
     runner(prompt="a lighthouse")
 
     assert pipeline.kwargs.get("output_type") != "latent"
+    assert not decoder.calls
+    assert runner.last_run["decoder"] == "conv"
+
+
+def test_a_single_stage_diffusion_decode_asks_for_latents_and_decodes_them():
+    runner, pipeline, _upsampler, decoder = make_runner()
+    runner.device = "cuda"
+
+    result = runner(prompt="a lighthouse", generator="gen-1")
+
+    assert pipeline.kwargs.get("output_type") == "latent"
+    assert decoder.kwargs["latents"] == pipeline._output.frames
+    assert decoder.kwargs["denormalize"] is False and decoder.kwargs["generator"] == "gen-1"
+    assert result is decoder._output
 
 
 # --------------------------------------------------------------------------
@@ -957,18 +979,26 @@ def test_getting_a_pipeline_does_not_build_the_stage_2_parts(tmp_path, monkeypat
         )
 
 
-def test_a_single_stage_run_never_builds_the_stage_2_parts():
-    """The default path must not touch the branch it does not use."""
+@pytest.mark.parametrize(
+    "device,policy,expected",
+    [("cpu", "auto", []), ("cuda", "conv", []), ("cuda", "auto", ["decoder"])],
+)
+def test_a_single_stage_run_builds_only_the_decoder_and_only_when_it_decodes(
+    device, policy, expected
+):
+    """The upsampler is stage 2's alone; the decoder is built when the policy uses it."""
     built = []
     runner = pipelines.StageRunner(
         Recorder("pipeline"),
         kind="text2video",
-        stage_2_factory=lambda: (built.append(1), (Recorder("up"), Recorder("dec")))[1],
+        device=device,
+        stage_2_factory=lambda: (built.append("both"), (Recorder("up"), Recorder("dec")))[1],
+        decoder_factory=lambda: (built.append("decoder"), Recorder("dec"))[1],
     )
 
-    runner(prompt="a lighthouse")
+    runner(prompt="a lighthouse", video_decoder=policy)
 
-    assert not built, "a single-stage run built the stage-2 parts"
+    assert built == expected, built
 
 
 def test_the_stage_2_parts_are_built_once_and_reused():

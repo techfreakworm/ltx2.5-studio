@@ -1043,6 +1043,7 @@ class LocalStageRunner:
         self.kind = kind
         self.pipeline = weights.pipeline_for(kind)
         self._audio_pipeline = None
+        self.last_run: dict | None = None
 
     @property
     def device(self) -> str:
@@ -1068,6 +1069,18 @@ class LocalStageRunner:
 
         kwargs = dict(pipelines._with_real_conditions(kwargs))
         audio_noise_level = kwargs.pop("audio_noise_level", None)
+        policy = kwargs.pop("video_decoder", None) or "auto"
+        if policy == "diffusion":
+            from .errors import DecoderUnavailableError
+
+            raise DecoderUnavailableError(reason=pipelines.OFF_CUDA_DECODER_NOTE)
+        self.last_run = pipelines.run_facts(
+            stage_2=False,
+            decoder="conv",
+            why_conv=pipelines.OFF_CUDA_DECODER_NOTE if policy == "auto" else None,
+            policy=policy,
+            audio_noise_level=audio_noise_level,
+        )
         kwargs = weights.with_explicit_crf(kwargs)
         call = _merged(kwargs, pipelines.distilled_kwargs(), pipelines._sampling_kwargs(progress))
         if weights.residency == STAGED:

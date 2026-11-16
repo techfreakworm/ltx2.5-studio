@@ -58,6 +58,10 @@ ERROR_SPECS = {
         {"mode": "Image to video", "missing": ("image",), "alternative": "Text to video"},
         ["Image to video", "image", "Text to video"],
     ),
+    "DecoderUnavailableError": (
+        {"reason": "it needs an NVIDIA (CUDA) GPU at this size"},
+        ["diffusion decoder", "NVIDIA", "standard decoder"],
+    ),
     "DecoderTooSmallError": (
         {
             "output": (192, 128, 9),

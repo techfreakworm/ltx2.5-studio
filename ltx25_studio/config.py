@@ -38,6 +38,9 @@ __all__ = [
     "ENV_QUANTIZATION",
     "MPS_SELF_TEST_CHOICES",
     "RESIDENCY_CHOICES",
+    "DECODER_CHOICES",
+    "DEFAULT_DECODER",
+    "ENV_DECODER",
     "QUANTIZATION_CHOICES",
     "ENV_OUTPUT_DIR",
     "ENV_OUTPUT_RETENTION_GB",
@@ -63,6 +66,7 @@ ENV_MODEL_SNAPSHOT_DIR = "LTX25_MODEL_SNAPSHOT_DIR"
 ENV_MPS_SELF_TEST = "LTX25_MPS_SELF_TEST"
 ENV_TRANSFORMER_GGUF = "LTX25_TRANSFORMER_GGUF"
 ENV_RESIDENCY = "LTX25_RESIDENCY"
+ENV_DECODER = "LTX25_DECODER"
 
 #: ``auto`` passes no ``size`` and the platform then allocates its default,
 #: ``large`` (47.375 GiB measured). ZeroGPU does NOT promote by itself: its
@@ -106,6 +110,13 @@ MPS_SELF_TEST_CHOICES = ("enforce", "warn")
 #: Staged by default on macOS, where memory is shared with the GPU.
 DEFAULT_RESIDENCY = "staged" if sys.platform == "darwin" else "resident"
 RESIDENCY_CHOICES = ("staged", "resident")
+
+#: Which decoder turns the final latents into frames. ``diffusion`` is the
+#: model's native decoder, ``conv`` the convolutional VAE; ``auto`` picks
+#: diffusion where it can run (CUDA, its kernel available, the video large
+#: enough) and conv otherwise, saying which in the run's notes.
+DEFAULT_DECODER = "auto"
+DECODER_CHOICES = ("auto", "diffusion", "conv")
 
 #: The prompt enhancer (PLAN §3.5), loaded lazily by ``enhance.py`` on first use
 #: inside the GPU worker and then KEPT for the life of that worker -- freeing it
@@ -255,6 +266,7 @@ class RuntimeConfig:
     mps_self_test: str = DEFAULT_MPS_SELF_TEST
     transformer_gguf: str | None = None
     residency: str = DEFAULT_RESIDENCY
+    decoder: str = DEFAULT_DECODER
 
     @property
     def lora_max_bytes(self) -> int:
@@ -309,4 +321,5 @@ def load_config() -> RuntimeConfig:
         mps_self_test=_choice(ENV_MPS_SELF_TEST, DEFAULT_MPS_SELF_TEST, MPS_SELF_TEST_CHOICES),
         transformer_gguf=_gguf_file(ENV_TRANSFORMER_GGUF),
         residency=_choice(ENV_RESIDENCY, DEFAULT_RESIDENCY, RESIDENCY_CHOICES),
+        decoder=_choice(ENV_DECODER, DEFAULT_DECODER, DECODER_CHOICES),
     )

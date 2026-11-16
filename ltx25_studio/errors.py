@@ -48,6 +48,7 @@ __all__ = [
     "ConstraintError",
     "DecodeError",
     "DecoderTooSmallError",
+    "DecoderUnavailableError",
     "DimensionError",
     "EmptyOutputError",
     "EncodeError",
@@ -303,6 +304,17 @@ class DecoderTooSmallError(ConstraintError):
             f"run would give it {self.output[0]}×{self.output[1]} at {self.output[2]} frames. "
             f"The smallest request that works is {self.smallest[0]}×{self.smallest[1]} at "
             f"{self.smallest[2]} frames. Make the video larger or longer, or {fix}."
+        )
+
+
+class DecoderUnavailableError(ConstraintError):
+    """The diffusion decoder was chosen explicitly and cannot run here."""
+
+    def __init__(self, *, reason):
+        self.reason = reason
+        super().__init__(
+            f"The diffusion decoder was chosen but cannot run here: {reason}. Choose the "
+            f"standard decoder, or auto, which uses the diffusion decoder wherever it can run."
         )
 
 
