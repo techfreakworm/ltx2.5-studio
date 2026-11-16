@@ -61,6 +61,14 @@ CONDITIONABLE_MODES = tuple(
     if spec.pipeline == "condition" and {"image", "video"} & set(spec.inputs)
 )
 
+#: Modes that make a variation of the user's clip (mode 04): the clip travels as
+#: ``video_variation`` and is never a condition. A shot (a real keyframe) still is.
+VARIATION_MODES = tuple(
+    mode_id
+    for mode_id in CONDITIONABLE_MODES
+    if modes.get_mode(mode_id).video_conditioning == "variation"
+)
+
 NUM_FRAMES = 121
 
 
@@ -95,12 +103,21 @@ def keyframe(mode_id, anchor, strength=1.0):
     )
 
 
-def run_with_shots(mode_id, rows, tmp_path, *, num_frames=NUM_FRAMES):
+def _inputs(mode_id):
+    fields = inputs_for(mode_id)
+    if mode_id in VARIATION_MODES:
+        # A variation runs at its clip's length, so the clip must reach past the anchor.
+        fields["video"] = video_file(frames=17)
+    return fields
+
+
+def run_with_shots(mode_id, rows, tmp_path, *, num_frames=NUM_FRAMES, sent=None):
+    """The conditions the pipeline received; ``sent`` (a dict) also gets every kwarg."""
     pipe = CapturingPipe()
     generate_module.generate(
         mode=mode_id,
         seed=7,
-        **inputs_for(mode_id),
+        **_inputs(mode_id),
         num_frames=num_frames,
         conditions=rows,
         pipeline_factory=factory_returning(pipe),
@@ -108,7 +125,17 @@ def run_with_shots(mode_id, rows, tmp_path, *, num_frames=NUM_FRAMES):
         output_root=tmp_path,
         retention_bytes=10**9,
     )
+    if sent is not None:
+        sent.update(pipe.kwargs)
     return pipe.kwargs.get("conditions", ())
+
+
+def assert_the_clip_is_the_variation(mode_id, sent):
+    """Mode 04: the clip arrives as decoded frames to vary, never as a condition or a path."""
+    clip = sent.get("video_variation")
+    assert clip is not None, f"{mode_id}: the clip did not arrive as the variation"
+    assert not isinstance(clip.source, str), f"{mode_id}: the clip arrived as a path"
+    assert getattr(clip.source, "ndim", None) == 4, f"{mode_id}: {type(clip.source)!r}"
 
 
 # --------------------------------------------------------------------------
@@ -142,8 +169,16 @@ def test_no_raw_dataframe_row_reaches_the_pipeline(mode_id, tmp_path):
 
 @pytest.mark.parametrize("mode_id", CONDITIONABLE_MODES)
 def test_every_condition_reaching_the_pipeline_carries_a_source_and_an_index(mode_id, tmp_path):
-    """Whatever the convention, a built condition has these three fields."""
-    conditions = run_with_shots(mode_id, [keyframe(mode_id, 3)], tmp_path)
+    """Whatever the convention, a built condition has these three fields.
+
+    For a variation mode the one condition is the shot: the clip is not one.
+    """
+    sent: dict = {}
+    conditions = run_with_shots(mode_id, [keyframe(mode_id, 3)], tmp_path, sent=sent)
+
+    if mode_id in VARIATION_MODES:
+        assert_the_clip_is_the_variation(mode_id, sent)
+        assert len(conditions) == 1, f"{mode_id}: {conditions!r}"
 
     for condition in conditions:
         for attribute in ("source", "index", "strength"):
@@ -166,8 +201,14 @@ def test_the_users_shot_actually_arrives_as_a_condition(mode_id, tmp_path):
     become another — a list that silently comes back the same length as if the
     row were never there is the quietest possible failure.
     """
-    without = run_with_shots(mode_id, [], tmp_path)
+    sent: dict = {}
+    without = run_with_shots(mode_id, [], tmp_path, sent=sent)
     with_shot = run_with_shots(mode_id, [keyframe(mode_id, 3)], tmp_path)
+
+    if mode_id in VARIATION_MODES:
+        # Without a shot, a variation reaches the pipeline with no condition at all.
+        assert without == (), f"{mode_id} built a condition from its clip: {without!r}"
+        assert_the_clip_is_the_variation(mode_id, sent)
 
     assert len(with_shot) == len(without) + 1, (
         f"mode {mode_id!r}: adding a shot row changed the condition count from "

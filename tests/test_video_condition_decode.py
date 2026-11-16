@@ -43,7 +43,7 @@ import numpy as np
 import pytest
 from test_exports_contract import factory_returning, one_muxed_file_encoder
 
-from ltx25_studio import conditioning
+from ltx25_studio import conditioning, modes
 from ltx25_studio import generate as generate_module
 from ltx25_studio.errors import ConstraintError, LTXStudioError
 
@@ -304,6 +304,15 @@ def test_no_video_path_string_reaches_the_pipeline(mode_id, tmp_path):
     )
 
     conditions = pipe.kwargs.get("conditions", ())
+    if modes.get_mode(mode_id).video_conditioning == "variation":
+        # Mode 04 varies the clip: it travels as decoded frames, and is no condition.
+        assert not conditions, f"{mode_id} also conditioned on its clip: {conditions!r}"
+        clip = pipe.kwargs["video_variation"]
+        assert not isinstance(clip.source, (str, Path)), (
+            f"{mode_id} handed the pipeline {clip.source!r} -- a path, not frames."
+        )
+        assert upstream_accepts(clip.source)
+        return
     assert conditions, f"{mode_id} built no condition at all from its video input"
     for condition in conditions:
         assert not isinstance(condition.source, (str, Path)), (
