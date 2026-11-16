@@ -58,6 +58,10 @@ ERROR_SPECS = {
         {"mode": "Image to video", "missing": ("image",), "alternative": "Text to video"},
         ["Image to video", "image", "Text to video"],
     ),
+    "GpuMemoryError": (
+        {"mode": "text_to_video", "stage": "generating", "reason": "CUDA out of memory"},
+        ["text_to_video", "out of memory", "smaller"],
+    ),
     "DecoderUnavailableError": (
         {"reason": "it needs an NVIDIA (CUDA) GPU at this size"},
         ["diffusion decoder", "NVIDIA", "standard decoder"],
@@ -231,6 +235,7 @@ BASE_OF = {
     "ModelLoadError": "GenerationError",
     "PromptEnhancementError": "GenerationError",
     "DecodeError": "GenerationError",
+    "GpuMemoryError": "GenerationError",
     "EncodeError": "GenerationError",
     "EmptyOutputError": "GenerationError",
 }

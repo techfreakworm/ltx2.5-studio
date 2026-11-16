@@ -41,6 +41,7 @@ from ltx25_studio.errors import (
     EmptyOutputError,
     FrameCountError,
     GenerationError,
+    GpuMemoryError,
     LoRANotAttachedError,
     LTXStudioError,
     ModelLoadError,
@@ -749,7 +750,7 @@ def test_two_staged_loras_are_both_active_during_the_run(tmp_path):
 
 def test_a_failed_generation_still_detaches_its_adapters(tmp_path):
     pipe = LoRAFakePipe(raises=RuntimeError("CUDA out of memory"))
-    with pytest.raises(DecodeError):
+    with pytest.raises(GpuMemoryError):
         generate(
             a_request(loras=(_staged(tmp_path / "a.safetensors"),)),
             pipeline_factory=factory_for(pipe),
@@ -1478,7 +1479,7 @@ def test_a_failed_run_still_records_its_peak_vram(tmp_path, monkeypatch, caplog)
 
     cuda = install_fake_torch(monkeypatch, a_cuda())
     caplog.set_level(logging.INFO, logger=generate_module.__name__)
-    with pytest.raises(DecodeError):
+    with pytest.raises(GpuMemoryError):
         generate(
             a_request(),
             pipeline_factory=factory_for(FakePipe(raises=RuntimeError("CUDA out of memory"))),

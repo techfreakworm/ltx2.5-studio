@@ -33,6 +33,7 @@ import contextvars
 import inspect
 import logging
 import secrets
+import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
@@ -45,10 +46,12 @@ from .errors import (
     EmptyOutputError,
     EncodeError,
     GenerationError,
+    GpuMemoryError,
     LoRAError,
     LTXStudioError,
     MissingInputError,
     ModelLoadError,
+    is_out_of_memory,
 )
 
 logger = logging.getLogger(__name__)
@@ -98,6 +101,7 @@ __all__ = [
     "GenerationRequest",
     "GenerationResult",
     "ProgressReporter",
+    "RunRecord",
     "configured_output_root",
     "decoder_policy",
     "generate",
@@ -190,6 +194,46 @@ class GenerationResult:
     #: the user -- the enhancement note and the peak-VRAM figures are both built
     #: on the far side of the fork and ride home here.
     warnings: tuple[str, ...] = ()
+    #: What actually happened, as facts for the UI (never parsed from ``warnings``).
+    record: RunRecord | None = None
+
+
+#: Where a run's length came from.
+LENGTH_FROM_REQUEST = "request"
+LENGTH_FROM_MODEL = "model"
+LENGTH_FROM_AUDIO = "audio"
+
+
+@dataclass(frozen=True)
+class RunRecord:
+    """What one run actually did. Builtins only: it crosses the ZeroGPU fork."""
+
+    mode: str
+    requested_width: int
+    requested_height: int
+    #: The returned picture's size; None for a mode that returns no video.
+    width: int | None
+    height: int | None
+    #: Frames rendered, and their length in seconds at ``frame_rate``.
+    frames: int | None
+    frame_rate: float
+    seconds: float | None
+    seed: int
+    stage_2: bool
+    #: ``"diffusion"`` or ``"conv"``; None when the runner did not say.
+    decoder: str | None
+    #: The audio stream's level (``audio_conditioning``) where one applies.
+    audio_level: float | None
+    #: :data:`LENGTH_FROM_REQUEST`, :data:`LENGTH_FROM_MODEL` or :data:`LENGTH_FROM_AUDIO`.
+    length_source: str
+    #: The prompt sent to the model, after enhancement.
+    prompt: str
+    #: ``(label, weight, attached module count)`` per adapter.
+    adapters: tuple[tuple[str, float, int], ...]
+    #: Inside the worker, monotonic, around the whole run.
+    elapsed_seconds: float
+    #: Peak VRAM reserved over the run, in GiB, where it was measured (CUDA).
+    peak_vram_gib: float | None
 
 
 def _default_pipeline_factory(**kwargs):
@@ -495,7 +539,8 @@ def _length_from_audio(
             f" Your audio is longer than the {constraints.MAX_SECONDS:g} s maximum, so it is "
             f"trimmed to fit."
         )
-    return replace(request, auto_duration=False, num_frames=num_frames), (note,)
+    extras = {**(request.extras or {}), "length_source": LENGTH_FROM_AUDIO}
+    return replace(request, auto_duration=False, num_frames=num_frames, extras=extras), (note,)
 
 
 def _anchor_bound(request: GenerationRequest) -> int:
@@ -566,7 +611,27 @@ def prepare_request(request: GenerationRequest):
     request, length_notes = _length_from_audio(request, spec, seconds)
     _checked_conditions(request, spec)
     _checked_lora_files(request)
+    _checked_stage_2_size(request, spec)
     return request, spec, scope_notes + length_notes
+
+
+def _checked_stage_2_size(request: GenerationRequest, spec) -> None:
+    """A stage-2 request this device cannot decode is refused before dispatch (no-op on CUDA)."""
+    if not stage_2_enabled(spec, request):
+        return
+    from . import device as device_module
+    from .pipelines import _frames_upper_bound
+
+    frames = _frames_upper_bound(
+        {
+            "num_frames": None if request.auto_duration else request.num_frames,
+            "max_seconds": request.max_seconds,
+            "frame_rate": request.frame_rate,
+        }
+    )
+    device_module.check_stage_2_size(
+        device_module.current().device, request.width, request.height, frames
+    )
 
 
 #: The name ``generate()`` and older callers use.
@@ -1047,6 +1112,10 @@ def _apply_loras(pipe, request: GenerationRequest):
     from .lora import apply as lora_apply
     from .lora import validate_lora
 
+    # A staged local runner holds no transformer between runs; adapters need one.
+    ensure_transformer = getattr(pipe, "ensure_transformer", None)
+    if callable(ensure_transformer):
+        ensure_transformer()
     target = getattr(pipe, "pipeline", pipe)
     reports = []
     weights = []
@@ -1059,10 +1128,12 @@ def _apply_loras(pipe, request: GenerationRequest):
                 # reads a file. "source" (what the user typed) is the display
                 # name and the local-upload case, where the two coincide.
                 source = entry.get("path") or entry.get("source")
+                label = _adapter_label(entry.get("source") or source)
                 weight = float(entry.get("weight", 1.0))
                 validated = entry.get("report") is not None
             else:
                 source = entry
+                label = _adapter_label(source)
                 weight = 1.0
                 validated = False
             if not validated:
@@ -1081,10 +1152,15 @@ def _apply_loras(pipe, request: GenerationRequest):
                     source,
                     max_bytes=max_bytes,
                     transformer=getattr(target, "transformer", None),
+                    **_manifest_override(),
                 )
             reports.append(
                 lora_apply.apply_lora(
-                    target, source, adapter_name=f"user_lora_{position}", weight=weight
+                    target,
+                    source,
+                    adapter_name=f"user_lora_{position}",
+                    weight=weight,
+                    label=label,
                 )
             )
             weights.append(weight)
@@ -1103,6 +1179,27 @@ def _apply_loras(pipe, request: GenerationRequest):
         if callable(set_adapters):
             set_adapters([report.adapter_name for report in reports], weights)
     return tuple(reports)
+
+
+def _adapter_label(source) -> str:
+    """How an adapter is named in the run report: what the user gave, a path by its name."""
+    text = str(source or "")
+    path = Path(text)
+    return path.stem if path.is_absolute() else text
+
+
+def _manifest_override() -> dict:
+    """``manifest=None`` when the model is not the pinned one (a snapshot override).
+
+    The checked-in shape manifest describes the pinned transformer; another
+    checkpoint is checked against its own live transformer instead.
+    """
+    from .preflight import snapshot_override
+
+    try:
+        return {"manifest": None} if snapshot_override() is not None else {}
+    except LTXStudioError:
+        return {}
 
 
 def _delete_adapters(target, names, *, tolerant: bool = False) -> None:
@@ -1404,6 +1501,17 @@ class _VramProbe:
             self._total / _GiB,
         )
 
+    @property
+    def total_bytes(self) -> int | None:
+        """The partition's total memory, when the probe measured it."""
+        return self._total or None if self._laps else None
+
+    def peak_gib(self) -> float | None:
+        """Peak reserved VRAM over every lap, in GiB; None where nothing was measured."""
+        if not self._laps:
+            return None
+        return round(max(lap[2] for lap in self._laps) / _GiB, 3)
+
     def notes(self) -> tuple[str, ...]:
         """The laps as user-visible notes, for ``GenerationResult.warnings``.
 
@@ -1536,12 +1644,15 @@ class ProgressReporter:
 
     def __init__(self, handle: Callable | None = None) -> None:
         self._handle = handle
+        self._position = 0.0
 
     def __bool__(self) -> bool:
         """True when there is somebody listening."""
         return self._handle is not None
 
     def _emit(self, position, label: str) -> None:
+        if isinstance(position, (int, float)):
+            self._position = float(position)
         handle = self._handle
         if handle is None:
             return
@@ -1552,9 +1663,13 @@ class ProgressReporter:
             self._handle = None
 
     def phase(self, label: str) -> None:
-        """Announce a phase at the start of its band."""
-        start, _end = _PHASE_BANDS[label]
-        self._emit(start, label)
+        """Announce a phase at the start of its band; an unknown label keeps the bar where it is."""
+        band = _PHASE_BANDS.get(label)
+        if band is None:
+            logger.debug("progress: unknown phase label %r", label)
+            self._emit(self._position, label)
+            return
+        self._emit(band[0], label)
 
     def upscaling(self) -> None:
         """The stage-2 latent upsample.
@@ -1605,6 +1720,84 @@ class ProgressReporter:
         return callback_on_step_end
 
 
+def _partition_notes(probe) -> tuple[str, ...]:
+    """Say so when the GPU slice is smaller than the size that was asked for."""
+    total = probe.total_bytes
+    if total is None:
+        return ()
+    from . import zerogpu
+    from .config import load_config
+
+    try:
+        note = zerogpu.partition_note(total, load_config().zerogpu_size)
+    except LTXStudioError:
+        return ()
+    return (note,) if note else ()
+
+
+def _frame_size(output) -> tuple[int, int] | None:
+    """``(width, height)`` of the returned frames, read off the output; None if unreadable."""
+    frames = getattr(output, "frames", None)
+    first = frames
+    while isinstance(first, (list, tuple)) and first:
+        first = first[0]
+    size = getattr(first, "size", None)
+    if isinstance(size, tuple) and len(size) == 2:  # PIL: (width, height)
+        return int(size[0]), int(size[1])
+    shape = getattr(frames, "shape", None)
+    if shape is not None and len(shape) >= 3:
+        dims = list(shape)
+        if dims[-1] in (1, 3, 4):  # ..., H, W, C
+            return int(dims[-2]), int(dims[-3])
+        return int(dims[-1]), int(dims[-2])  # ..., C, H, W
+    return None
+
+
+def _length_source(request: GenerationRequest) -> str:
+    if (request.extras or {}).get("length_source") == LENGTH_FROM_AUDIO:
+        return LENGTH_FROM_AUDIO
+    return LENGTH_FROM_MODEL if request.auto_duration else LENGTH_FROM_REQUEST
+
+
+def _run_record(
+    request, spec, output, *, kwargs, seed, run_facts, lora_reports, elapsed, probe
+) -> RunRecord:
+    """The facts of a finished run, for ``GenerationResult.record``."""
+    facts = run_facts if isinstance(run_facts, dict) else {}
+    returns_video = "video" in spec.exports
+    size = _frame_size(output) if returns_video else None
+    frames = _frame_count(output)
+    rate = float(request.frame_rate)
+    level = kwargs.get("audio_noise_level")
+    adapters = tuple(
+        (
+            str(getattr(report, "label", "") or Path(str(report.source)).stem),
+            float(report.weight),
+            int(report.attached),
+        )
+        for report in lora_reports or ()
+    )
+    return RunRecord(
+        mode=request.mode,
+        requested_width=int(request.width),
+        requested_height=int(request.height),
+        width=size[0] if size else None,
+        height=size[1] if size else None,
+        frames=frames,
+        frame_rate=rate,
+        seconds=round(frames / rate, 3) if frames else None,
+        seed=int(seed),
+        stage_2=bool(facts.get("stage_2", stage_2_enabled(spec, request))),
+        decoder=facts.get("decoder"),
+        audio_level=None if level is None else float(level),
+        length_source=_length_source(request),
+        prompt=str(kwargs.get("prompt") or ""),
+        adapters=adapters,
+        elapsed_seconds=round(float(elapsed), 3),
+        peak_vram_gib=probe.peak_gib(),
+    )
+
+
 def generate(
     request: GenerationRequest | None = None,
     *,
@@ -1646,7 +1839,12 @@ def generate(
     # length, open the audio, check anchors and staged LoRA files. Both the
     # reservation estimate and the worker see the scoped request; a refusal
     # here costs no ZeroGPU slot. The worker repeats it, idempotently.
-    request, spec, notes = _prepare_request(request)
+    try:
+        request, spec, notes = _prepare_request(request)
+    except LTXStudioError as exc:
+        if not _IN_GPU_WORKER.get():
+            exc.gpu_used = False  # refused before dispatch: nothing was billed
+        raise
 
     # Route through the ZeroGPU entrypoint when one is registered and we are not
     # already inside the worker. Without this the UI calls straight through and
@@ -1697,6 +1895,7 @@ def generate(
     # Deliberately NOT above the dispatch: on the web-process side there is no
     # CUDA to measure, and a probe opened there would report the fork's numbers
     # as the run's.
+    started = time.monotonic()
     probe = _VramProbe()
     probe.start()
     finished = False
@@ -1774,7 +1973,14 @@ def generate(
         reporter.phase("loading the model")
         try:
             pipe = factory(pipeline=spec.pipeline)
+        except LTXStudioError:
+            # Already typed (a device refusal, a load error): keep it.
+            raise
         except Exception as exc:
+            if is_out_of_memory(exc):
+                raise GpuMemoryError(
+                    mode=request.mode, stage="loading the model", reason=str(exc)[:200]
+                ) from exc
             raise ModelLoadError(component=spec.pipeline, reason=str(exc)) from exc
 
         # Everything between the load and the first denoise step: the pixel-to-latent
@@ -1817,6 +2023,10 @@ def generate(
                 # Already typed -- a stage-2 ModelLoadError is not a decode failure.
                 raise
             except Exception as exc:
+                if is_out_of_memory(exc):
+                    raise GpuMemoryError(
+                        mode=request.mode, stage="generating", reason=str(exc)[:200]
+                    ) from exc
                 raise DecodeError(mode=request.mode, reason=f"the pipeline raised {exc!r}") from exc
 
             output = _decoded(output, request.mode)
@@ -1892,11 +2102,23 @@ def generate(
                 + length_notes
                 + size_notes
                 + decoder_notes
+                + _partition_notes(probe)
                 # Last, because it is diagnostic rather than something the user has
                 # to act on -- but present on every run, because the one flagship
                 # generation that finally gives this build a headroom number is not
                 # going to be the run somebody remembered to turn a flag on for.
                 + probe.notes()
+            )
+            record = _run_record(
+                request,
+                spec,
+                output,
+                kwargs=kwargs,
+                seed=seed,
+                run_facts=run_facts,
+                lora_reports=lora_reports,
+                elapsed=time.monotonic() - started,
+                probe=probe,
             )
 
             result = GenerationResult(
@@ -1908,6 +2130,7 @@ def generate(
                 video_path=artifacts.get("video"),
                 audio_path=artifacts.get("audio"),
                 warnings=warnings,
+                record=record,
             )
             finished = True
             return result

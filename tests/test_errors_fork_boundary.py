@@ -84,8 +84,11 @@ def _construct(name):
 def test_discovery_found_the_whole_exported_hierarchy():
     """The walk and ``__all__`` must agree in both directions: an exported name
     that is not in the hierarchy, or a hierarchy class that is not exported,
-    is a class this suite would silently miss."""
-    assert set(DISCOVERED) == set(errors.__all__)
+    is a class this suite would silently miss. The failure-category API is the
+    only non-error export."""
+    category_api = {*(name.upper() for name in errors.CATEGORIES), "CATEGORIES", "Failure"}
+    category_api |= {"categorise", "is_out_of_memory"}
+    assert set(DISCOVERED) == set(errors.__all__) - category_api
 
 
 # --------------------------------------------------------------------------

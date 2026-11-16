@@ -40,9 +40,19 @@ from __future__ import annotations
 # silently vary by environment, which is the inert-guard shape this build
 # keeps finding (SPACE_MODE_MATRIX §8). If gradio is absent, this package
 # should fail to import, loudly, right here.
+from dataclasses import dataclass
+
 from gradio.exceptions import Error as _GradioError
 
 __all__ = [
+    "ADAPTER",
+    "BUG",
+    "CATEGORIES",
+    "ENHANCER",
+    "INPUT",
+    "OOM",
+    "QUOTA",
+    "TIMEOUT",
     "AudioVideoDesyncError",
     "ConfigError",
     "ConstraintError",
@@ -52,8 +62,10 @@ __all__ = [
     "DimensionError",
     "EmptyOutputError",
     "EncodeError",
+    "Failure",
     "FrameCountError",
     "GenerationError",
+    "GpuMemoryError",
     "LTXStudioError",
     "LoRAConventionError",
     "LoRAError",
@@ -76,7 +88,87 @@ __all__ = [
     "PromptEnhancementError",
     "UnknownComponentError",
     "UnknownModeError",
+    "categorise",
+    "is_out_of_memory",
 ]
+
+
+# ---------------------------------------------------------------------------
+# failure categories -- what the UI's failure card is chosen from
+# ---------------------------------------------------------------------------
+
+#: Not enough ZeroGPU quota to schedule the run.
+QUOTA = "quota"
+#: The run used up its GPU time (the platform aborted it), or waited too long.
+TIMEOUT = "timeout"
+#: The GPU (or Apple GPU) ran out of memory.
+OOM = "oom"
+#: Refused before running: the request cannot be generated as asked.
+INPUT = "input"
+#: A LoRA adapter does not fit, failed to load or failed to attach.
+ADAPTER = "adapter"
+#: The prompt enhancer is unavailable.
+ENHANCER = "enhancer"
+#: Anything else of ours.
+BUG = "bug"
+CATEGORIES = (QUOTA, TIMEOUT, OOM, INPUT, ADAPTER, ENHANCER, BUG)
+
+
+@dataclass(frozen=True)
+class Failure:
+    """A failure's category and whether GPU time was spent on it."""
+
+    category: str
+    gpu_used: bool
+
+
+#: Message fragments of the out-of-memory errors torch raises (CUDA, MPS).
+_OOM_TEXT = ("out of memory",)
+#: How the ZeroGPU platform words its refusals and aborts (spaces 0.51: a
+#: ``gr.Error`` whose title and message carry these).
+_QUOTA_TEXT = (
+    "quota exceeded",
+    "exceeded your gpu quota",
+    "pending credits exceeded",
+    "illegal duration",
+    "reached its gpu limit",
+    "runs limit",
+)
+_QUEUE_TIMEOUT_TEXT = ("queue timeout",)
+_ABORT_TEXT = ("gpu task aborted", "timed out", "duration exceeded")
+
+
+def is_out_of_memory(exc: BaseException) -> bool:
+    """True for ``torch.OutOfMemoryError`` and the CUDA / MPS out-of-memory messages."""
+    if type(exc).__name__ == "OutOfMemoryError":
+        return True
+    return any(text in str(exc).lower() for text in _OOM_TEXT)
+
+
+def categorise(exc: BaseException) -> Failure:
+    """The category of any exception that reaches the UI, ours or foreign.
+
+    Ours carry their own (``LTXStudioError.category`` / ``.gpu_used``); a
+    platform refusal or abort is recognised by its words; anything else is
+    ``bug``. Unwraps the spaces 0.52 ``ZeroGPUTaskException``.
+    """
+    inner = getattr(exc, "exception", None)
+    if isinstance(inner, BaseException) and inner is not exc:
+        exc = inner
+    if isinstance(exc, LTXStudioError):
+        return Failure(exc.category, bool(exc.gpu_used))
+    if is_out_of_memory(exc):
+        return Failure(OOM, True)
+    words = " ".join(
+        str(part) for part in (getattr(exc, "title", ""), getattr(exc, "message", ""), exc)
+    ).lower()
+    if any(text in words for text in _QUOTA_TEXT):
+        return Failure(QUOTA, False)
+    if any(text in words for text in _QUEUE_TIMEOUT_TEXT):
+        return Failure(TIMEOUT, False)
+    if any(text in words for text in _ABORT_TEXT):
+        return Failure(TIMEOUT, True)
+    return Failure(BUG, True)
 
 
 def _join(values) -> str:
@@ -159,6 +251,11 @@ class LTXStudioError(_GradioError):
     ``LoRAError`` before its ``ValueError`` arm.
     """
 
+    #: One of :data:`CATEGORIES`; families set their own below.
+    category = BUG
+    #: False exactly for a refusal raised before dispatch (``generate`` sets it).
+    gpu_used = True
+
     def __init__(self, *args):
         # Concrete subclasses pass exactly one formatted sentence; tests may
         # construct bases bare. Hand gr.Error the message (it stores it and
@@ -182,6 +279,8 @@ class LTXStudioError(_GradioError):
 class ConstraintError(LTXStudioError):
     """An input violates a model constraint (PLAN §5.5)."""
 
+    category = INPUT
+
 
 class ModelFileError(LTXStudioError):
     """A model file or component could not be resolved (PLAN §5.2)."""
@@ -189,6 +288,8 @@ class ModelFileError(LTXStudioError):
 
 class LoRAError(LTXStudioError):
     """A user-supplied LoRA failed validation or failed to attach (PLAN §4.3)."""
+
+    category = ADAPTER
 
 
 class GenerationError(LTXStudioError):
@@ -581,7 +682,7 @@ class LoRADimensionError(LoRAError):
         super().__init__(
             f"LoRA {source} does not fit this model: {actual} at {module}, expected {expected}"
             f"{f' (key {key})' if key else ''}. The adapter was trained for a different LTX "
-            f"model; applying it would corrupt that module."
+            f"model, so it is refused rather than applied to the wrong shapes."
         )
 
 
@@ -658,6 +759,8 @@ class PromptEnhancementError(GenerationError):
     the operator to the wrong Hub page.
     """
 
+    category = ENHANCER
+
     def __init__(self, *, repo_id, reason):
         self.repo_id = repo_id
         self.reason = reason
@@ -665,6 +768,21 @@ class PromptEnhancementError(GenerationError):
             f"prompt enhancement failed and nothing was generated. The enhancer {repo_id!r} "
             f"could not be used: {reason}. Turn the enhance-prompt toggle off to run with the "
             f"prompt you typed."
+        )
+
+
+class GpuMemoryError(GenerationError):
+    """The GPU (or Apple GPU) ran out of memory during the run."""
+
+    category = OOM
+
+    def __init__(self, *, mode, stage, reason):
+        self.mode = mode
+        self.stage = stage
+        self.reason = reason
+        super().__init__(
+            f"The GPU ran out of memory while {stage} for mode {mode!r}. Try a smaller size, "
+            f"fewer frames, or turn off stage 2. ({reason})"
         )
 
 
@@ -710,6 +828,8 @@ class EmptyOutputError(GenerationError):
 
 class UnknownModeError(LTXStudioError):
     """A mode was requested that the registry does not define."""
+
+    category = INPUT
 
     def __init__(self, *, mode, known):
         self.mode = mode
