@@ -354,6 +354,7 @@ with **128 GB** of unified memory. Smaller machines are not verified.
 | `LTX25_MEMORY_LIMIT_GB` | 90 on macOS by default | before each big load and before the denoise, the app checks that committed memory plus what that step adds stays under this, and refuses with the numbers if not |
 | `LTX25_MEMORY_SETTLE_SECONDS` | 2 by default, 0 to 60 | the longest that check may wait for the gauge: for memory just freed to leave it, and to read a failing check again before it refuses (below). `0` switches the wait off: one reading |
 | `LTX25_MPS_SELF_TEST` | `enforce` (default) or `warn` | what to do when PyTorch fails the MPS numerics self-test |
+| `LTX25_OUTPUT_DIR` | `outputs` by default | where each run's files are written. A folder outside the working directory and the system temp dir is passed to Gradio as the one allowed path, so the page can show the results written there; for that launch it takes the place of `GRADIO_ALLOWED_PATHS` |
 
 **The memory check waits for memory just freed.** On a Mac, GPU memory the app frees leaves
 the gauge over a moment, not at once: after the text encoder's release the kernel gave its 24 GB
@@ -509,7 +510,10 @@ like a form quietly resetting itself. No error, no log, no signal. **It hid for 
 
 So: an empty output is an error at the source, every layer propagates it, there is no
 "newest file in the output directory" fallback, each run gets its own output directory, and
-there is no code path in which you press Generate, wait, and see nothing change.
+there is no code path in which you press Generate, wait, and see nothing change. That includes
+a result the page itself cannot show: until 2026-11-16 a file Gradio refused to serve left the
+page on "Generating…" for good; now such a run ends with Generate back and a card that says the
+run finished but its result could not be shown, with the server's own message.
 
 ---
 

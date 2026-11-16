@@ -476,6 +476,15 @@ Rationale: ~78 GB headroom minus the pip environment and a user LoRA or two. 20 
 generations and leaves the margin the 2.3 Space did not have when it filled its disk and went
 unhealthy.
 
+*(As built, 2026-11-16: the folder is `LTX25_OUTPUT_DIR`, `outputs` by default, and the writer
+and the startup sweep read the same setting. Gradio serves a file a step returns only from the
+working directory, the system temp dir, its own cache or `launch(allowed_paths=…)`, so a folder
+that resolves outside the first two is passed by `app.main` as the only allowed path (`e7cde1a`);
+in Gradio 6.24 a non-empty `allowed_paths` replaces `GRADIO_ALLOWED_PATHS` for that launch. A
+launcher that calls `app.demo.launch()` itself must pass the same. A run whose result Gradio
+still cannot show ends with Generate back and a card saying so, never on "Generating…"
+(`55692f5`).)*
+
 ---
 
 ## 3. Decision 3 — Mode coverage: 11 UI modes over 4 real workflows
