@@ -161,6 +161,43 @@ def test_the_runner_says_which_decoder_ran_and_whether_stage_2_ran(tmp_path):
     assert result.record.decoder == "diffusion" and result.record.stage_2 is False
 
 
+@pytest.mark.parametrize("device", ["cuda", "cpu"])
+def test_the_record_names_the_device_the_runner_ran_on(tmp_path, device):
+    """The UI labels the run's time by it ("on this Mac's GPU", "on the CPU")."""
+    from test_decode_policy import OK, runner_on
+
+    runner, _pipeline, _built = runner_on(device)
+    result = generate_module.generate(
+        mode="text_to_video",
+        seed=7,
+        prompt="p",
+        **OK,
+        decoder="conv",
+        pipeline_factory=lambda **_: runner,
+        encoder=good_encoder,
+        output_root=tmp_path,
+        retention_bytes=10**9,
+    )
+
+    assert result.record.device == device
+
+
+def test_a_diffusers_pipelines_torch_device_is_named_by_its_type(tmp_path):
+    from types import SimpleNamespace
+
+    torch = pytest.importorskip("torch")
+    pipe = FakePipe(output=Output())
+    pipe.pipeline = SimpleNamespace(device=torch.device("cpu"))
+
+    assert run(tmp_path, pipe=pipe).record.device == "cpu"
+
+
+def test_a_runner_that_says_nothing_is_recorded_on_this_processs_device(tmp_path, monkeypatch):
+    monkeypatch.setenv("LTX25_DEVICE", "cpu")
+
+    assert run(tmp_path).record.device == "cpu"
+
+
 def test_peak_vram_is_recorded_where_it_was_measured(tmp_path, monkeypatch):
     install_fake_torch(monkeypatch, a_cuda())
     assert run(tmp_path).record.peak_vram_gib == 73.0

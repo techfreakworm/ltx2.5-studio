@@ -520,11 +520,15 @@ def describe_gpu_kwargs(kwargs, runtime_config) -> str:
 
 
 def _looks_like_a_cuda_tensor(value) -> bool:
-    """True for anything a real ``torch.Tensor`` on CUDA would answer True to."""
+    """True for anything a real ``torch.Tensor`` on CUDA would answer True to.
+
+    A torch object's ``device`` is a ``torch.device``, never a ``str``: a plain
+    string is a label (the run record names the device it ran on), not a tensor.
+    """
     if getattr(value, "is_cuda", False):
         return True
     device = getattr(value, "device", None)
-    return device is not None and str(device).startswith("cuda")
+    return device is not None and not isinstance(device, str) and str(device).startswith("cuda")
 
 
 def _find_cuda(value, depth: int, seen: set[int]):

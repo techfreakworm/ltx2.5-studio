@@ -1499,6 +1499,7 @@ def test_auto_decodes_with_conv_off_cuda_on_every_runner(kind, composite, monkey
     assert (record.decoder, record.stage_2) == ("conv", False)
     assert (record.width, record.height, record.frames) == (SIZE, SIZE, FRAMES)
     assert any("NVIDIA" in line for line in result.record.diagnostics), result.record.diagnostics
+    assert record.device == "cpu", "the run's time is labelled by the device that ran it"
 
 
 @pytest.mark.parametrize("kind", RUNNERS)

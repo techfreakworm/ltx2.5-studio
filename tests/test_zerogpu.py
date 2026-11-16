@@ -105,6 +105,60 @@ def test_an_all_cpu_pipeline_output_is_fine():
     zerogpu.assert_returnable(FakeOutput(frames=FakeTensor("cpu"), audio=FakeTensor("cpu")))
 
 
+class FakeDevice:
+    """Stands in for ``torch.device``: not a ``str``, prints as one."""
+
+    def __init__(self, name):
+        self.name = name
+
+    def __str__(self):
+        return self.name
+
+
+def test_an_object_on_a_cuda_device_is_refused_without_is_cuda():
+    """A generator or stream has a ``torch.device`` and no ``is_cuda``."""
+    from types import SimpleNamespace
+
+    with pytest.raises(LTXStudioError):
+        zerogpu.assert_returnable({"generator": SimpleNamespace(device=FakeDevice("cuda:0"))})
+
+
+def test_a_result_whose_record_names_the_device_it_ran_on_crosses(tmp_path):
+    """The run record says "cuda" as a label; refusing it would refuse every Space run."""
+    from ltx25_studio import generate as generate_module
+
+    record = generate_module.RunRecord(
+        mode="text_to_video",
+        requested_width=64,
+        requested_height=64,
+        width=64,
+        height=64,
+        frames=9,
+        frame_rate=24.0,
+        seconds=0.375,
+        seed=7,
+        stage_2=False,
+        decoder="conv",
+        audio_level=None,
+        length_source="request",
+        prompt="p",
+        adapters=(),
+        elapsed_seconds=1.0,
+        peak_vram_gib=None,
+        device="cuda",
+    )
+    result = generate_module.GenerationResult(
+        output_path=tmp_path / "output.mp4",
+        run_id="abc",
+        run_dir=tmp_path,
+        mode="text_to_video",
+        seed=7,
+        record=record,
+    )
+
+    assert zerogpu.assert_returnable(result) is result
+
+
 # --------------------------------------------------------------------------
 # the defensive size= kwarg
 # --------------------------------------------------------------------------

@@ -243,6 +243,8 @@ class RunRecord:
     diagnostics: tuple[str, ...] = ()
     #: The clip-variation level used (``video_to_video``); None where none applies.
     video_level: float | None = None
+    #: The device the run ran on: ``"cuda"``, ``"mps"`` or ``"cpu"`` (None if unknown).
+    device: str | None = None
 
 
 def _default_pipeline_factory(**kwargs):
@@ -2153,8 +2155,34 @@ def _length_source(request: GenerationRequest) -> str:
     return LENGTH_FROM_MODEL if request.auto_duration else LENGTH_FROM_REQUEST
 
 
+def _run_device(pipe) -> str | None:
+    """The device the run used: the runner's own, else this process's resolution."""
+    for holder in (pipe, getattr(pipe, "pipeline", None)):
+        device = getattr(holder, "device", None)
+        kind = str(getattr(device, "type", device) or "").split(":", 1)[0].strip().lower()
+        if kind in ("cuda", "mps", "cpu"):
+            return kind
+    try:
+        from . import device as device_module
+
+        return device_module.current().device
+    except Exception:  # noqa: BLE001 -- an unresolvable device leaves it unknown
+        return None
+
+
 def _run_record(
-    request, spec, output, *, kwargs, seed, run_facts, lora_reports, elapsed, probe, diagnostics=()
+    request,
+    spec,
+    output,
+    *,
+    kwargs,
+    seed,
+    run_facts,
+    lora_reports,
+    elapsed,
+    probe,
+    diagnostics=(),
+    device=None,
 ) -> RunRecord:
     """The facts of a finished run, for ``GenerationResult.record``."""
     facts = run_facts if isinstance(run_facts, dict) else {}
@@ -2195,6 +2223,7 @@ def _run_record(
             if kwargs.get("video_variation") is None
             else float(kwargs["video_variation"].level)
         ),
+        device=device,
     )
 
 
@@ -2522,6 +2551,7 @@ def generate(
                 elapsed=time.monotonic() - started,
                 probe=probe,
                 diagnostics=diagnostics,
+                device=_run_device(pipe),
             )
 
             result = GenerationResult(

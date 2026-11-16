@@ -71,8 +71,20 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--auto-duration", action="store_true")
     p.add_argument("--min-seconds", type=float, default=1.0)
     p.add_argument("--max-seconds", type=float, default=5.0)
-    p.add_argument("--noise-scale", type=float, default=0.5)
-    p.add_argument("--strength", type=float, default=0.8)
+    p.add_argument(
+        "--noise-scale",
+        type=float,
+        default=None,
+        help="how much to change the input: video_to_video's clip, audio_to_audio's sound "
+        "(default: the mode's own level; snapped to the supported levels)",
+    )
+    p.add_argument(
+        "--strength",
+        type=float,
+        default=0.8,
+        help="read by no mode now (video_to_video takes --noise-scale); kept so scripts "
+        "that pass it still parse",
+    )
     p.add_argument("--enhance", action="store_true", help="rewrite the prompt with the enhancer")
     p.add_argument("--lora", action="append", default=[], metavar="PATH[:WEIGHT]")
     p.add_argument("--device", choices=local_runtime.LOCAL_DEVICES, default="mps")
@@ -85,6 +97,25 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--json", type=Path, help="write the report here as JSON")
     p.add_argument("--dry-run", action="store_true", help="print the plan; load nothing")
     return p
+
+
+def _artifacts(result) -> dict:
+    """What the run wrote, for the report and its --json file."""
+    return {
+        "output": str(result.output_path),
+        "video": str(result.video_path) if result.video_path else None,
+        "audio": str(result.audio_path) if result.audio_path else None,
+        "seed": result.seed,
+        "warnings": list(result.warnings),
+    }
+
+
+def _record(result) -> dict | None:
+    """The run record (``generate.RunRecord``) as a dict, for the --json file."""
+    import dataclasses
+
+    record = getattr(result, "record", None)
+    return dataclasses.asdict(record) if dataclasses.is_dataclass(record) else None
 
 
 def _lora(spec: str) -> dict:
@@ -367,14 +398,9 @@ def _run(args, report: _Report) -> int:
         )
     )
 
-    artifacts = {
-        "output": str(result.output_path),
-        "video": str(result.video_path) if result.video_path else None,
-        "audio": str(result.audio_path) if result.audio_path else None,
-        "seed": result.seed,
-        "warnings": list(result.warnings),
-    }
+    artifacts = _artifacts(result)
     report.data["artifacts"] = artifacts
+    report.data["record"] = _record(result)
     report.line("== artifacts")
     for key, value in artifacts.items():
         report.line(f"  {key}: {value}")
