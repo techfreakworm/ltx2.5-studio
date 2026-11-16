@@ -116,7 +116,7 @@ def test_the_lora_row_says_no_lora_in_words_and_lists_strengths():
     assert render.lora_summary_label([]) == "LoRA: none. Add an adapter"
     assert render.lora_idle() == "No LoRA: runs use the base model."
     two = [{"source": "a", "weight": 0.8}, {"source": "b", "weight": 1.0}]
-    assert render.lora_summary_label(two) == "LoRA: 2 adapters at 0.8 and 1"
+    assert render.lora_summary_label(two) == "LoRA: 2 adapters at 0.8 and 1.0"
 
 
 def test_the_staged_strengths_appear_in_the_cost_panel():

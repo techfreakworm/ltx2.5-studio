@@ -401,22 +401,29 @@ input[type="range"] { accent-color: var(--mr-paper); }
   color: var(--mr-paper) !important; font-family: var(--mr-body) !important; font-weight: 500 !important;
   border-radius: 6px !important; min-height: 40px; box-shadow: none !important; }
 #commission button.secondary:hover, #rail button.secondary:hover { border-color: var(--mr-dust) !important; }
-.mr-quiet, button.mr-quiet { background: transparent !important; border: 1px solid transparent !important;
+.mr-quiet, button.mr-quiet, #commission button.mr-quiet, #rail button.mr-quiet {
+  background: transparent !important; border: 1px solid transparent !important;
   color: var(--mr-paper) !important; text-decoration: underline; text-underline-offset: 3px;
   text-decoration-color: var(--mr-dust); box-shadow: none !important; font-weight: 500 !important;
   min-height: 40px; padding: 0 8px !important; }
-.mr-quiet:hover { text-decoration-color: var(--mr-paper); }
+.mr-quiet:hover, #rail button.mr-quiet:hover, #commission button.mr-quiet:hover {
+  text-decoration-color: var(--mr-paper); border-color: transparent !important; }
 button:disabled { cursor: not-allowed !important; }
 
-/* == media drop zones ==================================================== */
-#commission [data-testid="image"], #commission [data-testid="video"],
-#commission [data-testid="audio"], #commission .mr-drop {
+/* == media drop zones: recessed, dashed; a roll edge once a file is in ===== */
+#commission :is(#in-image, #in-video, #in-audio).block, #commission .mr-drop.block {
   background: var(--mr-well) !important; border: 1px dashed var(--mr-line) !important;
-  border-radius: 10px !important; }
-#commission .mr-media.has-file [data-testid] { border-style: solid !important; }
-.mr-caption p { margin: 4px 0 0 !important; font-size: 13px; line-height: 19px; color: var(--mr-dust); }
-#commission .upload-container, #commission .wrap.svelte-12ioyct, #commission .icon-wrap {
+  border-radius: 10px !important; padding: 6px !important; overflow: hidden; }
+#commission #in-image.block:has(img), #commission #in-video.block:has(video),
+#commission #in-audio.block:has(audio, canvas) {
+  border-style: solid !important; border-color: var(--mr-roll) !important; }
+#commission :is(#in-image, #in-video, #in-audio) [data-testid="block-label"] {
+  background: transparent !important; color: var(--mr-dust) !important; }
+#commission :is(#in-image, #in-video, #in-audio) :is(button, .upload-container, .wrap) {
   color: var(--mr-dust) !important; }
+#in-audio .upload-container, #in-audio [data-testid="upload"] { min-height: 120px !important; }
+.mr-caption p { margin: 4px 0 0 !important; font-size: 13px; line-height: 19px; color: var(--mr-dust); }
+#shape label:has(input[value="Match input"]) { font-family: var(--mr-body); font-size: 14px; }
 
 /* == chips (presets, choices) ============================================ */
 .mr-chips > div.wrap:not([data-testid]) { gap: 6px !important; }
@@ -444,20 +451,23 @@ button:disabled { cursor: not-allowed !important; }
 #commission .mr-acc > div:not(.label-wrap) { padding: 0 14px 14px !important; }
 .mr-bay-head p { font-size: 13px; line-height: 19px; color: var(--mr-dust); margin: 0 0 10px; max-width: 70ch; }
 .mr-lora-row { align-items: center !important; gap: 10px !important; }
-.mr-lora-name p { margin: 0; font-size: 14px; color: var(--mr-paper); }
+.mr-lora-name p { margin: 0; font-size: 14px; color: var(--mr-paper); overflow-wrap: anywhere; }
+#commission .mr-drop.block .wrap, #commission .mr-drop.block button { min-height: 0 !important; }
 .mr-lora-name p::before { content: ""; display: inline-block; width: 6px; height: 6px; border-radius: 50%;
   background: var(--mr-roll); margin-right: 8px; vertical-align: middle; }
 #lora-verdict h3 { font-family: var(--mr-display); font-size: 16px; color: var(--mr-cut-text) !important; margin: 0 0 6px; }
 #lora-verdict h4 { font-family: var(--mr-display); font-size: 16px; color: var(--mr-paper) !important; margin: 0 0 6px; }
-#lora-verdict:has(h3) { border-left: 4px solid var(--mr-cut) !important; padding: 10px 12px !important;
+#commission #lora-verdict.block:has(h3) { border-left: 4px solid var(--mr-cut) !important; padding: 10px 12px !important;
   background: color-mix(in srgb, var(--mr-cut) 10%, var(--mr-slate)) !important; border-radius: 6px; }
-#lora-verdict:has(h4) { border-left: 4px solid var(--mr-roll) !important; padding: 10px 12px !important;
+#commission #lora-verdict.block:has(h4) { border-left: 4px solid var(--mr-roll) !important; padding: 10px 12px !important;
   background: color-mix(in srgb, var(--mr-roll) 8%, var(--mr-slate)) !important; border-radius: 6px; }
 #lora-verdict p, #lora-verdict td, #lora-verdict li { font-size: 13px; color: var(--mr-paper); }
 #lora-verdict blockquote { border-left: 2px solid var(--mr-line); margin: 6px 0 0; padding: 2px 10px;
   color: var(--mr-paper); }
-#lora-verdict table { margin: 6px 0 0; border: none; }
-#lora-verdict td { border: none !important; padding: 2px 12px 2px 0 !important; }
+#lora-verdict :is(table, thead, tbody, tr, th, td) { border: none !important;
+  background: transparent !important; box-shadow: none !important; }
+#lora-verdict table { margin: 6px 0 0; width: auto; }
+#lora-verdict td { padding: 2px 16px 2px 0 !important; }
 #lora-verdict td:first-child { color: var(--mr-dust); }
 #lora-verdict thead { display: none; }
 .mr-hint p { margin: 2px 0 0; font-size: 13px; line-height: 19px; color: var(--mr-dust); }
@@ -498,7 +508,7 @@ button:disabled { cursor: not-allowed !important; }
   color: var(--mr-paper); }
 .mr-lamps { display: flex; flex-wrap: wrap; gap: 6px; }
 .mr-lamp { font-family: var(--mr-display); font-weight: 600; font-size: 12px; line-height: 16px;
-  letter-spacing: 0.08em; text-transform: uppercase; padding: 3px 7px; border-radius: 3px;
+  letter-spacing: 0.02em; padding: 3px 7px; border-radius: 3px;
   border: 1px solid var(--mr-line); color: var(--mr-dust); white-space: nowrap;
   transition: background-color 160ms ease, color 160ms ease; }
 .mr-lamp-cost.is-lit { background: var(--mr-tungsten); border-color: var(--mr-tungsten); color: var(--mr-on-tungsten); }
@@ -537,9 +547,9 @@ button:disabled { cursor: not-allowed !important; }
 /* == report =============================================================== */
 .mr-done { border: 1px solid var(--mr-line); border-left: 4px solid var(--mr-roll); border-radius: 10px;
   padding: 12px 14px; background: var(--mr-slate); }
-.mr-done-head { margin: 0 0 8px; }
+.mr-done-head { display: block; margin: 0 0 10px !important; line-height: 22px; }
 #report-actions { gap: 8px !important; }
-#run-status { border: 1px solid var(--mr-line) !important; border-radius: 10px !important;
+#rail #run-status.block { border: 1px solid var(--mr-line) !important; border-radius: 10px !important;
   padding: 12px 14px !important; background: var(--mr-slate) !important; }
 #run-status p { font-size: 14px; line-height: 21px; color: var(--mr-paper); margin: 0 0 6px; max-width: 70ch; }
 #run-status .mr-report-head { display: none; }
@@ -547,7 +557,7 @@ button:disabled { cursor: not-allowed !important; }
 #run-status details { margin-top: 6px; }
 #run-status summary { cursor: pointer; color: var(--mr-dust); font-size: 13px; }
 #run-status details p { color: var(--mr-dust); font-size: 13px; font-family: var(--mr-mono); word-break: break-word; }
-#run-status:has(h3) { border-color: var(--mr-cut) !important; border-left-width: 4px !important;
+#rail #run-status.block:has(h3) { border-color: var(--mr-cut) !important; border-left-width: 4px !important;
   background: color-mix(in srgb, var(--mr-cut) 10%, var(--mr-slate)) !important; }
 #run-status h3 { font-family: var(--mr-display); font-weight: 600; font-size: 16px; margin: 0 0 6px;
   color: var(--mr-cut-text) !important; }
@@ -626,9 +636,31 @@ _SCRIPT = """
       group.setAttribute('role', 'radiogroup');
       group.setAttribute('aria-label', 'What you start from, and what you get back');
     }
-    // One group, one name: a single Tab stop, and arrow keys move between cells.
+    // One group, one name: a single Tab stop. Arrow keys move by the grid's
+    // geometry (up/down/left/right), not by registry order.
     document.querySelectorAll('#mode-matrix input[type="radio"]').forEach((input) => {
       if (input.name !== 'mode-matrix') input.name = 'mode-matrix';
+      if (input.dataset.mrKeys) return;
+      input.dataset.mrKeys = '1';
+      input.addEventListener('keydown', (event) => {
+        const step = {ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1]}[event.key];
+        if (!step) return;
+        event.preventDefault();
+        const centre = (el) => { const r = el.getBoundingClientRect(); return [r.left + r.width / 2, r.top + r.height / 2]; };
+        const [x, y] = centre(input.closest('label'));
+        let best = null, bestScore = Infinity;
+        document.querySelectorAll('#mode-matrix input[type="radio"]').forEach((other) => {
+          if (other === input) return;
+          const [ox, oy] = centre(other.closest('label'));
+          const dx = ox - x, dy = oy - y;
+          const along = step[0] ? dx * step[0] : dy * step[1];
+          const across = step[0] ? Math.abs(dy) : Math.abs(dx);
+          if (along <= 4) return;
+          const score = along + across * 4;
+          if (score < bestScore) { bestScore = score; best = other; }
+        });
+        if (best) { best.click(); best.focus(); }
+      });
     });
   });
 })();

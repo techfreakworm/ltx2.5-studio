@@ -72,6 +72,7 @@ __all__ = [
     "lora_stage_of",
     "lora_summary_label",
     "lora_validating",
+    "lost_run",
     "media_caption",
     "mode_name",
     "monitor_caption",
@@ -492,10 +493,16 @@ def _length_words(facts: CostFacts) -> str:
     return "length not set"
 
 
+def weight_text(weight: Any) -> str:
+    """A LoRA strength as people write it: 1.0, 0.8, 0.85."""
+    text = f"{float(weight):.2f}"
+    return text[:-1] if text.endswith("0") else text
+
+
 def _lora_words(loras: Sequence[tuple[str, float]]) -> str:
     if not loras:
         return "none, base model only"
-    parts = [f"{_e(name)} at {_num(f'{weight:g}')}" for name, weight in loras]
+    parts = [f"{_e(name)} at {_num(weight_text(weight))}" for name, weight in loras]
     return "; ".join(parts)
 
 
@@ -531,7 +538,7 @@ def cost_panel(facts: CostFacts) -> str:
     if facts.reserve is not None:
         reserve = f"{_num(facts.reserve)} s of GPU time"
         if facts.extras:
-            parts = [f"{facts.base} s base"] + [f"{s} s {n.lower()}" for n, s in facts.extras]
+            parts = [f"{facts.base} s base"] + [f"{s} s for {n}" for n, s in facts.extras]
             reserve += f' <span class="mr-sub">({_e(" + ".join(parts))})</span>'
         rows.append(("Reserves", reserve))
         rows.append(("Needs", f"{_num(facts.reserve * facts.multiplier)} s of quota free to start"))
@@ -769,7 +776,7 @@ def applied_loras(applied: list[Any]) -> str:
     if not applied:
         return lora_idle()
     parts = [
-        f"{shown_name(a.get('source', a))} at {float(a.get('weight', 1.0)):g}" for a in applied
+        f"{shown_name(a.get('source', a))} at {weight_text(a.get('weight', 1.0))}" for a in applied
     ]
     return f"Staged for the next run: {'; '.join(parts)}."
 
@@ -778,7 +785,7 @@ def lora_summary_label(applied: Sequence[dict]) -> str:
     """The always-visible LoRA row's label."""
     if not applied:
         return "LoRA: none. Add an adapter"
-    weights = _and([f"{float(a.get('weight', 1.0)):g}" for a in applied])
+    weights = _and([weight_text(a.get("weight", 1.0)) for a in applied])
     noun = "adapter" if len(applied) == 1 else "adapters"
     return f"LoRA: {len(applied)} {noun} at {weights}"
 
@@ -861,6 +868,15 @@ def success(result: Any, mode: Any) -> str:
         + "</details>"
     )
     return "\n".join(lines)
+
+
+def lost_run() -> str:
+    """The generation step ended without a result this page can show."""
+    return (
+        "### The run ended without a result\n\n"
+        "Any GPU time this run used is billed. Press Generate again; if it happens again, "
+        "reload the page and report the time of the run."
+    )
 
 
 def empty_output_bug(mode: Any, missing: list[str]) -> str:

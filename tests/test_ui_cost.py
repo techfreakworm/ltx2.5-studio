@@ -75,7 +75,7 @@ def test_the_reservation_is_the_estimators_with_each_extra_named(
 
     assert facts.state == "ready", facts.reason
     assert facts.reserve == expected
-    prepared, _spec, _notes = generate_module._prepare_request(
+    prepared, _spec, _notes = generate_module.prepare_request(
         generate_module.GenerationRequest(mode="image_text_to_video", **values)
     )
     assert facts.reserve == zerogpu.estimate_duration(request=prepared), (
@@ -84,7 +84,7 @@ def test_the_reservation_is_the_estimators_with_each_extra_named(
     assert list(facts.extras) == named
     panel = render.cost_panel(facts)
     for label, seconds in named:
-        assert f"{seconds} s {label.lower()}" in panel, panel
+        assert f"{seconds} s for {label}" in panel, panel
 
 
 def test_each_lever_refreshes_the_panel(base_60, staged_lora):
@@ -172,7 +172,7 @@ def test_a_missing_input_disables_generate_with_the_servers_own_words():
     values = form("image_to_video", image=None)
     facts = handlers.review("image_to_video", values)
     with pytest.raises(MissingInputError) as refused:
-        generate_module._prepare_request(
+        generate_module.prepare_request(
             generate_module.GenerationRequest(mode="image_to_video", **values)
         )
     assert facts.state == "incomplete"

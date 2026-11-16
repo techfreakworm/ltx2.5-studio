@@ -88,9 +88,16 @@ def test_generate_is_disabled_by_the_first_step_and_restored_by_a_final_one(demo
         f for f in demo.fns.values() if f.trigger_after == run._id and button in f.outputs
     )
     assert button in start.outputs and start.api_visibility == "private"
-    assert not finish.trigger_only_on_success and not finish.trigger_only_on_failure, (
-        "the step that re-enables Generate must run after a failure too"
-    )
+    assert not finish.trigger_only_on_success and not finish.trigger_only_on_failure
+    # Gradio 6.24 runs `.then` listeners only when the step completes; a step
+    # Gradio itself fails fires `.failure` listeners alone. Both must bring
+    # Generate back.
+    on_failure = [
+        f for f in demo.fns.values()
+        if f.trigger_after == run._id and f.trigger_only_on_failure and button in f.outputs
+    ]
+    assert on_failure, "nothing re-enables Generate when Gradio fails the generation step"
+    assert on_failure[0].fn is finish.fn
     assert run.show_progress_on and by_elem_id(demo, "video-out") in run.show_progress_on
 
     start_values = start.fn("text_to_audio_video", False)

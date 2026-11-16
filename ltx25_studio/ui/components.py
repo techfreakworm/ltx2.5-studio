@@ -142,13 +142,16 @@ def lora_bay(*, rows: int, cap: str, max_weight: float) -> dict[str, Any]:
         label="Or upload a .safetensors file",
         file_types=[".safetensors"],
         type="filepath",
+        height=120,
         elem_classes=["mr-drop"],
     )
     widgets["verdict"] = gr.Markdown(render.lora_idle(), elem_id="lora-verdict")
     widgets["rows"] = []
     for index in range(rows):
         with gr.Row(elem_classes=["mr-lora-row"], equal_height=True):
-            name = gr.Markdown("", visible=False, elem_classes=["mr-lora-name"])
+            name = gr.Markdown(
+                "", visible=False, elem_classes=["mr-lora-name"], min_width=200, scale=2
+            )
             weight = gr.Slider(
                 minimum=0.05,
                 maximum=max_weight,
@@ -163,6 +166,6 @@ def lora_bay(*, rows: int, cap: str, max_weight: float) -> dict[str, Any]:
                 "Remove", visible=False, elem_classes=["mr-quiet"], scale=0, min_width=90
             )
         widgets["rows"].append({"name": name, "weight": weight, "remove": remove})
-    widgets["clear"] = gr.Button("Remove all", elem_classes=["mr-quiet"], size="sm")
+    widgets["clear"] = gr.Button("Remove all", elem_classes=["mr-quiet"], size="sm", visible=False)
     widgets["applied_summary"] = gr.Markdown(render.applied_loras([]), visible=False)
     return widgets

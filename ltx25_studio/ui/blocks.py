@@ -833,13 +833,13 @@ def build_ui() -> gr.Blocks:
         # =================================================================
         # LoRA bay
         # =================================================================
-        row_outputs = []
+        row_outputs = [bay["clear"]]
         for row in bay["rows"]:
             row_outputs += [row["name"], row["weight"], row["remove"]]
 
         def _lora_rows(staged: list) -> list[Any]:
-            out = []
             entries = list(staged or [])
+            out = [gr.update(visible=bool(entries))]
             for index in range(handlers.MAX_STAGED_LORAS):
                 if index < len(entries):
                     entry = entries[index]
@@ -983,10 +983,17 @@ def build_ui() -> gr.Blocks:
             recent,
             recent_head,
             *[c for row in recent_rows for c in row],
+            status,
         ]
 
         def _finish(request: gr.Request, mode_id: str, recent_now: list, *values: Any) -> list:
             outcome = _recall(request)
+            # The step before this one returned nothing this page can use: Gradio
+            # itself failed it (a file it would not serve, a lost connection).
+            # Say so loudly rather than leave "Running" on screen.
+            status_update = (
+                gr.update(value=render.lost_run(), visible=True) if outcome is None else gr.update()
+            )
             mode = modes.get_mode(mode_id)
             review_out = _review(mode_id, False, *values)
             entries = list(recent_now or [])
@@ -1005,7 +1012,7 @@ def build_ui() -> gr.Blocks:
                 has_video = outcome.video is not None
                 monitor = [
                     gr.update(visible=False),
-                    gr.update(value=outcome.video, visible=has_video),
+                    gr.update(value=outcome.video, visible=has_video, autoplay=True),
                     gr.update(
                         value=outcome.audio if not has_video else None, visible=not has_video
                     ),
@@ -1040,9 +1047,10 @@ def build_ui() -> gr.Blocks:
                 entries,
                 gr.update(visible=bool(entries)),
                 *_recent_rows(entries),
+                status_update,
             ]
 
-        generate_button.click(
+        generation = generate_button.click(
             fn=_start,
             inputs=[mode_selector, pool["enhance_prompt"]],
             outputs=start_outputs,
@@ -1054,12 +1062,18 @@ def build_ui() -> gr.Blocks:
             outputs=[video_out, audio_out, status],
             api_name="on_generate",
             show_progress_on=[video_out],
-        ).then(
-            fn=_finish,
-            inputs=[mode_selector, recent, *field_inputs],
-            outputs=finish_outputs,
-            **_PRIVATE,
         )
+        # Gradio 6.24 fires `.then` listeners only when the step completes and
+        # `.failure` listeners only when Gradio itself fails it, so the step that
+        # brings Generate back is wired to both: exactly one of them runs.
+        finish = {
+            "fn": _finish,
+            "inputs": [mode_selector, recent, *field_inputs],
+            "outputs": finish_outputs,
+            **_PRIVATE,
+        }
+        generation.then(**finish)
+        generation.failure(**finish)
 
         reuse_seed.click(
             fn=lambda seed: seed if seed is not None else -1,
@@ -1401,7 +1415,7 @@ def _recent_rows(entries: list) -> list:
             out += [
                 gr.update(value=label, visible=True),
                 gr.update(visible=True),
-                gr.update(value=f"Reuse seed {entry['seed']}", visible=True),
+                gr.update(value="Reuse seed", visible=True),
             ]
         else:
             out += [gr.update(visible=False), gr.update(visible=False), gr.update(visible=False)]

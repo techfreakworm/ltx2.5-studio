@@ -10,7 +10,7 @@ like.
 
 **The rules live in the backend.** What a mode accepts and requires comes from
 ``modes.accepts`` / ``modes.requires``; whether a request would be refused comes
-from ``generate._prepare_request`` -- the same pre-dispatch check ``generate()``
+from ``generate.prepare_request`` -- the same pre-dispatch check ``generate()``
 runs -- and the reservation from ``zerogpu.estimate_duration``. This module only
 asks them and marshals the answers.
 
@@ -467,7 +467,7 @@ def _staged_names(loras: Any) -> tuple[tuple[str, float], ...]:
 def review(mode_id: str, values: dict[str, Any]) -> render.CostFacts:
     """What this request would render, return and reserve -- or why it won't run.
 
-    Readiness is the backend's own answer: ``generate._prepare_request`` is the
+    Readiness is the backend's own answer: ``generate.prepare_request`` is the
     check ``generate()`` runs before it reserves a GPU, so the reason shown under
     a disabled Generate is the refusal the server would give, word for word.
     """
@@ -494,7 +494,7 @@ def review(mode_id: str, values: dict[str, Any]) -> render.CostFacts:
 
     state, reason, prepared, notes = "ready", None, request, ()
     try:
-        prepared, _spec, notes = generate_module._prepare_request(request)
+        prepared, _spec, notes = generate_module.prepare_request(request)
     except MissingInputError as exc:
         state, reason = "incomplete", str(exc)
         try:
@@ -726,7 +726,7 @@ def run(mode_id: str, *values: Any, progress: Any = None) -> RunOutcome:
     from .. import generate as generate_module
 
     try:
-        generate_module._prepare_request(_request(mode_id, params))
+        generate_module.prepare_request(_request(mode_id, params))
     except Exception as exc:  # noqa: BLE001 -- refused before any dispatch
         return done(
             video=None,
