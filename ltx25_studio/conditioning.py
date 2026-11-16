@@ -324,10 +324,43 @@ def _orientation(frame, stream) -> tuple[int, bool]:
     return (degrees // 90) % 4, False
 
 
-def _upright(frame, orientation: tuple[int, bool]):
+#: FFmpeg's numbers for the HDR transfers phones and cameras tag video with:
+#: AVCOL_TRC_SMPTE2084 (PQ, HDR10) and AVCOL_TRC_ARIB_STD_B67 (HLG).
+_HDR_TRANSFERS = {16: "PQ", 18: "HLG"}
+#: AVCOL_PRI_BT2020, the wide-colour primaries HDR video uses.
+_BT2020_PRIMARIES = 9
+
+
+def _colour(frame) -> tuple[dict, str | None]:
+    """``to_ndarray`` arguments that bring an HDR or BT.2020 frame to SDR BT.709, and
+    what the clip is; ``({}, None)`` for an SDR clip, which is read unchanged.
+
+    Without destination values PyAV's reformat drops the source transfer and
+    primaries, so HLG reference white reads as (189, 189, 189). FFmpeg's
+    swscale converts both when it is asked to.
+    """
+    transfer = _HDR_TRANSFERS.get(int(getattr(frame, "color_trc", 0) or 0))
+    wide = int(getattr(frame, "color_primaries", 0) or 0) == _BT2020_PRIMARIES
+    if transfer is None and not wide:
+        return {}, None
+    from av.video.reformatter import ColorPrimaries, ColorTrc
+
+    kind = f"HDR ({transfer})" if transfer else "wide-colour (BT.2020)"
+    return {"dst_color_trc": ColorTrc.BT709, "dst_color_primaries": ColorPrimaries.BT709}, kind
+
+
+def _colour_note(source, kind: str) -> str:
+    return (
+        f"Your video {Path(str(source)).name} is {kind}. It was converted to standard (SDR) "
+        f"colour for the model, so as a reference its colours may look flat or dark. Convert "
+        f"it to SDR for a closer match."
+    )
+
+
+def _upright(frame, orientation: tuple[int, bool], colour: dict):
     import numpy as np
 
-    array = frame.to_ndarray(format="rgb24")
+    array = frame.to_ndarray(format="rgb24", **colour)
     turns, mirror = orientation
     if not (turns or mirror):
         return array
@@ -336,12 +369,30 @@ def _upright(frame, orientation: tuple[int, bool]):
     return np.ascontiguousarray(array[:, ::-1] if mirror else array)
 
 
-def _frame_by_frame(container, stream, *, max_frames):
-    frames, orientation = [], None
+class _Pictures:
+    """Decoded frames -> RGB arrays as a player shows them.
+
+    Orientation and colour are properties of the stream, read off the first
+    frame converted; ``kind`` is set when the clip is HDR or wide-colour.
+    """
+
+    def __init__(self, stream):
+        self.stream = stream
+        self.orientation = None
+        self.colour: dict = {}
+        self.kind: str | None = None
+
+    def __call__(self, frame):
+        if self.orientation is None:
+            self.orientation = _orientation(frame, self.stream)
+            self.colour, self.kind = _colour(frame)
+        return _upright(frame, self.orientation, self.colour)
+
+
+def _frame_by_frame(container, stream, picture, *, max_frames):
+    frames = []
     for frame in container.decode(stream):
-        if orientation is None:
-            orientation = _orientation(frame, stream)
-        frames.append(_upright(frame, orientation))
+        frames.append(picture(frame))
         if max_frames is not None and len(frames) >= max_frames:
             break
     return frames
@@ -399,16 +450,16 @@ def _display_times(frames, *, nominal: Fraction):
         yield release()
 
 
-def _at_rate(container, stream, *, frame_rate: Fraction, max_frames):
+def _at_rate(container, stream, picture, *, frame_rate: Fraction, max_frames):
     """The frame nearest each ``t = i / frame_rate``, from the first frame on.
 
     Ties go to the earlier frame. Targets past the last frame's display time
-    are not filled, so a short clip yields fewer frames.
+    are not filled, so a short clip yields fewer frames. Only frames that are
+    taken are converted.
     """
     limit = float("inf") if max_frames is None else max_frames
     nominal = Fraction(stream.guessed_rate or stream.average_rate or frame_rate)
     frames: list = []
-    orientation = None
     previous = None  # (seconds, frame)
     gap = None
     cached = (None, None)
@@ -416,12 +467,10 @@ def _at_rate(container, stream, *, frame_rate: Fraction, max_frames):
     def take(frame):
         nonlocal cached
         if cached[0] is not frame:
-            cached = (frame, _upright(frame, orientation))
+            cached = (frame, picture(frame))
         frames.append(cached[1])
 
     for when, frame in _display_times(container.decode(stream), nominal=nominal):
-        if orientation is None:
-            orientation = _orientation(frame, stream)
         while len(frames) < limit and Fraction(len(frames)) / frame_rate <= when:
             target = Fraction(len(frames)) / frame_rate
             if previous is not None and target - previous[0] <= when - target:
@@ -442,7 +491,9 @@ def _at_rate(container, stream, *, frame_rate: Fraction, max_frames):
     return frames
 
 
-def decode_video_frames(source, *, max_frames: int | None = None, frame_rate=None):
+def decode_video_frames(
+    source, *, max_frames: int | None = None, frame_rate=None, notes: list | None = None
+):
     """A video path -> the RGB frames the pipeline will actually take.
 
     Returns ``(F, H, W, 3)`` ``uint8``, which is one of the four payload types
@@ -469,6 +520,10 @@ def decode_video_frames(source, *, max_frames: int | None = None, frame_rate=Non
     **Orientation.** The display matrix a phone or an editor stores beside a
     clip is applied, rotation and mirroring both, so the frames are what a
     player shows.
+
+    **Colour.** An HDR clip (PQ or HLG) or a BT.2020 one is converted to SDR
+    BT.709 by FFmpeg's swscale rather than read as if it were SDR; with
+    ``notes`` (a list), one sentence for the user is appended saying so.
 
     **No resizing, deliberately.** Upstream scales the condition so the longer
     side fills the target and centre-crops to exactly ``(height, width)``.
@@ -515,10 +570,13 @@ def decode_video_frames(source, *, max_frames: int | None = None, frame_rate=Non
                     f"Supply a video file rather than an audio-only or empty one."
                 )
             stream = container.streams.video[0]
+            picture = _Pictures(stream)
             if rate is None:
-                frames = _frame_by_frame(container, stream, max_frames=max_frames)
+                frames = _frame_by_frame(container, stream, picture, max_frames=max_frames)
             else:
-                frames = _at_rate(container, stream, frame_rate=rate, max_frames=max_frames)
+                frames = _at_rate(
+                    container, stream, picture, frame_rate=rate, max_frames=max_frames
+                )
     except ConstraintError:
         raise
     except Exception as exc:  # noqa: BLE001 -- every decode failure has one answer here
@@ -540,6 +598,8 @@ def decode_video_frames(source, *, max_frames: int | None = None, frame_rate=Non
             f"{source} changes frame size partway through, so its frames cannot be stacked "
             f"into one clip. Re-encode it at a single resolution."
         )
+    if picture.kind is not None and notes is not None:
+        notes.append(_colour_note(source, picture.kind))
     return np.stack(frames)
 
 
@@ -549,6 +609,7 @@ def build_conditions(
     num_frames: int,
     temporal_compression_ratio: int = DEFAULT_TEMPORAL_COMPRESSION_RATIO,
     frame_rate=None,
+    notes: list | None = None,
 ) -> tuple[ConditionSpec, ...]:
     """Normalise every condition into a range-checked :class:`ConditionSpec`.
 
@@ -564,7 +625,8 @@ def build_conditions(
     another.
 
     ``frame_rate`` is the generation's rate; a video condition is read at it by
-    timestamp. Without it the video is read frame by frame.
+    timestamp. Without it the video is read frame by frame. ``notes`` (a list)
+    collects what the decode tells the user, such as an HDR clip's conversion.
 
     The returned list is always the same length as the input. A condition that
     cannot be built raises; it never comes back quietly shorter, because a shot
@@ -585,6 +647,7 @@ def build_conditions(
                 source,
                 max_frames=num_frames if num_frames and num_frames > 0 else None,
                 frame_rate=frame_rate,
+                notes=notes,
             )
         built.append(
             ConditionSpec(

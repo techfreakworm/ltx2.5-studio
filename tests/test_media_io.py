@@ -356,6 +356,110 @@ def test_the_orientation_matches_what_ffmpeg_shows(rotation, hflip, vflip, tmp_p
 
 
 # ---------------------------------------------------------------------------
+# review r1, media-io-3 -- HDR clips (an iPhone records HLG by default)
+# ---------------------------------------------------------------------------
+
+#: 10-bit limited-range code values of one flat colour, as Y, Cb, Cr.
+HLG_REFERENCE_WHITE = (721, 512, 512)  # 75 % HLG signal
+PQ_REFERENCE_WHITE = (573, 512, 512)  # 203 nits in PQ (BT.2408 reference white)
+HLG_BT709_RED = (360, 405, 705)  # a BT.709 red at HLG reference level, in BT.2020
+
+
+def hdr_clip(path, *, transfer, colour, size=64):
+    """A real 10-bit BT.2020 clip of one flat colour, tagged the way a phone tags it."""
+    from av.video.reformatter import ColorPrimaries, ColorRange, Colorspace
+
+    with av.open(str(path), "w") as container:
+        stream = container.add_stream("libx264", rate=24)
+        stream.width = stream.height = size
+        stream.pix_fmt = "yuv420p10le"
+        context = stream.codec_context
+        context.color_primaries, context.color_trc = ColorPrimaries.BT2020, transfer
+        context.colorspace, context.color_range = Colorspace.BT2020, ColorRange.MPEG
+        for index in range(3):
+            frame = av.VideoFrame(size, size, "yuv420p10le")
+            for number, (plane, value) in enumerate(zip(frame.planes, colour, strict=True)):
+                rows = size if number == 0 else size // 2
+                plane.update(np.full((rows, plane.line_size // 2), value, "<u2").tobytes())
+            frame.pts, frame.time_base = index, Fraction(1, 24)
+            for packet in stream.encode(frame):
+                container.mux(packet)
+        for packet in stream.encode():
+            container.mux(packet)
+    return Path(path)
+
+
+def centre(frames):
+    return tuple(int(v) for v in frames[0, frames.shape[1] // 2, frames.shape[2] // 2])
+
+
+@pytest.mark.parametrize(
+    ("transfer", "colour"),
+    [("ARIB_STD_B67", HLG_REFERENCE_WHITE), ("SMPTE2084", PQ_REFERENCE_WHITE)],
+    ids=["HLG", "PQ"],
+)
+def test_hdr_reference_white_comes_back_white_not_grey(transfer, colour, tmp_path):
+    """Read as if it were SDR, HLG reference white is (189, 189, 189) and PQ's is (146, 146, 146)."""
+    from av.video.reformatter import ColorTrc
+
+    source = hdr_clip(tmp_path / "phone.mp4", transfer=getattr(ColorTrc, transfer), colour=colour)
+
+    for frames in (
+        conditioning.decode_video_frames(source),
+        conditioning.decode_video_frames(source, frame_rate=24),
+    ):
+        assert min(centre(frames)) >= 245, f"reference white came back as {centre(frames)}"
+
+
+def test_an_hlg_red_keeps_its_hue(tmp_path):
+    """Read as SDR the same pixel is (165, 58, 26): orange-brown."""
+    from av.video.reformatter import ColorTrc
+
+    source = hdr_clip(tmp_path / "phone.mp4", transfer=ColorTrc.ARIB_STD_B67, colour=HLG_BT709_RED)
+
+    red, green, blue = centre(conditioning.decode_video_frames(source, frame_rate=24))
+    assert red > 200 and green < 0.2 * red and blue < 0.1 * red, (red, green, blue)
+
+
+def test_an_hdr_clip_carries_a_plain_note_for_the_user(tmp_path):
+    from av.video.reformatter import ColorTrc
+
+    source = hdr_clip(tmp_path / "iphone.mov", transfer=ColorTrc.ARIB_STD_B67, colour=HLG_BT709_RED)
+    notes: list[str] = []
+
+    conditioning.decode_video_frames(source, frame_rate=24, notes=notes)
+
+    assert len(notes) == 1, notes
+    assert "iphone.mov" in notes[0] and "HDR" in notes[0] and "HLG" in notes[0]
+    assert "flat or dark" in notes[0]
+    assert notes[0].endswith("Convert it to SDR for a closer match.")
+    assert str(tmp_path) not in notes[0], "the note names the file, not a server path"
+
+
+def test_build_conditions_hands_the_note_on(tmp_path):
+    from av.video.reformatter import ColorTrc
+
+    source = hdr_clip(
+        tmp_path / "iphone.mp4", transfer=ColorTrc.SMPTE2084, colour=PQ_REFERENCE_WHITE
+    )
+    spec = conditioning.ConditionSpec(source=source, kind="video", index=0, strength=1.0)
+    notes: list[str] = []
+
+    conditioning.build_conditions([spec], num_frames=9, frame_rate=24, notes=notes)
+
+    assert len(notes) == 1 and "PQ" in notes[0], notes
+
+
+def test_an_sdr_clip_carries_no_note(tmp_path):
+    source = write_clip(tmp_path / "plain.mp4", [portrait()] * 3, rate=24)
+    notes: list[str] = []
+
+    conditioning.decode_video_frames(source, frame_rate=24, notes=notes)
+
+    assert notes == []
+
+
+# ---------------------------------------------------------------------------
 # F17 -- the user's audio in the mp4
 # ---------------------------------------------------------------------------
 
