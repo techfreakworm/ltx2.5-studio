@@ -190,9 +190,11 @@ def run(runtime_config, *, strict: bool = False, spaces_module=None, resolution=
 
 
 def _local_runner_device(resolution) -> bool:
-    """True where generation goes to the local runner: mps/cpu, no snapshot override."""
+    """True where generation goes to the local runner (mps/cpu, real weights)."""
+    from .pipelines import _uses_local_runner
+
     device = getattr(resolution, "device", None)
-    return device in ("mps", "cpu") and snapshot_override() is None
+    return device in ("mps", "cpu") and _uses_local_runner()
 
 
 def local_missing_files(runtime_config) -> list:

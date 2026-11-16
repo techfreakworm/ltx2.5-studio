@@ -670,24 +670,68 @@ def preflight_plan(
         name: size / memory.GB
         for name, (size, _) in weight_sizes(snapshot_dir, transformer_gguf).items()
     }
+    snapshot = Path(snapshot_dir)
+
+    def need(name, factor):
+        return _load_need_gb(sizes[name], factor, dtype_bytes, _stored_dtype_bytes(snapshot, name))
+
     small = sum(sizes[name] for name in (*_SMALL_WEIGHTS, "tokenizer"))
+    small_need = sizes["tokenizer"] * spike + sum(need(name, spike) for name in _SMALL_WEIGHTS)
     encoder, transformer = sizes["text_encoder"], sizes["transformer"]
+    encoder_need = need("text_encoder", spike)
+    transformer_need = (
+        transformer * transformer_spike if transformer_gguf else need("transformer", spike)
+    )
     activations = memory.activation_estimate_gb(width, height, num_frames, dtype_bytes=dtype_bytes)
     denoise = f"denoise {int(width)}x{int(height)}x{int(num_frames)}"
-    steps = [PlanStep("load small set", 0.0, small * spike)]
+    steps = [PlanStep("load small set", 0.0, small_need)]
     if residency == STAGED:
         steps += [
-            PlanStep("load text encoder", small, encoder * spike),
-            PlanStep("load transformer", small, transformer * transformer_spike),
+            PlanStep("load text encoder", small, encoder_need),
+            PlanStep("load transformer", small, transformer_need),
             PlanStep(denoise, small + transformer, activations),
         ]
     else:
         steps += [
-            PlanStep("load transformer", small, transformer * transformer_spike),
-            PlanStep("load text encoder", small + transformer, encoder * spike),
+            PlanStep("load transformer", small, transformer_need),
+            PlanStep("load text encoder", small + transformer, encoder_need),
             PlanStep(denoise, small + transformer + encoder, activations),
         ]
     return steps
+
+
+#: Bytes per element of a safetensors dtype tag.
+_SAFETENSORS_BYTES = {"F64": 8, "I64": 8, "F32": 4, "I32": 4, "BF16": 2, "F16": 2, "I16": 2}
+
+
+def _stored_dtype_bytes(snapshot: Path, component: str) -> int:
+    """Bytes per element the component is stored at, read from a safetensors header (else 2)."""
+    files, _declared = _component_files(Path(snapshot), component)
+    for path in files:
+        if not (path.is_file() and path.name.endswith(_WEIGHTS_SUFFIX)):
+            continue
+        try:
+            with open(path, "rb") as handle:
+                length = int.from_bytes(handle.read(8), "little")
+                header = json.loads(handle.read(length))
+        except (OSError, ValueError):
+            continue
+        for key, entry in header.items():
+            if key != "__metadata__" and isinstance(entry, dict):
+                return _SAFETENSORS_BYTES.get(str(entry.get("dtype")), 1)
+    return 2
+
+
+def _load_need_gb(file_gb: float, spike: float, target_bytes: int, stored_bytes: int) -> float:
+    """What loading a file of ``file_gb`` commits: converted copies plus the read pages.
+
+    A load at the stored dtype keeps the file's pages (``spike``); converting to
+    another dtype copies every tensor at the target size while the pages it read
+    stay active until the move releases them (review local-runtime-3).
+    """
+    if int(target_bytes) == int(stored_bytes):
+        return file_gb * spike
+    return file_gb * spike * (target_bytes / stored_bytes) + file_gb
 
 
 # --------------------------------------------------------------------------
@@ -778,7 +822,15 @@ class _LocalWeights:
         from diffusers.pipelines.ltx2.connectors import LTX2TextConnectors
 
         spike = memory.load_spike_factor("safetensors")
-        need = sum(self._gb[name] for name in (*_SMALL_WEIGHTS, "tokenizer")) * spike
+        need = self._gb["tokenizer"] * spike + sum(
+            _load_need_gb(
+                self._gb[name],
+                spike,
+                self.dtype_bytes,
+                _stored_dtype_bytes(self.snapshot_dir, name),
+            )
+            for name in _SMALL_WEIGHTS
+        )
         self._preflight("load small set", need)
         with self.phase("load small set"):
             try:
@@ -857,6 +909,30 @@ class _LocalWeights:
             return original(*args, **kwargs)
 
         pipeline.load_lora_weights = load_lora_weights
+        original_delete = pipeline.delete_adapters
+
+        def delete_adapters(adapter_names):
+            # Deleted while the transformer is released: the copy captured at the
+            # release must not be restored into a later run (review local-runtime-2).
+            names = [adapter_names] if isinstance(adapter_names, str) else list(adapter_names)
+            weights.forget_adapters(names)
+            return original_delete(adapter_names)
+
+        pipeline.delete_adapters = delete_adapters
+
+    def forget_adapters(self, names) -> None:
+        """Drop ``names`` from the adapters captured at a release, if any."""
+        captured = self._adapters
+        if captured is None:
+            return
+        names = set(names)
+        captured["adapters"] = [a for a in captured["adapters"] if a[0] not in names]
+        captured["active"] = [a for a in captured["active"] if a not in names]
+        for scaling in captured["scaling"].values():
+            for name in names:
+                scaling.pop(name, None)
+        if not captured["adapters"]:
+            self._adapters = None
 
     # -- the staged pair ---------------------------------------------------
 
@@ -865,7 +941,12 @@ class _LocalWeights:
             return self.text_encoder
         if self.residency == STAGED:
             self.release_transformer()
-        need = self._gb["text_encoder"] * memory.load_spike_factor("safetensors")
+        need = _load_need_gb(
+            self._gb["text_encoder"],
+            memory.load_spike_factor("safetensors"),
+            self.dtype_bytes,
+            _stored_dtype_bytes(self.snapshot_dir, "text_encoder"),
+        )
         self._preflight("load text encoder", need)
         with self.phase("load text encoder"):
             model = load_text_encoder(
@@ -891,6 +972,13 @@ class _LocalWeights:
             self.release_text_encoder()
         source = "gguf" if self.transformer_gguf is not None else "safetensors"
         need = self._gb["transformer"] * memory.load_spike_factor(source)
+        if self.transformer_gguf is None:
+            need = _load_need_gb(
+                self._gb["transformer"],
+                memory.load_spike_factor(source),
+                self.dtype_bytes,
+                _stored_dtype_bytes(self.snapshot_dir, "transformer"),
+            )
         self._preflight("load transformer", need)
         with self.phase("load transformer"):
             model = load_transformer(

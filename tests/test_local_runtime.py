@@ -1100,3 +1100,91 @@ def test_a_clip_variation_runs_on_the_local_runner(residency, level, tmp_path, m
             if line.startswith("preflight[")
         ]
         assert order.index(f"encode clip {SIZE}x{SIZE}x{FRAMES}") < order.index("load text encoder")
+
+
+# --------------------------------------------------------------------------
+# review findings: adapters across a staged release, the first LoRA run, and
+# the load preflight's dtype (local-runtime-2 = lora-1, -6 = lora-2, -3)
+# --------------------------------------------------------------------------
+
+
+def _tiny_adapter(tmp_path):
+    torch = _torch()
+    from test_real_pipeline_tiny import load_smoke
+
+    adapter = tmp_path / "look.safetensors"
+    donor = local_runtime.load_transformer(tiny_snapshot(), dtype=torch.float32, device="cpu")
+    load_smoke().make_lora(adapter, donor)
+    return {"source": str(adapter), "path": str(adapter), "weight": 1.0, "report": object()}
+
+
+def _run(runner, tmp_path, name, **fields):
+    from ltx25_studio import generate as generate_module
+
+    return generate_module.generate(
+        mode="text_to_video",
+        seed=SEED,
+        width=SIZE,
+        height=SIZE,
+        num_frames=FRAMES,
+        pipeline_factory=lambda **_: runner,
+        output_root=tmp_path / name,
+        retention_bytes=10**12,
+        **fields,
+    )
+
+
+def test_an_adapter_from_a_failed_staged_run_is_not_restored_into_the_next(tmp_path, monkeypatch):
+    pytest.importorskip("peft")
+    lora = _tiny_adapter(tmp_path)
+    runner = _runner("text2video", "staged")
+    real_ensure = runner.ensure_transformer
+
+    def ensure_then_starve():
+        model = real_ensure()
+        monkeypatch.setenv("LTX25_MEMORY_LIMIT_GB", "1")  # the text encoder now refuses
+        return model
+
+    monkeypatch.setattr(runner, "ensure_transformer", ensure_then_starve)
+    with pytest.raises(memory.MemoryPreflightError):
+        _run(runner, tmp_path, "a", prompt="a first prompt", loras=(lora,))
+    assert runner.pipeline.transformer is None, "the failed run released the transformer"
+
+    monkeypatch.delenv("LTX25_MEMORY_LIMIT_GB")
+    monkeypatch.setattr(runner, "ensure_transformer", real_ensure)
+    result = _run(runner, tmp_path, "b", prompt="a second prompt")
+
+    assert not getattr(runner.pipeline.transformer, "peft_config", None), (
+        "the failed run's adapter was re-attached to a run that asked for none"
+    )
+    assert result.record.adapters == ()
+
+
+def test_the_first_lora_run_on_a_fresh_staged_runner_attaches(tmp_path):
+    pytest.importorskip("peft")
+    lora = _tiny_adapter(tmp_path)
+    runner = _runner("text2video", "staged")
+    assert runner.pipeline.transformer is None
+
+    result = _run(runner, tmp_path, "a", prompt=PROMPT, loras=(lora,))
+
+    ((_label, weight, attached),) = result.record.adapters
+    assert weight == 1.0 and attached > 0
+
+
+def test_a_converting_load_promises_the_converted_copy_and_the_read_pages():
+    from local_fakes import tiny_snapshot as tiny
+
+    assert local_runtime._load_need_gb(10.0, 1.15, 2, 2) == pytest.approx(11.5)
+    assert local_runtime._load_need_gb(10.0, 1.15, 4, 2) == pytest.approx(10 * 1.15 * 2 + 10)
+    stored = local_runtime._stored_dtype_bytes(tiny(), "vae")
+    assert stored in (2, 4)
+    other = 4 if stored == 2 else 2
+    native = local_runtime.preflight_plan(
+        tiny(), width=SIZE, height=SIZE, num_frames=FRAMES, dtype_bytes=stored
+    )
+    converting = local_runtime.preflight_plan(
+        tiny(), width=SIZE, height=SIZE, num_frames=FRAMES, dtype_bytes=other
+    )
+    by_phase = {step.phase: step for step in native}
+    assert converting[0].need_gb > by_phase["load small set"].need_gb

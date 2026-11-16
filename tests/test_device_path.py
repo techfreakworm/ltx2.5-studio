@@ -904,3 +904,35 @@ def test_cuda_still_demands_the_whole_allow_list(monkeypatch, tmp_path):
 
     with pytest.raises(MissingModelFileError):
         preflight.run(runtime, strict=True, resolution=_resolution("cuda"))
+
+
+def test_a_real_sized_snapshot_override_goes_through_the_local_runner(
+    monkeypatch, no_cuda, tmp_path, fake_local_runner
+):
+    """Review local-runtime-4: the override is not a way round staging and preflight.
+
+    Only a small snapshot (the tiny test checkpoint) takes the resident build;
+    anything larger is real weights. The threshold is lowered here instead of
+    writing a gigabyte.
+    """
+    monkeypatch.setenv(config.ENV_DEVICE, "cpu")
+    _override_snapshot(monkeypatch, tmp_path)
+    (tmp_path / "weights.safetensors").write_bytes(b"x" * 4096)
+    monkeypatch.setattr(pipelines, "RESIDENT_SNAPSHOT_MAX_BYTES", 1024)
+
+    pipelines.get_pipeline(pipeline="text2video")
+
+    ((call,),) = [fake_local_runner]
+    assert call["snapshot_dir"] == tmp_path, call
+
+
+def test_a_small_snapshot_override_is_measured_through_its_links(tmp_path):
+    """An HF snapshot is links into its blobs; the size must follow them."""
+    blob = tmp_path / "blobs" / "abc"
+    blob.parent.mkdir()
+    blob.write_bytes(b"x" * 5000)
+    snapshot = tmp_path / "snapshot"
+    (snapshot / "vae").mkdir(parents=True)
+    (snapshot / "vae" / "w.safetensors").symlink_to(blob)
+
+    assert pipelines._weight_bytes(snapshot) == 5000

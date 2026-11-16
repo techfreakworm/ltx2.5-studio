@@ -2015,11 +2015,30 @@ def _dtype_label(dtype) -> str:
     return {"bfloat16": "bf16", "float32": "fp32", "float16": "fp16"}.get(name, name)
 
 
+#: An override snapshot this small (the tiny test checkpoint) takes the resident
+#: build; anything larger is real weights and goes through the local runner, with
+#: its staging and memory preflights (review local-runtime-4).
+RESIDENT_SNAPSHOT_MAX_BYTES = 1_000_000_000
+
+
 def _uses_local_runner() -> bool:
-    """Real weights on a local device go to the local runner; a snapshot override does not."""
+    """Real weights on a local device go to the local runner; only a small override does not."""
     from .preflight import snapshot_override
 
-    return snapshot_override() is None
+    override = snapshot_override()
+    return override is None or _weight_bytes(override) > RESIDENT_SNAPSHOT_MAX_BYTES
+
+
+def _weight_bytes(path) -> int:
+    """Bytes under ``path``, following links (an HF snapshot is links into its blobs)."""
+    total = 0
+    for root, _dirs, files in os.walk(path, followlinks=True):
+        for name in files:
+            try:
+                total += os.stat(os.path.join(root, name)).st_size
+            except OSError:
+                continue
+    return total
 
 
 def runner_summary(resolution, runtime_config) -> str:
