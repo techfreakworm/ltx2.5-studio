@@ -49,13 +49,16 @@ __all__ = [
     "DEFAULT_MAX_LORA_BYTES",
     "DISTILL_MIN_RANK",
     "IC_LORA_MARKER",
+    "LOADER_FACTOR_NAMES",
     "LORA_SUFFIX_PAIRS",
     "MIN_RESOLVED_FRACTION",
     "SUPPORTED_ARCHITECTURE_TOKEN",
     "SUPPORTED_SERIES",
+    "UNREADABLE_FACTOR_NAMES",
     "WARN_RESOLVED_FRACTION",
     "WARNED_SERIES",
     "LoRAInContextNameError",
+    "LoRAKeyNamingError",
     "LoRAValidation",
     "configured_max_bytes",
     "validate_lora",
@@ -71,6 +74,11 @@ IC_LORA_MARKER = "reference_downscale_factor"
 
 #: ``(down, up)`` suffix pairs. peft writes A/B; kohya and sd-scripts write down/up.
 LORA_SUFFIX_PAIRS = (("lora_A", "lora_B"), ("lora_down", "lora_up"))
+
+#: The factor names the pinned diffusers loads, and the ones it cannot: with
+#: ``lora_down``/``lora_up`` it finds no rank and fails inside the load.
+LOADER_FACTOR_NAMES = ("lora_A", "lora_B")
+UNREADABLE_FACTOR_NAMES = ("lora_down", "lora_up")
 
 #: The series this pipeline is. Compared on ``major.minor`` only.
 SUPPORTED_SERIES = "2.5"
@@ -114,6 +122,27 @@ class LoRAInContextNameError(LoRAInContextError):
             f"({value!r}). IC-LoRAs condition on a reference video or image and only work "
             f"through the in-context pipeline, which this app does not run. Applied to the "
             f"standard pipeline this adapter would load without error and have no effect.",
+        )
+
+
+class LoRAKeyNamingError(LoRAConventionError):
+    """Stage 6: low-rank pairs named ``lora_down``/``lora_up``, which the loader cannot read.
+
+    The keys are not converted: the file is refused before a run, naming both namings.
+    """
+
+    def __init__(self, *, source, keys):
+        self.source = source
+        self.keys = tuple(keys)
+        self.found_prefixes = ()
+        self.known_prefixes = ()
+        found, wanted = UNREADABLE_FACTOR_NAMES, LOADER_FACTOR_NAMES
+        LoRAError.__init__(
+            self,
+            f"LoRA {source} names its weight pairs {found[0]} and {found[1]} (the kohya "
+            f"naming, in {len(self.keys)} tensors). This model's loader reads only pairs "
+            f"named {wanted[0]} and {wanted[1]}, so it cannot load this file. Save the "
+            f"adapter with {wanted[0]}/{wanted[1]} names and validate it again.",
         )
 
 
@@ -292,6 +321,17 @@ def _check_pairing(grouped: dict[str, dict[int, str]], source: str) -> None:
     orphans = [sides[next(iter(sides))] for sides in grouped.values() if len(sides) < 2]
     if orphans:
         raise LoRAPairingError(source=source, unpaired_keys=tuple(sorted(orphans)))
+
+
+def _check_factor_names(inspection: LoRAInspection, source: str) -> None:
+    """Stage 6, after pairing: every factor carries a name the loader reads."""
+    unreadable = [
+        key
+        for key in inspection.keys
+        if any(f".{name}." in key or key.endswith(f".{name}") for name in UNREADABLE_FACTOR_NAMES)
+    ]
+    if unreadable:
+        raise LoRAKeyNamingError(source=source, keys=unreadable)
 
 
 def _ranks(inspection: LoRAInspection) -> tuple[int, ...]:
@@ -477,6 +517,7 @@ def validate_lora(
     _check_lora_substring(inspection, label)
 
     _check_pairing(_pairs(inspection), label)  # stage 6
+    _check_factor_names(inspection, label)
     targeted, resolved, reference_size = _check_dimensions(  # stage 6.5
         inspection, label, warnings, transformer=transformer, manifest=manifest
     )

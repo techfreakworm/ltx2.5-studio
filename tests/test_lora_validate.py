@@ -395,13 +395,47 @@ def test_a_correctly_paired_peft_adapter_passes(validate_via, good_lora):
     assert validate_via(good_lora) is not None
 
 
-def test_a_correctly_paired_kohya_adapter_passes(validate_via, write_safetensors):
+def test_a_correctly_paired_kohya_adapter_is_refused_naming_both_namings(
+    validate_via, write_safetensors
+):
+    """The pinned loader reads lora_A/lora_B only; lora_down/lora_up fail inside the load
+    ("list index out of range", tests/test_lora_apply.py), so Validate refuses them (F59)."""
     path = write_safetensors(
         name="kohya.safetensors",
         tensors=lora_tensors(NATIVE_PREFIX, TRANSFORMER_MODULE_PATHS, style="kohya"),
         metadata=OFFICIAL_METADATA,
     )
-    assert validate_via(path) is not None
+    with pytest.raises(LoRAConventionError) as caught:
+        validate_via(path)
+    assert type(caught.value).__name__ == "LoRAKeyNamingError", caught.value
+    message = str(caught.value)
+    for name in ("lora_down", "lora_up", "lora_A", "lora_B"):
+        assert name in message, message
+
+
+def test_a_file_mixing_both_namings_is_refused_too(write_safetensors):
+    tensors = lora_tensors(NATIVE_PREFIX, TRANSFORMER_MODULE_PATHS[:2])
+    tensors |= lora_tensors(NATIVE_PREFIX, TRANSFORMER_MODULE_PATHS[2:4], style="kohya")
+    path = write_safetensors(name="mixed.safetensors", tensors=tensors, metadata=OFFICIAL_METADATA)
+    with pytest.raises(LoRAConventionError) as caught:
+        lora_validate.validate_lora(path)
+    assert "4 tensor" in str(caught.value), caught.value
+
+
+def test_the_naming_refusal_comes_before_the_shape_check(write_safetensors):
+    """Stage 6, before 6.5: the file cannot load whatever its shapes are."""
+    path = write_safetensors(
+        name="kohya-wrong-shape.safetensors",
+        tensors=adapter_tensors(
+            ("transformer_blocks.0.attn1.to_q",),
+            prefix=NATIVE_PREFIX,
+            style="kohya",
+            dims={"transformer_blocks.0.attn1.to_q": (2048, 2048)},
+        ),
+        metadata=OFFICIAL_METADATA,
+    )
+    with pytest.raises(LoRAConventionError):
+        lora_validate.validate_lora(path)
 
 
 def test_lora_a_without_its_b_is_rejected(validate_via, write_safetensors):

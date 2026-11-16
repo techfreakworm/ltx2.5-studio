@@ -434,17 +434,25 @@ class _Tiny:
         self.pipe = pipe
         self.linears = linears
 
-    def adapter(self, path, modules=("to_q", "to_k"), in_features=None, block="attn1"):
+    def adapter(
+        self,
+        path,
+        modules=("to_q", "to_k"),
+        in_features=None,
+        block="attn1",
+        names=("lora_A", "lora_B"),
+    ):
         import torch
         from safetensors.torch import save_file
 
+        down, up = names
         tensors = {}
         for leaf in modules:
             name = f"transformer_blocks.0.{block}.{leaf}"
             in_dim, out_dim = self.linears.get(name, (16, 16))
             in_dim = (in_features or {}).get(leaf, in_dim)
-            tensors[f"diffusion_model.{name}.lora_A.weight"] = torch.zeros(4, in_dim)
-            tensors[f"diffusion_model.{name}.lora_B.weight"] = torch.zeros(out_dim, 4)
+            tensors[f"diffusion_model.{name}.{down}.weight"] = torch.zeros(4, in_dim)
+            tensors[f"diffusion_model.{name}.{up}.weight"] = torch.zeros(out_dim, 4)
         save_file(tensors, str(path))
         return path
 
@@ -516,6 +524,28 @@ def test_real_peft_duplicate_name_is_reported_as_one(tmp_path):
     lora_apply.apply_lora(tiny.pipe, path, adapter_name="user_lora_0")
     with pytest.raises(lora_apply.LoRADuplicateAdapterError):
         lora_apply.apply_lora(tiny.pipe, path, adapter_name="user_lora_0")
+
+
+def test_the_pinned_loader_cannot_read_lora_down_and_lora_up(tmp_path):
+    """F59's premise, measured: diffusers @ac56fa2f converts only lora_A/lora_B (and the
+    older .lora.down/.lora.up), so a kohya-named file fails inside the load. This is why
+    the validator refuses such a file before a run starts."""
+    tiny = _tiny_pipeline()
+    path = tiny.adapter(tmp_path / "kohya.safetensors", names=("lora_down", "lora_up"))
+    with pytest.raises(IndexError, match="list index out of range"):
+        tiny.pipe.load_lora_weights(path, adapter_name="user_lora_0")
+
+
+def test_the_fake_pipeline_refuses_kohya_names_as_the_pinned_loader_does(
+    fake_pipeline, write_safetensors
+):
+    path = write_safetensors(
+        name="kohya.safetensors",
+        tensors=lora_tensors(NATIVE_PREFIX, TRANSFORMER_MODULE_PATHS, style="kohya"),
+        metadata=OFFICIAL_METADATA,
+    )
+    with pytest.raises(IndexError, match="list index out of range"):
+        fake_pipeline.load_lora_weights(path, adapter_name="user_lora_0")
 
 
 # --------------------------------------------------------------------------

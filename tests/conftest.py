@@ -857,6 +857,10 @@ class FakePipeline:
                 "Invalid LoRA checkpoint. Make sure all LoRA param names contain "
                 "`'lora'` substring."
             )
+        # The pinned loader reads lora_A/lora_B names only: with lora_down/lora_up it
+        # finds no rank and fails like this (tests/test_lora_apply.py measures it, F59).
+        if any(".lora_down." in k or ".lora_up." in k for k in keys):
+            raise IndexError("list index out of range")
 
         attached = 0
         for key in keys:
@@ -870,12 +874,7 @@ class FakePipeline:
             if component_name is None:
                 continue
             module_path = stripped
-            for suffix in (
-                ".lora_A.weight",
-                ".lora_B.weight",
-                ".lora_down.weight",
-                ".lora_up.weight",
-            ):
+            for suffix in (".lora_A.weight", ".lora_B.weight"):
                 if module_path.endswith(suffix):
                     module_path = module_path[: -len(suffix)]
                     break

@@ -309,8 +309,19 @@ def test_a_staged_lora_whose_file_has_gone_is_refused_before_the_dispatch(refuse
     assert "adapter.safetensors" in str(error), str(error)
 
 
-# --------------------------------------------------------------------------
-# F05: when audio is the input, the audio sets the length
+def test_a_kohya_named_adapter_is_refused_before_the_dispatch(refused, tmp_path):
+    """F59: the loader cannot read lora_down/lora_up; that is said before a GPU is reserved."""
+    from lora_fixtures import OFFICIAL_METADATA, REAL_MODULES, adapter_tensors, write_adapter
+
+    path = write_adapter(
+        tmp_path / "kohya.safetensors",
+        adapter_tensors(REAL_MODULES[:3], style="kohya"),
+        OFFICIAL_METADATA,
+    )
+    error = refused(LoRAError, mode="text_to_video", prompt="p", loras=({"source": str(path)},))
+
+    assert "lora_down" in str(error) and "lora_A" in str(error), str(error)
+    assert errors.categorise(error) == errors.Failure(errors.ADAPTER, False)
 # --------------------------------------------------------------------------
 
 
