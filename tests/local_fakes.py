@@ -81,6 +81,43 @@ def as_array(value):
     return np.asarray(value, dtype=np.float64)
 
 
+def transformer_inputs(config, device, dtype):
+    """Fixed inputs for one transformer forward: 3x4x4 video tokens, 18 audio, 16 text."""
+    import torch
+
+    generator = torch.Generator(device="cpu").manual_seed(0)
+    frames, height, width, audio, text = 3, 4, 4, 18, 16
+    tensors = {
+        "hidden_states": torch.randn(
+            1, frames * height * width, config.in_channels, generator=generator
+        ),
+        "audio_hidden_states": torch.randn(1, audio, config.audio_in_channels, generator=generator),
+        "encoder_hidden_states": torch.randn(
+            1, text, config.cross_attention_dim, generator=generator
+        ),
+        "audio_encoder_hidden_states": torch.randn(
+            1, text, config.audio_cross_attention_dim, generator=generator
+        ),
+    }
+    inputs = {name: value.to(device, dtype) for name, value in tensors.items()}
+    timestep = torch.tensor([600.0], device=device)
+    mask = torch.ones(1, text, device=device)
+    inputs.update(
+        timestep=timestep,
+        sigma=timestep / 1000.0,
+        encoder_attention_mask=mask,
+        audio_encoder_attention_mask=mask,
+        num_frames=frames,
+        height=height,
+        width=width,
+        fps=24.0,
+        audio_num_frames=audio,
+        use_cross_timestep=True,
+        return_dict=False,
+    )
+    return inputs
+
+
 # --------------------------------------------------------------------------
 # a tiny transformer file with the REAL single-file key names
 # --------------------------------------------------------------------------

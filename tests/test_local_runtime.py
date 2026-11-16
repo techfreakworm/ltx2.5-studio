@@ -24,6 +24,7 @@ from local_fakes import (
     as_array,
     install_tiny_audio_encode_shim,
     tiny_snapshot,
+    transformer_inputs,
     write_faithful_gguf,
 )
 
@@ -236,6 +237,46 @@ def test_a_missing_file_names_the_exact_download_command(tmp_path):
     assert missing[shard] == (
         'hf download Lightricks/LTX-2.5-Diffusers --revision 871165de --include "text_encoder/*"'
     )
+
+
+def test_weight_files_are_found_on_disk_whatever_they_are_called(tmp_path):
+    """No checkpoint file name is assumed: the shard index, else any weight file."""
+    snapshot = tmp_path / "snapshot"
+    configs = {"scheduler": "scheduler_config.json", "tokenizer": "tokenizer_config.json"}
+    for component in (*local_runtime.SMALL_SET, "text_encoder", "transformer"):
+        (snapshot / component).mkdir(parents=True)
+        (snapshot / component / configs.get(component, "config.json")).write_text("{}")
+    (snapshot / "model_index.json").write_text("{}")
+    (snapshot / "tokenizer" / "tokenizer.json").write_text("{}")
+    oddly_named = {
+        "vae": "vae-weights.safetensors",
+        "audio_vae": "a.safetensors",
+        "vocoder": "model.safetensors",
+        "duration_head": "head.safetensors",
+        "text_encoder": "encoder.safetensors",
+        "transformer": "dit.safetensors",
+    }
+    for component, name in oddly_named.items():
+        (snapshot / component / name).write_bytes(b"x" * 100)
+    (snapshot / "connectors" / "x.safetensors.index.json").write_text(
+        json.dumps({"weight_map": {"a": "part-1.safetensors", "b": "part-2.safetensors"}})
+    )
+    for part in ("part-1", "part-2"):
+        (snapshot / "connectors" / f"{part}.safetensors").write_bytes(b"y" * 50)
+
+    assert local_runtime.missing_files(snapshot) == []
+    sizes = local_runtime.weight_sizes(snapshot)
+    assert sizes["vae"] == (100, "files") and sizes["connectors"] == (100, "files")
+    assert local_runtime.component_files(snapshot, "vae") == [
+        snapshot / "vae" / "vae-weights.safetensors"
+    ]
+    assert snapshot / "transformer" / "dit.safetensors" in local_runtime.run_files(snapshot)
+
+    (snapshot / "vocoder" / "model.safetensors").unlink()
+    (snapshot / "connectors" / "part-2.safetensors").unlink()
+    missing = [path for path, _ in local_runtime.missing_files(snapshot)]
+    assert missing == [snapshot / "connectors" / "part-2.safetensors", snapshot / "vocoder"]
+    assert not any("diffusion_pytorch_model" in str(path) for path in missing)
 
 
 # --------------------------------------------------------------------------
@@ -617,13 +658,12 @@ SIX_ROPE_MODULES = {
 }
 
 
-def test_cpu_keeps_the_checkpoints_double_precision_rope():
-    torch = _torch()
+def test_cpu_keeps_the_checkpoints_double_precision_rope_untouched():
     runner = _runner("text2video", "resident")
     flags = local_runtime.rope_flags(runner.pipeline)
     assert set(flags) == SIX_ROPE_MODULES
     assert all(flags.values())
-    del torch
+    assert not any(local_runtime.rope_on_cpu(runner.pipeline).values())
 
 
 def _mps_available():
@@ -632,11 +672,41 @@ def _mps_available():
 
 
 @pytest.mark.skipif("not _mps_available()", reason="MPS is not available on this host")
-def test_mps_loads_all_six_rope_modules_in_single_precision():
+def test_mps_keeps_float64_rope_by_computing_all_six_modules_on_the_cpu():
     runner = _runner("text2video", "resident", device="mps", dtype="bfloat16")
     flags = local_runtime.rope_flags(runner.pipeline)
     assert set(flags) == SIX_ROPE_MODULES
-    assert not any(flags.values())
+    assert all(flags.values()), "the checkpoint's double precision is kept, not switched off"
+    assert local_runtime.rope_on_cpu(runner.pipeline) == dict.fromkeys(SIX_ROPE_MODULES, True)
+
+
+@pytest.mark.skipif("not _mps_available()", reason="MPS is not available on this host")
+def test_after_a_staged_reload_the_transformer_still_computes_rope_on_the_cpu():
+    """The staged runner reloads the transformer between prompts; the CPU-RoPE
+    hooks live on module instances, so the fresh instance must get them again —
+    and a forward on MPS must then match the CPU."""
+    torch = _torch()
+    runner = _runner("text2video", "staged", device="mps", dtype="float32")
+    loaded = []
+    for prompt in (PROMPT, "a second, different prompt"):
+        runner(
+            prompt=prompt,
+            width=SIZE,
+            height=SIZE,
+            num_frames=FRAMES,
+            generator=torch.Generator().manual_seed(SEED),
+            output_type="np",
+        )
+        loaded.append(runner.pipeline.transformer)
+    assert loaded[0] is not loaded[1], "the second prompt released and reloaded the transformer"
+    assert local_runtime.rope_on_cpu(runner.pipeline) == dict.fromkeys(SIX_ROPE_MODULES, True)
+
+    reference = local_runtime.load_transformer(tiny_snapshot(), dtype=torch.float32, device="cpu")
+    with torch.no_grad():
+        on_cpu = reference(**transformer_inputs(reference.config, "cpu", torch.float32))[0]
+        on_mps = loaded[1](**transformer_inputs(loaded[1].config, "mps", torch.float32))[0]
+    error = float((on_mps.cpu() - on_cpu).abs().max() / on_cpu.abs().max())
+    assert error <= 1e-3, f"MPS forward differs from the CPU by {error:.2e} (relative)"
 
 
 @pytest.mark.skipif("not _mps_available()", reason="MPS is not available on this host")
@@ -660,7 +730,8 @@ def test_a_staged_tiny_text_to_video_completes_on_mps_in_bf16(tmp_path):
     )
     assert runner.pipeline.device.type == "mps"
     flags = local_runtime.rope_flags(runner.pipeline)
-    assert set(flags) == SIX_ROPE_MODULES and not any(flags.values())
+    assert set(flags) == SIX_ROPE_MODULES and all(flags.values())
+    assert all(local_runtime.rope_on_cpu(runner.pipeline).values())
 
 
 # --------------------------------------------------------------------------
@@ -745,16 +816,19 @@ def test_a_staged_run_with_the_gguf_transformer_completes(faithful_gguf, tmp_pat
 
 
 @pytest.mark.skipif("not _mps_available()", reason="MPS is not available on this host")
-def test_the_gguf_transformer_loads_on_mps_with_single_precision_rope(faithful_gguf):
+def test_the_gguf_transformer_on_mps_computes_its_float64_rope_on_the_cpu(faithful_gguf):
     torch = _torch()
     path, _ = faithful_gguf
     model = local_runtime.load_transformer(
         tiny_snapshot(), dtype=torch.bfloat16, device="mps", gguf=path
     )
-    flags = {
-        n: m.double_precision for n, m in model.named_modules() if hasattr(m, "double_precision")
-    }
-    assert len(flags) == 4 and not any(flags.values())
+    rope = [m for m in model.modules() if hasattr(m, "double_precision")]
+    assert len(rope) == 4
+    assert all(m.double_precision for m in rope)
+    assert all(getattr(m, "_ltx25_rope_cpu", False) for m in rope)
+    with torch.no_grad():
+        out = model(**transformer_inputs(model.config, "mps", torch.bfloat16))[0]
+    assert bool(torch.isfinite(out).all())
 
 
 # --------------------------------------------------------------------------

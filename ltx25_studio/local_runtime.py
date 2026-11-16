@@ -15,7 +15,9 @@ What differs from the Space path, and why:
 * **GGUF transformer**, through diffusers' own single-file loader, with the 12
   ``prompt_adaln_single`` keys renamed first: the pinned converter lacks that
   rename and would leave those tensors on ``meta``.
-* **RoPE in single precision on MPS**, which has no float64.
+* **The checkpoint's float64 RoPE on MPS**, which has no float64: the RoPE
+  forward runs on the CPU and only its tables move (``device.compute_rope_on_cpu``),
+  applied to the connectors once and to the transformer after every load.
 * **The image-conditioning CRF is set explicitly**, because upstream derives it
   from the text encoder, which is absent during a staged denoise.
 * **Memory preflight** before every heavy load and before the denoise.
@@ -70,8 +72,9 @@ __all__ = [
     "preflight_plan",
     "rename_prompt_adaln_keys",
     "resolve_dtype",
+    "apply_rope_precision",
     "rope_flags",
-    "rope_load_kwargs",
+    "rope_on_cpu",
     "weight_sizes",
 ]
 
@@ -202,14 +205,38 @@ def _dtype_label(dtype) -> str:
     return str(dtype).removeprefix("torch.")
 
 
-def rope_load_kwargs(device) -> dict:
-    """Load kwargs for the transformer and the connectors on ``device``.
+def apply_rope_precision(name: str, module, device, log=None) -> tuple[str, ...]:
+    """Keep the checkpoint's float64 RoPE on ``device``; the one place this is decided.
 
-    MPS has no float64; the checkpoints enable float64 RoPE grids. Loading with
-    ``rope_double_precision=False`` builds them in float32 (measured equivalent to
-    flipping the six module flags). Other devices keep the checkpoint's value.
+    MPS has no float64, so there the RoPE forward runs on the CPU and only its
+    tables move to the device (``device.compute_rope_on_cpu``: per-instance hooks,
+    idempotent, so it must run again on every freshly loaded module). Elsewhere
+    nothing changes. Returns the RoPE modules now covered.
     """
-    return {"rope_double_precision": False} if _device_type(device) == "mps" else {}
+    if _device_type(device) != "mps":
+        return ()
+    from . import device as device_module
+
+    covered = device_module.compute_rope_on_cpu((name, module))
+    (log or _logger.info)(
+        f"RoPE computed on the CPU in float64 for {len(covered)} {name} module(s)"
+    )
+    return covered
+
+
+def rope_on_cpu(pipeline) -> dict[str, bool]:
+    """``{module path: hooked}`` for every RoPE module: does it compute on the CPU?"""
+    found = {}
+    for root in ("connectors", "transformer"):
+        module = getattr(pipeline, root, None)
+        if module is None:
+            continue
+        for name, child in module.named_modules():
+            if hasattr(child, "double_precision"):
+                found[f"{root}.{name}" if name else root] = bool(
+                    getattr(child, "_ltx25_rope_cpu", False)
+                )
+    return found
 
 
 def rope_flags(pipeline) -> dict[str, bool]:
@@ -479,7 +506,6 @@ def load_transformer(snapshot_dir, *, dtype, device, gguf=None, rename=True, log
 
     log = log or _logger.info
     snapshot = Path(snapshot_dir)
-    rope = rope_load_kwargs(device)
     try:
         if gguf is None:
             model, info = LTX2VideoTransformer3DModel.from_pretrained(
@@ -488,7 +514,6 @@ def load_transformer(snapshot_dir, *, dtype, device, gguf=None, rename=True, log
                 torch_dtype=dtype,
                 local_files_only=True,
                 output_loading_info=True,
-                **rope,
             )
             _require_complete(
                 info.get("missing_keys", ()),
@@ -497,7 +522,7 @@ def load_transformer(snapshot_dir, *, dtype, device, gguf=None, rename=True, log
                 total=len(model.state_dict()),
             )
         else:
-            model = _load_gguf_transformer(snapshot, Path(gguf), dtype, rope, rename, log)
+            model = _load_gguf_transformer(snapshot, Path(gguf), dtype, rename, log)
     except LTXStudioError:
         raise
     except Exception as exc:
@@ -508,10 +533,11 @@ def load_transformer(snapshot_dir, *, dtype, device, gguf=None, rename=True, log
         move_to_device(model, device, files=files, label="transformer", log=log)
     except Exception as exc:
         raise TransformerLoadError(reason=f"moving it to {device} failed: {exc}") from exc
+    apply_rope_precision("transformer", model, device, log)
     return model.eval()
 
 
-def _load_gguf_transformer(snapshot: Path, path: Path, dtype, rope: dict, rename: bool, log):
+def _load_gguf_transformer(snapshot: Path, path: Path, dtype, rename: bool, log):
     from diffusers import GGUFQuantizationConfig, LTX2VideoTransformer3DModel
     from diffusers.loaders.single_file_utils import convert_ltx2_transformer_to_diffusers
     from diffusers.models.model_loading_utils import load_gguf_checkpoint
@@ -538,7 +564,6 @@ def _load_gguf_transformer(snapshot: Path, path: Path, dtype, rope: dict, rename
         torch_dtype=dtype,
         quantization_config=GGUFQuantizationConfig(compute_dtype=dtype),
         local_files_only=True,
-        **rope,
     )
     after = set(model.state_dict())
     if after != loaded:
@@ -762,7 +787,6 @@ class _LocalWeights:
                     subfolder="connectors",
                     torch_dtype=self.dtype,
                     local_files_only=True,
-                    **rope_load_kwargs(self.device),
                 )
                 base = LTX2ConditionPipeline.from_pretrained(
                     self.snapshot_dir,
@@ -787,6 +811,7 @@ class _LocalWeights:
                         log=self.log,
                     )
                 base.to(self.device)  # anything else; the weights are already there
+                apply_rope_precision("connectors", connectors, self.device, self.log)
             except Exception as exc:
                 raise ModelLoadError(component="small set", reason=str(exc)) from exc
         pipelines.assert_compression_ratios(base.vae)
