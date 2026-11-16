@@ -307,40 +307,22 @@ _DECODER_CACHE_KEY = "__decoder__"
 
 
 def derive_pipeline(base, target_cls):
-    """Build ``target_cls`` from ``base``'s ALREADY-LOADED modules.
+    """Build ``target_cls`` from ``base``'s ALREADY-LOADED modules, sharing them as-is.
 
     ``from_pretrained`` twice materialises two complete, independent copies of
     the model -- ~67 GiB each. On ZeroGPU that is ~134 GiB packed to disk
     against :data:`ZEROGPU_DISK_CAP_GB`, and packing runs after both builds; on a 96 GiB
-    card it is an outright OOM. The two pipeline classes take **identical**
+    card it is an outright OOM. The pipeline classes take **identical**
     weight-bearing components at our pinned revision, so there is no version of
     this where two copies are wanted.
 
-    Prefers ``from_pipe``, which exists at the pinned SHA and handles exactly
-    this asymmetry -- it treats optional components carrying a default in the
-    signature as safe to omit, which is precisely ``audio_scheduler``. Falls back
-    to filtering ``base.components`` against the target's own signature, which is
-    the same rule written out.
+    Constructed directly from ``base.components``, filtered to what the target
+    accepts (``audio_scheduler`` is the one asymmetry). **Not** ``from_pipe``:
+    it calls ``.to(dtype)`` on every module, which a GGUF-quantized transformer
+    refuses ("Casting a quantized model to a new dtype is unsupported"), which
+    bitsandbytes skips with a warning, and which -- without a dtype -- casts the
+    shared modules to float32 in place. Nothing here moves or casts a module.
     """
-    from_pipe = getattr(target_cls, "from_pipe", None)
-    if callable(from_pipe):
-        # ⚠️ `dtype=` IS REQUIRED. Without it diffusers resolves
-        # `dtype ... or torch.float32` (pipeline_utils.py:2155) and then calls
-        # `new_pipeline.to(dtype=dtype)` (:2253) — casting every module to fp32.
-        #
-        # The crash is the lesser half: an fp32 cast of a bf16 tensor allocates
-        # twice the bytes, so the "derived" pipeline is a second ~130 GiB copy and
-        # OOMs a 96 GiB card. The half that matters is that `nn.Module.to()`
-        # mutates IN PLACE and the modules are genuinely shared — so had it fit,
-        # **the base pipeline would silently have become fp32**, and every
-        # generation after it would have run at the wrong precision with no error
-        # and plausible-looking output.
-        #
-        # It would also have broken the ZeroGPU mmap precondition, since a cast
-        # materialises tensors into anonymous memory and the post-pack prune then
-        # frees nothing (PLAN §8.3). Same root cause, a second consequence.
-        dtype = getattr(base, "dtype", None)
-        return from_pipe(base) if dtype is None else from_pipe(base, dtype=dtype)
     accepted = inspect.signature(target_cls.__init__).parameters
     shared = {name: module for name, module in base.components.items() if name in accepted}
     return target_cls(**shared)

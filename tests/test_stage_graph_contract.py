@@ -551,8 +551,11 @@ class _CastingBase:
             raise AttributeError(name) from None
 
 
-class _CastingTarget:
-    """Stands in for diffusers: casts to float32 unless a dtype is supplied."""
+class _CastingTarget(_FakeTarget):
+    """Stands in for diffusers: ``from_pipe`` casts to float32 unless given a dtype.
+
+    Deriving must not go through it at all (it also casts a quantized module).
+    """
 
     @classmethod
     def from_pipe(cls, base, **kwargs):
@@ -1858,3 +1861,78 @@ def test_the_startup_report_prints_the_decoders_revision_beside_the_models(runti
     decoder = next(line for line in report.splitlines() if "decoder revision" in line)
     assert model_files.REVISION in model
     assert model_files.DIFFUSION_DECODER_REVISION in decoder
+
+
+# --------------------------------------------------------------------------
+# deriving never casts: a quantized module refuses (GGUF) or is skipped (bnb)
+#
+# `from_pipe(base, dtype=...)` calls `.to(dtype)` on every module. A GGUF model
+# raises "Casting a quantized model to a new dtype is unsupported" -- every
+# audio-input run on the local runner died there on real weights.
+# --------------------------------------------------------------------------
+
+
+class _QuantizedModule:
+    """A bitsandbytes/GGUF-like module: any dtype cast raises."""
+
+    dtype = "int8"
+
+    def to(self, *args, **kwargs):
+        if "dtype" in kwargs or any(not isinstance(a, str) for a in args):
+            raise ValueError("Casting a quantized model to a new `dtype` is unsupported.")
+        return self
+
+
+class _QuantizedBase(_CastingBase):
+    def __init__(self):
+        super().__init__()
+        self._modules["transformer"] = _QuantizedModule()
+
+    def to(self, dtype=None):
+        for module in self._modules.values():
+            module.to(dtype=dtype)
+        return self
+
+
+class _FromPipeTarget(_FakeTarget):
+    """Has diffusers' casting from_pipe AND a component constructor."""
+
+    @classmethod
+    def from_pipe(cls, base, **kwargs):
+        base.to(dtype=kwargs.get("dtype") or "float32")
+        raise AssertionError("from_pipe must not be used: it casts every module")
+
+
+def test_deriving_shares_a_quantized_module_without_casting_it():
+    base = _QuantizedBase()
+
+    derived = pipelines.derive_pipeline(base, _FromPipeTarget)
+
+    assert derived.transformer is base.transformer
+    assert derived.vae is base.vae and base.vae.dtype == "bfloat16"
+
+
+def test_the_audio_pipeline_never_casts_a_quantized_transformer(monkeypatch):
+    """The real classes, on the tiny checkpoint: the transformer refuses any dtype cast."""
+    pytest.importorskip("torch")
+    pytest.importorskip("diffusers")
+    from test_real_pipeline_tiny import _tiny_snapshot_cached, load_smoke
+
+    from ltx25_studio import audio_conditioning
+
+    if not _tiny_snapshot_cached():
+        pytest.skip("the tiny checkpoint is not in the HF cache")
+    base = load_smoke().tiny_stack(device="cpu")["base"]
+    transformer = base.transformer
+    original = transformer.to
+
+    def refuse_casts(*args, **kwargs):
+        if "dtype" in kwargs or any(not isinstance(a, (str, type(None))) for a in args):
+            raise ValueError("Casting a quantized model to a new `dtype` is unsupported.")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(transformer, "to", refuse_casts)
+
+    derived = audio_conditioning.audio_pipeline(base, 0.0)
+
+    assert derived.transformer is transformer

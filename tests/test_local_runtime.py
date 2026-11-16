@@ -829,6 +829,65 @@ def test_a_staged_run_with_the_gguf_transformer_completes(faithful_gguf, tmp_pat
     assert result.output_path.is_file()
 
 
+def _quantized_cases():
+    from ltx25_studio import audio_conditioning, modes
+
+    cases = [(mode_id, {}) for mode_id in modes.MODES if mode_id != "audio_to_audio"]
+    cases += [
+        ("audio_to_audio", {"noise_scale": level}) for level in audio_conditioning.VARIATION_LEVELS
+    ]
+    return cases
+
+
+@pytest.mark.parametrize("mode_id,extra", _quantized_cases())
+def test_every_mode_runs_on_the_quantized_runner(
+    faithful_gguf, tmp_path, monkeypatch, mode_id, extra
+):
+    """The real-weights failure: deriving the audio pipeline cast the GGUF transformer.
+
+    ``from_pipe(base, dtype=...)`` calls ``.to(dtype)`` on every module, and a
+    GGUF-quantized model refuses it ("Casting a quantized model to a new dtype is
+    unsupported"). Every mode once on the quantized runner, so the next
+    quantization-only failure cannot hide.
+    """
+    from ltx25_studio import generate as generate_module
+    from ltx25_studio import modes
+
+    monkeypatch.setattr(modes, "MIN_RESOLUTION", SIZE)
+    path, _ = faithful_gguf
+    media = _inputs(tmp_path)
+    fields = {"prompt": PROMPT}
+    for kind in modes.get_mode(mode_id).inputs:
+        if kind in media:
+            fields[kind] = media[kind]
+
+    def factory(*, pipeline, **_):
+        runner = local_runtime.build_local_runner(
+            kind=pipeline,
+            device="cpu",
+            dtype="bfloat16",
+            snapshot_dir=tiny_snapshot(),
+            transformer_gguf=path,
+        )
+        install_tiny_audio_encode_shim(runner.pipeline.audio_vae)
+        return runner
+
+    result = generate_module.generate(
+        mode=mode_id,
+        seed=SEED,
+        width=SIZE,
+        height=SIZE,
+        num_frames=FRAMES,
+        **{**fields, **extra},
+        pipeline_factory=factory,
+        output_root=tmp_path / "out",
+        retention_bytes=10**12,
+    )
+    assert result.output_path.is_file()
+    if "noise_scale" in extra:
+        assert result.record.audio_level == extra["noise_scale"]
+
+
 @pytest.mark.skipif("not _mps_available()", reason="MPS is not available on this host")
 def test_the_gguf_transformer_on_mps_computes_its_float64_rope_on_the_cpu(faithful_gguf):
     torch = _torch()
