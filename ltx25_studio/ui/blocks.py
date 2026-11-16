@@ -1211,6 +1211,10 @@ def build_ui() -> gr.Blocks:
         ) -> list[Any]:
             _forget(request)
             mode = modes.get_mode(mode_id)
+            device, on_zerogpu = handlers.run_platform()
+            starting = handlers.on_generate_start(
+                mode_id, enhance, prompt, device=device, on_zerogpu=on_zerogpu
+            )
             return [
                 gr.update(interactive=False, value="Generating…"),
                 render.readiness_reason(
@@ -1221,7 +1225,7 @@ def build_ui() -> gr.Blocks:
                 gr.update(value=None, visible=True),
                 gr.update(value=None, visible=False),
                 render.monitor_caption(kind="running", mode=mode),
-                gr.update(value=handlers.on_generate_start(mode_id, enhance, prompt), visible=True),
+                gr.update(value=starting, visible=True),
                 gr.update(visible=False),
                 gr.update(visible=False),
                 gr.update(visible=False),

@@ -58,6 +58,7 @@ __all__ = [
     "quota_multiplier",
     "review",
     "run",
+    "run_platform",
     "seconds_for_frames",
     "unshown_report",
 ]
@@ -854,11 +855,27 @@ def on_lora_weight(staged: list[dict] | None, index: int, weight: Any) -> list[d
 # ---------------------------------------------------------------------------
 
 
-def on_generate_start(mode_id: str, enhance_prompt: Any = False, prompt: Any = None) -> str:
+def run_platform() -> tuple[str | None, bool]:
+    """``(device, on ZeroGPU)`` for a run started in this process, as :func:`run_facts`
+    labels a finished one."""
+    return _run_device(None)
+
+
+def on_generate_start(
+    mode_id: str,
+    enhance_prompt: Any = False,
+    prompt: Any = None,
+    *,
+    device: str | None = None,
+    on_zerogpu: bool = True,
+) -> str:
     """Shown the instant Generate is pressed, so the page is never silent.
 
     Says the prompt is being enhanced only when it will be: the mode takes a
-    prompt and, when the prompt is passed, it is not empty.
+    prompt and, when the prompt is passed, it is not empty. ``device`` and
+    ``on_zerogpu`` say where the run will run (the page passes
+    :func:`run_platform`); without them the words are the Space's, a
+    reservation from the user's quota.
     """
     try:
         mode = modes.get_mode(mode_id)
@@ -867,7 +884,7 @@ def on_generate_start(mode_id: str, enhance_prompt: Any = False, prompt: Any = N
     enhancing = bool(enhance_prompt) and modes.accepts(mode, "text")
     if prompt is not None:
         enhancing = enhancing and bool(str(prompt).strip())
-    return render.running(mode, enhancing=enhancing)
+    return render.running(mode, enhancing=enhancing, on_zerogpu=on_zerogpu, device=device)
 
 
 @dataclass

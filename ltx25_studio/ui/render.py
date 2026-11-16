@@ -965,8 +965,23 @@ def lora_summary_label(applied: Sequence[dict]) -> str:
 # ---------------------------------------------------------------------------
 
 
-def running(mode: Any, *, enhancing: bool = False) -> str:
-    """Shown the moment Generate is pressed, so the page is never silent."""
+def running(
+    mode: Any, *, enhancing: bool = False, on_zerogpu: bool = True, device: str | None = None
+) -> str:
+    """Shown the moment Generate is pressed, so the page is never silent.
+
+    On ZeroGPU a run first reserves GPU time from the user's quota. Anywhere else there is
+    no quota and no reservation: it loads, samples and decodes on this machine, on
+    ``device`` when known (the words of :func:`took_words`).
+    """
+    if not on_zerogpu:
+        if enhancing:
+            return (
+                f"**Enhancing your prompt: {mode.label}.** Gemma rewrites it on this machine "
+                f"first, then generation starts. The prompt actually sent is in the report."
+            )
+        where = _ON_DEVICE.get(str(device or ""), "on this machine")
+        return f"**Running: {mode.label}.** Loading, sampling and decoding {where}."
     if enhancing:
         return (
             f"**Enhancing your prompt: {mode.label}.** Gemma rewrites it on the GPU first, "
