@@ -34,7 +34,7 @@
    "sample": {
     "file": "samples/text_to_audio_video.mp4",
     "caption": "Made by this app: LTX-2.5, single pass. Same prompt and seed as “Storm on deck”.",
-    "settings": "704 × 480, 5 s, with sound",
+    "settings": "704 × 480, 5 s",
     "seed": 12
    }
   },
@@ -111,7 +111,7 @@
    "sample": {
     "file": "samples/image_to_audio_video.mp4",
     "caption": "Made by this app: LTX-2.5, single pass. From the example's picture, same seed.",
-    "settings": "704 × 480, 5 s, with sound",
+    "settings": "704 × 480, 5 s",
     "seed": 15
    }
   },
@@ -132,7 +132,7 @@
    "sample": {
     "file": "samples/image_text_to_audio_video.mp4",
     "caption": "Made by this app: LTX-2.5, single pass. From the example's picture and prompt, same seed.",
-    "settings": "480 × 704, 5 s, with sound",
+    "settings": "480 × 704, 5 s",
     "seed": 16
    }
   },
@@ -213,31 +213,31 @@
   "audio_to_video": {
    "examples": [
     {
-     "label": "A portrait set to a recording",
-     "audio": "media/captain_line.wav",
-     "image": "media/captain.jpg",
-     "prompt": "Close-up of a weathered sea captain shouting on the deck of a ship in a storm, rain on his face.",
+     "label": "Waves, pictured",
+     "audio": "media/ocean.wav",
+     "prompt": "Waves roll onto a sandy beach at sunset, golden light on turquoise water, seagulls overhead. Vivid colour, modern digital cinematography.",
      "settings": {
-      "width": 480,
-      "height": 704,
-      "seed": 21
+      "shape": "3:2",
+      "seed": 23
      }
     },
     {
-     "label": "A voice, a studio",
-     "audio": "media/studio_welcome.wav",
-     "prompt": "A young woman with red hair speaks to the camera in a bright modern studio with colourful neon lights behind her, close-up, vivid colour.",
+     "label": "A portrait over the sea",
+     "audio": "media/ocean.wav",
+     "image": "media/captain.jpg",
+     "prompt": "A weathered sea captain stands at the rail of his ship, lips closed, gazing out over the rolling waves as gulls wheel overhead; wind tugs at his coat.",
      "settings": {
-      "shape": "3:2",
-      "seed": 25
+      "width": 480,
+      "height": 704,
+      "seed": 24
      }
     }
    ],
    "sample": {
     "file": "samples/audio_to_video.mp4",
-    "caption": "Made by this app: LTX-2.5, single pass. From the example's recording, picture and prompt, same seed. The sound is the recording itself.",
-    "settings": "480 × 704, 4.7 s (the recording's length)",
-    "seed": 21
+    "caption": "Made by this app: LTX-2.5, single pass. From the example's recording and prompt, same seed. The sound is the recording itself.",
+    "settings": "704 × 480, 4.7 s (the recording's length)",
+    "seed": 23
    }
   }
  }

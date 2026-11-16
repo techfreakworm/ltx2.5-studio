@@ -2,17 +2,27 @@
 
 ``examples/media/**`` and ``examples/samples/**`` are Git LFS files (``.gitattributes``): a
 clone with Git LFS holds the media themselves, a clone without it (or an export made with
-``GIT_LFS_SKIP_SMUDGE=1``) a three-line pointer in place of each. The manifest must name
-every mode with an example and a sample, and only files that are there; the loader must
-return every entry when the media were fetched, and skip each entry that needs a pointer with
-its log line when they were not; the page must build either way. Which of the two this
-checkout is, is read from the first bytes of one sample.
+``GIT_LFS_SKIP_SMUDGE=1``) a three-line pointer in place of each. The files that ship are
+pinned by name, the manifest must name every mode with an example and a sample, and exactly
+the files that are there; the loader must return every entry when the media were fetched, and
+skip each entry that needs a pointer with its log line when they were not; the page must build
+either way. Which of the two this checkout is, is read from the first bytes of one sample.
+
+Audio to video does not lip-sync, so nothing it shows may suggest it does. Measured on real
+weights, the mouth's opening frame by frame against the speech level of the sound track:
++0.845 in image + text to video with sound, where the model voices the words itself, and
+-0.379 in audio to video with a portrait and a recording of speech. Every audio-to-video run
+measured lay between -0.38 and +0.07, no better than an unrelated sound track scores
+(docs/SPACE_MODE_MATRIX.md §10.2). So its examples ask for no speech and bring no recording
+named as speech, and its sample's caption promises no speaking face.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import re
+from pathlib import PurePosixPath
 
 import pytest
 from conftest import REPO_ROOT
@@ -27,6 +37,40 @@ MEDIA = ("image", "video", "audio")
 POINTER_START = b"version https://git-lfs.github.com/spec/v1"
 #: The file whose first bytes say whether this checkout fetched the media.
 PROBE = EXAMPLES / "samples" / "text_to_video.mp4"
+#: Ignored by git (.gitignore), so it never ships.
+IGNORED = {".DS_Store"}
+
+#: Every media file that ships, and only these: a change here is a change to what the
+#: Space downloads.
+SHIPPED = {
+    "media/cabin.jpg",
+    "media/cabin_clip.mp4",
+    "media/captain.jpg",
+    "media/captain_silent.mp4",
+    "media/ocean.wav",
+    "media/tram.jpg",
+    "samples/audio_to_audio.m4a",
+    "samples/audio_to_video.mp4",
+    "samples/image_text_to_audio_video.mp4",
+    "samples/image_text_to_video.mp4",
+    "samples/image_to_audio_video.mp4",
+    "samples/image_to_video.mp4",
+    "samples/text_to_audio.m4a",
+    "samples/text_to_audio_video.mp4",
+    "samples/text_to_video.mp4",
+    "samples/video_to_audio.m4a",
+    "samples/video_to_video.mp4",
+}
+
+#: Words that ask for speech, at the start of a word in any case ("speaks", "Shouting",
+#: "voices"); "sing" but not "single".
+SPEECH = re.compile(r"\b(?:speak|say|said|shout|talk|sing(?!l)|voice)", re.IGNORECASE)
+#: A quoted line: any double quote, or single quotes around words (not an apostrophe).
+QUOTED_LINE = re.compile(r"[\"“”„«»]|(?<!\w)['‘][^'’\n]+['’](?!\w)")
+#: A recording whose name says it is speech.
+SPEECH_FILE = re.compile(r"(?:^|[^a-z])(?:line|speech|voice|welcome)", re.IGNORECASE)
+#: Words a caption would use to promise a face that speaks.
+FACE = re.compile(r"\b(?:face|lip|mouth)", re.IGNORECASE)
 
 
 def _is_pointer(path) -> bool:
@@ -49,17 +93,24 @@ def _named() -> set[str]:
     return named
 
 
-def _shipped() -> set[str]:
+def _files_under(folder) -> set[str]:
     return {
         path.relative_to(EXAMPLES).as_posix()
-        for folder in ("media", "samples")
-        for path in (EXAMPLES / folder).rglob("*")
-        if path.is_file()
+        for path in folder.rglob("*")
+        if path.is_file() and path.name not in IGNORED
     }
+
+
+def _shipped() -> set[str]:
+    return _files_under(EXAMPLES / "media") | _files_under(EXAMPLES / "samples")
 
 
 def _not_fetched(caplog) -> list[str]:
     return [r.getMessage() for r in caplog.records if "not fetched" in r.getMessage()]
+
+
+def _speech_in(text: str) -> list[str]:
+    return [m.group() for pattern in (SPEECH, QUOTED_LINE) for m in pattern.finditer(text)]
 
 
 def test_the_manifest_names_all_eleven_modes_each_with_an_example_and_a_sample():
@@ -78,6 +129,13 @@ def test_every_file_the_manifest_names_is_in_examples_and_every_media_file_is_na
     assert _shipped() == _named(), "a media file nobody names would ship as dead weight"
 
 
+def test_the_shipped_files_are_these_seventeen_and_all_sit_where_git_lfs_tracks_them():
+    assert _named() == SHIPPED, "the manifest names other media than the ones pinned here"
+    assert _files_under(EXAMPLES) == SHIPPED | {showcase.MANIFEST, "PROVENANCE.md"}, (
+        "a file elsewhere in examples/ is not a Git LFS file and would ship as a plain blob"
+    )
+
+
 def test_the_media_are_git_lfs_files_and_the_manifest_is_plain_text():
     rules = (REPO_ROOT / ".gitattributes").read_text(encoding="utf-8").splitlines()
     for pattern in ("examples/media/**", "examples/samples/**"):
@@ -89,6 +147,24 @@ def test_the_media_are_git_lfs_files_and_the_manifest_is_plain_text():
         f"{PROBE.name} says the media were {'' if FETCHED else 'not '}fetched; these disagree: "
         + ", ".join(name for name, pointer in states.items() if pointer == FETCHED)
     )
+
+
+def test_audio_to_video_asks_for_no_speech_and_its_sample_promises_no_speaking_face():
+    entry = MANIFEST["audio_to_video"]
+    offending = {}
+    for example in entry["examples"]:
+        found = _speech_in(f"{example['label']}\n{example.get('prompt', '')}")
+        name = PurePosixPath(example.get("audio", "")).name
+        if SPEECH_FILE.search(name):
+            found.append(name)
+        if found:
+            offending[example["label"]] = found
+    assert offending == {}, "an audio-to-video example that asks for speech"
+    caption = entry["sample"]["caption"]
+    promised = [m.group() for pattern in (SPEECH, FACE) for m in pattern.finditer(caption)]
+    assert promised == [], caption
+    seeds = {example["settings"].get("seed") for example in entry["examples"]}
+    assert entry["sample"]["seed"] in seeds, "the sample is what one of these examples makes"
 
 
 def test_the_loader_returns_what_was_fetched_and_skips_each_pointer_with_its_line(caplog):
