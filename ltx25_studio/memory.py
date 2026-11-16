@@ -12,6 +12,7 @@ imports in the torch-less environment.
 
 from __future__ import annotations
 
+import math
 import os
 import re
 import subprocess
@@ -404,13 +405,44 @@ def preflight(
 
 HIGH_WATERMARK_ENV = "PYTORCH_MPS_HIGH_WATERMARK_RATIO"
 LOW_WATERMARK_ENV = "PYTORCH_MPS_LOW_WATERMARK_RATIO"
-#: torch's low-watermark default on unified memory: above a smaller high ratio,
-#: every ``torch.mps.empty_cache()`` raises "invalid low watermark ratio 1.4".
+#: PyTorch's MPS allocator on Apple silicon (ATen/mps/MPSAllocator.h; measured
+#: on torch 2.11 and 2.15): the high ratio defaults to 1.7 and may be 0 (no
+#: limit) up to 2.0; the low ratio defaults to 1.4 and may be 0 up to the high
+#: one, or up to 2.0 when the high one is 0.
+TORCH_DEFAULT_HIGH_WATERMARK = 1.7
 TORCH_DEFAULT_LOW_WATERMARK = 1.4
+TORCH_MAX_WATERMARK = 2.0
+
+#: The number C's ``strtod`` reads at the start of a value: how PyTorch parses
+#: these two variables (anything else reads as 0).
+_STRTOD = re.compile(
+    r"\s*([+-]?)(0x(?:[0-9a-f]+\.?[0-9a-f]*|\.[0-9a-f]+)(?:p[+-]?\d+)?"
+    r"|(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?|inf(?:inity)?|nan)",
+    re.IGNORECASE,
+)
+
+
+def _as_pytorch_reads(raw: str) -> float:
+    """The number PyTorch reads from an environment value (C ``strtod``)."""
+    found = _STRTOD.match(raw)
+    if found is None:
+        return 0.0
+    sign, text = found.groups()
+    value = float.fromhex(text) if text[:2].lower() == "0x" else float(text)
+    return -value if sign == "-" else value
+
+
+def _is_plain(raw: str, value: float) -> bool:
+    """Whether ``raw`` is a number Python reads the same way, so it says what it means."""
+    try:
+        written = float(raw)
+    except ValueError:
+        return False
+    return written == value or (math.isnan(written) and math.isnan(value))
 
 
 class MpsWatermarkError(LTXStudioError):
-    """The MPS allocator settings would make every attempt to free GPU memory fail."""
+    """PyTorch's MPS allocator would refuse these settings, and every GPU operation fail."""
 
     def __init__(self, *, reason: str):
         self.reason = reason
@@ -419,9 +451,13 @@ class MpsWatermarkError(LTXStudioError):
 
 @dataclass(frozen=True)
 class MpsWatermarks:
+    """The two ratios as PyTorch reads them (``None``: not set, its default applies)."""
+
     high: float | None
     low: float | None
     problem: str | None
+    #: Values that are not plain numbers, and what PyTorch reads them as.
+    notes: tuple[str, ...] = ()
 
     def require(self) -> MpsWatermarks:
         if self.problem is not None:
@@ -432,43 +468,60 @@ class MpsWatermarks:
 def mps_watermarks(environ=None) -> MpsWatermarks:
     """The two MPS allocator ratios from the environment, and what is wrong with them.
 
-    A high ratio set without a low ratio at or below it is refused: torch then
-    keeps its 1.4 low default, and freeing GPU memory fails on every call.
+    Refused: exactly what PyTorch's allocator refuses when it starts, a high
+    ratio outside 0 to 2.0 or a low ratio outside 0 to the high one (to 2.0 when
+    the high one is 0, no limit), each unset one at its default. Every GPU
+    operation then fails, from the first allocation on. A value that is not a
+    plain number is read the way PyTorch reads it, and ``notes`` says so.
     """
     env = os.environ if environ is None else environ
     raw_high, raw_low = env.get(HIGH_WATERMARK_ENV), env.get(LOW_WATERMARK_ENV)
-    fix = (
-        f"Set both, with the low one at or below the high one, for example "
-        f"{HIGH_WATERMARK_ENV}=0.5 {LOW_WATERMARK_ENV}=0.4."
-    )
+    high = None if raw_high is None else _as_pytorch_reads(raw_high)
+    low = None if raw_low is None else _as_pytorch_reads(raw_low)
 
-    def number(name, raw):
-        if raw is None or raw.strip() == "":
-            return None, None
-        try:
-            value = float(raw)
-        except ValueError:
-            value = None
-        if value is None or value != value or value < 0:
-            return None, f"{name}={raw!r} is not a number of 0 or more. {fix}"
-        return value, None
+    notes = []
+    for name, raw, value in (
+        (HIGH_WATERMARK_ENV, raw_high, high),
+        (LOW_WATERMARK_ENV, raw_low, low),
+    ):
+        if raw is not None and not _is_plain(raw, value):
+            consequence = (
+                ", which means no limit" if name == HIGH_WATERMARK_ENV and value == 0 else ""
+            )
+            notes.append(
+                f"{name}={raw!r} is not a plain number; PyTorch reads it as {value:g}{consequence}."
+            )
 
-    high, high_problem = number(HIGH_WATERMARK_ENV, raw_high)
-    low, low_problem = number(LOW_WATERMARK_ENV, raw_low)
-    problem = high_problem or low_problem
-    if problem is None and high is not None:
-        if low is None:
-            problem = (
-                f"{HIGH_WATERMARK_ENV} is {high:g} but {LOW_WATERMARK_ENV} is not set, so PyTorch "
-                f"keeps its low default of {TORCH_DEFAULT_LOW_WATERMARK:g} and every attempt to free "
-                f"GPU memory fails. {fix}"
-            )
-        elif low > high:
-            problem = (
-                f"{LOW_WATERMARK_ENV} is {low:g}, above {HIGH_WATERMARK_ENV} {high:g}, so every "
-                f"attempt to free GPU memory fails. {fix}"
-            )
-    return MpsWatermarks(high, low, problem)
+    used_high = TORCH_DEFAULT_HIGH_WATERMARK if high is None else high
+    used_low = TORCH_DEFAULT_LOW_WATERMARK if low is None else low
+    ceiling = TORCH_MAX_WATERMARK if used_high == 0 else used_high
+    if raw_low is None:
+        said_low = f"{LOW_WATERMARK_ENV} is not set, so PyTorch uses its default of {used_low:g}"
+    else:
+        said_low = f"{LOW_WATERMARK_ENV} is {used_low:g}"
+    if raw_high is None:
+        said_high = f"{HIGH_WATERMARK_ENV} is not set (PyTorch's default, {used_high:g})"
+    elif used_high == 0:
+        said_high = f"{HIGH_WATERMARK_ENV} is 0 (no limit), which allows up to {ceiling:g}"
+    else:
+        said_high = f"{HIGH_WATERMARK_ENV} is {used_high:g}"
+
+    problem = None
+    if not 0 <= used_high <= TORCH_MAX_WATERMARK:
+        problem = (
+            f"{HIGH_WATERMARK_ENV} is {raw_high!r}, and PyTorch accepts only 0 to "
+            f"{TORCH_MAX_WATERMARK:g} (0 means no limit)."
+        )
+    elif not 0 <= used_low <= ceiling:
+        problem = f"{said_low}, and the low ratio must be from 0 to the high one: {said_high}."
+    if problem is not None:
+        problem += (
+            f" PyTorch refuses this setting when its GPU memory allocator starts, so every "
+            f"operation on the GPU would fail. Leave both unset, or set both with the low one "
+            f"at or below the high one, for example {HIGH_WATERMARK_ENV}=0.5 "
+            f"{LOW_WATERMARK_ENV}=0.4."
+        )
+    return MpsWatermarks(high, low, problem, tuple(notes))
 
 
 def mps_stats() -> dict[str, float] | None:

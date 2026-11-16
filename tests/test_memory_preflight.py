@@ -347,7 +347,12 @@ def test_the_module_imports_without_torch():
 
 
 # --------------------------------------------------------------------------
-# MPS allocator watermarks: a high ratio below 1.4 needs a low ratio too
+# MPS allocator watermarks: refused exactly when PyTorch's allocator refuses
+# them. Ground truth, measured on torch 2.11 and 2.15 with a 4-byte MPS
+# allocation per setting (review r1, local-runtime-11): the high ratio
+# defaults to 1.7 and may be 0 (no limit) up to 2.0; the low ratio defaults to
+# 1.4 and may be 0 up to the high one, or up to 2.0 when the high one is 0. A
+# refused pair fails every GPU operation, from the first allocation on.
 # --------------------------------------------------------------------------
 
 HIGH = "PYTORCH_MPS_HIGH_WATERMARK_RATIO"
@@ -361,9 +366,16 @@ LOW = "PYTORCH_MPS_LOW_WATERMARK_RATIO"
         ({HIGH: "0.5", LOW: "0.4"}, 0.5, 0.4),
         ({HIGH: "0.5", LOW: "0.5"}, 0.5, 0.5),
         ({LOW: "0.4"}, None, 0.4),
+        ({HIGH: "1.7"}, 1.7, None),  # PyTorch's own default
+        ({HIGH: "2.0"}, 2.0, None),  # its upper bound
+        ({HIGH: "0.0"}, 0.0, None),  # no limit, as PyTorch's own out-of-memory message suggests
+        ({HIGH: "1.4"}, 1.4, None),  # equal to the low default
+        ({HIGH: "0", LOW: "2.0"}, 0.0, 2.0),
+        ({LOW: "1.5"}, None, 1.5),
+        ({LOW: "0"}, None, 0.0),
     ],
 )
-def test_watermark_settings_that_work_are_reported_and_accepted(environ, high, low):
+def test_every_watermark_setting_pytorch_accepts_is_accepted(environ, high, low):
     marks = memory.mps_watermarks(environ)
     assert (marks.high, marks.low, marks.problem) == (high, low, None)
     marks.require()
@@ -372,12 +384,19 @@ def test_watermark_settings_that_work_are_reported_and_accepted(environ, high, l
 @pytest.mark.parametrize(
     ("environ", "words"),
     [
-        ({HIGH: "0.5"}, ("is not set", "1.4")),
-        ({HIGH: "0.5", LOW: "0.6"}, ("0.6", "above", "0.5")),
-        ({HIGH: "half", LOW: "0.4"}, ("'half'", "not a number")),
+        ({HIGH: "0.5"}, ("is not set", "1.4", "0.5")),
+        ({HIGH: "1.3"}, ("is not set", "1.4", "1.3")),
+        ({HIGH: "0.5", LOW: "0.6"}, ("0.6", "0.5")),
+        ({HIGH: "2.1"}, ("2.1", "0 to 2")),
+        ({HIGH: "-1"}, ("-1", "0 to 2")),
+        ({HIGH: "inf"}, ("inf", "0 to 2")),
+        ({HIGH: "nan"}, ("nan", "0 to 2")),
+        ({HIGH: "0", LOW: "2.1"}, ("2.1", "no limit")),
+        ({LOW: "1.8"}, ("1.8", "1.7")),
+        ({LOW: "-0.1"}, ("-0.1", "0 to")),
     ],
 )
-def test_a_high_watermark_without_a_lower_low_one_is_refused_naming_the_fix(environ, words):
+def test_exactly_the_settings_pytorch_refuses_are_refused_with_the_true_reason(environ, words):
     marks = memory.mps_watermarks(environ)
     assert marks.problem is not None
     with pytest.raises(memory.MpsWatermarkError) as caught:
@@ -386,7 +405,32 @@ def test_a_high_watermark_without_a_lower_low_one_is_refused_naming_the_fix(envi
     assert isinstance(caught.value, LTXStudioError)
     for word in (*words, HIGH, LOW):
         assert word in message
-    assert "PYTORCH_MPS_LOW_WATERMARK_RATIO=0.4" in message or "below" in message
+    assert "every operation on the GPU" in message, "the refusal must say what really fails"
+    assert "free GPU memory fails" not in message
+    assert f"{HIGH}=0.5 {LOW}=0.4" in message
+
+
+@pytest.mark.parametrize(
+    ("value", "reads_as"),
+    [("half", 0.0), ("0,5", 0.0), ("", 0.0), ("1.5x", 1.5), ("0x1p-1", 0.5), (" 0.5", 0.5)],
+)
+def test_a_high_value_is_read_the_way_pytorch_reads_it(value, reads_as):
+    """C ``strtod``: the number at the start, else 0, and 0 means no limit at all."""
+    marks = memory.mps_watermarks({HIGH: value, LOW: "0.4"})
+    assert marks.high == reads_as and marks.problem is None
+
+
+@pytest.mark.parametrize("value", ["half", "0,5", ""])
+def test_a_high_value_pytorch_reads_as_no_limit_says_so(value):
+    marks = memory.mps_watermarks({HIGH: value})
+    assert marks.problem is None
+    assert len(marks.notes) == 1 and repr(value) in marks.notes[0]
+    assert "no limit" in marks.notes[0]
+
+
+def test_plain_numbers_carry_no_note():
+    assert memory.mps_watermarks({HIGH: "0.5", LOW: "0.4"}).notes == ()
+    assert memory.mps_watermarks({}).notes == ()
 
 
 def test_the_watermarks_are_read_from_the_process_environment(monkeypatch):
