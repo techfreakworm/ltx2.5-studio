@@ -664,3 +664,104 @@ def test_a_seed_out_of_range_is_refused_before_dispatch(seed):
             generate_module.GenerationRequest(mode="text_to_video", prompt="p", seed=seed)
         )
     assert "seed" in str(caught.value) and str(generate_module.MAX_SEED) in str(caught.value)
+
+
+# --------------------------------------------------------------------------
+# call sites asked for by the lora / conditioning / audio owner
+# --------------------------------------------------------------------------
+
+
+def _staged_entry(path):
+    Path(path).write_bytes(b"x")
+    return {"source": str(path), "path": str(path), "weight": 1.0, "report": object()}
+
+
+def test_a_staged_adapter_is_marked_in_use_at_the_gate(monkeypatch, tmp_path):
+    """lora-5: eviction cannot remove an adapter a queued run is about to load."""
+    from ltx25_studio import lora
+
+    marked = []
+    monkeypatch.setattr(lora, "mark_used", lambda path: marked.append(str(path)) or True)
+    entry = _staged_entry(tmp_path / "a.safetensors")
+
+    generate_module.prepare_request(
+        generate_module.GenerationRequest(mode="text_to_video", prompt="p", loras=(entry,))
+    )
+
+    assert marked == [entry["path"]]
+
+
+def test_an_unvalidated_adapter_is_validated_before_dispatch(refused, tmp_path):
+    """Validation hashes the whole file; it belongs before the GPU window."""
+    junk = tmp_path / "junk.safetensors"
+    junk.write_bytes(b"x")
+    refused(LoRAError, mode="text_to_video", prompt="p", loras=(str(junk),))
+
+
+def test_a_validated_adapter_carries_its_report_into_the_worker(monkeypatch, tmp_path):
+    from ltx25_studio import lora
+
+    report = object()
+    monkeypatch.setattr(lora, "validate_lora", lambda source, **kwargs: report)
+    path = tmp_path / "b.safetensors"
+    path.write_bytes(b"x")
+
+    scoped, _spec, _notes = generate_module.prepare_request(
+        generate_module.GenerationRequest(mode="text_to_video", prompt="p", loras=(str(path),))
+    )
+
+    ((entry,),) = [scoped.loras]
+    assert entry["report"] is report and entry["path"] == str(path)
+
+
+def test_a_video_condition_is_decoded_at_the_generation_size_and_its_notes_reach_the_run(
+    monkeypatch, accepted
+):
+    """media-io-3/4: reduced while decoding; an HDR clip's note is told to the user."""
+    import numpy as np
+
+    from ltx25_studio import conditioning
+
+    seen = []
+
+    def decode(source, *, max_frames=None, frame_rate=None, notes=None, size=None):
+        seen.append(size)
+        notes.append("your clip is HDR; it was converted to SDR colour.")
+        return np.zeros((2, 8, 8, 3), dtype=np.uint8)
+
+    monkeypatch.setattr(conditioning, "decode_video_frames", decode)
+    result, _sent = accepted(
+        mode="video_to_audio", video=video_file(), num_frames=9, enable_stage_2=False
+    )
+
+    assert seen == [(modes.MIN_RESOLUTION, modes.MIN_RESOLUTION)]
+    assert any("HDR" in note for note in result.warnings), result.warnings
+
+
+def test_an_audio_upload_is_decoded_only_as_far_as_the_run_uses(monkeypatch, tmp_path):
+    """media-io-5: an hour-long upload to a five-second run is not decoded whole."""
+    from conftest import STUB_SAMPLING_RATE, STUB_WAVEFORM, FakeAudioVae
+
+    from ltx25_studio import audio as audio_module
+
+    asked = {}
+
+    def load(source, *, max_seconds=None):
+        asked["max_seconds"] = max_seconds
+        return STUB_WAVEFORM, STUB_SAMPLING_RATE
+
+    monkeypatch.setattr(audio_module, "load_waveform", load)
+    pipe = FakePipe()
+    pipe.audio_vae = FakeAudioVae()
+    generate_module.generate(
+        mode="audio_to_video",
+        seed=7,
+        audio=_wav(tmp_path / "long.wav", seconds=20.0),
+        num_frames=17,
+        pipeline_factory=factory_returning(pipe),
+        encoder=one_muxed_file_encoder,
+        output_root=tmp_path / "out",
+        retention_bytes=10**9,
+    )
+
+    assert asked["max_seconds"] == pytest.approx(audio_module.upload_seconds_needed(17, 24.0))

@@ -723,8 +723,17 @@ def _checked_conditions(request: GenerationRequest, spec) -> None:
         conditioning.normalise_condition(condition, num_frames=_anchor_bound(request))
 
 
-def _checked_lora_files(request: GenerationRequest) -> None:
-    """Every staged adapter is still a file on disk."""
+def _checked_lora_files(request: GenerationRequest) -> GenerationRequest:
+    """Every staged adapter is still on disk, marked in use, and validated.
+
+    Marked so cache eviction cannot remove it during the queue wait (this runs on
+    the web side and again at the worker's start). An adapter staged without a
+    validation report (a programmatic caller) is validated HERE, before a GPU is
+    reserved -- validation hashes the whole file -- and carries its report on.
+    """
+    from . import lora as lora_module
+
+    staged = []
     for entry in getattr(request, "loras", ()) or ():
         if isinstance(entry, dict):
             path = entry.get("path") or entry.get("source")
@@ -736,6 +745,27 @@ def _checked_lora_files(request: GenerationRequest) -> None:
                 f"The LoRA {Path(str(shown)).name} is no longer on disk, so it cannot be "
                 f"applied. Validate it again, or clear it, before generating."
             )
+        lora_module.mark_used(path)
+        if not isinstance(entry, dict) or entry.get("report") is None:
+            entry = dict(entry) if isinstance(entry, dict) else {"source": str(path)}
+            entry.setdefault("path", str(path))
+            entry["report"] = lora_module.validate_lora(
+                str(path), max_bytes=_lora_max_bytes(), **_manifest_override()
+            )
+        staged.append(entry)
+    if not staged:
+        return request
+    return replace(request, loras=tuple(staged))
+
+
+def _lora_max_bytes() -> int | None:
+    """The configured adapter size limit, or None for the validator's own default."""
+    try:
+        from .config import load_config
+
+        return load_config().lora_max_bytes
+    except Exception:  # noqa: BLE001 -- a bad cap must not change what is validated
+        return None
 
 
 def prepare_request(request: GenerationRequest):
@@ -768,7 +798,7 @@ def prepare_request(request: GenerationRequest):
             _video_seconds(source)
     request = _validated(request)
     _checked_conditions(request, spec)
-    _checked_lora_files(request)
+    request = _checked_lora_files(request)
     _checked_stage_2_size(request, spec)
     _checked_decoder(request, spec)
     return request, spec, scope_notes + length_notes
@@ -911,13 +941,24 @@ def _prepared_conditions(kwargs: dict, request: GenerationRequest) -> None:
     """
     raw = kwargs.get("conditions")
     if not raw:
-        return
+        return ()
     cap = _decode_cap(request)
+    # The largest size a condition is resized to: the stage-2 size when it runs.
+    scale = 2 if kwargs.get("enable_stage_2") else 1
+    size = (
+        int(kwargs.get("height") or request.height) * scale,
+        int(kwargs.get("width") or request.width) * scale,
+    )
+    notes: list[str] = []
     kwargs["conditions"] = conditioning.build_conditions(
-        tuple(_decoded_video_condition(entry, cap, request.frame_rate) for entry in raw),
+        tuple(
+            _decoded_video_condition(entry, cap, request.frame_rate, size=size, notes=notes)
+            for entry in raw
+        ),
         num_frames=_anchor_bound(request),
         temporal_compression_ratio=constraints.DEFAULT_TEMPORAL_COMPRESSION_RATIO,
     )
+    return tuple(notes)
 
 
 def _prepared_variation(kwargs: dict, request: GenerationRequest, spec) -> tuple[str, ...]:
@@ -941,9 +982,11 @@ def _prepared_variation(kwargs: dict, request: GenerationRequest, spec) -> tuple
         frames = conditioning.decode_video_frames(
             source,
             max_frames=num_frames,
-            notes=notes,
-            size=(int(kwargs["height"]), int(kwargs["width"])),
-            **_decode_options(request.frame_rate),
+            **_decode_options(
+                request.frame_rate,
+                size=(int(kwargs["height"]), int(kwargs["width"])),
+                notes=notes,
+            ),
         )
         if len(frames) < num_frames:
             fitting = constraints.nearest_valid_num_frames(int(len(frames)))[0]
@@ -957,16 +1000,21 @@ def _prepared_variation(kwargs: dict, request: GenerationRequest, spec) -> tuple
     return tuple(notes)
 
 
-def _decode_options(frame_rate) -> dict:
-    """``frame_rate=`` for the video decode, when the decoder takes it."""
+def _decode_options(frame_rate, *, size=None, notes=None) -> dict:
+    """``frame_rate=`` (and ``size``/``notes`` when given) for the video decode, where it takes them."""
     try:
         parameters = inspect.signature(conditioning.decode_video_frames).parameters
     except (TypeError, ValueError):
         return {}
-    return {"frame_rate": float(frame_rate)} if "frame_rate" in parameters else {}
+    wanted = {"frame_rate": float(frame_rate), "size": size, "notes": notes}
+    return {
+        name: value
+        for name, value in wanted.items()
+        if name in parameters and (value is not None or name == "frame_rate")
+    }
 
 
-def _decoded_video_condition(entry, cap: int, frame_rate):
+def _decoded_video_condition(entry, cap: int, frame_rate, *, size=None, notes=None):
     """A video condition with its frames decoded, capped at ``cap``; anything else as-is.
 
     Decoded here rather than inside ``build_conditions`` so the cap can be the
@@ -984,7 +1032,9 @@ def _decoded_video_condition(entry, cap: int, frame_rate):
     if not isinstance(source, (str, Path)):
         return entry
     frames = conditioning.decode_video_frames(
-        source, max_frames=cap if cap and cap > 0 else None, **_decode_options(frame_rate)
+        source,
+        max_frames=cap if cap and cap > 0 else None,
+        **_decode_options(frame_rate, size=size, notes=notes),
     )
     return conditioning.ConditionSpec(
         source=frames, kind="video", index=int(index or 0), strength=float(strength)
@@ -1048,6 +1098,14 @@ def _seeded_generator(pipe, seed: int):
     generator = torch.Generator(device=target) if target is not None else torch.Generator()
     generator.manual_seed(int(seed))
     return generator
+
+
+def _parameters(function) -> frozenset[str]:
+    """The keyword names ``function`` takes ({} where it cannot be inspected)."""
+    try:
+        return frozenset(inspect.signature(function).parameters)
+    except (TypeError, ValueError):
+        return frozenset()
 
 
 def _muxes_supplied_audio(exports) -> bool:
@@ -1180,7 +1238,16 @@ def _prepared_audio(kwargs: dict, request: GenerationRequest, pipe, *, spec):
             f"it returns a plausible track the user did not ask for and nothing reports it."
         )
 
-    waveform, rate = audio_module.load_waveform(source)
+    num_frames = kwargs.get("num_frames")
+    frame_rate = float(kwargs.get("frame_rate") or getattr(request, "frame_rate", 0.0))
+    load_options = {}
+    if num_frames is not None and "max_seconds" in _parameters(audio_module.load_waveform):
+        # Decode no more of the upload than the run can use (an hour-long file
+        # to a five-second run is not decoded whole in the GPU window).
+        load_options["max_seconds"] = audio_module.upload_seconds_needed(
+            int(num_frames), frame_rate
+        )
+    waveform, rate = audio_module.load_waveform(source, **load_options)
     muxes_upload = _muxes_supplied_audio(exports)
     # Anything this path had to change about the user's file comes back through
     # `notes`, so it reaches `GenerationResult.warnings` rather than the Space
@@ -1199,14 +1266,20 @@ def _prepared_audio(kwargs: dict, request: GenerationRequest, pipe, *, spec):
     # who should not need to know the frame arithmetic. Skipped under
     # auto_duration for the same reason as there: no independent video length
     # exists yet for the audio to disagree with.
-    num_frames = kwargs.get("num_frames")
     if num_frames is not None:
+        reconcile_options = {}
+        if load_options and "source_seconds" in _parameters(
+            audio_module.reconcile_waveform_with_video
+        ):
+            # The trim note names the upload's real length, not the decoded part.
+            reconcile_options["source_seconds"] = _audio_seconds(source)
         waveform, trim_note = audio_module.reconcile_waveform_with_video(
             waveform,
             sampling_rate=rate,
             params=audio_module.audio_params_from(audio_vae),
             num_frames=int(num_frames),
-            frame_rate=float(kwargs.get("frame_rate") or getattr(request, "frame_rate", 0.0)),
+            frame_rate=frame_rate,
+            **reconcile_options,
         )
         if trim_note is not None:
             notes.append(trim_note)
@@ -2230,7 +2303,7 @@ def generate(
         # simply wrong rather than merely coarse.
         reporter.phase("preparing the inputs")
         kwargs = _pipeline_kwargs(spec, request)
-        _prepared_conditions(kwargs, request)
+        condition_notes = _prepared_conditions(kwargs, request)
         clip_notes = _prepared_variation(kwargs, request, spec)
         lora_reports = _apply_loras(pipe, request)
         try:
@@ -2245,7 +2318,7 @@ def generate(
             # container is the one it belongs in, and None everywhere else; see
             # `_muxes_supplied_audio`.
             audio_notes, supplied_audio = _prepared_audio(kwargs, request, pipe, spec=spec)
-            audio_notes += _audio_level_notes(kwargs, request, spec) + clip_notes
+            audio_notes += _audio_level_notes(kwargs, request, spec) + clip_notes + condition_notes
             # Consumed by `StageRunner`, never forwarded to diffusers -- the same
             # treatment `enable_stage_2` gets, and for the same reason: it is ours.
             # Only when somebody is listening, so an injected fake in the offline
