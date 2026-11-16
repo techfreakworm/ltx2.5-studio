@@ -1287,8 +1287,8 @@ def _prepared_audio(kwargs: dict, request: GenerationRequest, pipe, *, spec):
 
     target = getattr(pipe, "pipeline", pipe)
     audio_vae = getattr(target, "audio_vae", None)
-    # The vocoder declares the analysis window the VAE's config does not, so the
-    # forward transform needs both components. See audio.MEL_PARAM_SOURCES.
+    # The forward mel transform reads only the audio VAE (audio.MEL_PARAM_SOURCES,
+    # audio.MEL_CONVENTIONS); the vocoder passed below supplies nothing.
     vocoder = getattr(target, "vocoder", None)
     if audio_vae is None:
         raise GenerationError(
@@ -1766,10 +1766,10 @@ def _require_artifact(candidate, *, mode: str, run_dir: Path, track: str = "") -
 # peak-VRAM instrumentation -- PLAN §7.3
 # --------------------------------------------------------------------------
 
-#: Every VRAM figure this build prints is a GiB, because that is the unit
-#: ``scripts/host_matrix.py``, ``scripts/host_smoke.py`` and
-#: ``docs/HINODE_HOST_SETUP.md`` already use. A report that mixes GB and GiB is
-#: a report nobody can line up against the numbers already banked.
+#: Every VRAM figure this build prints is a GiB, because that is the unit the
+#: earlier measurements in ``docs/HINODE_HOST_SETUP.md`` use. A report that
+#: mixes GB and GiB is a report nobody can line up against the numbers already
+#: banked.
 _GiB = 1024**3
 
 

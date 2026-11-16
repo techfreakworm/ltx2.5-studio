@@ -133,10 +133,11 @@ DECODER_CHOICES = ("auto", "diffusion", "conv")
 #: gated, one ``model.safetensors``, **2.490 GB total** -- against **10.279 GB**
 #: for the bf16 ``google/gemma-4-E2B-it``. Its ``config.json`` carries
 #: ``quantization_config.quant_method == "gemma"``, which ``transformers``
-#: >= 5.15.1 (already the floor in requirements.txt) registers as
-#: ``GemmaQuantizer``; the unpacking layers it installs are plain torch, with no
-#: CUDA or kernel dependency, so the checkpoint runs on either device -- which is
-#: what let the enhancer start on the CPU and what lets it run on the GPU now.
+#: registers as ``GemmaQuantizer`` from 5.15.1 on; requirements.txt pins 5.23.0,
+#: where ``enhance.py`` reads one per-layer scale back from the checkpoint. The
+#: unpacking layers it installs are plain torch, with no CUDA or kernel
+#: dependency, so the checkpoint runs on either device -- which is what let the
+#: enhancer start on the CPU and what lets it run on the GPU now.
 #:
 #: ⚠️ Its ``config.json`` has **no** ``architectures`` key, so ``AutoModel*``
 #: cannot dispatch on it. ``enhance.py`` therefore names
@@ -162,9 +163,11 @@ DEFAULT_PROMPT_ENHANCER_REPO = "google/gemma-4-E2B-it-qat-mobile-transformers"
 #: ⚠️ **Why it is switchable at all: disk.** The prefetch is ~2.5 GB for the QAT
 #: default, and it lands while ``demo.launch()`` is packing -- the exact window
 #: ``pipelines.ZEROGPU_DISK_CAP_GB`` is measured against, where the int8 packing
-#: peak already sits at 133.4-137.4 GB. An operator who knows this deploy will
-#: never enable enhancement can decline to spend that headroom, and gets the
-#: un-prefetched behaviour back: still working, just slower on first use.
+#: peak is derived at 121.4-125.4 GB for transformer + text encoder
+#: (``pipelines._quantization_config``; never measured). An operator who knows
+#: this deploy will never enable enhancement can decline to spend that headroom,
+#: and gets the un-prefetched behaviour back: still working, just slower on
+#: first use.
 DEFAULT_PREFETCH_ENHANCER = True
 
 

@@ -328,7 +328,9 @@ def test_a_torch_size_mismatch_becomes_a_one_line_dimension_error(good_lora):
     error = excinfo.value
     assert error.module == "transformer_blocks.0.attn1.to_k"
     assert (error.expected, error.actual) == (4096, 2048)
-    assert len(str(error)) < 600, f"{len(str(error))} characters: {str(error)[:200]}…"
+    # Bounded as a person reads it: the temp root's length is not the message's.
+    message = str(error).replace(str(good_lora), good_lora.name)
+    assert len(message) < 600, f"{len(message)} characters: {message[:200]}…"
     assert error.__cause__ is original
 
 

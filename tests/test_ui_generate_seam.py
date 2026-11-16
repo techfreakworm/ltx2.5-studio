@@ -34,7 +34,7 @@ from functools import lru_cache
 from pathlib import Path
 
 import pytest
-from conftest import STUB_WAVEFORM, audio_file, inputs_for
+from conftest import STUB_WAVEFORM, _media_dir, audio_file, inputs_for
 from test_exports_contract import (
     MODE_IDS,
     MODE_TRACK_PAIRS,
@@ -85,7 +85,8 @@ def conditioning_video() -> str:
     import av
     import numpy as np
 
-    directory = Path(tempfile.mkdtemp(prefix="ltx25-seam-"))
+    # Inside the session's media folder, under pytest's base temp (never left behind).
+    directory = Path(tempfile.mkdtemp(prefix="ltx25-seam-", dir=_media_dir()))
     path = directory / "conditioning-input.mp4"
     with av.open(str(path), "w") as container:
         stream = container.add_stream("h264", rate=24)

@@ -399,7 +399,7 @@ def test_a_space_uses_the_gpu_without_ever_probing_cuda(monkeypatch):
 
 
 def test_a_plain_cuda_box_uses_the_gpu(monkeypatch):
-    """hinode: same GPU, no `spaces` package. It must still do the work."""
+    """A CUDA machine without the `spaces` package (the retired hinode host was one)."""
     monkeypatch.setattr(zerogpu, "host_has_cuda", _SpiedProbe(True))
     assert zerogpu.will_use_gpu(zerogpu.local_spaces_stub()) is True
 

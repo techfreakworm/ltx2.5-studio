@@ -160,8 +160,9 @@ def assert_compression_ratios(vae) -> tuple[int, int]:
 # upstream's own dispatch
 # ---------------------------------------------------------------------------
 
-#: The largest decode PROVEN to fit the 96 GB MIG slice untiled, from live
-#: runs: 704x480x49 decoded clean; 1216x704x121 completed its denoise and then
+#: The largest decode PROVEN to fit the 47.375 GiB ``large`` partition untiled
+#: (every run before 2026-08-26 ran there), from live runs: 704x480x49 decoded
+#: clean; 1216x704x121 completed its denoise and then
 #: died inside ``vae.decode``'s conv3d on the CUDACachingAllocator (~26 GB per
 #: full-resolution intermediate at 121 frames, on ~35 GB of resident weights).
 #:
@@ -482,10 +483,10 @@ def _quantization_config(quantization: str):
     turns into a control.
 
     **And it is load-bearing now rather than optional.** Disk was never the
-    binding constraint — the run died with the disk line reporting **[OK]** at
-    82.2 GB against :data:`ZEROGPU_DISK_CAP_GB`, killed at ~60.0 GB of RAM
-    against a ceiling measurably above that (ours)
-    and ~68 GB (⚠️ inherited). See ``docs/SPACE_GENERATION_FINDING.md``.
+    binding constraint — the run died with the disk line reporting **[OK]**
+    against :data:`ZEROGPU_DISK_CAP_GB` (the 82.2 GB it printed was a pre-pack
+    reading), killed at ~60.0 GB of RAM against a ceiling above 93.56 GB (the
+    inherited ~68 GB is falsified). See ``docs/SPACE_GENERATION_FINDING.md``.
 
     ✅ **Revised arithmetic**, derived from ``model_files`` component sizes:
 
@@ -500,7 +501,8 @@ def _quantization_config(quantization: str):
     out of them was blanket.** It was also the bug. Every frame the deployed
     Space ever produced was correctly-shaped, high-variance garbage — colour
     static and flat fields, at every resolution, in every mode,
-    deterministically. The same code on local MPS bf16 looked good. The only
+    deterministically. Local MPS bf16 artifacts made with tooling outside this
+    package (no MPS path existed here then) looked good. The only
     difference in the deployed path is this function, and the config it
     returned named no ``llm_int8_skip_modules`` at all, so bnb replaced
     **every** ``nn.Linear`` in the transformer — including the adaLN/modulation
@@ -549,8 +551,8 @@ def _quantization_config(quantization: str):
             component="transformer",
             reason=(
                 f"int8 was requested and the quantisation stack is not importable ({exc}). "
-                f"`bitsandbytes` is a pinned requirement; see requirements.txt for why the "
-                f"floor is 0.46.0 rather than the 0.43.3 diffusers itself mandates."
+                f"`bitsandbytes` is pinned (0.50.2); see requirements.txt for why any pin "
+                f"must stay above 0.46.0 rather than the 0.43.3 diffusers itself mandates."
             ),
         ) from exc
 
@@ -589,10 +591,10 @@ def _quantization_config(quantization: str):
     # 3. **`quant_backend` couples us to two libraries' signatures.**
     #    `pipe_quant_config.py:_validate_init_kwargs_in_backends` raises unless
     #    diffusers' and transformers' `BitsAndBytesConfig.__init__` parameter
-    #    sets are EQUAL. They are identical today, but requirements.txt pins
-    #    only `transformers>=5.15.1,<6` -- a minor release that adds one kwarg
-    #    on either side turns int8 into a hard startup failure. The
-    #    `quant_mapping` path skips that check entirely.
+    #    sets are EQUAL. They are identical today, and requirements.txt pins
+    #    transformers==5.23.0 exactly, but a bump that adds one kwarg on either
+    #    side would turn int8 into a hard startup failure. The `quant_mapping`
+    #    path skips that check entirely.
     #
     # ⚠️ The config CLASS differs per component and is not interchangeable. In
     # the granular branch `_resolve_quant_config` ignores its own `is_diffusers`
@@ -1454,11 +1456,12 @@ class StageRunner:
         self.decoder = decoder
         #: The generation device; off CUDA the diffusion decoder runs on the CPU.
         self.device = device
-        #: Built on the first stage-2 request, never at construction. The parts
-        #: are ~2.1 GB of weights AND a NATTEN kernel resolved over the network,
-        #: and eight of the eleven modes never touch them. Building eagerly
-        #: turned a dependency of one branch into a hard requirement for every
-        #: mode -- when NATTEN could not resolve, nothing loaded at all.
+        #: Built on first use (a stage-2 request, or a single-stage diffusion
+        #: decode on CUDA), never at construction. The parts are ~2.1 GB of
+        #: weights AND a NATTEN kernel resolved over the network, and a run that
+        #: needs neither never touches them. Building eagerly turned a
+        #: dependency of one branch into a hard requirement for every mode --
+        #: when NATTEN could not resolve, nothing loaded at all.
         self._stage_2_factory = stage_2_factory
         #: The diffusion decoder alone, for a single-stage diffusion decode.
         self._decoder_factory = decoder_factory

@@ -712,9 +712,13 @@ def test_loading_an_adapter_marks_it_used_first(tmp_path, fake_pipeline, good_lo
     fetch.mark_used(adapter)
     _age_stamps(folder, 5000)
 
+    # Against the clock just before the load, not a wall-clock window: a slow
+    # machine must not turn a fresh stamp into an old one. One second of slack
+    # for file systems that keep whole seconds.
+    before = time.time()
     lora_apply.apply_lora(fake_pipeline, adapter)
 
     stamps = [marker.stat().st_mtime for marker in folder.glob(".ltx25-*")]
-    assert len(stamps) == 2 and min(stamps) > time.time() - 60, (
+    assert len(stamps) == 2 and min(stamps) >= before - 1, (
         "a run loading an adapter must stamp it used before the load"
     )

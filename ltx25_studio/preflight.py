@@ -23,11 +23,9 @@ byte is touched:
    **specifically** -- move the cache out from under that pattern and the 72 GB
    snapshot is never freed, silently (PLAN §6.2, §8.3).
 
-3. **Resource preflight.** Measure free RAM and free disk against the
-   requirement computed from the resolved config, and raise an error that NAMES
-   THE NUMBERS if short -- "need ~67.2 GiB for the bf16 load, saw 41.3 GiB".
-   That turns an anonymous OOM, or a "Workload evicted, storage limit exceeded
-   (150G)", into a message that names the fix (PLAN §2.6's quantised fallbacks).
+3. **Resource report.** The startup report (``pipelines.startup_report``) logs
+   the disk floor; there is no RAM check here (local runs preflight memory in
+   ``memory.py``).
 
 Stdlib only. A preflight that needs a heavy import to tell you the environment
 is wrong has already lost.

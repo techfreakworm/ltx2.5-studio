@@ -207,7 +207,7 @@ def backing_file(address: int, regions) -> str | None:
 def unbacked_parameters(module, regions, *, pattern: str = AUTOPRUNE_PATTERN) -> list[str]:
     """Named parameters whose storage is NOT backed by a prunable blob.
 
-    Each one is 72 GB of disk that ZeroGPU will never reclaim.
+    ZeroGPU's post-pack cleanup cannot attribute these to a blob it may unlink.
     """
     import fnmatch
 
@@ -260,9 +260,9 @@ def check_mmap_backed(module, *, name: str, maps_text: str | None = None) -> tup
         return True, (
             f"{len(offenders)} parameters of {name} are not mmap'd from prunable HF blobs: "
             f"{shown}{more}. ZeroGPU's post-pack cleanup unlinks only file-backed tensors, so "
-            f"the {len(offenders)}-parameter shortfall means the HF snapshot is never freed -- "
-            f"72 GB stays on disk with nothing to attribute it to. Something cast, cloned or "
-            f"eagerly loaded these; the dtype must match the checkpoint's on-disk dtype."
+            f"the blobs behind these may not be freed. int8-quantised weights are materialised "
+            f"by construction (the 2026-11-13 boot still freed 65.25 GB); anything else was "
+            f"cast, cloned or eagerly loaded, and its dtype must match the checkpoint's."
         )
     return True, f"mmap backing for {name}: all parameters file-backed and prunable"
 

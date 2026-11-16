@@ -7,7 +7,7 @@
 **Do not hardcode a sampling rate.** The vocoder knows its own
 (``vocoder.config.output_sampling_rate``, 48000 at the pinned revision) and
 ``audio.export_sampling_rate_from()`` is the one place that reads it;
-``scripts/host_matrix.py`` passes that value through. A second copy of the
+``scripts/local_generate.py`` passes the vocoder's value through. A second copy of the
 number here would be a second thing to be wrong. Omitting the flag skips the
 rate check rather than assuming one.
 

@@ -509,7 +509,9 @@ def test_a_malformed_entry_is_a_format_error_not_a_python_error(header, tmp_path
         lora_inspect.inspect_lora(path)
     message = str(excinfo.value)
     assert "malformed.safetensors" in message
-    assert len(message) < 600, f"a {len(message)}-character message is not one a person reads"
+    # Bounded as a person reads it: the temp root's length is not the message's.
+    read = message.replace(str(path), path.name)
+    assert len(read) < 600, f"a {len(read)}-character message is not one a person reads"
 
 
 def test_deeply_nested_json_is_a_format_error_not_a_recursion_error(tmp_path):
@@ -525,7 +527,7 @@ def test_a_hostile_value_is_not_quoted_in_full(tmp_path):
     path = raw_adapter(tmp_path / "long.safetensors", header, b"\x01" * 8)
     with pytest.raises(LoRAFormatError) as excinfo:
         lora_inspect.inspect_lora(path)
-    assert len(str(excinfo.value)) < 600
+    assert len(str(excinfo.value).replace(str(path), path.name)) < 600
 
 
 @pytest.mark.parametrize("header", MALFORMED_ENTRIES.values(), ids=MALFORMED_ENTRIES)

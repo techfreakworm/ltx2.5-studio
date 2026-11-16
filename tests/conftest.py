@@ -688,13 +688,32 @@ def audio_input_ready(monkeypatch):
 # --------------------------------------------------------------------------
 
 _MEDIA_DIR: list[Path] = []
+#: The session's pytest config, for its base temp (see :func:`_media_dir`).
+_CONFIG: list = []
+
+
+def pytest_configure(config):
+    _CONFIG.append(config)
 
 
 def _media_dir() -> Path:
-    import tempfile
+    """The session's directory for real input files, under pytest's base temp.
 
+    pytest keeps only its last few base temps, so these never pile up in the
+    system temp folder. Outside pytest, a temp folder removed at exit.
+    """
     if not _MEDIA_DIR:
-        _MEDIA_DIR.append(Path(tempfile.mkdtemp(prefix="ltx25-inputs-")))
+        factory = getattr(_CONFIG[-1], "_tmp_path_factory", None) if _CONFIG else None
+        if factory is not None:
+            _MEDIA_DIR.append(factory.mktemp("ltx25-inputs"))
+        else:
+            import atexit
+            import shutil
+            import tempfile
+
+            path = Path(tempfile.mkdtemp(prefix="ltx25-inputs-"))
+            atexit.register(shutil.rmtree, path, ignore_errors=True)
+            _MEDIA_DIR.append(path)
     return _MEDIA_DIR[0]
 
 
