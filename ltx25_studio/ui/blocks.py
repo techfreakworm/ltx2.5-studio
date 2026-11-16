@@ -249,6 +249,7 @@ def build_ui() -> gr.Blocks:
                         choices=[name for name, _ in render.NOISE_CHOICES],
                         value="Moderately",
                         label=render.FIELD_COPY["noise_scale"][0],
+                        info=render.FIELD_COPY["noise_scale"][1],
                         visible=view0.active["noise_scale"],
                         elem_id="lever-noise",
                         elem_classes=["mr-chips", "mr-words"],
@@ -336,6 +337,11 @@ def build_ui() -> gr.Blocks:
                         max_weight=max_weight,
                     )
                     components.render_fields(pool, "loras")
+                lora_note = gr.Markdown(
+                    render.lora_no_trigger(),
+                    visible=not view0.active["prompt"],
+                    elem_classes=["mr-hint", "mr-lora-note"],
+                )
 
                 # -- Advanced -------------------------------------------------
                 with gr.Accordion(
@@ -543,6 +549,7 @@ def build_ui() -> gr.Blocks:
             dims_hint,
             pool["min_seconds"],
             pool["max_seconds"],
+            lora_note,
             *example_outputs,
             monitor_idle,
             video_out,
@@ -647,6 +654,7 @@ def build_ui() -> gr.Blocks:
                 gr.update(visible=view.sizes_picture),
                 gr.update(visible=view.active["min_seconds"]),
                 gr.update(visible=view.active["max_seconds"]),
+                gr.update(visible=not view.active["prompt"]),
                 *example_updates,
                 *monitor_updates,
                 monitor_next,

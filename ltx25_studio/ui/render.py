@@ -23,6 +23,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+from .. import audio_conditioning
 from ..errors import (
     ConstraintError,
     DecodeError,
@@ -116,6 +117,13 @@ def _secs_html(value: float) -> str:
 
 def _seconds(value: float) -> str:
     return f"{value:.1f} s"
+
+
+def _two_places(value: float) -> str:
+    """Two decimals, half up (0.725 -> 0.73), as a person rounds."""
+    from decimal import ROUND_HALF_UP, Decimal
+
+    return str(Decimal(str(float(value))).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
 
 
 def _and(items: Sequence[str]) -> str:
@@ -219,7 +227,11 @@ FIELD_COPY: dict[str, tuple[str, str]] = {
     ),
     "seed": ("Seed", "-1 picks a new seed each run. The seed used is in the run report."),
     "strength": ("Stick to the source clip", "Higher keeps more of your clip. 0.99 at most."),
-    "noise_scale": ("How much to change your sound", ""),
+    "noise_scale": (
+        "How much to change your sound",
+        "Your sound is noised to this level and the model rebuilds it; lower keeps more of it. "
+        "Ignore my audio makes new sound, as if none were given.",
+    ),
     "loras": ("LoRA adapters", ""),
     "enhance_prompt": (
         "Enhance my prompt",
@@ -275,11 +287,14 @@ def media_caption(mode: Any, kind: str) -> str:
 
 
 #: The four choices that write ``noise_scale`` in Audio → sound.
-NOISE_CHOICES: tuple[tuple[str, float], ...] = (
-    ("A little", 0.42),
-    ("Moderately", 0.73),
-    ("A lot", 0.91),
-    ("Ignore my audio (new sound)", 1.0),
+#: The words for the levels ``audio_conditioning`` supports, lowest first; the
+#: values are the module's own, so the choice writes a level it can run.
+NOISE_CHOICES: tuple[tuple[str, float], ...] = tuple(
+    zip(
+        ("A little", "Moderately", "A lot", "Ignore my audio (new sound)"),
+        audio_conditioning.VARIATION_LEVELS,
+        strict=True,
+    )
 )
 
 #: Shape presets: ``(name, width, height)``. All multiples of 32.
@@ -676,6 +691,14 @@ def lora_stage_of(exc: BaseException) -> tuple[str, str] | None:
     return None
 
 
+def lora_no_trigger() -> str:
+    """Under the LoRA row in the modes that take no prompt."""
+    return (
+        "This mode has no prompt, so adapters that need a trigger word will not show their "
+        "effect. Use an image + text mode for those."
+    )
+
+
 def lora_heading(cap: str) -> str:
     return (
         f"Add a LoRA from the Hub or upload a .safetensors file (up to {cap}). The file is "
@@ -851,7 +874,7 @@ def run_summary(facts: RunFacts) -> str:
         rows.append(("Length", origin.lstrip(", ").capitalize()))
     if facts.audio_level is not None:
         named = next((n for n, v in NOISE_CHOICES if abs(v - facts.audio_level) < 1e-6), None)
-        level = _num(f"{facts.audio_level:g}")
+        level = _num(_two_places(facts.audio_level))
         rows.append(("Change", f"{_e(named)} ({level})" if named else level))
     rows.append(("Seed", _num(facts.seed)))
     rows.append(("LoRA", _lora_words(facts.loras)))
@@ -924,7 +947,7 @@ _FAILURES: tuple[tuple[type, str, str], ...] = (
     (
         PromptEnhancementError,
         "The prompt enhancer is unavailable",
-        "Turn off Enhance my prompt and press Generate again.",
+        "Turn Enhance off to run with your own prompt.",
     ),
     (
         LoRAError,
@@ -983,7 +1006,7 @@ _CATEGORIES: dict[str, tuple[str, str]] = {
     ),
     "enhancer": (
         "The prompt enhancer is unavailable",
-        "Turn off Enhance my prompt and press Generate again.",
+        "Turn Enhance off to run with your own prompt.",
     ),
     "bug": (
         "Something went wrong in this app",

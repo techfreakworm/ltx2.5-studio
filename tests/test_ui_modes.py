@@ -315,3 +315,24 @@ def test_a_form_full_of_stale_values_runs_exactly_like_a_clean_one(mode_id, capt
         f"a UI-driven run of {mode_id} told the user about a value they cannot see: "
         f"{leak['result'].warnings}"
     )
+
+
+def test_the_levers_follow_the_registrys_own_attributes():
+    """Strength only where the mode leaves the clip's strength to the user; the
+    change choice only where the mode varies the audio rather than holding it."""
+    for mode_id in MODE_IDS:
+        spec = modes.get_mode(mode_id)
+        view = handlers.mode_view(mode_id)
+        assert view.active["strength"] == (
+            modes.accepts(spec, "video") and spec.video_strength is None
+        )
+        assert view.active["noise_scale"] == (spec.audio_conditioning == "variation")
+
+
+def test_the_change_choices_write_the_levels_the_audio_module_supports():
+    from ltx25_studio import audio_conditioning
+    from ltx25_studio.ui import render
+
+    levels = [level for _name, level in render.NOISE_CHOICES]
+    assert levels == list(audio_conditioning.VARIATION_LEVELS)
+    assert all(audio_conditioning.snap_level(level) == level for level in levels)

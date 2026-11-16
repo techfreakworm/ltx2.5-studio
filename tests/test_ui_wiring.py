@@ -223,3 +223,34 @@ def test_the_real_mode_switch_parks_a_hidden_value_and_restores_it_intact(demo):
     assert values["audio"] == audio, "the user's file did not come back intact"
     assert out[switch.outputs.index(slots["audio"])]["visible"] is True
     assert parked == {}
+
+
+def test_the_trigger_word_note_shows_only_in_the_modes_without_a_prompt(demo):
+    switch = next(f for f in demo.fns.values() if getattr(f.fn, "__name__", "") == "_switch")
+    note = next(
+        b
+        for b in demo.blocks.values()
+        if "mr-lora-note" in (getattr(b, "elem_classes", None) or [])
+    )
+    slots = dict(zip(["mode", *FIELD_KEYS], dependency(demo, "on_generate").inputs, strict=True))
+    keys = [k for k in FIELD_KEYS if slots[k] in switch.inputs[10:]]
+    shown = set()
+    for mode_id in modes.MODES:
+        args = [
+            mode_id,
+            mode_id,
+            {},
+            "Moderately",
+            "Match my clip",
+            "3:2",
+            {"kind": "idle"},
+            121,
+            704,
+            480,
+            *(field_by_key(k).default for k in keys),
+        ]
+        out = switch.fn(*args)
+        if out[switch.outputs.index(note)]["visible"]:
+            shown.add(mode_id)
+    assert shown == {"image_to_video", "image_to_audio_video"}
+    assert note.visible is False, "05, the default, has a prompt"

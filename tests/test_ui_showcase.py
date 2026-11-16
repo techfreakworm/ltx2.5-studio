@@ -184,7 +184,8 @@ def test_the_summary_says_where_the_length_came_from_and_how_much_the_sound_chan
     from ltx25_studio.ui import handlers, render
     from ltx25_studio.ui.fields import FIELDS
 
-    params = {f.key: f.default for f in FIELDS} | {"auto_duration": True, "noise_scale": 0.73}
+    moderately = dict(render.NOISE_CHOICES)["Moderately"]
+    params = {f.key: f.default for f in FIELDS} | {"auto_duration": True, "noise_scale": moderately}
 
     class Result:
         seed = 3
@@ -199,9 +200,9 @@ def test_the_summary_says_where_the_length_came_from_and_how_much_the_sound_chan
             result=Result(),
         )
     )
-    assert facts.length_source == "audio" and facts.audio_level == 0.73
+    assert facts.length_source == "audio" and facts.audio_level == moderately
     summary = render.run_summary(facts)
-    assert "Matched to your audio" in summary and "Moderately" in summary
+    assert "Matched to your audio" in summary and "Moderately" in summary and "0.73" in summary
     facts = handlers.run_facts(
         handlers.RunOutcome(
             video="v",

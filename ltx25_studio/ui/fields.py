@@ -97,13 +97,13 @@ def _model_may_pick_length(mode: Any) -> bool:
 
 
 def _video_lever(mode: Any) -> bool:
-    """The clip-strength lever: a video input whose picture comes back."""
-    return modes.accepts(mode, "video") and "video" in mode.exports
+    """The clip-strength lever: a video input whose strength the mode does not fix."""
+    return modes.accepts(mode, "video") and mode.video_strength is None
 
 
 def _audio_lever(mode: Any) -> bool:
-    """The noise lever: an audio input that is transformed, not kept as the soundtrack."""
-    return modes.requires(mode, "audio") and "video" not in mode.exports
+    """The change-level choice: audio the mode varies rather than holds fixed."""
+    return mode.audio_conditioning == "variation"
 
 
 def _sizes_the_picture(mode: Any) -> bool:

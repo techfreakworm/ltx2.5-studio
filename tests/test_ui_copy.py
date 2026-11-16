@@ -64,7 +64,12 @@ def test_a_gpu_side_failure_has_a_plain_headline_a_quota_line_a_step_and_the_det
     assert headline.startswith("### ")
     assert type(exc).__name__ not in headline
     assert "Any GPU time this run used is billed." in text
-    assert "press generate again" in text.lower() or "report" in text.lower()
+    lowered_step = text.lower()
+    assert (
+        "press generate again" in lowered_step
+        or "report" in lowered_step
+        or "turn enhance off to run with your own prompt" in lowered_step
+    )
     assert "<details" in text and "<summary>Detail</summary>" in text
     assert str(exc).strip().split("(")[0][:30] in text.replace("&#x27;", "'").replace("&quot;", '"')
     lowered = text.lower()
