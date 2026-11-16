@@ -38,8 +38,14 @@ VOCODER_RATE = 48000
 # ---------------------------------------------------------------------------
 
 
-def write_clip(path, images, *, rate, pts=None, rotation=None, rotate_tag=None):
-    """Encode ``images`` (H, W, 3 uint8) with timestamps in units of ``1/rate``."""
+def write_clip(
+    path, images, *, rate, pts=None, rotation=None, rotate_tag=None, hflip=False, vflip=False
+):
+    """Encode ``images`` (H, W, 3 uint8) with timestamps in units of ``1/rate``.
+
+    ``rotation`` (counter-clockwise degrees) and the flips go into the display
+    matrix: a player turns the stored picture by ``rotation``, then mirrors it.
+    """
     pts = list(range(len(images))) if pts is None else list(pts)
     height, width = images[0].shape[:2]
     with av.open(str(path), "w") as container:
@@ -47,8 +53,8 @@ def write_clip(path, images, *, rate, pts=None, rotation=None, rotate_tag=None):
         stream.width, stream.height = width, height
         stream.pix_fmt = "yuv420p"
         stream.codec_context.options = {"crf": "12"}
-        if rotation is not None:
-            stream.set_display_rotation(rotation)
+        if rotation is not None or hflip or vflip:
+            stream.set_display_rotation(rotation or 0, hflip=hflip, vflip=vflip)
         if rotate_tag is not None:
             stream.metadata["rotate"] = str(rotate_tag)
         for image, stamp in zip(images, pts, strict=True):
@@ -297,6 +303,56 @@ def test_an_unrotated_clip_is_left_alone(tmp_path):
     source = write_clip(tmp_path / "plain.mp4", [portrait()] * 3, rate=24)
 
     assert_upright(conditioning.decode_video_frames(source))
+
+
+# Review r1, media-io-7: a display matrix can mirror as well as turn (front
+# cameras, editing apps). Every one of the eight orientations a matrix can
+# express, written the way a player reads it.
+
+MIRRORED = [
+    pytest.param(rotation, hflip, vflip, id=f"{rotation}-{'h' if hflip else 'v'}flip")
+    for rotation in (0, 90, 180, 270, -90)
+    for hflip, vflip in ((True, False), (False, True))
+]
+
+
+def mirrored_clip(path, *, rotation, hflip, vflip):
+    """A clip a player shows as the upright :func:`portrait`."""
+    shown = portrait()
+    mirrored = shown[:, ::-1] if hflip else shown[::-1]
+    stored = np.rot90(mirrored, k=-(rotation // 90))
+    return write_clip(path, [stored] * 3, rate=24, rotation=rotation, hflip=hflip, vflip=vflip)
+
+
+@pytest.mark.parametrize(("rotation", "hflip", "vflip"), MIRRORED)
+def test_a_mirrored_display_matrix_comes_in_upright_and_unmirrored(
+    rotation, hflip, vflip, tmp_path
+):
+    source = mirrored_clip(tmp_path / "front.mp4", rotation=rotation, hflip=hflip, vflip=vflip)
+
+    assert_upright(conditioning.decode_video_frames(source))
+    assert_upright(conditioning.decode_video_frames(source, frame_rate=24))
+
+
+@pytest.mark.parametrize(("rotation", "hflip", "vflip"), MIRRORED)
+def test_the_orientation_matches_what_ffmpeg_shows(rotation, hflip, vflip, tmp_path):
+    """FFmpeg's autorotate is the player's view; check against it where it is installed."""
+    import shutil
+    import subprocess
+
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg is None:
+        pytest.skip("no ffmpeg on PATH to compare against")
+    source = mirrored_clip(tmp_path / "front.mp4", rotation=rotation, hflip=hflip, vflip=vflip)
+    ours = conditioning.decode_video_frames(source)
+    shown = subprocess.run(
+        [ffmpeg, "-v", "error", "-i", str(source), "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
+        capture_output=True,
+        check=True,
+        timeout=60,
+    ).stdout
+    theirs = np.frombuffer(shown, dtype=np.uint8).reshape(ours.shape)
+    assert np.abs(ours.astype(int) - theirs.astype(int)).mean() < 2.0
 
 
 # ---------------------------------------------------------------------------

@@ -49,6 +49,8 @@ module still imports with no media stack and no GPU present.
 from __future__ import annotations
 
 import heapq
+import math
+import struct
 from collections import deque
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -259,13 +261,57 @@ def _already_decoded(source) -> bool:
     return False
 
 
-def _quarter_turns(frame, stream) -> int:
-    """Counter-clockwise quarter turns that make this stream's frames upright.
+def _display_matrix(frame):
+    """The frame's display matrix (nine int32, FFmpeg's layout), or ``None``."""
+    for side_data in getattr(frame, "side_data", None) or ():
+        if "DISPLAYMATRIX" in str(getattr(side_data, "type", "")).upper():
+            raw = bytes(side_data)
+            if len(raw) >= 36:
+                return struct.unpack("=9i", raw[:36])
+    return None
 
-    The display matrix (``frame.rotation``, counter-clockwise degrees) wins; an
-    older file may carry only a ``rotate`` stream tag, which counts clockwise.
-    Angles that are not a multiple of 90 are left alone.
+
+def _matrix_orientation(matrix) -> tuple[int, bool]:
+    """``(turns, mirror)`` for a display matrix, decided as FFmpeg's autorotate does.
+
+    FFmpeg reads the clockwise angle (``get_rotation``), then picks transpose,
+    flips or nothing from the signs of the matrix entries; each of its choices
+    is written here as counter-clockwise quarter turns followed by an optional
+    left-right mirror.
     """
+    a, b, c, d = matrix[0], matrix[1], matrix[3], matrix[4]
+    scale_x, scale_y = math.hypot(a, c), math.hypot(b, d)
+    if not scale_x or not scale_y:
+        return 0, False
+    theta = -round(-math.degrees(math.atan2(b / scale_y, a / scale_x)))
+    theta -= 360 * math.floor(theta / 360 + 0.9 / 360)
+    if abs(theta - 90) < 1:
+        return (3, True) if c > 0 else (3, False)  # transpose, or turn clockwise
+    if abs(theta - 180) < 1:
+        hflip, vflip = a < 0, d < 0  # FFmpeg applies each one it finds
+        if hflip and vflip:
+            return 2, False
+        if hflip:
+            return 0, True
+        return (2, True) if vflip else (0, False)
+    if abs(theta - 270) < 1:
+        return (1, True) if c < 0 else (1, False)  # anti-transpose, or turn anticlockwise
+    if abs(theta) < 1:
+        return (2, True) if d < 0 else (0, False)  # mirror upside down, or nothing
+    return 0, False
+
+
+def _orientation(frame, stream) -> tuple[int, bool]:
+    """``(counter-clockwise quarter turns, then mirror left-right)`` that show this
+    stream's frames as a player does.
+
+    The display matrix wins, mirroring included; an older file may carry only
+    a ``rotate`` stream tag, which counts clockwise. Angles that are not a
+    multiple of 90 are left alone.
+    """
+    matrix = _display_matrix(frame)
+    if matrix is not None:
+        return _matrix_orientation(matrix)
     degrees = int(round(getattr(frame, "rotation", 0) or 0))
     if not degrees:
         tag = next((v for k, v in stream.metadata.items() if k.lower() == "rotate"), None)
@@ -274,23 +320,28 @@ def _quarter_turns(frame, stream) -> int:
         except ValueError:
             degrees = 0
     if degrees % 90:
-        return 0
-    return (degrees // 90) % 4
+        return 0, False
+    return (degrees // 90) % 4, False
 
 
-def _upright(frame, turns: int):
+def _upright(frame, orientation: tuple[int, bool]):
     import numpy as np
 
     array = frame.to_ndarray(format="rgb24")
-    return np.ascontiguousarray(np.rot90(array, k=turns)) if turns else array
+    turns, mirror = orientation
+    if not (turns or mirror):
+        return array
+    if turns:
+        array = np.rot90(array, k=turns)
+    return np.ascontiguousarray(array[:, ::-1] if mirror else array)
 
 
 def _frame_by_frame(container, stream, *, max_frames):
-    frames, turns = [], None
+    frames, orientation = [], None
     for frame in container.decode(stream):
-        if turns is None:
-            turns = _quarter_turns(frame, stream)
-        frames.append(_upright(frame, turns))
+        if orientation is None:
+            orientation = _orientation(frame, stream)
+        frames.append(_upright(frame, orientation))
         if max_frames is not None and len(frames) >= max_frames:
             break
     return frames
@@ -357,7 +408,7 @@ def _at_rate(container, stream, *, frame_rate: Fraction, max_frames):
     limit = float("inf") if max_frames is None else max_frames
     nominal = Fraction(stream.guessed_rate or stream.average_rate or frame_rate)
     frames: list = []
-    turns = None
+    orientation = None
     previous = None  # (seconds, frame)
     gap = None
     cached = (None, None)
@@ -365,12 +416,12 @@ def _at_rate(container, stream, *, frame_rate: Fraction, max_frames):
     def take(frame):
         nonlocal cached
         if cached[0] is not frame:
-            cached = (frame, _upright(frame, turns))
+            cached = (frame, _upright(frame, orientation))
         frames.append(cached[1])
 
     for when, frame in _display_times(container.decode(stream), nominal=nominal):
-        if turns is None:
-            turns = _quarter_turns(frame, stream)
+        if orientation is None:
+            orientation = _orientation(frame, stream)
         while len(frames) < limit and Fraction(len(frames)) / frame_rate <= when:
             target = Fraction(len(frames)) / frame_rate
             if previous is not None and target - previous[0] <= when - target:
@@ -415,8 +466,9 @@ def decode_video_frames(source, *, max_frames: int | None = None, frame_rate=Non
     variable-frame-rate clip keeps its timing. Without it, frames are read one
     by one in order, which is only right when the clip's rate already matches.
 
-    **Orientation.** The display rotation a phone stores beside a portrait clip
-    is applied, so the frames are upright as a player would show them.
+    **Orientation.** The display matrix a phone or an editor stores beside a
+    clip is applied, rotation and mirroring both, so the frames are what a
+    player shows.
 
     **No resizing, deliberately.** Upstream scales the condition so the longer
     side fills the target and centre-crops to exactly ``(height, width)``.
