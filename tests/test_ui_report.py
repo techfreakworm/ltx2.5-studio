@@ -38,12 +38,24 @@ def diagnostics(markup: str) -> str:
     return found.group(1) if found else ""
 
 
-def assert_ui_words(text: str, where: str) -> None:
+@pytest.fixture
+def temp_roots(tmp_path_factory) -> set[str]:
+    """Where this run keeps its inputs and outputs, wherever this machine's temp root is:
+    ``PATHS`` alone misses a leaked path under a root it does not list."""
+    import os
+    import tempfile
+
+    roots = (tempfile.gettempdir(), str(tmp_path_factory.getbasetemp()))
+    return {path for root in roots for path in (root, os.path.realpath(root))}
+
+
+def assert_ui_words(text: str, where: str, roots=()) -> None:
     for mode_id in MODE_IDS:
         assert mode_id not in text, f"{where}: mode id {mode_id!r} in {text!r}"
     for word in JARGON:
         assert word.lower() not in text.lower(), f"{where}: {word!r} in {text!r}"
     assert not PATHS.search(text), f"{where}: a server path in {text!r}"
+    assert not [root for root in roots if root in text], f"{where}: a server path in {text!r}"
     assert not REPR.search(text), f"{where}: Python repr quotes in {text!r}"
     for word in ("paid", "billed"):
         assert word not in text.lower(), f"{where}: {word!r} after the run: {text!r}"
@@ -86,7 +98,9 @@ RUNS = [(m, {}) for m in MODE_IDS] + [
 
 
 @pytest.mark.parametrize(("mode_id", "overrides"), RUNS, ids=lambda v: str(v)[:40])
-def test_what_the_ui_itself_says_after_a_run_is_in_the_users_words(wired, mode_id, overrides):
+def test_what_the_ui_itself_says_after_a_run_is_in_the_users_words(
+    wired, temp_roots, mode_id, overrides
+):
     outcome = run(mode_id, **overrides)
     mode = modes.get_mode(mode_id)
     facts = handlers.run_facts(outcome)
@@ -102,11 +116,13 @@ def test_what_the_ui_itself_says_after_a_run_is_in_the_users_words(wired, mode_i
         "running": render.running(mode, enhancing=bool(overrides.get("enhance_prompt"))),
     }
     for where, text in strings.items():
-        assert_ui_words(text, f"{mode_id} {where}")
+        assert_ui_words(text, f"{mode_id} {where}", temp_roots)
     assert head.startswith(f"Done: {mode.label}.")
 
 
-def test_a_cuda_shaped_run_keeps_its_vram_figures_inside_diagnostics(wired, monkeypatch):
+def test_a_cuda_shaped_run_keeps_its_vram_figures_inside_diagnostics(
+    wired, temp_roots, monkeypatch
+):
     """On CUDA the probe records VRAM laps; none of it may show above Diagnostics."""
     GiB = 1024**3
 
@@ -156,7 +172,9 @@ def test_a_cuda_shaped_run_keeps_its_vram_figures_inside_diagnostics(wired, monk
         )
     peak = f"{record.peak_vram_gib:.2f}"
     assert peak in inside and peak not in shown, shown
-    assert_ui_words(visible(render.run_summary(handlers.run_facts(outcome))), "what you got")
+    assert_ui_words(
+        visible(render.run_summary(handlers.run_facts(outcome))), "what you got", temp_roots
+    )
 
 
 # --------------------------------------------------------------------------

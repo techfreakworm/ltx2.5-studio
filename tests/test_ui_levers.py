@@ -103,10 +103,36 @@ def fingerprint(value):
     return type(value).__name__
 
 
+#: The level of the waveform the fake loader gives each of ``media``'s two audio files, in
+#: order. Two different waveforms by construction, whatever the files are called and
+#: wherever the temp root is.
+AUDIO_LEVELS = (0.01, 0.02)
+
+
 @pytest.fixture
-def wired(monkeypatch, tmp_path):
+def media(tmp_path):
+    """Each input kind's two values: the baseline's, then the one a flip switches to."""
+    from conftest import audio_file, video_file
+    from PIL import Image
+
+    other_audio = tmp_path / "second-sound-file.wav"
+    other_audio.write_bytes(Path(audio_file()).read_bytes())
+    return {
+        "image": (
+            Image.new("RGB", (64, 64), (40, 40, 40)),
+            Image.new("RGB", (64, 64), (200, 30, 30)),
+        ),
+        # long enough for stage 2's decoder (17 frames at least)
+        "video": (video_file(frames=25), video_file(frames=41)),
+        "audio": (audio_file(), str(other_audio)),
+    }
+
+
+@pytest.fixture
+def wired(monkeypatch, tmp_path, media):
     """``handlers.run`` reaches the real ``generate()``; the pipeline, the encoder and the
-    adapter attach are the seams. Each audio file loads as its own waveform."""
+    adapter attach are the seams. Each of ``media``'s audio files loads as its own
+    waveform, looked up by the file itself; any other file is an error."""
     import numpy as np
     from test_exports_contract import FakePipe, factory_returning, one_muxed_file_encoder
 
@@ -114,9 +140,19 @@ def wired(monkeypatch, tmp_path):
     from ltx25_studio import generate as generate_module
     from ltx25_studio import lora
 
+    levels = {
+        Path(path).resolve(): level
+        for path, level in zip(media["audio"], AUDIO_LEVELS, strict=True)
+    }
+
     def load(source):
+        level = levels.get(Path(source).resolve())
+        if level is None:
+            raise AssertionError(
+                f"the fake audio loader was handed {source!r}, neither of the test's audio files"
+            )
         waveform = np.zeros((2, round(121 / 24.0 * 16000)), dtype=np.float32)
-        waveform[:, ::97] = 0.01 * (1 + len(str(source)) % 7)
+        waveform[:, ::97] = level
         return waveform, 16000
 
     monkeypatch.setattr(audio_module, "load_waveform", load)
@@ -160,21 +196,28 @@ def what_runs(form: Form, seen: dict):
     return fingerprint(sent), tuple(mels), seen["adapters"][-1], outcome.result.seed
 
 
-def _media(tmp_path):
-    from conftest import audio_file, video_file
-    from PIL import Image
+def _as_the_fakes_see_it(kind: str | None, value):
+    """What a run hands on for ``value``: the loaded waveform for an audio file, the decoded
+    frames for a clip, the value itself for anything else."""
+    if value is not None and kind == "audio":
+        from ltx25_studio import audio as audio_module
 
-    other_audio = tmp_path / "second-sound-file.wav"
-    other_audio.write_bytes(Path(audio_file()).read_bytes())
-    return {
-        "image": (
-            Image.new("RGB", (64, 64), (40, 40, 40)),
-            Image.new("RGB", (64, 64), (200, 30, 30)),
-        ),
-        # long enough for stage 2's decoder (17 frames at least)
-        "video": (video_file(frames=25), video_file(frames=41)),
-        "audio": (audio_file(), str(other_audio)),
-    }
+        return fingerprint(audio_module.load_waveform(value)[0])
+    if value is not None and kind == "video":
+        from ltx25_studio import conditioning
+
+        return fingerprint(conditioning.decode_video_frames(value))
+    return fingerprint(value)
+
+
+def _check_the_flip(name: str, kind: str | None, before, after) -> None:
+    """Two values the fakes cannot tell apart cannot show whether a control acts: such a
+    flip is a broken test, and is reported as one rather than as an inert control."""
+    if _as_the_fakes_see_it(kind, before) == _as_the_fakes_see_it(kind, after):
+        pytest.fail(
+            f"broken test: its two values for {name!r} look the same to the fakes "
+            f"({before!r}, {after!r}), so flipping between them cannot change the run"
+        )
 
 
 def _baseline(demo, mode_id, *, upscale, auto, media, tmp_path):
@@ -217,12 +260,12 @@ def _controls(form: Form):
         ("upscale", form.fields["enable_stage_2"], lambda v: not v),
         ("seed", form.fields["seed"], lambda v: int(v) + 1),
         ("decoder", form.fields["decoder"], lambda v: "conv" if v != "conv" else "diffusion"),
-        ("strength", form.fields["strength"], lambda v: 0.4),
+        ("strength", form.fields["strength"], lambda v: 0.4 if v != 0.4 else 0.6),
         ("shape", by("shape"), lambda v: "16:9" if v != "16:9" else "1:1"),
         ("seconds", by("seconds"), lambda v: 3.0 if float(v or 0) != 3.0 else 4.0),
         ("sound change", by("lever-noise"), lambda v: "A lot" if v != "A lot" else "A little"),
         ("clip change", by("lever-clip"), lambda v: "A little" if v != "A little" else "A lot"),
-        ("adapter strength", rows[0], lambda v: 0.6),
+        ("adapter strength", rows[0], lambda v: 0.6 if v != 0.6 else 0.4),
     ]
     for kind in ("image", "video", "audio"):
         candidates.append((kind, form.fields[kind], kind))
@@ -247,9 +290,8 @@ CASES = [
 
 @pytest.mark.parametrize(("mode_id", "upscale", "auto"), CASES)
 def test_every_visible_control_changes_what_reaches_the_pipeline(
-    demo, wired, tmp_path, mode_id, upscale, auto
+    demo, wired, media, tmp_path, mode_id, upscale, auto
 ):
-    media = _media(tmp_path)
     form = _baseline(demo, mode_id, upscale=upscale, auto=auto, media=media, tmp_path=tmp_path)
     base = what_runs(form, wired)
     assert what_runs(form, wired) == base, "the fingerprint is not deterministic"
@@ -263,13 +305,13 @@ def test_every_visible_control_changes_what_reaches_the_pipeline(
     inert = []
     for name, component, change in controls:
         twin = form.copy()
-        if isinstance(change, str):  # a media kind: the other file
-            twin.user(component, media[change][1])
-        elif name == "seconds" and form.visible(form.by_id("length-source")):
+        if name == "seconds" and form.visible(form.by_id("length-source")):
             twin.user(twin.by_id("length-source"), "Set the length")
-            twin.user(component, change(twin.get(component)))
-        else:
-            twin.user(component, change(twin.get(component)))
+        kind = change if isinstance(change, str) else None  # a media kind: the other file
+        before = twin.get(component)
+        after = media[kind][1] if kind else change(before)
+        _check_the_flip(name, kind, before, after)
+        twin.user(component, after)
         if what_runs(twin, wired) == base:
             inert.append(name)
     assert not inert, f"{mode_id} (upscale={upscale}, model picks={auto}): inert {inert}"
@@ -281,3 +323,24 @@ def test_every_visible_control_changes_what_reaches_the_pipeline(
     )
     twin.click(remove)
     assert what_runs(twin, wired)[2] == (), "Remove left the adapter in the run"
+
+
+def test_a_flip_the_fakes_cannot_see_is_reported_as_a_broken_test(wired, media, tmp_path):
+    """The two audio files are two waveforms whatever their paths; equal values are caught."""
+    from PIL import Image
+
+    from ltx25_studio import audio as audio_module
+
+    for kind, (first, second) in media.items():
+        _check_the_flip(kind, kind, first, second)
+    grey = Image.new("RGB", (64, 64), (40, 40, 40))
+    for name, kind, before, after in (
+        ("audio", "audio", media["audio"][1], media["audio"][1]),
+        ("video", "video", media["video"][0], media["video"][0]),
+        ("image", "image", media["image"][0], grey),  # another object, the same picture
+        ("strength", None, 0.4, 0.4),
+    ):
+        with pytest.raises(pytest.fail.Exception, match=f"broken test: .*'{name}'"):
+            _check_the_flip(name, kind, before, after)
+    with pytest.raises(AssertionError, match="neither of the test's audio files"):
+        audio_module.load_waveform(str(tmp_path / "third-sound-file.wav"))
