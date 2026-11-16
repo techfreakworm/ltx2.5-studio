@@ -155,7 +155,21 @@ too quiet and duller, because the app's mel transform used the wrong window size
   made a voice in time with his mouth (its loudness follows the clip's original sound track at
   a correlation of 0.92), in words of its own.
 - **Audio to video** carries your recording exactly and takes its length from it, with or
-  without a prompt and with or without a first-frame image.
+  without a prompt and with or without a first-frame image. It does not lip-sync (next
+  paragraph).
+
+**Speech and lips.** Audio to video does not lip-sync. Measured on real weights, the mouth's
+opening frame by frame against the speech level of the sound track: in audio to video it did
+not follow the words in any run (correlation between −0.38 and +0.07, no better than an
+unrelated sound track scores), while speech the model writes itself, in image + text to video
+with sound, scores +0.84. Asking in the prompt for perfect lip sync and quoting the words did not
+change that in any case tried. Two changes to how the app samples — re-noising your audio along
+with the picture, plus cross-modal guidance — reached at most +0.26 in a probe, and neither is in
+the app. Lightricks' own audio-driven lip-sync recipes for LTX-2.3 use the non-distilled model;
+this app runs the distilled LTX-2.5 transformer, unguided. So, for a face that speaks in time,
+use **Image + text to video with sound** and put the line in quotes in the prompt. Audio to video
+sets a picture to a recording — its mood, its content, its length — and does not lip-sync. The
+measurements are in [`docs/SPACE_MODE_MATRIX.md`](docs/SPACE_MODE_MATRIX.md) §10.2.
 
 Through the API, pass `noise_scale` yourself for video to video and audio to audio: the
 endpoint's published default, 0.5, is snapped to the nearest level, 0.42 (*A little*), in both.

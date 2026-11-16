@@ -992,7 +992,72 @@ evidence directory, outside this repo.
 | 08 | Text to audio | `M08_t2a` at `75d0c53` | a male voice reads the announcement | wav only, 48 kHz stereo, 5.01 s, −15.1 LUFS; transcript exact | works |
 | 09 | Video to audio | `M09c_v2a_captain_noprompt`, `M09d_v2a_captain_prompt`, `M09e_v2a_tram_prompt`, `M09f_v2a_tram_noprompt` at `b12415f` | on a clip of a man shouting (only the picture reaches the model), a voice in time with his mouth, in different words; on the tram clip, machine hum and a low rumble | loudness envelope vs the clip's own soundtrack: correlation 0.92 (lag −40 ms); waveform correlation 0.03, so generated rather than copied; −18.0 / −13.5 LUFS (man), −31.3 / −26.7 LUFS (tram) | works, with and without a prompt |
 | 10 | Audio to audio | ocean `M10_a2a_l042`, `M10_a2a_l073`, `M10_a2a_l091`, `M10_a2a_l073_noprompt` and speech `M10s_speech_l042` / `_l073` / `_l091` at `b12415f`; after the audio-encoding fix, speech `M10f_speech_l042` / `_l073` / `_l091` and ocean `M10f_ocean_l073`, `M10f_ocean_l091_rain` at `7cf1547` | the ocean recording's two swells stay in place at levels 0.42 and 0.73 and are gone at 0.91, where the prompt's rain takes over; speech keeps its words at "a little" and nearly at "moderately" ("The store was withing, all hands on debt…"), and becomes other words at "a lot" | at `7cf1547`, level against the input: speech +0.6 / +1.1 / −6.8 dB at 0.42 / 0.73 / 0.91, ocean +1.5 dB at 0.73 and −1.4 dB at 0.91 with the rain prompt (at `b12415f`: −7.2 / −7.0 / −15.3, −8.9 and −11.6); same events at the same times (mel-modulation correlation): speech 0.97 / 0.95 / 0.71, transcript exact at 0.42; ocean 0.86 at 0.73 and 0.59 at 0.91 (at `b12415f`: 0.90 / 0.85 / 0.59); unrelated-sound controls 0.00 and 0.33; before the first fix (`M10_a2a_before_ns05`): clipped and unrelated (−0.04) | works: graded by level, at the input's own loudness. The 7–9 dB loss seen at `b12415f` was the app's mel transform (window 512, taken from the vocoder's config; F69), fixed at `7cf1547` (window 1024): the app's own encode → decode round trip, with no generation, now returns speech +0.2 dB and the ocean −0.3 dB (it was −8.9 / −9.7) |
-| 11 | Audio to video | `M11_a2v_after`, `M11b_a2v_firstframe`, `M11c_a2v_noprompt`, `M11d_a2v_colour_prompt`, `M11e_a2v_female_studio`, `M11f_a2v_ocean`, `X1b_a2v_operator_audio` at `b12415f`; after the audio-encoding fix, `M11g_a2v_same_prompt`, `M11h_a2v_firstframe`, `M11i_a2v_female_studio` at `7cf1547` | a clear storm scene on a ship's deck (before the first fix, `X4_a2v_before_ns05`: a grey veil); with a portrait as first frame, the man shouts while the recording plays; with no prompt, a man talking; a woman's voice with a studio prompt, and the ocean recording with a beach prompt, in colour. At `b12415f`, three runs with no first-frame image and a prompt naming no colours came out black and white; after the audio-encoding fix the same audio, prompt and seed give the same scene in colour (`M11g`): the model had been hearing the upload about 9 dB quiet and dull | the soundtrack is the supplied audio (correlation 1.0000 at 0 ms); length from the audio (4.83 s → 113 frames; the operator's 8.16 s, 24 kHz mono recording → 193 frames, written as 48 kHz stereo, +0.06 dB); luma p1–p99 9–180, contrast 51.3 (before: 59–105, 13.2); first frame vs the portrait SSIM 0.87 (`M11h`: 0.871, transcript exact); `M11g`: saturation 0.29 against 0.03 for `M11_a2v_after`, luma 8–170, contrast 49.4; `M11i`: in colour, transcript exact | works, in every variant tried: prompt only, no prompt, a first-frame image, non-speech audio, the operator's own recording |
+| 11 | Audio to video | `M11_a2v_after`, `M11b_a2v_firstframe`, `M11c_a2v_noprompt`, `M11d_a2v_colour_prompt`, `M11e_a2v_female_studio`, `M11f_a2v_ocean`, `X1b_a2v_operator_audio` at `b12415f`; after the audio-encoding fix, `M11g_a2v_same_prompt`, `M11h_a2v_firstframe`, `M11i_a2v_female_studio` at `7cf1547` | a clear storm scene on a ship's deck (before the first fix, `X4_a2v_before_ns05`: a grey veil); with a portrait as first frame, the man shouts while the recording plays, not in time with its words (below); with no prompt, a man talking; a woman's voice with a studio prompt, and the ocean recording with a beach prompt, in colour. At `b12415f`, three runs with no first-frame image and a prompt naming no colours came out black and white; after the audio-encoding fix the same audio, prompt and seed give the same scene in colour (`M11g`): the model had been hearing the upload about 9 dB quiet and dull | the soundtrack is the supplied audio (correlation 1.0000 at 0 ms); length from the audio (4.83 s → 113 frames; the operator's 8.16 s, 24 kHz mono recording → 193 frames, written as 48 kHz stereo, +0.06 dB); luma p1–p99 9–180, contrast 51.3 (before: 59–105, 13.2); first frame vs the portrait SSIM 0.87 (`M11h`: 0.871, transcript exact); `M11g`: saturation 0.29 against 0.03 for `M11_a2v_after`, luma 8–170, contrast 49.4; `M11i`: in colour, transcript exact | works, in every variant tried: prompt only, no prompt, a first-frame image, non-speech audio, the operator's own recording. It does not lip-sync (below) |
+
+**Speech and lips in audio to video.** Measured with the lead's lip-sync tool (MediaPipe face
+landmarks give the mouth's opening in every frame; that curve is correlated with the speech
+level of the sound track; the null is the same statistic over shifted audio). The reference
+for "in sync" is speech the model writes itself.
+
+| clip | mouth vs speech, lag 0 | best (lag) | 95 % of the shifted-audio null | opening, speech − pauses |
+|---|---|---|---|---|
+| image + text to video with sound, jointly generated (`M07_it2av`) — the reference | **0.84** | 0.84 (0) | 0.29 | +2.6 σ |
+| audio to video, portrait + recorded speech (`M11h`) | **−0.38** | −0.24 (+250 ms) | 0.35 | −0.6 σ |
+| audio to video, studio voice, prompt only (`M11i`) | 0.07 | 0.31 (−125 ms) | 0.34 | +0.3 σ |
+| control: `M11h`'s picture against another recording | 0.02 | | 0.24 | |
+
+The mouth in `M11h` is open and moving, but not in time with the words: below the
+shifted-audio null.
+
+**A prompt technique** (the operator's tip: ask for perfect lip sync, lip movement matching the
+audio, and quote the spoken words), A/B on the app's own path at `aa7ff84` — the first
+real-weights runs after the one-stage-graph change `c712e7e` — with the same 4.83 s recording,
+113 frames, and the same seeds with and without it (`LS_*`). Mouth vs speech at lag 0:
+
+| case | seed | base prompt | + "perfect lip sync" + the quoted transcript |
+|---|---|---|---|
+| image + audio, close-up portrait (face 250–310 px) | 21 | −0.38 | −0.04 |
+| | 22 | −0.31 | −0.17 |
+| image + audio, medium shot (face 83–94 px) | 21 | −0.36 | −0.24 |
+| | 22 | +0.04 | −0.09 |
+| audio only, close-up prompt | 21 | +0.04 | −0.18 |
+| | 22 | −0.04 | −0.03 |
+
+A third arm, word-by-word acting directions in the prompt (close-up portrait, seed 21), scored
++0.07. With the technique the mouth no longer opens mostly in the pauses, but in no case does it
+follow the words: no run, with or without it, scores above what an unrelated sound track does
+(up to 0.2–0.4). In the mouth strips, without it the mouth opens after about half a second and
+stays open, one long shout through words and pauses; with it the mouth opens and closes more,
+but not with the words. The A/B was 17 runs and the probe below 11, all exit 0.
+
+**How the audio is held while sampling** — a probe outside the app (the app's own path with
+one switch each; portrait + recording, seed 21, at `482800d`: `A2V_*`, `MG_*`, `LV_*`,
+`MG2_*`). Mouth vs speech at lag 0:
+
+| how the audio is held during sampling | cross-modal guidance off | video modality guidance 3.0 | 6.0 |
+|---|---|---|---|
+| frozen clean, as the app does (and as the vendor's ComfyUI template for 2.3 does) | −0.38 | −0.28 | |
+| at a constant level 0.42 / 0.725 | −0.41 / −0.41 | −0.29 / — | |
+| re-noised to the video's level each step | −0.31 | **+0.24** (+0.16 with the technique above) | **+0.26** |
+| the same until sigma 0.5, then clean | −0.30 | | |
+
+Only matched noise levels together with modality guidance turn the sign, to about a third of
+the way to the reference, at twice the denoise time, and more guidance does not help further.
+Neither is in the app. The distilled LTX-2.5 transformer, run unguided, makes speech in sync
+when it writes the sound itself, and its sound follows a given picture (row 09: 0.92), but its
+picture does not follow a given voice at the level of syllables. Lightricks' audio-driven
+lip-sync recipes for LTX-2.3 use the non-distilled model: the ComfyUI template "LTX-2.3: Image
+Audio to Video" runs the dev model with the distilled LoRA at half strength, and Lightricks'
+lip-sync guide for 2.3 names `modality_scale` (about 3.0) and CFG about 4, which is guidance.
+This app runs the distilled transformer unguided; the repository's dev transformer
+(`transformer_full`, about 44 GB more) is downloaded neither by the Space nor for the Mac.
+
+**What the app says.** Audio to video sets a picture to a recording (content, mood, length; the
+recording is the sound track, exactly) and does not lip-sync; its audio caption says so and
+points to image + text to video with sound, with the line in quotes, for a face that speaks in
+time. Nothing is baked into prompts or placeholders. Not started, and a cost decision for the
+operator: the dev transformer with the vendor's lip-sync settings, or an audio-conditioning
+LoRA if Lightricks publishes one for 2.5.
 
 **Other checks on real weights.**
 
