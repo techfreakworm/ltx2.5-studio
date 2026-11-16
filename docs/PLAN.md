@@ -1,7 +1,10 @@
 # LTX-2.5 Studio — Design Plan
 
-**Status:** implemented; not yet run on a GPU. The matrix in
-[`docs/TEST_PLAN.md`](TEST_PLAN.md) is what proves it works.
+**Status (2026-11-16):** implemented. After the 2026-11-16 fixes, ten of the eleven modes are
+verified on real weights on a Mac (Apple silicon); none has been re-run on the Space, which still
+runs the 2026-08-26 build. What has been verified, and how, is in
+[`SPACE_MODE_MATRIX.md`](SPACE_MODE_MATRIX.md) §10. *(Originally: "implemented; not yet run on a
+GPU. The matrix in `docs/TEST_PLAN.md` is what proves it works.")*
 **Branch:** `soma/ltx25-studio` · **Remote:** `git@github.com:techfreakworm/ltx2.5-studio.git`
 **Target:** private Hugging Face Space `techfreakworm/LTX2.5-Studio` (gradio SDK, ZeroGPU).
 
@@ -9,8 +12,11 @@
 > GPU" was true when written. Since then: **all eleven modes ran on hinode**
 > (704×480×121 baseline, stage 2 at 1408×960, duration head f=97, LoRA both
 > directions, mel round-trip — [`OPERATOR_HANDOFF.md`](OPERATOR_HANDOFF.md) §2)
-> and **all eleven generate on the live ZeroGPU Space** at sha `287ba9c`,
-> 256×256×9 ([`SPACE_MODE_MATRIX.md`](SPACE_MODE_MATRIX.md)). The line above is
+> and **all eleven execute on the live ZeroGPU Space** at sha `287ba9c`,
+> 256×256×9 ([`SPACE_MODE_MATRIX.md`](SPACE_MODE_MATRIX.md)). *(Corrected
+> 2026-11-16: this said "generate". Every Space output up to `ff142d9` was colour
+> static, because the int8 build quantised the conditioning path; fixed at
+> `eb1aa9f`.)* The line above is
 > kept because this document records how the build was *decided*; where the
 > project *stands* is the handoff's job. Where a decision below was overtaken —
 > the bf16 default (§2.6), the ~68 GB ceiling (§2), the explicit `size=`
@@ -70,8 +76,8 @@ a build we cannot reproduce or pin.
 hand-maintained block of *custom-node deps we discovered are required but aren't auto-installed
 by their respective nodes* (`gguf`, `imageio_ffmpeg`, `opencv-python`, `matplotlib`,
 `scikit-image`, `onnxruntime`, `yt-dlp`). That comment block is the evidence: the dependency
-surface was discovered by breakage, not by design. Diffusers replaces all of it with ~16 pinned
-direct deps and zero custom-node surface.
+surface was discovered by breakage, not by design. Diffusers replaces all of it with 19 direct
+deps, each pinned to one version (§5.1), and zero custom-node surface.
 
 **Decisive coupling to §2.** The `*-comfy-int8-convrot` quantised weights are **ComfyUI-only**
 — the model card says so. Choosing A or C means those 36.9 GB of int8 weights are unusable to
@@ -183,6 +189,15 @@ second is now settled rather than uncertain: it does not fit (§2.5).
 > died with the number (`SPACE_GENERATION_FINDING.md` §6). The disk row's
 > verdict stood for bf16 — and was then routed around: the deployed Space ships
 > **int8** (`ZEROGPU_DISK.md` Option B) and fits at **82.2 GB of 150 [OK]**.
+>
+> ⛔ **Corrected 2026-11-16, two rows.** (1) "82.2 GB of 150 [OK]" is a reading
+> taken *before* ZeroGPU packs (packed term 0.0). On the 2026-11-13 boot the
+> platform's progress bar read `40.6G` packed; the disk peak has never been measured.
+> (2) The VRAM row assumed `xlarge`. Until 2026-08-26 the Space ran on the
+> 47.375 GiB `large` partition (`auto` never promotes, §2.6), where stage 2 at
+> 704×480×49 — 55.906 GiB reserved — could not fit: on `large`, VRAM *was* the
+> problem. On `xlarge` (94.971 GiB, now the code's default) that is the largest
+> peak measured, with ~39 GiB to spare.
 
 ### 2.1 Trap A — duplicate shard sets
 
@@ -228,7 +243,7 @@ Measured from the Hub's own byte counts, not estimated. The `GB` column is decim
 | `transformer/` | 37.9762 | index | the model (4 live shards + config + index) |
 | `text_encoder/` | 23.9195 | index | `Gemma4UnifiedForConditionalGeneration` (§10 OQ-4) |
 | `connectors/` | 6.3445 | index | text → transformer conditioning; also a LoRA target |
-| `vae/` | 1.4522 | index | video VAE (conv-decoder fallback — §7.4) |
+| `vae/` | 1.4522 | index | video VAE: encodes conditions, and decodes wherever the diffusion decoder cannot run (§7.4) |
 | `latent_upsampler/` | 0.9957 | **subfolder** | stage-2 spatial upscale |
 | `diffusion_decoder/` | 0.8343 | index | **the native 2.5 decoder** — §7.4 |
 | `temporal_latent_upsampler/` | 0.2619 | **subfolder** | stage-2 temporal upscale |
@@ -403,6 +418,14 @@ So bf16 ships and `size="xlarge"` is **declared explicitly** rather than being s
 > ceiling, "uncertain but documented") is falsified besides
 > (`SPACE_GENERATION_FINDING.md` §6). The §6.2.1-class route list at the end of
 > this section omitted the route actually taken.
+>
+> ⛔ **Corrected 2026-11-16.** "ZeroGPU promoted to `xlarge` by inference" is wrong:
+> `auto` never promotes (the block above this section's table), so the Space ran
+> on `large` until `LTX25_ZEROGPU_SIZE=xlarge` was set as a Space variable on
+> 2026-08-26. The code now defaults to `xlarge` (`config.DEFAULT_ZEROGPU_SIZE`),
+> so `size="xlarge"` is declared explicitly after all — by default, not by a
+> variable. "Packed ~51.1 GB": the platform's progress bar read `40.6G` on the
+> 2026-11-13 boot. "82.2/150 [OK]" is a reading taken before packing.
 
 **⚠️ There is no precision switch, and the reason is a correction rather than a decision.**
 `LTX25_TRANSFORMER_PRECISION` and `LTX25_TEXT_ENCODER_PRECISION` existed, resolved cleanly, and
@@ -420,6 +443,12 @@ of quantised tensors was unknown — was false; see above.** The lever is gone b
 option*; it
 is not a *configured* one, and the difference is now visible in the code rather than implied.
 
+> ⛔ **Corrected 2026-11-16: there is a precision switch now, and it is wired.**
+> `LTX25_QUANTIZATION` = `auto` (the default: int8 on ZeroGPU, bf16 everywhere else) |
+> `bf16` | `int8`, resolved in `config.py` and `device.py`; int8 is bitsandbytes
+> (pinned, §5.1) and is refused at startup off CUDA. The two removed variables stay
+> removed.
+
 The routes actually available under disk pressure are persistent storage, a public Space, or
 smaller checkpoints — see §6.2.1.
 
@@ -428,7 +457,9 @@ smaller checkpoints — see §6.2.1.
 variant needing *different files* cannot be fetched on demand into that cache. If a future
 precision setting changes the file list, the Space must be rebuilt with a new `preload_from_hub`
 block. Setting the variable alone changes how the existing weights are loaded -- nothing more. This is **technical risk #1** (§10), and it is to be settled by
-measurement on the Space, not by argument.
+measurement on the Space, not by argument. *(2026-11-16: moot as built. int8 is applied at
+load time to the same files, so changing `LTX25_QUANTIZATION` needs no new download and no
+rebuild.)*
 
 ### 2.7 Output retention — 20 GB, evicted oldest-first
 
@@ -504,10 +535,20 @@ discards the input entirely.
 | 10 | audio → audio | condition | `audio_latents` + `noise_scale`, export only audio | ⚠️ same |
 | 11 | audio → video | condition | `audio_latents` + `noise_scale`, export only video | ⚠️ pays audio encode on top |
 
-**Mandatory mitigation for modes 8–11:** run at the **minimum legal resolution**, **skip the
+> ⛔ **Corrected 2026-11-16, rows 4, 10 and 11.** One `noise_scale` also set the *video's*
+> starting noise in the condition pipeline, which washed out audio → video (measured on real
+> weights). Now (`audio_conditioning.py`): **11** holds the supplied audio fixed while the
+> picture is generated to it, and exports **video with that audio** (`exports=("audio",
+> "video")`); **10** changes the supplied audio by one of the model's own levels (0.42, 0.73,
+> 0.91, or 1.0, which ignores it). Row **4**'s mechanism was replaced on 2026-11-16 as well
+> (`modes.py`, `video_conditioning="variation"`).
+<!-- follow-up pass: describe row 4's new lever once the mode-04 change has been verified on real weights. -->
+
+**Mandatory mitigation for modes 8–10:** run at the **minimum legal resolution**, **skip the
 stage-2 spatial upscale**, export only the requested track. The UI must say in words that
 audio-only modes still render video internally — a user who does not know that will read the
-runtime as a bug.
+runtime as a bug. *(Corrected 2026-11-16: this said 8–11. Mode 11 returns video, so it gets
+none of these mitigations, `modes.py`.)*
 
 ### 3.4 Multishot — **downgraded to honest**
 
@@ -519,6 +560,11 @@ driven, unverified, no API support* — a documented technique in the UI copy, n
 button that implies support we cannot back.
 
 (Superseding an earlier draft of this plan that called it a first-class affordance. It is not.)
+
+> ⛔ **Corrected 2026-11-16: the UI no longer offers a shot list.** Its rows fed the
+> prompt-segment *text* to the pipeline as frames, which fails in the worker; it never worked
+> on real weights. The API keeps its `conditions` slot, and rows that carry text instead of
+> media are refused before a GPU is reserved (`generate.scope_request_to_mode`).
 
 ### 3.5 Prompt enhancement: **ships, as a real toggle, default off**
 
@@ -549,9 +595,13 @@ download — and if it never goes to CUDA, it is never packed at all.
 **✅ And the download is 2.49 GB.** `google/gemma-4-E2B-it-qat-mobile-transformers` is the
 quantisation-aware-trained build: public, ungated, one `model.safetensors`, **2.490 GB**
 against **10.279 GB** for the bf16 `google/gemma-4-E2B-it`. Its `config.json` carries
-`quantization_config.quant_method == "gemma"`, which `transformers >= 5.15.1` — already the
-floor in `requirements.txt` — registers as `GemmaQuantizer`; the unpacking layers it installs
-are plain torch with no CUDA or kernel dependency, which is what lets it run on the CPU.
+`quantization_config.quant_method == "gemma"`, which `transformers` registers as
+`GemmaQuantizer` from 5.15.1 on; the unpacking layers it installs are plain torch with no CUDA
+or kernel dependency, which is what lets it run on the CPU. *(Corrected 2026-11-16: this said
+5.15.1 was "already the floor in `requirements.txt`". The file now pins `transformers==5.23.0`
+exactly (§5.1), whose loader refuses one per-layer scale table of this checkpoint, so
+`enhance.py` reads that one weight back from the cached checkpoint and refuses any other
+mismatch.)*
 ⚠️ It has **no** top-level `architectures` key, so `AutoModel*` cannot dispatch on it and
 `Gemma4ForConditionalGeneration` must be named explicitly. `LTX25_PROMPT_ENHANCER_REPO`
 selects the repo; the bf16 build is one environment variable away.
@@ -605,10 +655,17 @@ and diffusion decoder to CUDA inside the worker for exactly this reason. The enh
 speed: ~1-2 s of billed wall against ~85 s for a real generation, **under 5% overhead** where
 the CPU placement was +3500%.
 
+> ⛔ **Corrected 2026-11-16: "~1-2 s" is the decode alone.** Loading the enhancer in a fresh
+> worker takes about 29 s, and the reservation grows by `ENHANCE_DURATION_SECONDS` = **180 s**
+> for every enhanced run, because the estimator cannot know whether the worker is warm
+> (`zerogpu.py`). The pre-check needs that reservation × 2 of quota free on `xlarge`.
+
 **What that costs, and what now pays for it.** Enhancement is inside the reservation, so
 `zerogpu.estimate_duration` adds `ENHANCE_DURATION_SECONDS` when the toggle is set — an
 enhanced run killed at the reservation boundary would be a self-inflicted wound — and the UI
-caption gives up "costs no quota" to be honest about "no longer costs nine minutes".
+caption gives up "costs no quota" to be honest about "no longer costs nine minutes". *(It then
+said "a second or two of quota", which was also wrong. Since 2026-11-16 it says the run
+reserves 180 s more and usually uses a few seconds.)*
 
 **And the download is prefetched, because it would otherwise be billed.** Without it the
 first enhanced call in each container spends the 88 s Hub fetch *inside* the metered window:
@@ -625,6 +682,13 @@ reservation increment is sized for the download rather than for the decode.
 `LTX25_PREFETCH_ENHANCER=0` declines the ~2.5 GB for a deploy that will never enable
 enhancement — it lands while `demo.launch()` is packing, which is the window
 `ZEROGPU_DISK_CAP_GB` is measured against.
+
+> ⛔ **Corrected 2026-11-16: on the deployed build the prefetch failed on every boot**
+> (`AttributeError: 'tqdm' object has no attribute '_progress'`, in the 2026-11-13 log): the
+> UI's `gr.Progress(track_tqdm=True)` patched tqdm process-wide and broke the prefetch's
+> progress bars. The degraded path was the normal one, so the first enhanced run in each
+> container paid the download inside its reservation. The UI no longer installs that patch
+> (`ui/blocks.py`); a prefetch that works on the Space is not verified yet.
 
 The settings, unchanged from what this section banked in advance and now imported from
 upstream rather than restated: `prompt_max_new_tokens=600`, **greedy decoding**
@@ -883,6 +947,10 @@ shape. No torch, no diffusers, no `safetensors` package. Three reasons, in order
 download. A user who pastes a repo-id for a 2B-architecture adapter gets a specific rejection in
 about a second instead of after a 300 MB download. Stage 1 comes free from `Content-Length`.
 
+> ⛔ **Corrected 2026-11-16: the range-read is not built.** `lora/fetch.py` checks the size from
+> the listing, then downloads, then validates: a wrongly-built adapter costs one bounded,
+> cached download (its docstring says so).
+
 **Upload route:** the bytes are already local, so the same parser runs against the file. Both
 routes converge on one code path, which is what §4.3 asks for.
 
@@ -895,7 +963,7 @@ import diffusers or peft**, because it is the only one that touches a real model
 
 Binding on all code in the repo.
 
-### 5.1 Pin every dependency, with upper bounds — and know what NOT to pin
+### 5.1 Pin every dependency to one exact version — and know what NOT to pin
 
 Evidence from the predecessor: `spaces>=0.30.0` and `torch>=2.4.0` — floors with **no ceiling**
 — alongside exactly one hard pin, `torchaudio==2.10.0`, carrying this comment:
@@ -906,40 +974,62 @@ Evidence from the predecessor: `spaces>=0.30.0` and `torch>=2.4.0` — floors wi
 That comment is a post-mortem, applied to one line while ~50 stayed unbounded.
 
 **But the inverse mistake is also real, and the 2.3 repo made it.** Its own `AGENTS.md:19` says
-**do not pin `spaces`** — the platform pins its own version (live Spaces report 0.49.3 / 0.50.0 /
-0.50.4 while PyPI is 0.51.1) and a conflicting pin breaks pip resolution at build time. Its
+**do not pin `spaces`** — the platform installs its own version, and a conflicting pin breaks pip
+resolution at build time (in August, live Spaces reported 0.49.3 / 0.50.0 / 0.50.4 while PyPI had
+0.51.1; this Space reports 0.51.3 on 2026-11-16, and PyPI has had 0.52.0 since 2026-11-13). Its
 `requirements.txt:2` then pins `spaces>=0.30.0` anyway. We follow the rule the repo wrote and
-did not keep: **no `spaces` line in `requirements.txt`**, and the import is guarded in code
-(`try: import spaces / except ImportError: spaces = None`) so local dev works.
+did not keep: **no `spaces` line in `requirements.txt`**. `app.py` guards the import
+(`try: import spaces`, and on `ImportError` the local stub `zerogpu.local_spaces_stub()`, whose
+`GPU` returns the function unchanged), so local dev works without it.
 
-The full pin set:
+> **Corrected 2026-11-16: every line is now ONE exact version, not a range.** This section used
+> to give each dependency a floor and a ceiling. A range is resolved again on every Space
+> rebuild, so the image gets whatever is newest that day instead of what was tested; on
+> 2026-11-16 a fresh resolution gave transformers 5.23.0, on which the pinned prompt enhancer
+> did not load. `requirements.txt` now pins the versions the real-weights runs of 2026-11-16
+> used, and `tests/test_requirements_exact.py` fails on any range (its only exemption is a line
+> marked `# platform-provided`). Those runs were on Apple silicon with PyTorch 2.15.0, so the
+> CUDA-only lines below — the torch trio as the Space installs it, `bitsandbytes`, `kernels` —
+> have no real-weights evidence under these pins until the Space runs. In particular the
+> bitsandbytes int8 load of the transformer and the text encoder under transformers 5.23.0 has
+> not run yet.
+
+The full pin set, as `requirements.txt` has it:
 
 | package | pin | why |
 |---|---|---|
-| `torch` | `==2.11.0` | ZeroGPU supports exactly 2.8.0 / 2.9.1 / 2.10.0 / **2.11.0**; ceiling is 2.11.0. CUDA 12.8, sm_120 needs cu128+ |
+| `torch` | `==2.11.0` | ZeroGPU supports exactly 2.8.0 / 2.9.1 / 2.10.0 / **2.11.0**; ceiling is 2.11.0. CUDA 12.8, sm_120 needs cu128+. Not for local Apple-silicon runs: 2.11 computes attention wrongly on MPS (README, "Run it locally") |
 | `torchvision` | `==0.26.0` | **trap:** `torchvision 0.28.0` hard-declares `torch==2.13.0`, so a floating torchvision silently upgrades torch past the ceiling |
 | `torchaudio` | `==2.11.0` | must match torch exactly (the ABI break above) |
-| `gradio` | `>=6.24.0,<7` | **5.x is END OF LIFE** (last stable 5.50.0, 2025-11-21) |
 | `diffusers` | `@ git+…@ac56fa2f…` | §1.3 |
-| `transformers` | `>=5.15.1,<6` | |
-| `accelerate` | `>=1.14.0,<2` | |
-| `peft` | `>=0.20.0,<0.21` | LoRA backend |
-| `safetensors` | `>=0.8.0,<0.9` | |
-| `huggingface_hub` | `>=1.28.0,<2` | |
-| `hf_xet` | `>=1.6.0,<2` | |
-| `imageio` | `>=2.37.4,<3` | |
-| `imageio-ffmpeg` | `>=0.6.0,<0.7` | |
-| `av` | `>=18.1.0,<19` | PyAV — required by CRF re-compression (§5.7) |
-| `numpy` | `>=2.5.2,<3` | **numpy 2.** Do NOT pin `<2`: 1.26.4 is 2 years EOL and nothing in the stack caps it |
-| `pillow` | `>=12.3.0,<13` | |
-| `spaces` | **absent, deliberately** | platform-pinned; see above |
+| `transformers` | `==5.23.0` | the version the 12B text encoder and the pipelines ran with on real weights. Its loader refuses one per-layer scale table of the prompt enhancer's checkpoint, so `enhance.py` reads that one weight back from the cached checkpoint and refuses any other mismatch |
+| `tokenizers` | `==0.23.3` | pinned beside transformers because it decides whether transformers imports at all |
+| `accelerate` | `==1.15.0` | |
+| `peft` | `==0.20.0` | LoRA backend |
+| `safetensors` | `==0.8.0` | |
+| `huggingface_hub` | `==1.33.0` | |
+| `hf_xet` | `==1.8.0` | |
+| `kernels` | `==0.16.2` | fetches the NATTEN kernel the diffusion decoder needs; CUDA only |
+| `bitsandbytes` | `==0.50.2` | the int8 route on ZeroGPU. Must stay above 0.46.0, below which the packer tries to move quantised tensors itself |
+| `gradio` | `==6.24.0` | must equal the README's `sdk_version` (a drift test asserts it). **5.x is END OF LIFE** (last stable 5.50.0, 2025-11-21) |
+| `imageio` | `==2.38.1` | |
+| `imageio-ffmpeg` | `==0.6.0` | |
+| `av` | `==18.1.0` | PyAV — required by CRF re-compression (§5.7) |
+| `numpy` | `==2.5.5` | **numpy 2.** Do NOT go back to 1.x: 1.26.4 is 2 years EOL and nothing in the stack caps it |
+| `pillow` | `==12.3.0` | |
+| `spaces` | **absent, deliberately** | the platform installs it; see above |
+
+**The named fallback.** If the int8 load misbehaves on the Space, the fallback is
+`transformers==5.22.2` with exactly the same companion pins (the header of `requirements.txt`
+says so). On 5.22.2 the enhancer's checkpoint loads as stored and nothing is read back.
 
 **gradio 6 breaking changes that hit us:** `gr.Video` subtitle-tuple return removed;
 `show_download_button` / `show_share_button` → `buttons=[...]`; `gr.Audio` `show_controls` →
 `show_recording_waveform`; `min_length` / `max_length` → event-listener validators.
 
-**Python 3.12 is required, not preferred:** numpy 2.5.2 needs ≥3.12 and `av` 18 needs ≥3.11. The
-default 3.10.13 image silently resolves both *downward* rather than failing.
+**Python 3.12 is required, not preferred:** numpy 2.5.5 needs ≥3.12 and `av` 18.1.0 needs ≥3.11
+(their `Requires-Python`). The default 3.10.13 image resolved both *downward* when the pins were
+ranges; with exact pins it fails the build instead.
 
 ### 5.2 One central model-file indirection
 
@@ -952,6 +1042,14 @@ happens again, the message should tell the operator which URL to go look at.
 
 Pinning a **revision** per repo is part of this module's job — a repo whose content can change
 under us is not pinned just because its name is stable.
+
+> **Corrected 2026-11-16: two things live elsewhere.** The quantization choice is
+> `LTX25_QUANTIZATION`, resolved in `config.py`/`device.py` and applied in `pipelines.py`, not
+> here. The prompt enhancer is outside this module by design (§3.5) and is pinned on its own
+> (`enhance.ENHANCER_REVISION`). The diffusion decoder has its own revision here (`aba1b702`,
+> the vendor's corrected upload of 2026-10-08); every other component stays at `871165de`.
+> One revision is still not ours to pin: the NATTEN kernel the diffusion decoder fetches
+> (`version=1`, hard-coded upstream).
 
 **New requirement: `model_files.py` emits the download allow-list as data.** It must be able to
 produce the exact list of **37 paths** (§2.3), so that:
@@ -1044,7 +1142,7 @@ loaded components, using literals only as fallbacks. Same discipline. §5.7 exte
 |---|---|---|
 | `height % 32 == 0`, `width % 32 == 0` | enforced upstream (raises) in all generation pipelines *and* the latent-upsample pipeline | validate before the call, snap in the UI, **show** the snapped value |
 | `num_frames % 8 == 1` | **not** hard-raised upstream. Falls out of `latent_num_frames = (num_frames - 1) // vae.temporal_compression_ratio + 1`, which **silently floors** a bad value | we raise. **The `8` is `vae.temporal_compression_ratio`** — see below |
-| audio/video length agreement | audio and video lengths are computed independently, and a supplied `audio_latents` **overrides** the duration-derived audio length (§5.7) | validate they agree; raise rather than emit a desynced file |
+| audio/video length agreement | audio and video lengths are computed independently, and a supplied `audio_latents` **overrides** the duration-derived audio length (§5.7) | validate they agree; raise rather than emit a desynced file. *(As built, 2026-11-16: in a mode that takes audio, a set length longer than the audio is refused before a GPU is reserved, and audio longer than the video is trimmed with a note, never padded; automatic length there means "match my audio", taken from the file, because the duration head reads only the text. `generate.py`)* |
 
 **The `num_frames` modulus is a parameter, not a literal.** Hardcoding `8` would violate §5.4.
 Resolution:
@@ -1078,6 +1176,13 @@ This is the fail-loudly principle applied to the resource budget. It turns an an
 `"Workload evicted, storage limit exceeded (150G)"` into a diagnosable message that names the
 fix. It also runs the §1.3 diffusers-version assertion. Test case.
 
+> ⛔ **Corrected 2026-11-16: only half of this exists.** `preflight.py` checks the diffusers
+> version and that the weights are complete, and the startup report logs the disk floor; it
+> measures no free RAM, on the Space or anywhere (its docstring still promises it). A memory
+> preflight exists for **local** runs only: `memory.py` checks committed memory plus what the
+> next load or the denoise will add against a limit (`LTX25_MEMORY_LIMIT_GB`, 90 GB on macOS by
+> default) and refuses with the numbers.
+
 **The startup report** (`pipelines.startup_report`) prints, before anything expensive:
 
 ```
@@ -1098,6 +1203,14 @@ LTX-2.5 Studio starting
 > `quantised transformer, text_encoder as int8 | peak RSS 0.91 -> 87.13 GiB`
 > — captured in `SPACE_GENERATION_FINDING.md` §5 and `OPERATOR_HANDOFF.md` §5.
 > The load-bearing line survives unchanged: the live Space reads `37/37 files`.
+>
+> ⛔ **Stale again (corrected 2026-11-16).** The report was rewritten: it no longer prints
+> `dtype : bf16 (fixed; …)`, which was false under int8, but `device`, `precision` and
+> `runner` lines resolved from the configuration; `packed copy : not measured yet, ZeroGPU
+> writes it at launch after this report`; and `zerogpu size : requested xlarge; reservation
+> 180 s per run (x1.5 with stage 2, +60 s with LoRAs, +180 s with prompt enhancement)`. The old
+> `zerogpu size : not yet known (reported after packing)` was never followed by a report. The
+> new report has not run on the Space yet.
 
 The **cache count is the load-bearing line**: `36/37`, with the first missing file named, makes
 "preload worked" and "preload silently did nothing" two different sentences. When a GPU run fails
@@ -1136,7 +1249,7 @@ Recorded for completeness — **but see §8.4: we do not use accelerate's offloa
 | 1 | **ZeroGPU quota attribution rides a contextvar** (`gradio.context.LocalContext.request`). It does **not** cross a plain `threading.Thread` — without it every user is bucketed as Space-anonymous and you get *"Space app has reached its GPU limit"* at **0 minutes used** | any thread we spawn must carry `contextvars.copy_context()`; better, do not spawn plain threads across the GPU boundary |
 | 2 | The `duration=` callable must accept **the exact same positional signature** as the decorated function, trailing kwargs included | otherwise TypeError at schedule time; test the signature match |
 | 3 | **Hidden 1.5× duration multiplier on `large`** (`duration_factor`): `duration=60` is scheduled as 90 s. On `xlarge` the factor is skipped but the request is **doubled** instead | never reason about wall-clock quota from the `duration=` number alone |
-| 4 | Default duration is 60 s. The **max is a server-side, tier-dependent, unpublished cap** | **discover it, never hardcode it.** Empirically ~120 s is the safe ceiling; the official Lightricks LTX Space ships `@spaces.GPU(duration=75, size="xlarge")` |
+| 4 | Default duration is 60 s. The **max is a server-side, tier-dependent, unpublished cap** | **discover it, never hardcode it.** Empirically ~120 s is the safe ceiling; the official Lightricks LTX Space ships `@spaces.GPU(duration=75, size="xlarge")`. *(Corrected 2026-11-16: this app's base reservation is now 180 s, `LTX25_GPU_DURATION_SECONDS`, and `zerogpu.estimate_duration` can ask for up to 510 s: ×1.5 with stage 2, +60 s with LoRAs, +180 s with the enhancer. The server's maximum is still not known.)* |
 | 5 | **Do NOT auto-retry a ZeroGPU timeout** using the captured Gradio request: the `X-IP-Token` ages past TTL during attempt 1, so attempt 2 always 401s with *"Expired ZeroGPU proxy token"* — **masquerading as the root cause** | surface the original timeout; never retry behind the user's back |
 | 6 | `preload_from_hub` is **capped at 10 entries**, and preloaded files are owned by the *build* user and **read-only to runtime uid 1000** — a later lazy `hf_hub_download` fails with `Permission denied (os error 13)` unless the cache is mirrored | §6.2 |
 | 7 | Accumulated generations filled the 2.3 Space's disk and it went unhealthy | §2.7 — sweep on startup and after each run |
@@ -1151,14 +1264,20 @@ Recorded for completeness — **but see §8.4: we do not use accelerate's offloa
 | **SDK** | `sdk: gradio`, `sdk_version: 6.24.0` — **a custom Dockerfile forfeits ZeroGPU entirely** |
 | **Python** | `python_version: "3.12"` — required, not optional (§5.1) |
 | **Hardware** | ZeroGPU. `suggested_hardware: zero-a10g` is the **legacy id string the Spaces API still reports — it is NOT an A10G** (§8.1) |
-| **Size** | `size="xlarge"` declared explicitly (§8.5) |
-| **Weights** | README frontmatter `preload_from_hub:` |
+| **Size** | `size="xlarge"` declared explicitly (§8.6): `LTX25_ZEROGPU_SIZE` defaults to `xlarge` |
+| **Weights** | downloaded at startup by `preflight.ensure_weights()` (§6.2). `preload_from_hub:` is disabled: it cannot fetch a gated repo for a private Space |
 | **Secret** | `HF_TOKEN` — required; `Lightricks/LTX-2.5-Diffusers` is gated |
 | **Git** | GitHub `git@github.com:techfreakworm/ltx2.5-studio.git`; Space and GitHub stay in sync |
 
 > **On the Size row (annotated 2026-08-25):** never declared in practice —
 > every deploy has run `auto`, and the live Space was promoted to `xlarge` by
 > inference. §8.6's annotation carries the detail.
+>
+> ⛔ **Corrected 2026-11-16:** not "by inference" — `auto` never promotes, so the Space
+> ran on the 47.375 GiB `large` partition until `LTX25_ZEROGPU_SIZE=xlarge` was set as a
+> Space variable on 2026-08-26 (§8.6). The code now defaults to `xlarge`, so the row holds
+> as written even without the variable. The Weights row is corrected in place: the
+> download moved to startup when `preload_from_hub` failed on the private Space.
 
 Naming precedent: `techfreakworm/LTX2.3-Studio`, `wan-studio` (private), `SAM3-cutout-studio`
 (private).
@@ -1210,6 +1329,8 @@ gcTimeout : 172800 s = 48 hours
 There is **no persistent storage**, so the full **72.186 GB** is refetched on
 every cold start — restart, rebuild, or 48 hours idle. `startup_duration_timeout:
 1h` covers it. **This is accepted for the development phase**, not endorsed.
+*(Still so on 2026-11-16: storage None, `gcTimeout` 48 h. The cold start of 2026-11-13 took
+13 min 59 s to serving, about 11.5 min of it this download.)*
 
 Two routes back to preloading, either of which restores it:
 
@@ -1299,11 +1420,18 @@ bug in the allow-list, not as normal operation.
 `LTX-2.3-22b-IC-LoRA-*` are each gated on their own acceptance and the token does not have
 them. This is **not** a blocker: §4.5 shows the ungated community LoRAs are a *better* R3
 fixture anyway, because they are what users actually upload. Recorded so nobody is surprised
-when an official IC-LoRA 403s.
+when an official IC-LoRA 403s. *(Checked in August; not re-checked since.)*
 
 **Local reality check:** the gate being open does not mean we can generate locally. The 22B
 model does not run on macOS. Real generations happen on the Space, under the quota discipline
 in [`docs/TEST_PLAN.md`](TEST_PLAN.md).
+
+> ⛔ **Corrected 2026-11-16: it runs on Apple silicon now.** With a separate PyTorch 2.15
+> environment, the Q8_0 GGUF transformer and staged residency (the text encoder and the
+> transformer are never resident together), ten of the eleven modes are verified on real
+> weights on a 128 GB Mac ([`SPACE_MODE_MATRIX.md`](SPACE_MODE_MATRIX.md) §10.2; how to run it:
+> the README). Upscale ×2, the diffusion decoder and int8 still need CUDA, so they are checked
+> on the Space only.
 
 ---
 
@@ -1314,12 +1442,17 @@ in [`docs/TEST_PLAN.md`](TEST_PLAN.md).
 ```
 app.py                       # entrypoint. `import spaces` FIRST (§8.2), then build + launch.
 ltx25_studio/
-  config.py                  # device/dtype selection, paths, retention cap (§2.7), env overrides
-  model_files.py             # §5.2 — THE single source of truth: repo ids, revisions, subfolders,
-                             #   filenames, sizes, AND the dtype/quantization switch (§2.6)
+  config.py                  # every LTX25_* setting, resolved and validated: GPU size, duration,
+                             #   quantization, device, retention cap (§2.7), paths
+  device.py                  # LTX25_DEVICE (cuda/mps/cpu), dtype and int8 per device, the MPS
+                             #   numerics self-test, RoPE on the CPU for MPS
+  model_files.py             # §5.2 — THE single source of truth: repo ids, revisions (one per
+                             #   component where they differ), subfolders, filenames, sizes
   errors.py                  # typed exception hierarchy; every error carries an actionable detail
-  preflight.py               # §5.6 — RAM/disk headroom vs the model_files requirement;
-                             #   §1.3 — the diffusers-version fail-fast assertion
+  preflight.py               # weights complete (or the local runner's files present);
+                             #   §1.3 — the diffusers-version fail-fast assertion. No RAM check
+  memory.py                  # local runs: committed memory + the next step vs a limit (§5.6)
+  local_runtime.py           # local runs on mps/cpu: GGUF transformer, staged residency
   zerogpu.py                 # §8 — the `spaces` shim, the static @spaces.GPU policy, the
                              #   duration callable, contextvar propagation, and the
                              #   "never return CUDA tensors" boundary
@@ -1330,6 +1463,7 @@ ltx25_studio/
                              #   conversion (§5.7 #1); uint8/PIL normalisation (§5.7 #7)
   audio.py                   # waveform <-> mel <-> audio_vae latents; params from config (§5.4);
                              #   vocoder decode
+  audio_conditioning.py      # supplied audio held fixed or varied by a level, on its own schedule
   modes.py                   # §3.3 registry: 11 UI modes as data over the 4 real workflows
   generate.py                # §7.4 stage graph. OWNS the never-empty invariant (§5.3) and the
                              #   per-run output directory
@@ -1339,13 +1473,24 @@ ltx25_studio/
   outputs.py                 # mux video+audio, single-track export, 20 GB oldest-first eviction
   lora/
     inspect.py               # header-only safetensors parse; metadata + convention detection
-    validate.py              # validator stages 1-6 (§4.3)
+    validate.py              # validator stages 1-6.5 (§4.3)
     apply.py                 # load_lora_weights, stage-7 attach assertion, both-component fusing
+    fetch.py, keys.py, manifest.py, staging.py
+                             # Hub fetch + bounded cache, where each key lands (diffusers'
+                             #   renames), the shape manifest stage 6.5 checks, staged adapters
   ui/
     blocks.py                # Gradio Blocks assembly
     components.py            # reusable widgets (condition list, LoRA picker, constraint hints)
     handlers.py              # thin adapters: UI event -> one call -> UI update. No logic.
+    fields.py, render.py, chrome.py, showcase.py, uploads.py
+                             # field specs, user-facing strings, styling, examples and samples,
+                             #   app-owned copies of uploaded LoRA files
 ```
+
+*(Corrected 2026-11-16 in place: `device.py`, `memory.py`, `local_runtime.py`,
+`audio_conditioning.py` and the extra `lora/` and `ui/` modules were missing; device selection
+moved out of `config.py`, the quantization switch is not in `model_files.py`, and `preflight.py`
+has no RAM check.)*
 
 ### 7.2 Layering rules
 
@@ -1388,6 +1533,16 @@ the VAE reconstruction stage"*. It would not error. It would just be worse, fore
 would know why.
 
 **Decision: classic pipelines, with the diffusion decode added as an explicit stage.**
+
+> ⛔ **Corrected 2026-11-16: as built until today, only half of this happened.** The diffusion
+> decode was wired into the stage-2 branch alone, and stage 2 is off by default, so every
+> default run decoded with the convolutional VAE — exactly the silent loss described above.
+> Now the decoder is a per-run choice, `LTX25_DECODER` (`auto` by default): `auto` decodes with
+> the diffusion decoder where it can run — CUDA, its kernel available, a video large enough
+> for it — and with the conv VAE otherwise, and the run says which. Modes that discard their
+> video always use the conv VAE. The decoder's weights are pinned to the vendor's corrected
+> upload (`aba1b702`, §5.2). None of this has run on the Space yet; off CUDA (a Mac) every
+> run decodes with the conv VAE.
 
 ```
 stage 1   LTX2ConditionPipeline(..., sigmas=DISTILLED_SIGMA_VALUES,
@@ -1466,6 +1621,11 @@ decisions; none is a knob we can turn.
 > 150 [OK]**, prune freed 65.25 GB, all eleven modes generating at sha
 > `287ba9c`. The finding itself stands: bf16 on `storage: None` remains
 > structurally infeasible — which is exactly why the live Space is not bf16.
+>
+> ⛔ *Corrected 2026-11-16:* "82.2 GB of 150 [OK]" is a reading taken before packing (the
+> platform's progress bar read `40.6G` packed on the 2026-11-13 boot; the disk peak was never
+> measured), and at
+> `287ba9c` the eleven modes *executed*: every output up to `ff142d9` was colour static.
 
 **The base is always the superset class**, `LTX2ConditionPipeline`. Deriving
 superset → subset can only drop `audio_scheduler`, which the subset does not
@@ -1494,7 +1654,8 @@ integration is the wrong trade.
 
 The modular path is recorded here as **the canonical alternative**: if we move to it, the decode
 block is swappable exactly as the docstring describes, and `vae/` (1.452 GB) stays in the subset
-as the conv-VAE fallback either way.
+as the conv-VAE fallback either way. *(Corrected 2026-11-16: until today the conv VAE was not a
+fallback but the decoder of every default run; see the correction under "Decision" above.)*
 
 ---
 
@@ -1518,6 +1679,11 @@ of several.
 
 **VRAM is not our constraint.** 67.2 GiB of weights against `xlarge`'s ~95 GiB leaves ~28 GiB
 for activations. The constraints are CPU RAM and transient disk (§2).
+
+> ⛔ **Corrected 2026-11-16:** only on `xlarge`, and the Space did not get `xlarge` until
+> 2026-08-26 (`auto` never promotes, §8.6). On the measured 47.375 GiB `large` partition,
+> stage 2 at 704×480×49 (55.906 GiB reserved) could not fit. On `xlarge` (94.971 GiB, now the
+> code's default) the largest peak measured leaves ~39 GiB.
 
 ### 8.2 Import order is load-bearing
 
@@ -1546,6 +1712,13 @@ normal GPU-box practice:
    **disk → pinned host memory → VRAM**.
 
 HF's guidance, quoted: **models must be placed on cuda at the root module level.**
+
+> ⛔ **Corrected 2026-11-16: step 2's timing is wrong, and §3.5 has it right.** The module-scope
+> `.to("cuda")` registers the tensors; the packing itself runs once, at `demo.launch()`
+> (`torch.pack()` in `spaces/zero/__init__.py`). The 2026-11-13 boot log shows it: a disk
+> reading labelled "after packing" with `packed 0.0`, then the platform's own progress bar
+> packing `40.6G`, then "Cleaned 65.25GB of tensor files … after packing" 29 s later. The
+> startup report was relabelled accordingly (§5.6).
 
 ##### ⚠️ The snapshot is freed after packing — but only if the mmap survives
 
@@ -1582,8 +1755,15 @@ coexist for the whole packing window — which is the peak in §2.5, the authori
 Steady state afterwards is fine at ~72 GB. **It is the peak that evicts us, not
 the residency.**
 
+> *Observed 2026-11-13, recorded 2026-11-16:* under int8, 1344 transformer and 331 text-encoder
+> parameters are materialised into anonymous memory (the app logs a warning for them), and the
+> boot still cleaned 65.25 GB. So precondition 1 does not hold per tensor; most likely a blob is
+> unlinked while any of its tensors is still mapped. Not verified beyond that one log.
+
 **Corollary: do NOT lazy-load models inside the decorated function.** HF documents that
-placements are optimised for startup; lazy loading defeats the packer entirely.
+placements are optimised for startup; lazy loading defeats the packer entirely. *(As built,
+two exceptions are deliberate: the stage-2 parts and the prompt enhancer load lazily inside the
+worker, to keep them out of the packing window, and pay a per-worker load instead (§3.5).)*
 
 ##### Considered and rejected: deferring the second workflow
 
@@ -1659,17 +1839,32 @@ the cost is visible in the source rather than being a surprise in the quota dash
 > GiB**. §8.6's original instruction — *declare the size explicitly rather than
 > being silently promoted* — was right on the first try and was talked out of by
 > a threshold reading. Trace: [`MIG_ALLOCATOR_SIGHTINGS.md`](MIG_ALLOCATOR_SIGHTINGS.md) §1.
+>
+> ✅ **And since 2026-11-16 it is the code's default:** `LTX25_ZEROGPU_SIZE` defaults to
+> `xlarge` (`config.DEFAULT_ZEROGPU_SIZE`), so a Space that loses the variable still asks for
+> the full GPU. The int8 packed size the 2026-08-25 annotation estimated at ~51.1 GB was
+> `40.6G` on the platform's own progress bar (2026-11-13 boot).
 
 **Quota arithmetic:** PRO gives 2400 s/day. At `duration=75` on `xlarge` (2×), each run is
 charged ~150 s → **~16 runs/day**. Dropping under 42.00 GiB via quantization would return us to
 `large` at 1× — that is the entire quota argument for §2.6's fallback, and it is worth
 approximately double the runs.
 
+> ⛔ **Corrected 2026-11-16: both halves of that paragraph are wrong.** (1) The tier follows the
+> `size` passed, not the packed size: the Space is quantised *and* explicitly `xlarge`, so
+> dropping under 42.00 GiB would buy nothing. (2) The reservation is not 75 s. It is
+> `zerogpu.estimate_duration`: the base `LTX25_GPU_DURATION_SECONDS` (180 s by default and on
+> the Space), × 1.5 with stage 2, + 60 s with LoRAs, + 180 s with prompt enhancement, so 180 to
+> 510 s. Billing is the GPU time actually used × 2 on `xlarge` (Hugging Face's documented rate;
+> not measurable here, no quota endpoint answers), so a runs-per-day figure depends on what each
+> run uses and is not stated here. To start, a run needs its reservation × 2 of quota free.
+
 Two further traps from §5.8: the hidden **1.5× `duration_factor` on `large`** (so `duration=60`
 schedules as 90 s; `xlarge` skips the factor but doubles the request instead), and the fact that
 the **maximum duration is a server-side, tier-dependent, unpublished cap** — discover it, never
 hardcode it. ~120 s is the empirical safe ceiling; the official Lightricks LTX Space ships
-`@spaces.GPU(duration=75, size="xlarge")`.
+`@spaces.GPU(duration=75, size="xlarge")`. *(Corrected 2026-11-16: this app now asks for
+180–510 s, see above; the server's maximum is still not known.)*
 
 ### 8.6.1 Where §8 actually executes — and why the decorator is unconditional
 
@@ -1710,6 +1905,16 @@ MPS has no ZeroGPU packer, no `spaces` decorator semantics, and unified memory c
 arithmetic entirely. Device strategy is selected in `config.py`, the `spaces` import is guarded,
 and the local path is expected to be **capability-limited rather than identical**. Do not assume
 a code path that works on ZeroGPU works on MPS, or vice versa.
+
+> **As built, 2026-11-16.** The device is chosen in `device.py`: `LTX25_DEVICE` = `auto`
+> (CUDA where it exists, otherwise no generation device: the UI starts and Generate says how
+> to opt in) | `cuda` | `mps` | `cpu`. On `mps`/`cpu` real weights go to `local_runtime.py`:
+> the GGUF transformer through diffusers' own loader, staged residency (text encoder and
+> transformer never resident together), RoPE computed on the CPU in float64, a memory
+> preflight before every heavy step (`memory.py`), and an MPS numerics self-test that refuses
+> a PyTorch which computes wrongly on this GPU (2.11 does; 2.15.0 is what was verified).
+> Capability-limited as predicted: Upscale ×2, the diffusion decoder and bitsandbytes int8 need
+> CUDA. Verified on real weights for ten of eleven modes (`SPACE_MODE_MATRIX.md` §10.2).
 
 ---
 
@@ -2099,7 +2304,9 @@ run must be green with zero weights on disk.
 Ranked by how much silent wrongness they prevent:
 
 1. **A LoRA for the wrong architecture is rejected** — specifically at stage 7 if it survives
-   stages 1–6 (§4.3).
+   stages 1–6 (§4.3). *(Corrected 2026-11-16: §4.3 is right and this line was not. Stage 6.5
+   is the gate — per-module shape fit, now checked at Validate time against a checked-in shape
+   manifest, with no weights — and stage 7's attach count is the second line, not the first.)*
 2. **A generation that produces no file raises** — never returns an empty path, and there is no
    newest-file fallback (§5.3).
 3. **`denormalize=False` on the diffusion decode** — the double-denormalization corruption
@@ -2123,7 +2330,7 @@ register.
 | # | Question | Resolution |
 |---|---|---|
 | **OQ-1** | Pin a diffusers release, or `main`? | **RESOLVED: pin the exact SHA** `ac56fa2f…` (§1.3). A SHA is more pinned than a range, not less. Plus a startup version assertion, because 0.39.0 fails *late*. |
-| **OQ-2** | Does `diffusion_decoder` have a consumer? | **Moot** — the SHA provides it. Both `diffusion_decoder` (0.834) and `duration_head` (0.004) stay in the subset; duration prediction ships. |
+| **OQ-2** | Does `diffusion_decoder` have a consumer? | **Moot** — the SHA provides it. Both `diffusion_decoder` (0.834) and `duration_head` (0.004) stay in the subset; duration prediction ships. *(2026-11-16: until today its only consumer was stage 2; it now decodes single-stage runs too, on CUDA, §7.4.)* |
 | **OQ-3** | Is `num_frames % 8 == 1` enforced? | **RESOLVED: no.** Upstream silently floors. We raise; the modulus is a **parameter with an `8` fallback** for pre-load validation, plus a load-time tripwire (§5.5). |
 | **OQ-4** | Gemma-3 or Gemma-4? | **CLOSED ON EVIDENCE: Gemma-4.** `model_index.json` says `text_encoder: ['transformers', 'Gemma4UnifiedForConditionalGeneration']`. The diffusers annotation is a union (`Gemma3ForConditionalGeneration \| Gemma4UnifiedForConditionalGeneration`); the *weights* resolve it. So CRF provably takes the `gemma4` branch → **18**. **Still derive family and CRF at runtime; hardcode neither** (§5.7 #8). |
 | **OQ-5** | Audio length from duration or latent shape? | **RESOLVED: latent shape wins.** Upstream computes it from duration, then overrides from `audio_latents.shape` when supplied. The desync is real and directional (§5.7 #11). |
@@ -2136,10 +2343,10 @@ register.
 | **1** | ~~bf16 fits ZeroGPU's transient disk~~ — **SETTLED: it does not.** | **Not a risk any more, a finding.** The snapshot **IS** freed after packing (verified, `spaces` 0.51.1) — and the unlink runs *strictly after* `_pack()`, so the 144.37 GB peak precedes it, and with an 8–12 GB image the total is **152–156 GB against a 150 GB cap**. See §2.5 for the authoritative arithmetic. The ~68 GB RAM ceiling remains a community cgroup observation, separate and still open. | **No longer settled by measurement — it is settled.** The routes are persistent storage, a public Space with `preload_from_hub` (§6.2), or smaller checkpoints. All three are operator decisions, none is a knob we can turn. **ZeroGPU is parked; hinode is the critical path.** |
 | 2 | ~~the packer handles quantised tensor subclasses~~ — **RESOLVED: it does, for bitsandbytes** | `spaces/zero/torch/bitsandbytes.py` no-ops for bnb ≥ 0.46.0, wired in at `patching.py:328/355/445`. **No equivalent module exists for torchao** — bnb is supported, torchao is not, and that decides the library. *Verified, `spaces` 0.51.1.* | Not a risk. Recorded because the asymmetry is invisible from outside. See `docs/ZEROGPU_DISK.md`. |
 | 3 | ~~`preload_from_hub` 10-entry cap~~ | **RETIRED.** We are one repo → one entry with comma-separated filenames. Fits comfortably (§6.2). | — |
-| 4 | Max `@spaces.GPU` duration on our tier | server-side, tier-dependent, **unpublished** | discover empirically; never hardcode (§5.8 #4) |
-| 5 | Multishot via prompt structure produces usable results | no API support, and the enhancer system prompts actively discourage scene cuts (§3.4) | presented to users as unverified technique, not a feature |
-| **7** | ~~The diffusion decoder fetches NATTEN from the Hub at generation time~~ — **ANSWERED: once per process.** | ✅ **Measured on hinode**: two stage-2 generations in one process, **exactly one** kernel fetch. So a worker needs outbound network at its **first** stage-2 use, not on every press of Generate. | **Still a real dependency** — each cold worker pays it once, and `get_kernel("shi-labs/natten", version=1)` is hardcoded inside diffusers so we cannot pin it by revision. Lazy construction keeps it off the startup path for the eight modes that never reach stage 2. |
-| 6 | An LTX-**2.3** LoRA attaches cleanly to the **2.5 distilled** transformer | the model card says most 2.3 LoRAs run on 2.5 unchanged, but our R3 fixture is a 2.3 LoRA and our transformer is 2.5-distilled; the official 2.5 LoRA targets the **DEV** transformer, so it is not a valid control | **TEST_PLAN R3** — stage 7 asserts attachment count > 0 against real weights |
+| 4 | Max `@spaces.GPU` duration on our tier | server-side, tier-dependent, **unpublished** | discover empirically; never hardcode (§5.8 #4). *(2026-11-16: still unknown, and now load-bearing: this app asks for up to 510 s.)* |
+| 5 | Multishot via prompt structure produces usable results | no API support, and the enhancer system prompts actively discourage scene cuts (§3.4) | presented to users as unverified technique, not a feature. *(2026-11-16: the UI no longer offers a shot list, §3.4; several shots can still be written into the prompt.)* |
+| **7** | ~~The diffusion decoder fetches NATTEN from the Hub at generation time~~ — **ANSWERED: once per process.** | ✅ **Measured on hinode**: two stage-2 generations in one process, **exactly one** kernel fetch. So a worker needs outbound network at its **first** stage-2 use, not on every press of Generate. | **Still a real dependency** — each cold worker pays it once, and `get_kernel("shi-labs/natten", version=1)` is hardcoded inside diffusers so we cannot pin it by revision. Lazy construction keeps it off the startup path for the eight modes that never reach stage 2. *(Corrected 2026-11-16: three modes skip stage 2, not eight. And with `LTX25_DECODER=auto` the diffusion decoder now decodes single-stage video runs on CUDA too, so a cold worker pays the fetch at its first video run; if the decoder or its kernel cannot be built, `auto` falls back to the conv VAE and says so. Not yet seen on the Space.)* |
+| 6 | An LTX-**2.3** LoRA attaches cleanly to the **2.5 distilled** transformer | the model card says most 2.3 LoRAs run on 2.5 unchanged, but our R3 fixture is a 2.3 LoRA and our transformer is 2.5-distilled; the official 2.5 LoRA targets the **DEV** transformer, so it is not a valid control | **TEST_PLAN R3** — stage 7 asserts attachment count > 0 against real weights. *(2026-11-16: the validator now warns on a 2.3 adapter instead of refusing it. Two 2.5 adapters visibly change the output on real weights, locally (`SPACE_MODE_MATRIX.md` §10.2); a 2.3 adapter has not been run on real weights.)* |
 | **8** | **`temporal_latent_upsampler` has no documented role** — we download 0.2619 GB and `preflight` carries a dedicated error path for it | It is the **same class** as the spatial one (`LTX2LatentUpsamplerModel`), differing only by `spatial_upsample`/`temporal_upsample` and `use_rational_resampler`. But upstream's component table lists **only** `latent_upsampler/` as belonging to the two-stage recipe, and neither documented recipe nor `LTX25AutoBlocks` mentions the temporal one. *Read off the model card at revision `871165de…` and the configs themselves, not inferred* | **Deliberately not wired.** Inventing a role for it in a graph upstream does not describe is worse than 0.26 GB of unused download. If it proves to be dead weight the allow-list can drop it — but on evidence, not on tidiness |
 
 > **Risk 1, re-read on 2026-08-25 — three of its clauses aged, differently.**
@@ -2151,6 +2358,10 @@ register.
 > all eleven modes at sha `287ba9c` via the route the "how it gets settled"
 > column did not list — int8 runtime quantization (`ZEROGPU_DISK.md` Option B),
 > fitting at 82.2/150 [OK].
+>
+> ⛔ *Corrected 2026-11-16:* at `287ba9c` the eleven modes *executed*; every output up to
+> `ff142d9` was colour static. "82.2/150 [OK]" is a reading taken before packing; the disk
+> peak has never been measured. hinode is retired.
 
 ### ✅ Blocker cleared
 
@@ -2158,7 +2369,8 @@ register.
 `model_index.json`. Weights work is unblocked.
 
 Remaining access note, **not** a blocker: the Lightricks *LoRA* repos are separately gated and
-still shut. §4.5 shows the ungated community LoRAs make a better R3 fixture anyway.
+still shut. §4.5 shows the ungated community LoRAs make a better R3 fixture anyway. *(Checked in
+August; not re-checked since.)*
 
 ---
 
