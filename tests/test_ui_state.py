@@ -359,8 +359,9 @@ def test_a_hidden_size_or_range_is_neither_validated_nor_sent(form, wired):
 
 
 def test_the_refused_state_lights_no_cost_lamp(tmp_path):
-    adapter = tmp_path / "a.safetensors"
-    adapter.write_bytes(b"x")
+    from lora_fixtures import good_adapter
+
+    adapter = good_adapter(tmp_path)
     values = (
         {spec.key: spec.default for spec in FIELDS}
         | inputs_for("text_to_video")

@@ -93,3 +93,17 @@ def test_the_sample_jump_shows_only_while_the_monitor_shows_a_sample(tmp_path, m
     assert (
         "@media (min-width: 1024px) { #sample-jump { display: none !important; } }" in chrome._css()
     )
+
+
+def test_a_checked_box_and_a_chosen_chip_are_marked_in_ink_where_gradio_paints_them():
+    """Minor 17: Gradio's preflight sheet paints a white tick and dot directly
+    (``.gradio-container-6-24-0 [type=checkbox]:checked``, specificity 0,3,0), past the
+    theme variable its component reads, so the ink marks are set by ID (the capture rig's
+    m17 checks the pixels)."""
+    css = chrome._css()
+    for kind, mark in (("checkbox", chrome._INK_TICK), ("radio", chrome._INK_DOT)):
+        rule = (
+            f'#commission input[type="{kind}"]:checked {{ background-image: {mark} !important; }}'
+        )
+        assert rule in css, kind
+        assert "%2312161b" in mark, "the mark is ink, not white"

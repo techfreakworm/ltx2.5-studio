@@ -367,6 +367,8 @@ footer .run-history, footer .run-history + .divider { display: none !important; 
   #rail::-webkit-scrollbar-track { background: transparent; }
   #rail::-webkit-scrollbar-thumb { background: var(--mr-line-strong); border-radius: 6px;
     border: 2px solid var(--mr-ink); }
+  /* the caption keeps two lines, so a one-line caption does not move Generate */
+  #rail > #monitor-caption { min-height: 38px; }
   /* Generate never leaves the rail's visible area */
   #rail > #commit { position: sticky; bottom: 0; z-index: 3; background: var(--mr-ink);
     padding: 8px 0 4px !important; margin-top: -8px !important; }
@@ -418,8 +420,6 @@ input[type="range"] { accent-color: var(--mr-paper); }
 #commission input[type="range"]::-moz-range-thumb { background-color: var(--mr-paper) !important;
   box-shadow: 0 0 0 2px var(--mr-ink) !important; }
 #commission input[type="range"][disabled]::-webkit-slider-thumb { background-color: var(--mr-dust) !important; }
-/* the radio chips' inner dot is white on paper in Gradio; ink here */
-.gradio-container .gradio-style input[type="radio"]:checked::after { background-color: var(--mr-ink) !important; }
 /* help text at a readable measure */
 #commission .info-text, #commission .mr-caption p, #commission .mr-hint p, #commission .mr-line p,
 #commission .mr-bay-head p, #commission #lora-verdict p { max-width: 70ch; }
@@ -508,6 +508,17 @@ button:disabled { cursor: not-allowed !important; }
 #commission :is(#in-image, #in-video, #in-audio) :is(button, .upload-container, .wrap) {
   color: var(--mr-dust) !important; }
 #in-audio .upload-container, #in-audio [data-testid="upload"] { min-height: 120px !important; }
+/* Gradio's upload prompt is Title Case ("Drop Image Here - or - Click to Upload"):
+   its words are hidden (and so dropped from the accessibility tree) and ours shown */
+#commission :is(#in-image, #in-video, #in-audio) .wrap:has(> .or) { font-size: 0 !important;
+  visibility: hidden; }
+#commission :is(#in-image, #in-video, #in-audio) .wrap:has(> .or) > :first-child { visibility: visible; }
+#commission :is(#in-image, #in-video, #in-audio) .wrap:has(> .or)::after { visibility: visible;
+  font-size: 14px; line-height: 21px; color: var(--mr-dust); text-align: center; max-width: 32ch; }
+#commission #in-image .wrap:has(> .or)::after { content: "Drop an image here, or click to choose one"; }
+#commission #in-video .wrap:has(> .or)::after { content: "Drop a video here, or click to choose one"; }
+#commission #in-audio .wrap:has(> .or)::after {
+  content: "Drop an audio file here, or click to choose one"; }
 .mr-caption p { margin: 4px 0 0 !important; font-size: 13px; line-height: 19px; color: var(--mr-dust); }
 #shape label:has(input[value="Match input"]) { font-family: var(--mr-body); font-size: 14px; }
 
@@ -593,6 +604,12 @@ button:disabled { cursor: not-allowed !important; }
 #monitor .progress-bar { background: var(--mr-paper) !important; }
 #monitor .wrap.default, #monitor .wrap.center { background: rgba(14,18,22,0.86) !important; }
 #monitor [aria-label="Empty value"] .icon { visibility: hidden; }
+/* the player's toolbar is a quiet button in the corner, not a bordered strip */
+#monitor :is(.icon-button-wrapper, .icon-buttons) { background: transparent !important;
+  border: none !important; box-shadow: none !important; }
+#monitor :is(.icon-button-wrapper, .icon-buttons) :is(button, a) { border: none !important;
+  background: rgba(14, 18, 22, 0.72) !important; border-radius: 6px !important;
+  color: var(--mr-paper) !important; box-shadow: none !important; }
 #monitor-caption p { margin: 0; font-size: 13px; line-height: 19px; color: var(--mr-dust); }
 #monitor-caption strong { color: var(--mr-paper); font-weight: 600; }
 
@@ -721,11 +738,6 @@ button:disabled { cursor: not-allowed !important; }
     height: 44px !important; }
   #monitor button, #monitor a[download] { min-width: 44px !important; min-height: 44px !important;
     display: inline-flex; align-items: center; justify-content: center; }
-  #monitor :is(.icon-button-wrapper, .icon-buttons) { background: transparent !important;
-    border: none !important; box-shadow: none !important; }
-  #monitor :is(.icon-button-wrapper, .icon-buttons) :is(button, a) { border: none !important;
-    background: rgba(14, 18, 22, 0.72) !important; border-radius: 6px !important;
-    color: var(--mr-paper) !important; box-shadow: none !important; }
   footer :is(button, a):not(.hidden) { display: inline-flex !important; align-items: center;
     min-height: 44px !important; }
   footer .divider { display: none !important; }
@@ -835,8 +847,17 @@ _SCRIPT = """
 """
 
 
+def _control_marks_css() -> str:
+    """The ink tick and dot, set where they are painted: Gradio's preflight sheet draws
+    its white ones directly at (0,3,0), past the theme variable its component reads."""
+    return (
+        f'#commission input[type="checkbox"]:checked {{ background-image: {_INK_TICK} !important; }}\n'
+        f'#commission input[type="radio"]:checked {{ background-image: {_INK_DOT} !important; }}\n'
+    )
+
+
 def _css() -> str:
-    return _TOKENS + _theme_css() + _SHELL + _matrix_css()
+    return _TOKENS + _theme_css() + _SHELL + _matrix_css() + _control_marks_css()
 
 
 def head_html() -> str:

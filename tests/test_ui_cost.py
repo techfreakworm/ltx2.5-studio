@@ -42,8 +42,11 @@ def base_60(monkeypatch):
 
 @pytest.fixture
 def staged_lora(tmp_path):
-    path = tmp_path / "adapter.safetensors"
-    path.write_bytes(b"x")
+    """A real (sparse) adapter: staged files are read before dispatch, so a placeholder
+    would be refused rather than costed."""
+    from lora_fixtures import good_adapter
+
+    path = good_adapter(tmp_path)
     return [{"source": "org/adapter", "path": str(path), "weight": 0.8, "content_key": "k"}]
 
 

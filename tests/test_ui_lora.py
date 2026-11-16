@@ -161,3 +161,18 @@ def test_upload_copies_share_the_lora_caches_budget(tmp_path, upload_dir, monkey
     assert copies[-1].is_file(), "the newest copy is never the one evicted"
     total = sum(f.stat().st_size for f in upload_dir.rglob("*") if f.is_file())
     assert total <= uploads.budget_bytes()
+
+
+def test_the_bay_buttons_are_the_one_small_size_of_the_button_family():
+    """Minor 20: Check and add and Remove were large while every other button was small."""
+    pytest.importorskip("gradio")
+    from ltx25_studio.ui import build_ui
+
+    demo = build_ui()
+    buttons = [
+        b
+        for b in demo.blocks.values()
+        if type(b).__name__ == "Button" and b.value in ("Check and add", "Remove", "Remove all")
+    ]
+    assert {b.value for b in buttons} == {"Check and add", "Remove", "Remove all"}
+    assert all(b.size == "sm" for b in buttons), [(b.value, b.size) for b in buttons]
