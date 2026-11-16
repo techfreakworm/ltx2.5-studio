@@ -1,0 +1,4 @@
+# Media shipped with the app go through Git LFS: the Hub rejects a push whose history holds a
+# binary file that is not LFS-tracked. examples/manifest.json and PROVENANCE.md stay plain text.
+examples/media/** filter=lfs diff=lfs merge=lfs -text
+examples/samples/** filter=lfs diff=lfs merge=lfs -text
