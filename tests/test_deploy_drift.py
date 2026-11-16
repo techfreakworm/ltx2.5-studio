@@ -444,3 +444,60 @@ def test_the_startup_report_cache_count_cannot_default_to_complete():
         f"startup_report(missing_files=) defaults to {default!r}. With an empty default "
         f"every caller that omits it gets a confident 37/37 with nothing checked."
     )
+
+
+# --------------------------------------------------------------------------
+# package data: the LoRA shape manifest must ship wherever the package does
+# --------------------------------------------------------------------------
+
+
+def test_the_lora_shape_manifest_is_found_from_the_checkout():
+    """The Space runs from the repo checkout; this is the path it reads."""
+    from ltx25_studio.lora import manifest
+
+    assert manifest.MANIFEST_PATH.is_file(), manifest.MANIFEST_PATH
+
+
+def test_the_lora_shape_manifest_ships_in_the_wheel(tmp_path):
+    """An installed wheel holds only what ``package-data`` names: without it the
+    manifest (a ``.json`` beside the code) is silently left out and stage 6.5
+    loses its reference shapes. Built offline from a copy of the tree, with the
+    environment's own setuptools (no build isolation, no network)."""
+    pytest.importorskip("setuptools")
+    import shutil
+    import subprocess
+    import sys
+    import zipfile
+
+    source = tmp_path / "src"
+    source.mkdir()
+    for name in ("pyproject.toml", "README.md"):
+        shutil.copy(REPO_ROOT / name, source / name)
+    shutil.copytree(
+        REPO_ROOT / "ltx25_studio",
+        source / "ltx25_studio",
+        ignore=shutil.ignore_patterns("__pycache__"),
+    )
+    wheels = tmp_path / "wheels"
+    wheels.mkdir()
+    built = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys; from setuptools import build_meta; print(build_meta.build_wheel(sys.argv[1]))",
+            str(wheels),
+        ],
+        cwd=str(source),
+        env={"PYTHONDONTWRITEBYTECODE": "1", "PATH": "/usr/bin:/bin"},
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+    assert built.returncode == 0, built.stderr[-2000:]
+    wheel = next(wheels.glob("*.whl"))
+    names = zipfile.ZipFile(wheel).namelist()
+    shipped = sorted(p.name for p in (REPO_ROOT / "ltx25_studio" / "lora").glob("*.json"))
+
+    assert shipped, "the LoRA package has no JSON to ship"
+    for name in shipped:
+        assert f"ltx25_studio/lora/{name}" in names, f"{name} is missing from {wheel.name}"

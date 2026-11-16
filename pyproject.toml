@@ -33,6 +33,9 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools]
 packages = ["ltx25_studio", "ltx25_studio.lora", "ltx25_studio.ui"]
 
+[tool.setuptools.package-data]
+"ltx25_studio.lora" = ["*.json"]
+
 [tool.pytest.ini_options]
 pythonpath = ["."]
 # --continue-on-collection-errors: this is a TDD loop, so specs routinely import
@@ -41,13 +44,13 @@ pythonpath = ["."]
 # nothing — which destroys the signal we steer by. Collection errors still make
 # the run exit non-zero, so nothing sneaks through as a pass.
 addopts = "-ra --continue-on-collection-errors"
-# No `testpaths` on purpose: `tests/` is owned by another teammate and does not
-# exist yet. Pinning testpaths to a missing directory turns `pytest -q` into a
-# usage error (exit 4) instead of an honest "no tests ran" (exit 5).
+testpaths = ["tests"]
 norecursedirs = [".venv", ".git", "outputs", "models", "assets"]
+# Labels only: nothing deselects them, so they run wherever their own skip
+# conditions allow.
 markers = [
-    "gpu: needs a GPU and real weights on disk (deselected by default)",
-    "network: reaches the Hugging Face Hub (deselected by default)",
+    "gpu: needs a GPU and real weights on disk",
+    "network: reaches the Hugging Face Hub",
 ]
 
 [tool.ruff]
