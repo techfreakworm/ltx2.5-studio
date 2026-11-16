@@ -28,7 +28,8 @@ The directory is ``LTX25_EXAMPLES_DIR`` (default ``examples/``) and the file is
     }
 
 Paths are relative to the directory and must stay inside it. An entry naming
-a missing file is skipped with a log line rather than shown broken. With no
+a missing file is skipped with a log line rather than shown broken; so is one
+whose file is a Git LFS pointer (the media was never fetched). With no
 manifest at all the page shows a designed idle monitor and no example row.
 
 Gradio-free.
@@ -39,6 +40,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -65,6 +67,16 @@ _SETTINGS = {
     "auto",
     "auto_duration",
 }
+
+#: What a file tracked by Git LFS is when its object was not fetched: the whole file is
+#: these three lines (https://github.com/git-lfs/git-lfs/blob/main/docs/spec.md).
+_LFS_POINTER = re.compile(
+    rb"version https://git-lfs\.github\.com/spec/v1\r?\n"
+    rb"oid sha256:[0-9a-f]{64}\r?\n"
+    rb"size [0-9]+\r?\n?"
+)
+#: Longer than any such pointer: a file past this length is not one.
+_LFS_POINTER_MAX_BYTES = 200
 
 
 @dataclass(frozen=True)
@@ -112,7 +124,25 @@ def _inside(root: Path, relative: Any) -> Path | None:
     if not candidate.is_relative_to(root) or not candidate.is_file():
         logger.warning("showcase: skipping %r (missing, or outside %s)", relative, root)
         return None
+    if _is_lfs_pointer(candidate):
+        logger.warning(
+            "showcase: skipping %r: the media was not fetched (%s is a Git LFS pointer; "
+            "run `git lfs pull`)",
+            relative,
+            candidate,
+        )
+        return None
     return candidate
+
+
+def _is_lfs_pointer(path: Path) -> bool:
+    """Whether ``path`` is a Git LFS pointer; reads no more than 201 bytes of it."""
+    try:
+        with path.open("rb") as handle:
+            head = handle.read(_LFS_POINTER_MAX_BYTES + 1)
+    except OSError:
+        return False
+    return len(head) <= _LFS_POINTER_MAX_BYTES and _LFS_POINTER.fullmatch(head) is not None
 
 
 def load_showcase(directory: str | os.PathLike | None = None, *, known_modes=()) -> Showcase:

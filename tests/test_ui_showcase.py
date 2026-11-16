@@ -8,7 +8,9 @@ or a path outside the examples folder, are skipped rather than shown broken.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import logging
 
 import pytest
 
@@ -64,7 +66,7 @@ def test_a_manifest_gives_examples_and_samples(tmp_path):
 
 @pytest.mark.parametrize("bad", ["missing.png", "../outside.png", "/etc/hosts"])
 def test_an_entry_naming_a_missing_or_outside_file_is_skipped(tmp_path, bad):
-    (tmp_path.parent / "outside.png").write_bytes(b"x")
+    (tmp_path / "outside.png").write_bytes(b"x")  # what "../outside.png" names from ex/
     write(
         tmp_path / "ex",
         {
@@ -340,3 +342,141 @@ def test_clicking_an_example_fills_the_form_in_every_mode(tmp_path, monkeypatch)
             assert form.field("enable_stage_2") is True, mode_id
         if modes.accepts(spec, "text"):
             assert form.field("enhance_prompt") is True, mode_id
+
+
+# --------------------------------------------------------------------------
+# media that was never fetched: a Git LFS pointer is a missing file
+# --------------------------------------------------------------------------
+
+
+def pointer_text(name: str, size: int = 1_234_567, newline: str = "\n") -> str:
+    """The pointer a checkout without the LFS objects leaves in place of a file."""
+    oid = hashlib.sha256(name.encode()).hexdigest()
+    return newline.join(
+        ("version https://git-lfs.github.com/spec/v1", f"oid sha256:{oid}", f"size {size}", "")
+    )
+
+
+def lfs_pointer(path, newline: str = "\n"):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(pointer_text(path.name, newline=newline).encode())
+    return path
+
+
+def not_fetched(caplog) -> list[str]:
+    return [r.getMessage() for r in caplog.records if "not fetched" in r.getMessage()]
+
+
+def test_a_pointer_in_place_of_a_sample_is_a_missing_sample(tmp_path, caplog):
+    _fixture_manifest(tmp_path)
+    lfs_pointer(tmp_path / "samples" / "text_to_video.mp4")
+    with caplog.at_level(logging.WARNING, logger=showcase.__name__):
+        shown = showcase.load_showcase(tmp_path, known_modes=tuple(modes.MODES))
+    assert shown.sample_for("text_to_video") is None
+    assert set(shown.samples) == set(modes.MODES) - {"text_to_video"}, "the other samples load"
+    assert set(shown.examples) == set(modes.MODES), "every example loads"
+    (line,) = not_fetched(caplog)
+    assert "samples/text_to_video.mp4" in line, line
+
+
+@pytest.mark.parametrize(
+    ("mode_id", "media", "pointer"),
+    [
+        ("image_to_video", {"image": "media/still.png"}, "image"),
+        ("video_to_video", {"video": "media/clip.mp4"}, "video"),
+        ("audio_to_audio", {"audio": "media/voice.wav"}, "audio"),
+        ("audio_to_video", {"image": "media/still.png", "audio": "media/voice.wav"}, "audio"),
+        ("audio_to_video", {"image": "media/still.png", "audio": "media/voice.wav"}, "image"),
+    ],
+)
+def test_a_pointer_in_place_of_an_examples_media_skips_that_example_alone(
+    tmp_path, caplog, mode_id, media, pointer
+):
+    for name in media.values():
+        (tmp_path / name).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / name).write_bytes(b"real media")
+    lfs_pointer(tmp_path / media[pointer])
+    fetched = {kind: f"media/fetched-{kind}" for kind in media}
+    for name in fetched.values():
+        (tmp_path / name).write_bytes(b"real media")
+    write(
+        tmp_path,
+        {
+            "modes": {
+                mode_id: {
+                    "examples": [
+                        {"label": "Not fetched", **media},
+                        {"label": "Fetched", **fetched},
+                    ]
+                },
+                "text_to_video": {"examples": [{"label": "Tram", "prompt": "a tram"}]},
+            }
+        },
+    )
+    with caplog.at_level(logging.WARNING, logger=showcase.__name__):
+        shown = showcase.load_showcase(tmp_path, known_modes=tuple(modes.MODES))
+    (example,) = shown.for_mode(mode_id)
+    assert example.label == "Fetched"
+    assert {k: p.name for k, p in example.media.items()} == {
+        k: v.split("/")[-1] for k, v in fetched.items()
+    }
+    assert [e.label for e in shown.for_mode("text_to_video")] == ["Tram"]
+    (line,) = not_fetched(caplog)
+    assert media[pointer] in line, line
+
+
+def _tiny_png() -> bytes:
+    from io import BytesIO
+
+    from PIL import Image
+
+    buffer = BytesIO()
+    Image.new("RGB", (1, 1), (200, 30, 30)).save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+POINTER = pointer_text("clip.mp4")
+NOT_POINTERS = {
+    "a real image smaller than a pointer": _tiny_png,
+    "a pointer's text and more after it": lambda: (POINTER + "x" * 300).encode(),
+    "a pointer's lines and a fourth one": lambda: (POINTER + "extra line\n").encode(),
+    "another spec url": lambda: POINTER.replace("git-lfs.github.com", "example.com").encode(),
+    "an oid that is not sha256 hex": lambda: POINTER.replace("sha256:", "sha256:z").encode(),
+    "no size line": lambda: POINTER.rsplit("size", 1)[0].encode(),
+    "a size that is not a number": lambda: POINTER.replace("size 1234567", "size big").encode(),
+}
+
+
+@pytest.mark.parametrize("make", NOT_POINTERS.values(), ids=NOT_POINTERS)
+def test_a_real_file_is_still_accepted_whatever_text_it_starts_with(tmp_path, caplog, make):
+    assert len(_tiny_png()) < 200, "the small real file is smaller than a pointer"
+    (tmp_path / "samples").mkdir()
+    (tmp_path / "samples" / "clip.mp4").write_bytes(make())
+    write(tmp_path, {"modes": {"video_to_video": {"sample": {"file": "samples/clip.mp4"}}}})
+    with caplog.at_level(logging.WARNING, logger=showcase.__name__):
+        shown = showcase.load_showcase(tmp_path)
+    assert shown.sample_for("video_to_video").path.name == "clip.mp4"
+    assert not not_fetched(caplog)
+
+
+@pytest.mark.parametrize("newline", ["\n", "\r\n"], ids=["lf", "crlf"])
+def test_a_pointer_is_recognised_with_either_line_ending(tmp_path, caplog, newline):
+    lfs_pointer(tmp_path / "samples" / "clip.mp4", newline=newline)
+    write(tmp_path, {"modes": {"video_to_video": {"sample": {"file": "samples/clip.mp4"}}}})
+    with caplog.at_level(logging.WARNING, logger=showcase.__name__):
+        assert showcase.load_showcase(tmp_path).sample_for("video_to_video") is None
+    assert len(not_fetched(caplog)) == 1
+
+
+def test_a_sample_that_was_not_fetched_leaves_the_idle_monitor(tmp_path, monkeypatch):
+    pytest.importorskip("gradio")
+    lfs_pointer(tmp_path / "samples" / "t2av.mp4")
+    write(tmp_path, {"modes": {"text_to_audio_video": {"sample": {"file": "samples/t2av.mp4"}}}})
+    monkeypatch.setenv(showcase.EXAMPLES_ENV, str(tmp_path))
+    from ltx25_studio.ui import build_ui
+
+    demo = build_ui()
+    by_id = {getattr(b, "elem_id", None): b for b in demo.blocks.values()}
+    assert by_id["monitor-idle"].visible is not False
+    assert by_id["video-out"].visible is False and by_id["video-out"].value is None
+    assert by_id["sample-jump"].visible is False
