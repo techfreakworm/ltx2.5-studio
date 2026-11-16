@@ -16,10 +16,11 @@
 
 # --- NOT PINNED, DELIBERATELY -------------------------------------------------
 # `spaces` is intentionally absent. The Spaces platform pins its own version
-# (live Spaces reported 0.49.3 / 0.50.0 / 0.50.4 while PyPI had 0.51.1; PyPI
-# has had 0.52.0 since 2026-11-13), and a conflicting pin here breaks pip
-# resolution at build time. See docs/PLAN.md §5.1. The 2.3 repo's own
-# AGENTS.md:19 states this rule and its requirements.txt:2 then violated it.
+# (live Spaces reported 0.49.3 / 0.50.0 / 0.50.4 while PyPI had 0.51.1, and
+# this Space reported 0.51.3 on 2026-11-16; PyPI has had 0.52.0 since
+# 2026-11-13), and a conflicting pin here breaks pip resolution at build time.
+# See docs/PLAN.md §5.1. The 2.3 repo's own AGENTS.md:19 states this rule and
+# its requirements.txt:2 then violated it.
 # The import is guarded in ltx25_studio/zerogpu.py so local dev works without it.
 # ------------------------------------------------------------------------------
 
