@@ -13,10 +13,12 @@ pointed at a closed local port, so a forgotten override fails instead of reachin
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import pickle
 import sys
 import uuid
+from dataclasses import replace
 from datetime import UTC, datetime
 from fractions import Fraction
 from pathlib import Path
@@ -308,16 +310,16 @@ def test_the_payload_reaches_the_space_by_name(tmp_path, space):
 
 def test_a_field_appended_to_the_spec_is_sent_in_its_own_slot(tmp_path, space, monkeypatch):
     """A decoder choice is being appended. A key the spec has is passed through by name."""
-    decoder = fields.Field(
-        key="decoder", kind="dropdown", label="Decoder", default="auto",
-        options={"choices": [("Auto", "auto"), ("Best quality", "diffusion"), ("Fast", "conv")]},
+    future = fields.Field(
+        key="future_choice", kind="dropdown", label="A later choice", default="a",
+        options={"choices": [("A", "a"), ("B", "b")]},
     )
-    monkeypatch.setattr(fields, "FIELDS", (*fields.FIELDS, decoder))
+    monkeypatch.setattr(fields, "FIELDS", (*fields.FIELDS, future))
     fake = space().reply(Reply(video=write_video(tmp_path / "v.mp4")))
-    code, lines, _out, _ledger = live(tmp_path, fake, [t2v(decoder="conv")])
+    code, lines, _out, _ledger = live(tmp_path, fake, [t2v(future_choice="b", decoder="conv")])
     assert code == space_matrix.EXIT_OK, "\n".join(lines)
     params = fake.generate_calls[0]["params"]
-    assert params["decoder"] == "conv"
+    assert params["future_choice"] == "b" and params["decoder"] == "conv"
     assert params["enhance_prompt"] is False and params["width"] == SIZE
 
 
@@ -973,7 +975,11 @@ def test_a_picture_condition_is_recorded_and_shown_and_never_stops_the_plan(tmp_
     """The app's check is recorded as it says it; a fired condition is shown, the frames are looked at."""
     from ltx25_studio import outputs
 
-    monkeypatch.setattr(outputs, "structure_failure", lambda structure: "static: a fired test condition")
+    checked = outputs.assess_picture(moving_stack())
+    monkeypatch.setattr(
+        outputs, "assess_picture",
+        lambda frames, **kwargs: replace(checked, conditions=("static: a fired test condition",)),
+    )
     video = write_video(tmp_path / "v.mp4")
     fake = space().reply(Reply(video=video), Reply(video=video))
     code, lines, out, _ = live(tmp_path, fake, [t2v("a"), t2v("b")])
@@ -1182,9 +1188,7 @@ def checks(path):
 def the_apps_own_record(path):
     from ltx25_studio import outputs
 
-    structure = outputs.measure_structure(space_matrix._decode_video_frames(path))
-    failure = outputs.structure_failure(structure)
-    return structure, ([failure] if failure else []), list(outputs.structure_warnings(structure))
+    return outputs.assess_picture(space_matrix._decode_video_frames(path))
 
 
 def test_a_moving_structured_video_passes_every_frame_check(tmp_path):
@@ -1201,14 +1205,15 @@ def test_the_picture_check_is_the_apps_own_recorded_verbatim(tmp_path):
     """Measurements, conditions and notes exactly as ``outputs`` returns them; no threshold of its own."""
     for name, stack in (("static", structureless_stack()), ("murky", murky_stack()), ("moving", moving_stack())):
         path = write_frames(tmp_path / f"{name}.mp4", stack)
-        structure, conditions, notes = the_apps_own_record(path)
+        checked = the_apps_own_record(path)
         health = space_matrix.measure_video(path)["picture_health"]
-        assert health["conditions"] == conditions and health["notes"] == notes
-        assert health["measurements"]["structure_ratio"] == structure.structure_ratio
+        assert health["conditions"] == list(checked.conditions) and health["notes"] == list(checked.notes)
+        assert health["measurements"] == dataclasses.asdict(checked.measurements)
     source = (REPO_ROOT / "scripts" / "space_matrix.py").read_text()
-    for name in ("MIN_STRUCTURE_RATIO", "MAX_HIGH_FREQUENCY_RATIO", "LOW_BLOCK_STD", "LOW_LUMA_BAND"):
-        assert name not in source, f"the harness must not hold the detector's {name}"
-    assert source.count("outputs.structure_failure(") == 1, "one wrapper is the only call site"
+    for name in ("MIN_STRUCTURE_RATIO", "MAX_HIGH_FREQUENCY_RATIO", "LOW_BLOCK_STD", "LOW_LUMA_BAND",
+                 "FLAT_MAX_LUMA_STD", "VEILED_", "STATIC_M", "structure_failure"):
+        assert name not in source, f"the harness must not hold the picture check's {name}"
+    assert source.count("outputs.assess_picture(") == 1, "one wrapper is the only call site"
 
 
 def test_a_frozen_render_fails_the_freeze_floor_that_byte_identity_misses(tmp_path):

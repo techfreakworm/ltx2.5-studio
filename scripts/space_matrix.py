@@ -1265,24 +1265,13 @@ def _verbatim(value: Any) -> Any:
     return str(value)
 
 
-def _structure_check_today(frames) -> dict:
-    structure = outputs.measure_structure(frames)
-    failure = outputs.structure_failure(structure)
-    return {
-        "check": "outputs.structure_failure",
-        "measurements": structure,
-        "conditions": [failure] if failure else [],
-        "notes": outputs.structure_warnings(structure),
-    }
-
-
 def picture_health(frames) -> Any:
-    """The app's own picture-health check, recorded verbatim. Nothing here judges it.
+    """The app's own picture check (``outputs.assess_picture``), recorded verbatim.
 
-    The single call site: when ``outputs``' recalibrated check lands, this return line is the
-    only one to change (to ``_verbatim(outputs.<its check>(frames))``).
+    The single call site. Nothing here judges what it returns: a fired condition is shown in the
+    summary and never fails a call.
     """
-    return _verbatim(_structure_check_today(frames))
+    return _verbatim(outputs.assess_picture(frames))
 
 
 def fired_conditions(health: Any) -> list[str]:
