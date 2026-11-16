@@ -303,7 +303,7 @@ Mac with **128 GB** of unified memory. Smaller machines are not verified.
   Nothing is downloaded for you on a Mac: a missing file is reported with the exact
   `hf download` command that fetches it.
 
-**Settings** (environment variables, read at startup):
+**Settings** (environment variables; set them before you start the app):
 
 | variable | value | what it does |
 |---|---|---|
