@@ -548,6 +548,10 @@ button:disabled { cursor: not-allowed !important; }
 .mr-done { border: 1px solid var(--mr-line); border-left: 4px solid var(--mr-roll); border-radius: 10px;
   padding: 12px 14px; background: var(--mr-slate); }
 .mr-done-head { display: block; margin: 0 0 10px !important; line-height: 22px; }
+.mr-prompt-sent { margin-top: 10px; }
+.mr-prompt-sent blockquote { margin: 4px 0 0; padding: 8px 10px; border-left: 2px solid var(--mr-line);
+  background: var(--mr-well); color: var(--mr-paper); font-size: 13px; line-height: 19px;
+  user-select: text; white-space: pre-wrap; }
 #report-actions { gap: 8px !important; }
 #rail #run-status.block { border: 1px solid var(--mr-line) !important; border-radius: 10px !important;
   padding: 12px 14px !important; background: var(--mr-slate) !important; }
@@ -569,6 +573,18 @@ button:disabled { cursor: not-allowed !important; }
 .mr-recent-row:has(.mr-recent-text:not(.hidden)) { border-top: 1px solid var(--mr-line); padding-top: 6px; }
 .mr-recent-row:not(:has(button:not(.hidden))), .mr-lora-row:not(:has(button:not(.hidden))) { display: none !important; }
 .mr-recent-row .mr-recent-text p { margin: 0; font-size: 13px; color: var(--mr-paper); }
+
+/* == the matrix cells name themselves wherever there is room ================ */
+@media (min-width: 561px) {
+  #mode-matrix label { justify-content: flex-start !important; gap: 10px;
+    padding: 4px 30px 4px 12px !important; text-align: left; }
+  #mode-matrix label::before { flex: 0 0 12px; }
+  #mode-matrix label > span { position: static !important; width: auto; height: auto; overflow: visible;
+    clip: auto; white-space: normal; font-family: var(--mr-body); font-size: 12px; line-height: 15px;
+    color: var(--mr-dust); }
+  #mode-matrix label:hover > span, #mode-matrix label.selected > span,
+  #mode-matrix label:has(input:checked) > span { color: var(--mr-paper); }
+}
 
 /* == below 1024 px: one column and a commit bar ============================ */
 @media (max-width: 1023px) {

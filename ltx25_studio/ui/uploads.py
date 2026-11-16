@@ -1,9 +1,16 @@
-"""App-owned copies of uploaded LoRA files.
+"""App-owned copies of uploaded LoRA files, under the LoRA cache's own budget.
 
-Gradio keeps uploads in its own cache, and ``build_ui`` sets ``delete_cache``
-so that cache is pruned. A staged adapter must outlive that until Generate, so
-the upload is copied here first and the copy is what gets validated and
-staged. Copies older than :data:`KEEP_SECONDS` are removed on each new copy.
+Gradio keeps uploads in its cache, and ``build_ui`` sets ``delete_cache`` so
+that cache is pruned. A staged adapter must outlive the pruning until Generate,
+so an upload is copied first and the copy is what gets validated and staged.
+
+Where and how much: the copy lives in the Hub adapter cache
+(``lora.lora_cache_dir()``, ``$HF_HOME/ltx25-lora``) as a
+``models--upload--<id>`` folder stamped with the cache's last-used marker. So
+uploads and Hub downloads share one least-recently-used budget -- the one
+``lora.fetch_lora`` already applies, twice the configured adapter size cap --
+and ``lora.evict_lora_cache`` removes the oldest of either kind. A copy that is
+rejected, or that duplicates a staged adapter, is deleted at once.
 
 Gradio-free.
 """
@@ -12,44 +19,42 @@ from __future__ import annotations
 
 import os
 import shutil
-import tempfile
-import time
 import uuid
 from pathlib import Path
 
-__all__ = ["KEEP_SECONDS", "UPLOADS_ENV", "own_copy", "uploads_dir"]
+__all__ = ["UPLOAD_PREFIX", "budget_bytes", "discard", "own_copy"]
 
-#: Overrides where uploaded adapters are kept.
-UPLOADS_ENV = "LTX25_LORA_UPLOAD_DIR"
-
-#: How long a copied upload is kept: a working day.
-KEEP_SECONDS = 24 * 3600
+#: Folder prefix inside the LoRA cache; ``evict_lora_cache`` reads the id after
+#: ``models--`` as ``upload/<id>``.
+UPLOAD_PREFIX = "models--upload--"
 
 
-def uploads_dir() -> Path:
-    """The folder uploaded adapters are copied into."""
-    configured = os.environ.get(UPLOADS_ENV)
-    root = Path(configured) if configured else Path(tempfile.gettempdir()) / "ltx25-lora-uploads"
-    root.mkdir(parents=True, exist_ok=True)
-    return root
+def budget_bytes() -> int:
+    """The cache budget ``fetch_lora`` uses: twice the configured size cap."""
+    from .. import lora
 
-
-def _prune(root: Path, *, now: float) -> None:
-    for entry in root.iterdir():
-        try:
-            if entry.is_dir() and now - entry.stat().st_mtime > KEEP_SECONDS:
-                shutil.rmtree(entry, ignore_errors=True)
-        except OSError:
-            continue
+    return 2 * int(lora.configured_max_bytes())
 
 
 def own_copy(source: str | os.PathLike) -> Path:
-    """Copy an uploaded file into :func:`uploads_dir`, keeping its file name."""
+    """Copy an uploaded file into the LoRA cache, then keep the cache in budget."""
+    from .. import lora
+    from ..lora.fetch import LAST_USED_MARKER
+
     path = Path(source)
-    root = uploads_dir()
-    _prune(root, now=time.time())
-    target_dir = root / uuid.uuid4().hex[:12]
-    target_dir.mkdir()
-    target = target_dir / path.name
+    root = lora.lora_cache_dir()
+    key = uuid.uuid4().hex[:16]
+    folder = root / f"{UPLOAD_PREFIX}{key}"
+    folder.mkdir(parents=True)
+    target = folder / path.name
     shutil.copyfile(path, target)
+    (folder / LAST_USED_MARKER).touch()
+    lora.evict_lora_cache(budget_bytes(), cache_dir=root, keep=(f"upload/{key}",))
     return target
+
+
+def discard(copy: str | os.PathLike) -> None:
+    """Remove a copy made by :func:`own_copy` (rejected, or already staged)."""
+    folder = Path(copy).parent
+    if folder.name.startswith(UPLOAD_PREFIX):
+        shutil.rmtree(folder, ignore_errors=True)

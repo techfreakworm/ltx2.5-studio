@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .. import constraints, modes
-from . import render
+from . import render, uploads
 from .fields import FIELD_KEYS, FIELDS, PARKED_FIELDS, SHOT_ANCHOR_COLUMN, TOGGLEABLE_FIELDS
 
 __all__ = [
@@ -395,23 +395,10 @@ def on_shots_change(rows: Any, num_frames: Any) -> str:
 
 
 def quota_multiplier() -> int:
-    """How many seconds of quota one second of GPU time costs.
-
-    ``zerogpu`` does not export this yet; until it does, the configured size
-    decides it the way the platform does (xlarge counts double).
-    """
+    """Quota seconds per GPU second, for the configured ZeroGPU size."""
     from .. import zerogpu
 
-    exported = getattr(zerogpu, "QUOTA_MULTIPLIER", None)
-    if exported is not None:
-        return int(exported)
-    try:
-        from ..config import load_config
-
-        size = load_config().zerogpu_size
-    except Exception:  # noqa: BLE001 -- the documented size for this model
-        size = "xlarge"
-    return 2 if size == "xlarge" else 1
+    return int(zerogpu.quota_multiplier())
 
 
 def _shape_problems(width: Any, height: Any, num_frames: Any, auto: bool) -> list[str]:
@@ -483,11 +470,7 @@ def review(mode_id: str, values: dict[str, Any]) -> render.CostFacts:
     except Exception as exc:  # noqa: BLE001
         return render.CostFacts(mode_name=name, state="refused", reason=str(exc))
 
-    problems = []
-    if mode.min_resolution:
-        # The pinned modes render at the registry's size whatever the boxes say;
-        # the backend still validates the boxes, so a bad value is still named.
-        pass
+    # The backend validates the size boxes in every mode, pinned ones included.
     problems = _shape_problems(
         request.width, request.height, request.num_frames, bool(request.auto_duration)
     )
@@ -621,27 +604,34 @@ def on_validate_lora(
     if not source:
         return (render.lora_nothing_to_validate(), staged, render.applied_loras(staged))
 
+    from .. import lora
+
+    copy = None
     try:
-        from .. import lora
-
         if upload:
-            from . import uploads
-
-            local = uploads.own_copy(source)
-            report = lora.validate_lora(str(local), upload=True)
+            copy = uploads.own_copy(source)
+            report = lora.validate_lora(str(copy), upload=True)
         else:
             report = lora.validate_lora(source, fetcher=lora.fetch_lora, upload=False)
-        entry = lora.staged_entry(source, report)
+        entry = lora.staged_entry(source, report, weight=lora.staging.DEFAULT_WEIGHT)
     except Exception as exc:  # noqa: BLE001 -- every failure must reach the user
+        _discard(copy)
         return (render.lora_rejected(source, exc), staged, render.applied_loras(staged))
 
     existing = lora.find_duplicate(staged, entry)
     if existing is not None:
+        _discard(copy)
         return (render.lora_duplicate(source, existing), staged, render.applied_loras(staged))
     if len(staged) >= MAX_STAGED_LORAS:
+        _discard(copy)
         return (render.lora_too_many(MAX_STAGED_LORAS), staged, render.applied_loras(staged))
     staged.append(dict(entry))
     return (render.lora_accepted(source, report), staged, render.applied_loras(staged))
+
+
+def _discard(copy: Any) -> None:
+    if copy is not None:
+        uploads.discard(copy)
 
 
 def on_clear_loras() -> tuple[str, list[dict[str, Any]], str]:
@@ -672,12 +662,20 @@ def on_lora_weight(staged: list[dict] | None, index: int, weight: Any) -> list[d
 # ---------------------------------------------------------------------------
 
 
-def on_generate_start(mode_id: str, enhance_prompt: Any = False) -> str:
-    """Shown the instant Generate is pressed, so the page is never silent."""
+def on_generate_start(mode_id: str, enhance_prompt: Any = False, prompt: Any = None) -> str:
+    """Shown the instant Generate is pressed, so the page is never silent.
+
+    Says the prompt is being enhanced only when it will be: the mode takes a
+    prompt and, when the prompt is passed, it is not empty.
+    """
     try:
-        return render.running(modes.get_mode(mode_id), enhancing=bool(enhance_prompt))
+        mode = modes.get_mode(mode_id)
     except Exception as exc:  # noqa: BLE001
         return render.failure(exc)
+    enhancing = bool(enhance_prompt) and modes.accepts(mode, "text")
+    if prompt is not None:
+        enhancing = enhancing and bool(str(prompt).strip())
+    return render.running(mode, enhancing=enhancing)
 
 
 @dataclass
@@ -693,6 +691,9 @@ class RunOutcome:
     error: BaseException | None = None
     refused: bool = False
     took: float = 0.0
+    #: The request as ``generate.prepare_request`` scoped it (lengths matched
+    #: to an audio input are filled in here).
+    prepared: Any = None
 
     def as_tuple(self) -> tuple[Any, Any, str]:
         return (self.video, self.audio, self.status)
@@ -726,7 +727,7 @@ def run(mode_id: str, *values: Any, progress: Any = None) -> RunOutcome:
     from .. import generate as generate_module
 
     try:
-        generate_module.prepare_request(_request(mode_id, params))
+        prepared, _spec, _notes = generate_module.prepare_request(_request(mode_id, params))
     except Exception as exc:  # noqa: BLE001 -- refused before any dispatch
         return done(
             video=None,
@@ -758,6 +759,58 @@ def run(mode_id: str, *values: Any, progress: Any = None) -> RunOutcome:
         audio=audio_path if "audio" in mode.exports else None,
         status=render.success(result, mode),
         result=result,
+        prepared=prepared,
+    )
+
+
+def fact(result: Any, name: str, fallback: Any = None) -> Any:
+    """One named fact about a finished run, from the result's structured record.
+
+    The backend is adding ``result.record``; until a field is there, the caller's
+    ``fallback`` -- worked out from the request and the wall clock -- is used.
+    Every run fact the report shows is read through here, so the switch-over is
+    this one function.
+    """
+    value = getattr(getattr(result, "record", None), name, None)
+    return fallback if value is None else value
+
+
+def run_facts(outcome: RunOutcome) -> render.RunFacts:
+    """What the report's "what you got" block states, for a finished run."""
+    from .. import pipelines
+
+    mode = modes.get_mode(outcome.mode_id)
+    result, params = outcome.result, outcome.params
+    request = outcome.prepared
+    stage_2 = bool(params.get("enable_stage_2")) and not mode.skip_stage_2
+    if mode.min_resolution:
+        size = (modes.MIN_RESOLUTION, modes.MIN_RESOLUTION)
+    else:
+        size = (_as_int(params.get("width")) or 0, _as_int(params.get("height")) or 0)
+    scale = pipelines.STAGE_2_SPATIAL_SCALE if stage_2 else 1
+    auto = bool(getattr(request, "auto_duration", params.get("auto_duration")))
+    frames = None if auto else getattr(request, "num_frames", params.get("num_frames"))
+    rate = float(getattr(request, "frame_rate", FRAME_RATE) or FRAME_RATE)
+    stage_2 = bool(fact(result, "stage_2", stage_2))
+    width = fact(result, "width", size[0] * scale)
+    height = fact(result, "height", size[1] * scale)
+    seconds = fact(result, "seconds", (int(frames) / rate) if frames else None)
+    adapters = fact(result, "adapters", None)
+    loras = (
+        tuple((render.shown_name(str(a["source"])), float(a["weight"])) for a in adapters)
+        if adapters
+        else _staged_names(params.get("loras"))
+    )
+    return render.RunFacts(
+        mode=mode,
+        seed=int(fact(result, "seed", getattr(result, "seed", 0))),
+        returned_size=(int(width), int(height)),
+        seconds=seconds,
+        stage_2=stage_2,
+        loras=loras,
+        took=float(fact(result, "worker_seconds", outcome.took)),
+        took_is_gpu=fact(result, "worker_seconds", None) is not None,
+        prompt_sent=fact(result, "prompt_sent", None),
     )
 
 

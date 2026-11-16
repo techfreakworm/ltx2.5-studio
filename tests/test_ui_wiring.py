@@ -93,14 +93,15 @@ def test_generate_is_disabled_by_the_first_step_and_restored_by_a_final_one(demo
     # Gradio itself fails fires `.failure` listeners alone. Both must bring
     # Generate back.
     on_failure = [
-        f for f in demo.fns.values()
+        f
+        for f in demo.fns.values()
         if f.trigger_after == run._id and f.trigger_only_on_failure and button in f.outputs
     ]
     assert on_failure, "nothing re-enables Generate when Gradio fails the generation step"
     assert on_failure[0].fn is finish.fn
     assert run.show_progress_on and by_elem_id(demo, "video-out") in run.show_progress_on
 
-    start_values = start.fn("text_to_audio_video", False)
+    start_values = start.fn("text_to_audio_video", False, "a harbour")
     first = start_values[start.outputs.index(button)]
     assert first["interactive"] is False
 
@@ -165,3 +166,60 @@ def test_every_ui_only_event_is_private(demo):
     for fn in demo.fns.values():
         if fn.api_name not in ("on_generate", "on_validate_lora"):
             assert fn.api_visibility == "private", fn.api_name
+
+
+def test_the_real_mode_switch_parks_a_hidden_value_and_restores_it_intact(demo):
+    """05 -> 11 (audio added) -> 05 -> 11, through the handler the radio fires.
+
+    While 05 is selected the audio slot holds nothing, so nothing hidden is
+    submitted; back in 11 the user's file is the same file. Only leaf components
+    are updated in this step -- no container -- so Gradio 6's dropped
+    container-visibility updates cannot bite here.
+    """
+    from conftest import audio_file
+
+    switch = next(f for f in demo.fns.values() if getattr(f.fn, "__name__", "") == "_switch")
+    slots = dict(zip(["mode", *FIELD_KEYS], dependency(demo, "on_generate").inputs, strict=True))
+    assert not any(
+        isinstance(c, (gr.Row, gr.Column, gr.Group, gr.Accordion)) for c in switch.outputs
+    )
+    parked_slots = switch.inputs[10:]
+    keys = [k for k in FIELD_KEYS if slots[k] in parked_slots]
+    values = {spec_key: field_by_key(spec_key).default for spec_key in keys}
+    values["prompt"] = "a captain at the wheel"
+    audio = audio_file()
+
+    def go(previous, mode, parked):
+        args = [
+            previous,
+            mode,
+            parked,
+            "Moderately",
+            "Match my clip",
+            "3:2",
+            {"kind": "idle"},
+            121,
+            704,
+            480,
+            *(values[k] for k in keys),
+        ]
+        out = switch.fn(*args)
+        parked = out[switch.outputs.index(switch.inputs[2])]
+        for key in keys:
+            update = out[switch.outputs.index(slots[key])]
+            if "value" in update:
+                values[key] = update["value"]
+        return parked, out
+
+    parked, _ = go("text_to_audio_video", "audio_to_video", {})
+    values["audio"] = audio  # the user adds a sound in Audio -> video + sound
+    parked, out = go("audio_to_video", "text_to_audio_video", parked)
+    assert values["audio"] is None, "a hidden audio file would be submitted with 05"
+    assert out[switch.outputs.index(slots["audio"])]["visible"] is False
+    assert parked == {"audio": audio}
+    assert values["prompt"] == "a captain at the wheel", "a prompt both modes take stays put"
+
+    parked, out = go("text_to_audio_video", "audio_to_video", parked)
+    assert values["audio"] == audio, "the user's file did not come back intact"
+    assert out[switch.outputs.index(slots["audio"])]["visible"] is True
+    assert parked == {}

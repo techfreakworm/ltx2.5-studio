@@ -153,7 +153,7 @@ def lora_bay(*, rows: int, cap: str, max_weight: float) -> dict[str, Any]:
                 "", visible=False, elem_classes=["mr-lora-name"], min_width=200, scale=2
             )
             weight = gr.Slider(
-                minimum=0.05,
+                minimum=0.1,
                 maximum=max_weight,
                 step=0.05,
                 value=1.0,

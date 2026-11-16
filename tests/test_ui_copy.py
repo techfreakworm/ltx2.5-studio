@@ -172,3 +172,84 @@ def test_the_copy_the_verdict_required_is_in_place():
     assert "Reserves 180 s more" in enhance.info and "GPU" in enhance.info
     assert "frames" in render.frame_hint(120, ratio=8, lower=113, upper=121, valid=False)
     assert "113" in render.frame_hint(120, ratio=8, lower=113, upper=121, valid=False)
+
+
+def test_the_start_message_says_enhancing_only_when_the_prompt_will_be_enhanced():
+    assert "Enhancing your prompt" in handlers.on_generate_start("text_to_video", True, "a tram")
+    assert "Enhancing" not in handlers.on_generate_start("text_to_video", True, "   ")
+    assert "Enhancing" not in handlers.on_generate_start("image_to_video", True, "stale")
+    assert "Enhancing" not in handlers.on_generate_start("text_to_video", False, "a tram")
+
+
+@pytest.mark.parametrize(
+    ("category", "headline"),
+    [
+        ("quota", "Not enough GPU quota"),
+        ("timeout", "ran out of GPU time"),
+        ("out_of_memory", "ran out of memory"),
+        ("adapter", "adapter doesn't fit"),
+        ("enhancer", "enhancer is unavailable"),
+        ("bug", "went wrong in this app"),
+    ],
+)
+def test_a_failure_the_backend_categorised_reads_its_category(category, headline):
+    exc = errors.DecodeError(mode="text_to_video", reason="x")
+    exc.category = category
+    text = render.failure(exc)
+    assert headline in text.split("\n", 1)[0]
+    assert "Any GPU time this run used is billed." in text
+    exc.gpu_used = False
+    assert "Nothing ran. No GPU time was used." in render.failure(exc)
+
+
+def test_run_facts_read_the_results_record_first_and_fall_back_to_the_request():
+    params = {spec.key: spec.default for spec in FIELDS} | {
+        "width": 704,
+        "height": 480,
+        "num_frames": 121,
+        "enable_stage_2": True,
+        "loras": [{"source": "/tmp/a/style.safetensors", "weight": 0.8}],
+    }
+
+    class Bare:
+        seed = 9
+
+    bare = handlers.RunOutcome(
+        video="v",
+        audio="v",
+        status="",
+        mode_id="text_to_audio_video",
+        params=params,
+        result=Bare(),
+        took=12.4,
+    )
+    facts = handlers.run_facts(bare)
+    assert facts.returned_size == (1408, 960) and facts.stage_2 and facts.seed == 9
+    assert facts.loras == (("style.safetensors", 0.8),) and not facts.took_is_gpu
+    assert "wall-clock" in render.run_summary(facts)
+
+    class Record:
+        width, height, seconds, stage_2 = 704, 480, 4.0, False
+        worker_seconds, prompt_sent, seed = 33.0, "an enhanced prompt", 10
+        adapters = ({"source": "org/style", "weight": 1.2, "modules_attached": 12},)
+
+    class Recorded:
+        seed = 9
+        record = Record()
+
+    facts = handlers.run_facts(
+        handlers.RunOutcome(
+            video="v",
+            audio="v",
+            status="",
+            mode_id="text_to_audio_video",
+            params=params,
+            result=Recorded(),
+            took=12.4,
+        )
+    )
+    assert facts.returned_size == (704, 480) and not facts.stage_2 and facts.seconds == 4.0
+    assert facts.seed == 10 and facts.loras == (("org/style", 1.2),)
+    assert facts.took == 33.0 and facts.took_is_gpu
+    summary = render.run_summary(facts)
+    assert "GPU time" in summary and "an enhanced prompt" in summary

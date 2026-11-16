@@ -22,8 +22,9 @@ from ltx25_studio.ui import handlers, render, uploads
 
 @pytest.fixture(autouse=True)
 def upload_dir(tmp_path, monkeypatch):
-    target = tmp_path / "owned"
-    monkeypatch.setenv(uploads.UPLOADS_ENV, str(target))
+    """The LoRA cache, pointed at a temporary folder: tests never write the real one."""
+    target = tmp_path / "lora-cache"
+    monkeypatch.setattr(lora, "lora_cache_dir", lambda: target)
     return target
 
 
@@ -74,11 +75,12 @@ def test_a_rejection_quotes_the_validator_verbatim_under_a_plain_headline(tmp_pa
     verdict, staged, _s = handlers.on_validate_lora("", str(adapter), [])
 
     assert staged == []
-    copy = sorted(uploads.uploads_dir().glob("*/*.safetensors"))[-1]
     with pytest.raises(lora.LoRAError) as raised:
-        lora.validate_lora(str(copy), upload=True)
+        lora.validate_lora(str(adapter), upload=True)
     assert verdict.startswith("### Rejected: ")
-    assert str(raised.value).strip() in verdict, "the validator's message, verbatim"
+    # The validator's own words; the file it names is the app's copy.
+    reason = str(raised.value).strip().split(str(adapter), 1)[-1]
+    assert reason in verdict, "the validator's message, verbatim"
     assert "LoRA" + "DimensionError" not in verdict.split("\n")[0]
     assert "Nothing was spent." in verdict
 
@@ -137,3 +139,25 @@ def test_the_strength_slider_never_offers_more_than_the_lora_module_accepts():
     from ltx25_studio.ui import blocks
 
     assert 0 < blocks.LORA_SLIDER_MAX <= lora.staging.MAX_WEIGHT
+
+
+def test_a_rejected_or_duplicate_upload_leaves_no_copy_behind(tmp_path, upload_dir):
+    handlers.on_validate_lora("", str(wrong_dimension_adapter(tmp_path / "w")), [])
+    assert not list(upload_dir.glob("models--upload--*")), "a rejected copy was kept"
+    good = good_adapter(tmp_path / "g")
+    _v, staged, _s = handlers.on_validate_lora("", str(good), [])
+    handlers.on_validate_lora("", str(good), staged)
+    assert len(list(upload_dir.glob("models--upload--*"))) == 1, "a duplicate copy was kept"
+
+
+def test_upload_copies_share_the_lora_caches_budget(tmp_path, upload_dir, monkeypatch):
+    """Copies are least-recently-used evicted under the Hub cache's own budget."""
+    size = good_adapter(tmp_path / "probe").stat().st_size
+    monkeypatch.setattr(lora, "configured_max_bytes", lambda: int(size * 1.5))
+    assert uploads.budget_bytes() == 3 * size  # twice the cap, as fetch_lora uses
+    copies = [uploads.own_copy(good_adapter(tmp_path / str(i))) for i in range(5)]
+    left = sorted(upload_dir.glob("models--upload--*"))
+    assert len(left) <= 3, "the copies outgrew the cache budget"
+    assert copies[-1].is_file(), "the newest copy is never the one evicted"
+    total = sum(f.stat().st_size for f in upload_dir.rglob("*") if f.is_file())
+    assert total <= uploads.budget_bytes()

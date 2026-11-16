@@ -1,328 +1,224 @@
-# UI Design — "The Machine Room"
+# UI design: the machine room
 
-The design direction for LTX-2.5 Studio's interface, every deliberate choice and its
-reason, and what was rejected. Written so the design can be reviewed without running
-the app. Implementation lives in `ltx25_studio/ui/chrome.py` (tokens, stylesheet,
-masthead) and `ltx25_studio/ui/blocks.py` (layout and the `elem_id`/`elem_classes`
-hooks the stylesheet targets).
+What the LTX-2.5 Studio interface is, and why each part is shaped as it is. Code:
+`ltx25_studio/ui/` (`chrome.py` holds tokens, stylesheet and identity bar; `blocks.py`
+holds layout and wiring; `handlers.py` holds every decision; `render.py` holds every
+string a user reads; `fields.py` holds the input spec).
 
-## The brief, restated
+## Job
 
-Eleven modes over one jointly audio-visual model, on metered ZeroGPU time. The
-audience is practitioners spending quota. The page has one job: **let a user
-commission one run knowing exactly what it will cost and what it will return** —
-before the money is spent, not after. The previous UI was never designed, only
-accumulated: a wall of eleven radio rows, banners of paragraph soup, the headline
-LoRA feature in an accordion, and two cost truths (stage-2 doubling, audio-only
-full-video-compute) stated either after the run or never.
-
-## Direction
-
-**The machine room** — the visual language of broadcast and production hardware:
-slate console panels, engraved equipment lettering, annunciator lamps, mono data
-readouts. Chosen because it is *this* subject's own world (the app already speaks in
-shots, frames, slates) and because this project's defining ethos — honesty about
-cost, loud failure — has a native idiom there: the annunciator panel, whose entire
-job is to light a lamp when something expensive or dangerous is true.
-
-The interface is dark. That is a subject decision, not a default: footage-viewing
-environments are dark so the footage reads true, and the output pane holds video.
-The specificity comes from *which* dark and *what signals*: warm blue-gray slates
-rather than neutral black, and a three-signal semantic system rather than a single
-decorative accent.
-
-## Tokens
-
-Palette (defined once in `chrome.py`, prefixed `--mr-`):
-
-| token | value | role |
-|---|---|---|
-| ink | `#12161B` | identity ground: masthead, annunciator |
-| slate | `#1C232B` | console panel: mode board, briefing |
-| slate-2 | `#242D37` | raised panel / hover / selected |
-| line | `#39434F` | gasket hairlines |
-| paper | `#E9ECEF` | primary text on slate |
-| dust | `#9AA6B2` | secondary text on slate |
-| tungsten | `#F2A33C` | **cost** signal — lamps, warned-mode edges, Generate |
-| cut | `#E5484D` | **failure** signal — the run-status panel only |
-| roll | `#3FBF7F` | reserved for accepted/complete accents |
-
-The three signal colors are semantic, never decorative: tungsten always means "this
-costs", cut always means "this failed". Generate is tungsten on purpose — pressing
-it is the act of spending, and the button wears the spend color.
-
-Type, three roles, loaded from Google Fonts with real fallback stacks:
-
-* **Chakra Petch** (display) — equipment lettering: the wordmark, mode-card names,
-  panel headers, lamp labels. Squared terminals read as engraved hardware type.
-* **Spline Sans** (body) — labels, info strings, briefing prose.
-* **Spline Sans Mono** (data) — every number a user reads: the annunciator, the
-  constraint hints, seeds, dimensions. A number in the UI is an instrument reading
-  and is set like one.
-
-Chakra Petch + Spline Sans (+ its companion mono) were chosen over the default-y
-pairs (Inter, Space Grotesk, IBM Plex) precisely because they are *not* the faces a
-generic pass produces, while still being sober enough for a working tool.
+Practitioners spend a metered daily GPU quota on a model that makes video and sound
+together. The page lets them pick what they start from and what they want back, see
+exactly what the run will cost and return, press Generate, and watch the result
+arrive without moving their eyes.
 
 ## Layout
 
-Two-column console, unchanged in skeleton from the predecessor (it was the one
-sound structural decision): the **commission column** (mode → prompt/inputs → shape
-→ sampling → LoRA bay → annunciator → Generate) and the **returns column** (status,
-then players). The order in the commission column is the order of the decision, top
-to bottom, ending at the point of commitment.
+At 1024 px and wider the page has two columns under a one-line identity bar.
 
-### Masthead
+- **The commission column.** At the top is the mode matrix: rows are what you start
+  from (Text, Image, Image + text, Video, Audio), and columns are what you get back
+  (Video + sound, Video (silent), Sound only). Below it come the purpose line and up
+  to three example buttons, then the selected mode's inputs: media first, each with
+  its one lever, then the prompt with Enhance. After those come shape, length and
+  Upscale, the LoRA row and Advanced.
+- **The rail.** It is sticky at `top: 12px` and scrolls inside itself if it outgrows
+  the viewport. From the top it holds the monitor, the status line, the cost panel,
+  Generate with its reason line, the run report and Recent runs.
 
-A slate identity strip: wordmark (`LTX-2.5` with the model number in tungsten),
-one-line tagline, then the **fact rail** — the two standing truths as
-lamp-labelled rows (`JOINT A/V`, `METERED`). These replace two stacked Markdown
-banner paragraphs; every fact from the old banners survives (both tracks always
-rendered; full video compute; daily quota at 2× xlarge; failed runs cost quota; no
-auto-retry and why), but as scannable labelled rows instead of prose soup. The copy
-lives in `render.STANDING_FACTS`; `chrome.masthead_html` only gives it form.
+Below 1024 px the page is one column. The inputs come first, then the cost panel,
+monitor and report. A fixed bottom bar holds one line (the cost, or why Generate is
+off) and the same Generate button, restyled. There is never a second Generate in the
+DOM. Pressing Generate on a narrow screen scrolls the monitor into view.
 
-### The mode board
+## The matrix
 
-Eleven modes is the interface's hardest problem, and a vertical radio list answered
-it with a wall. The selector is now a **board**: the same `gr.Radio` (the component
-class is part of the published API surface — `parameters[0]["component"] == "Radio"`
-in `test_space_matrix`), styled by CSS grid into slate cards. Each card carries its
-registry number (`01`–`11`, zero-padded — the same numbers PLAN §3.2 and the mode
-matrix docs use, so a mode can be named in a bug report without ambiguity) and its
-label. The four modes carrying a registry `cost_note` get a **tungsten left edge**
-plus the ⚠️ marker.
+The matrix is the existing mode `gr.Radio`, which stays parameter 0 of `/on_generate`.
+CSS grid rules generated from the registry place each choice in its cell:
 
-The tungsten-edge selector is *generated from the registry* at build time
-(`chrome._cost_marked_selector` walks `modes.MODES` and emits
-`label:has(input[value="<mode id>"])` per warned mode) — the same derivation rule as
-the ⚠️ marker: a new warned mode is painted by adding a registry entry, never by
-editing CSS. Card selection state uses Gradio's own `selected` class; the native
-radio dot is visually hidden with focus preserved
-(`label:has(input:focus-visible)` gets a visible outline).
+- the row comes from the inputs the mode requires;
+- the column comes from the tracks it exports;
+- the small corner number comes from registry order. It is an ID for bug reports, not
+  a label.
 
-### The briefing
+A `gr.HTML` frame behind the radio draws the axis headers, the four inert empty cells
+and the two column notes. The cost marker is a tungsten underline on "Sound only", the
+column that pays for a thrown-away video.
 
-Directly under the board, one slate card describing the selected mode: takes /
-returns, the registry `cost_note` **verbatim** in a tungsten-edged blockquote, and
-the mitigations (min resolution, stage-2 skip) in plain words. Unchanged in
-substance from the old `render.mode_briefing`; restyled to read as the board's
-detail panel.
+The eleven radios share one `name`, so the matrix is one Tab stop. A small script
+makes the arrow keys move by the grid's geometry. Each radio's accessible name is the
+mode's full registry label.
 
-### The annunciator — the signature element
+## What you see is what runs
 
-One strip above Generate, mono type on ink, always present, kept live by
-`handlers.on_cost_change` on every change to the mode or any cost-relevant control:
+One predicate decides what each mode shows and what it requires:
 
-```
-text_to_video · renders 704×480 · 121 frames ≈ 5.0 s @ 24 fps · reserves ≈60 GPU-seconds
-STAGE 2 ×2 — returns 1408×960, not the 704×480 requested: it renders at the size
-above, then upsamples and refines. GPU reservation ×1.5, included in the figure above.
-```
+- a field is shown exactly when `modes.accepts(spec, kind)`;
+- a field is marked required exactly when `modes.requires(spec, kind)`.
 
-Lamps light only when true:
+This is the predicate `generate.scope_request_to_mode` scopes with.
 
-* **FULL VIDEO COMPUTE** — audio-only modes: video rendered at the pinned minimum
-  and discarded, mitigations named. (Restates the briefing's cost note at the point
-  of commitment, for the user who scrolled past it.)
-* **AUDIO ENCODE ON TOP** — `audio_to_video`: the encode is paid on top of a full
-  render.
-* **STAGE 2 ×2** — the returned size stated next to the requested size *before the
-  run*: the operator requirement that nothing previously satisfied. The doubling
-  factor is `pipelines.STAGE_2_SPATIAL_SCALE` — the same constant the post-run size
-  note uses — and the reservation figure calls the real
-  `zerogpu.estimate_duration`, the function the platform actually bills on. No
-  number in the strip is a second copy of anything.
+When the mode changes, the value of every field the new mode does not use is
+**parked**: it moves into a session `gr.State`, and the widget goes back to its
+default. The value comes back when a mode that uses it is selected (`handlers.mode_switch`).
+So a UI run never submits a hidden value, and the backend never has to say "an image
+was supplied … ignored" about something the user cannot see. API callers still get
+the backend's scoping and its notes.
 
-This is where the design spends its one aesthetic risk: a black instrument strip
-with amber lamps is an unusual thing to put in a Gradio form, and it is the one
-element the page should be remembered by — because it *is* the product's thesis
-(honest cost, before commitment) made visible.
+Some modes pin their values. Their pinned values are never written into the user's
+fields. The sound-only modes show a read-only line, "Renders at 256 × 256 with no
+upscale", in place of the shape controls.
 
-### The LoRA bay
+Some fields keep their API slot but show nothing:
 
-The headline feature was in an accordion; it is now a **bay**: always open, framed
-(`#lora-bay`), with a display-type header band and a one-line promise
-("validated before any weights are touched … rejected in milliseconds, with the
-exact reason"). Both acquisition routes stay side by side; the verdict surface and
-the staged-adapters line remain first-class. The empty state of the staged list was
-deduplicated: it previously rendered the identical idle paragraph twice in a row
-(verdict + summary), which read as a broken template; the summary's empty state is
-now one distinct line ("**Staged for the next run:** none — base LTX-2.5
-weights."), still stated positively, never as blankness.
+- the negative prompt (guidance is fixed at 1.0);
+- the shot-list `conditions` (a row with text is refused before every run);
+- `noise_scale`, which is written by the four "How much to change your sound" choices
+  in Audio → sound.
 
-### Failure, loud
+Strength is shown only for Video → video. "Let the model pick the length" is shown
+only where no input has a length. Where an input does have a length, "Match my clip"
+writes the matched frame count, or for audio inputs turns on the backend's "match my
+audio".
 
-The run status (`#run-status`) is quiet by default. Every failure shape
-`render.py` produces — `### ❌ Generation failed`, `### 🛑 Internal error` — opens
-with an `<h3>`, and success/running never do, so the stylesheet keys the loud
-treatment on that structure: `#run-status:has(h3)` gets a cut-red border, red
-left edge and red tint, with the error class name and the verbatim actionable
-message inside. The state lives in the *content*, which is what the frozen
-`(video, audio, markdown)` handler contract allows; no second channel, no CSS
-class the handler would have to set.
+## The rail
 
-Verified live (faked pipeline): an illegal width renders the red panel with
-`DimensionError — width=700 is not divisible by 32. … Use 672 or 704 instead.`
+**The monitor** is always dark and 16:9. It shows one player, chosen by what the run
+exported, so joint modes never show one file twice. Its contents depend on the state:
 
-### The run report
+- **Idle:** the selected mode's sample output from the manifest, captioned "Example
+  output, not your run". If there is no sample, a designed idle frame is shown
+  instead.
+- **During a run:** the phase-labelled progress (`show_progress_on`).
+- **After a run:** that run's result, captioned with its mode and seed. It stays on
+  screen when the mode changes.
 
-`render.success` now surfaces `result.warnings` — previously those notes (the
-stage-2 "this output is 1408×960, not the 704×480 requested" note, the mono-widen
-note) were computed, attached to the result, and *never shown*; they reached the
-sidecar file and the Space log only. The seed line now says what the seed is for:
-"seed `N` — rerun with it and the same settings to reproduce".
+**The cost panel** is the signature element. It is a labelled grid with these rows:
 
-## Copy decisions
+- Renders
+- Returns
+- Reserves
+- Needs (quota free to start)
+- Billed
+- LoRA
 
-* **The shot-list contradiction is fixed.** The old UI told users, in two places,
-  that the anchor column takes a *latent index* (`_MULTISHOT_NOTE`, and the
-  Dataframe label "anchor (latent index)") while the ruled convention — executable
-  in `test_shot_anchor_convention.py` — is that the user types a **frame** and
-  `conditioning.py` converts exactly once. A user following the old note got a
-  mis-anchored shot every time. Both places now say *frame*, and the note explains
-  the 8:1 snap and points at the readout.
-* **Prompt enhancement is a real toggle now, default off** (PLAN §3.5). The
-  caption that used to sit under the prompt box — first "the model pack does not
-  ship it", then "disk budget, ~20.6 GB at the packing peak" — is **deleted**,
-  and so is the policy it defended. Both readings of the cost were wrong, and
-  the second one was wrong in a way worth writing down.
+Above the grid are cost lamps that light only when they are true. The figures come
+from these sources:
 
-  ⛔ **"It is charged twice, so ~20.6 GB."** That was a *placement* artefact, not
-  a property of the model. ZeroGPU packs exactly once per container, at
-  `demo.launch()`, over tensors registered while the module scope ran. A model
-  loaded lazily inside a request handler — after launch, and never moved to CUDA
-  — is not in the packing window at all. It is charged once, as a download.
+- **Reserves:** `zerogpu.estimate_duration` for the same request, with each extra
+  named with its seconds.
+- **Needs:** the reservation times the quota multiplier.
+- **Renders and Returns:** the size and length come from the request that
+  `generate.prepare_request` scopes.
 
-  ✅ **And the download is 2.49 GB, not 10.28.**
-  `google/gemma-4-E2B-it-qat-mobile-transformers` is the quantisation-aware-trained
-  build: public, ungated, one `model.safetensors`, **2.490 GB** against **10.279 GB**
-  for the bf16 `google/gemma-4-E2B-it`. Checked against the Hub, not assumed. The
-  bf16 build is still one environment variable away for anyone who wants it.
+A request that would be refused shows "Won't run", lists every size and length problem
+with its nearest legal values, and shows no figure. The lamp words are:
 
-  ⚠️ **It ran in the WEB process for zero GPU-seconds, and that was wrong.**
-  The caption said so, the tests asserted it, and the claim was true: the
-  request crossing the ZeroGPU fork already carried the rewritten prompt and the
-  worker never enhanced. What nobody measured was what the user waited through.
-  On the live Space, `text_to_video` 256x256x9 went from **15.38 s** to
-  **553.45 s warm** — the 88 s download is not the cost, the CPU decode of 600
-  greedy tokens at ~0.9 s/token is. "Costs no quota — only time" turned out to
-  mean nine minutes.
+- "Upscale +N s"
+- "Enhance +N s"
+- "LoRA +N s"
+- "Video thrown away"
+- "Audio encode"
 
-  ✅ **It now runs on the GPU, inside the reservation**, at ~1-2 s against ~85 s
-  for a real generation. The caption gives up "free" to stop implying "fast",
-  and the running message no longer says the wait happens before a slot is
-  reserved, because it does not. **The lesson is the one worth keeping: "where
-  does it run" has two axes, disk and latency, and this build optimised one and
-  never measured the other.** A control whose cost is stated on one axis only is
-  the same shape as an inert lever — it speaks, and what it says is incomplete.
+**Generate** is disabled whenever the form would be refused. The line under it uses
+the backend's own refusal words, from `generate.prepare_request`. Generate is also
+disabled while a run is in flight. The click runs three steps:
 
-  ⚠️ **What the user must be able to see is the prompt that was actually sent.**
-  The box still shows what they typed; without the run report quoting the
-  rewrite, the video would be the only evidence that something else was
-  generated. It goes through the same `GenerationResult.warnings` channel as the
-  stage-2 size note, so there is one surface for "here is what actually
-  happened", not two.
+1. A start step disables Generate and clears the monitor.
+2. `/on_generate` runs, with its inputs and outputs frozen.
+3. A final step re-enables Generate.
 
-  ⛔ **No seed control for it**, and that is a design decision rather than an
-  omission: LTX-2.5 enhancement decodes greedily (`do_sample=False`), so
-  `prompt_enhancement_seed` changes no output. This build has found seven inert
-  levers; an eighth would be a choice. For the same reason `enhance.py`
-  deliberately does **not** copy upstream's `torch.manual_seed` call — reseeding
-  the global RNG would make an enhanced run irreproducible and buy nothing.
+The final step is wired twice, as `.then` and as `.failure`, because Gradio 6.24 runs
+`.then` listeners only when the step completes. A request that would be refused never
+reaches `generate()`, so its red panel can truthfully say "Nothing ran. No GPU time
+was used."
 
-  The toggle is hidden for modes that discard the prompt, on the same predicate
-  as the prompt box itself — a checkbox offering to improve a field that is not
-  on screen is the inert-lever shape again.
+**The report** is the `/on_generate` Markdown. On success it shows the seed, the
+backend's notes as plain text and a collapsed Diagnostics block, with no cost
+reminder. A "What you got" card above it is built from the request and the wall-clock
+time:
 
-* **`noise_scale=1.0` trap named**: the slider info now says that at 1.0 the upload
-  contributes *nothing* and the run is a full-price generation of fresh audio.
-* **Seed reproducibility stated** on the field and in the run report.
-* The empty status is an invitation with a guarantee: "Nothing is spent until the
-  button is pressed."
+- mode
+- size and upscale
+- length
+- seed
+- LoRA strengths
+- time taken
 
-## Mechanics (Gradio 6, pinned 6.24.0)
+A failure has a plain category headline, a quota line, one next step and the verbatim
+detail in a `<details>`. `#run-status` is a live region, and it becomes assertive on
+failure.
 
-* `css=`/`theme=` moved to `launch()` in Gradio 6, and `app.py` (not this layer's
-  file) calls a bare `demo.launch()`. The stylesheet and font links ride on
-  **`gr.HTML(head=...)`** — the documented Gradio 6 injection point — carried by
-  the masthead component, so shell and styles arrive together. No deprecated
-  constructor kwargs, no `app.py` change.
-* The CSS is assembled in Python so the warned-mode selector derives from the
-  registry (see above). Identity surfaces are self-colored — the same slate in both
-  Gradio themes, like hardware on a desk — so every text node inside them carries
-  an explicit color (Gradio's theme stylesheets load after ours and win specificity
-  ties; inheritance painted the wordmark dark-on-dark in light mode until this was
-  made explicit). Form internals deliberately keep the native theme so light-mode
-  users keep a light form.
-* Reduced motion respected (the only transitions are 120 ms card hovers, disabled
-  under `prefers-reduced-motion`); focus-visible outlines on cards and Generate;
-  dust-on-slate and tungsten-on-ink both clear ~6:1 contrast.
-* Captions under media inputs (Gradio 6 media components have no `info=`) are now
-  registered per-field and **toggled with their field** by the mode selector; the
-  old shape built them write-only, so a hidden image input left its caption
-  floating on screen for modes with no image at all.
+**Recent runs** keeps the last six runs of the session, each with "Restore settings"
+and "Reuse seed".
 
-## Contracts honoured
+## LoRA
 
-* `/on_generate` endpoint: same fn, no `api_name`, positional order `mode_id` +
-  `FIELDS` order, returns `(video, audio, markdown)`. Verified headlessly:
-  `parameters[0] == Radio`, 17 parameters, returns `[Video, Audio, Markdown]`.
-* `fields.FIELD_KEYS` order unchanged; component classes per field unchanged.
-* `handlers.on_mode_change` / `on_shots_change` signatures unchanged (tests call
-  them positionally). The new `on_cost_change` is additive.
-* No behavioural or seam test was touched. **Zero presentational test updates were
-  required**: no test pinned the old layout or copy except through self-referencing
-  `render.*` comparisons, which move with the renderer.
+The LoRA row is an accordion whose label is the live state: "LoRA: none. Add an
+adapter" or "LoRA: 2 adapters at 0.8 and 1.0". Inside it are two routes:
 
-## Rejected
+- a Hub repo-id box, which accepts Hub ids only, with "Check and add";
+- an upload, which is copied into an app-owned folder before it is checked, because
+  `delete_cache` prunes Gradio's upload cache.
 
-* **Tabs or a dropdown for the eleven modes** — a dropdown hides ten of eleven
-  answers to "what can this do?", tabs would either duplicate widget sets (the
-  exact predecessor disease `fields.py` exists to prevent) or fake tab-ness over
-  one form; and the Radio component class is part of the published API surface.
-  The board keeps all eleven visible, scannable, and warning-marked at the moment
-  of choice.
-* **A gradio Theme subclass** — `theme=` belongs to `launch()` in Gradio 6, which
-  is `app.py`'s line; and a theme cannot express the registry-derived cost edges or
-  the annunciator anyway. CSS-over-default-theme delivers the identity without
-  touching the frozen entrypoint.
-* **Hiding the resolution controls on audio-only modes** (rather than greying) —
-  rejected long before this redesign and kept rejected: a disabled control showing
-  the forced 256 answers "what ran?"; absence answers nothing.
-* **Restoring width/height when leaving an audio-only mode** — visiting mode
-  08–10 forces 256 into the boxes; returning to a video mode leaves 256 in place
-  (the handler is stateless and cannot distinguish "forced 256" from "typed 256").
-  A restore-to-default would clobber values users chose; invisible state edits are
-  the exact class of magic this project distrusts. The annunciator makes the
-  current truth visible at all times, and the sticky value errs cheap, never
-  expensive.
-* **Duplicating the full `cost_note` in the annunciator** — the briefing already
-  quotes it verbatim at selection; the strip restates the fact in instrument
-  wording at commitment. Twice verbatim would train users to skip both.
-* **Motion beyond hover** (pulsing running lamp, scroll reveals) — this is a tool;
-  a page-load sequence on a quota console is noise. The one place motion was
-  considered (a pulsing ⏳ during runs) was cut because encoding run-state into
-  content-keyed CSS would have meant styling on emoji text-matching or widening the
-  handler contract.
-* **The three AI-default looks** (cream + serif + terracotta; neutral black + acid
-  accent; broadsheet hairlines) — the first and third fight the subject (footage
-  wants dark; a console is not a newspaper); the second is what "dark tool" becomes
-  without a decision, and the warm slate + semantic three-signal system is that
-  decision.
+Adapters are staged with `lora.staged_entry` at strength 1.0 and de-duplicated by
+content key. The bay pre-builds three rows, each with the adapter's name, a strength
+slider (0.05 to 1.5) and Remove. An accepted adapter gets a roll-edged card. A
+rejected one gets a cut card with a plain headline and the validator's message
+verbatim.
 
-## Verification
+## Visual system
 
-Everything below ran with **no GPU, no weights, no network**, via the test suite's
-faked-pipeline seams (`pipeline_factory`, `encoder` — the same pattern as
-`tests/test_ui_generate_seam.py`; the throwaway launcher lives in
-`outputs/.ui_preview.py`, gitignored):
+The tokens are dark under both OS schemes. Gradio's theme variables are pinned to
+them with `!important` from the identity bar's `head=`, because Gradio's own sheet
+loads later.
 
-* Headless build + API contract check (twice-buildable, endpoint shape).
-* Full offline gate green (see commit / report for counts).
-* Live in a browser: mode board selection and per-mode visibility; forced 256 on
-  mode 08 with the FULL VIDEO COMPUTE lamp; STAGE 2 lamp showing the doubled
-  return size and the ×1.5 reservation from the real estimator; a complete run
-  rendering the report with seed, run dir and the stage-2 size warning; an illegal
-  width rendering the loud red `DimensionError` panel; light theme coherent after
-  the explicit-color hardening.
+| token | hex | role |
+|---|---|---|
+| ink | `#12161B` | page ground |
+| slate | `#1C232B` | the commission panel, the cost panel, the report |
+| slate-2 | `#242D37` | raised: selected cell, secondary buttons |
+| well | `#0E1216` | recessed: inputs, drop zones, the monitor |
+| line | `#39434F` | hairlines |
+| paper | `#E9ECEF` | text, the focus ring, neutral accents |
+| dust | `#9AA6B2` | secondary and help text |
+| tungsten | `#F2A33C` | cost only: lamps, the reserve and quota figures, the Generate fill |
+| cut | `#E5484D` / text `#FF8A8E` | failure only |
+| roll | `#3FBF7F` | accepted only: staged adapters, a file in a drop zone, a finished run |
+
+**Type:**
+
+- Chakra Petch 600 for the wordmark (20), matrix headers (14), panel titles (16),
+  Generate (16) and lamps (12).
+- Spline Sans for prose (14/21; help text 13/19).
+- Spline Sans Mono 500, with tabular figures, for numerals only.
+
+**Components:**
+
+- **One button family.** Primary is Generate only. Secondary is a slate-2 fill with a
+  line border. Quiet buttons are underlined text.
+- **One focus ring:** 2 px paper with a 2 px offset.
+- **Radii:** panels 10, controls 6, lamps 3.
+- **Motion:** state changes only, and none under `prefers-reduced-motion`.
+
+## Showcase
+
+`LTX25_EXAMPLES_DIR` (default `examples/`) may hold a `manifest.json` (schema in
+`ui/showcase.py`). Each mode can have examples and one sample output:
+
+- An example has a label, a prompt, media paths and settings. "Try an example" fills
+  the form and runs nothing.
+- A sample output has its file, caption, settings and seed.
+
+Entries that name a missing file, or a path outside the folder, are skipped. With no
+manifest, there is no example row and the monitor shows its idle frame.
+
+## Contracts
+
+- **`/on_generate`:** parameter 0 is the mode radio, then `FIELD_KEYS` in order, which
+  is append-only with unchanged component classes. It returns `[Video, Audio,
+  Markdown]`.
+- **`/on_validate_lora`:** its inputs and outputs are unchanged.
+- **Other events:** every other event is `api_visibility="private"`.
+- **Progress:** no event builds `gr.Progress(track_tqdm=True)`, which patches tqdm for
+  the whole process.

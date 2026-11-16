@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import html
 import os
-from collections.abc import Iterable, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -87,7 +87,6 @@ __all__ = [
     "run_summary",
     "running",
     "shot_anchor_readout",
-    "status_line",
     "success",
 ]
 
@@ -298,10 +297,6 @@ LENGTH_SET = "Set the length"
 
 def pinned_line(mode: Any, size: int) -> str:
     return f"Renders at {size} × {size} with no upscale, because the picture is thrown away."
-
-
-def length_line(*, seconds: float, frames: int) -> str:
-    return f"{frames} frames, {seconds:.2f} s at 24 fps."
 
 
 def match_clip_line(
@@ -575,7 +570,7 @@ def cost_panel(facts: CostFacts) -> str:
 def commit_line(facts: CostFacts) -> str:
     """The phone's commit bar: the cost in one line, or why Generate is off."""
     if facts.state == "refused":
-        return "Won’t run: " + (facts.problems[0] if facts.problems else (facts.reason or ""))
+        return facts.problems[0] if facts.problems else (facts.reason or "This won’t run.")
     if facts.state == "incomplete" and facts.reason:
         return facts.reason
     parts = []
@@ -597,7 +592,7 @@ def readiness_reason(facts: CostFacts, *, running: bool = False) -> str:
     if facts.state == "ready":
         return ""
     if facts.state == "refused" and facts.problems:
-        return "Won’t run: " + " ".join(facts.problems)
+        return " ".join(facts.problems)
     return facts.reason or "This request would be refused."
 
 
@@ -635,10 +630,6 @@ def monitor_caption(
     if kind == "failed":
         return "**This run failed.** The report below says why."
     return READY
-
-
-def status_line(text: str) -> str:
-    return text
 
 
 # ---------------------------------------------------------------------------
@@ -728,19 +719,23 @@ def lora_accepted(source: str, report: Any) -> str:
     targeted = getattr(report, "modules_targeted", None)
     resolved = getattr(report, "modules_resolved", None)
     if targeted:
-        rows.append(("Layers found in LTX-2.5", f"{resolved} of {targeted}"))
+        rows.append(("Fits LTX-2.5", f"{resolved} of {targeted} layers"))
+    if getattr(report, "hub_revision", None):
+        rows.append(("Hub commit", str(report.hub_revision)[:12]))
     lines = [
         f"#### Accepted: {name}",
         "",
-        "Staged for the next run at strength 1.0. Set its strength below.",
+        "Checks 1 to 6.5 passed: the file reads cleanly and every layer fits its target in "
+        "LTX-2.5. Staged for the next run at strength 1.0; adapters are often made for 0.5 "
+        "to 1.2, so set its strength below.",
         "",
         "| | |",
         "|---|---|",
         *(f"| {label} | {value} |" for label, value in rows),
     ]
-    warnings = tuple(getattr(report, "warnings", ()) or ())
-    if warnings:
-        lines += ["", *(f"- {w}" for w in warnings)]
+    notes = tuple(getattr(report, "warnings", ()) or ())
+    if notes:
+        lines += ["", "Good to know:", *(f"- {note}" for note in notes)]
     return "\n".join(lines)
 
 
@@ -760,10 +755,22 @@ def lora_too_many(limit: int) -> str:
     )
 
 
+def _lora_extra_headline(exc: BaseException) -> str | None:
+    """Headlines for errors defined inside the LoRA package (imported only once it is loaded)."""
+    from ..lora.manifest import LoRAManifestDriftError
+    from ..lora.staging import LoRAWeightError
+
+    if isinstance(exc, LoRAManifestDriftError):
+        return "Not checked: this app's layer table is out of date, not your file"
+    if isinstance(exc, LoRAWeightError):
+        return "Not staged: that strength is out of range"
+    return None
+
+
 def lora_rejected(source: str, exc: BaseException) -> str:
     """A rejection: plain headline, the verbatim validator message underneath."""
     name = shown_name(source)
-    headline = next(
+    headline = (_lora_extra_headline(exc) if isinstance(exc, LoRAError) else None) or next(
         (text for error_type, text in _LORA_HEADLINES if isinstance(exc, error_type)),
         "Rejected: the adapter could not be checked",
     )
@@ -820,6 +827,8 @@ class RunFacts:
     stage_2: bool
     loras: tuple[tuple[str, float], ...]
     took: float
+    #: True when ``took`` is the worker's own GPU time, not the page's wall clock.
+    took_is_gpu: bool = False
     prompt_sent: str | None = None
 
 
@@ -833,12 +842,19 @@ def run_summary(facts: RunFacts) -> str:
         rows.append(("Length", _secs_html(facts.seconds)))
     rows.append(("Seed", _num(facts.seed)))
     rows.append(("LoRA", _lora_words(facts.loras)))
-    rows.append(("Took", f"{_num(f'{facts.took:.0f}')} s, wall-clock"))
+    clock = "GPU time" if facts.took_is_gpu else "wall-clock"
+    rows.append(("Took", f"{_num(f'{facts.took:.0f}')} s, {clock}"))
     grid = "".join(f"<dt>{label}</dt><dd>{value}</dd>" for label, value in rows)
+    sent = ""
+    if facts.prompt_sent:
+        sent = (
+            '<div class="mr-prompt-sent"><p class="mr-sub">Prompt sent</p>'
+            f"<blockquote>{_e(facts.prompt_sent)}</blockquote></div>"
+        )
     return (
         '<section class="mr-done" aria-label="What you got">'
         '<p class="mr-done-head"><span class="mr-lamp mr-lamp-roll is-lit">Done</span></p>'
-        f'<dl class="mr-done-grid">{grid}</dl></section>'
+        f'<dl class="mr-done-grid">{grid}</dl>{sent}</section>'
     )
 
 
@@ -930,6 +946,39 @@ _FAILURES: tuple[tuple[type, str, str], ...] = (
 )
 
 
+#: ``exc.category`` (set by the backend) -> ``(headline, next step)``.
+_CATEGORIES: dict[str, tuple[str, str]] = {
+    "quota": (
+        "Not enough GPU quota for this run",
+        "Wait for your daily quota to refill, or make the run smaller or shorter.",
+    ),
+    "timeout": (
+        "The run ran out of GPU time",
+        "Make the run shorter or smaller, or turn off Upscale, then press Generate again.",
+    ),
+    "out_of_memory": (
+        "The GPU ran out of memory",
+        "Make the run smaller: a lower size, fewer frames or Upscale off.",
+    ),
+    "refused": (
+        "Refused before running: fix the input",
+        "Change what the detail below names, then press Generate again.",
+    ),
+    "adapter": (
+        "An adapter doesn't fit this model",
+        "Remove the adapter, or try a different one, and press Generate again.",
+    ),
+    "enhancer": (
+        "The prompt enhancer is unavailable",
+        "Turn off Enhance my prompt and press Generate again.",
+    ),
+    "bug": (
+        "Something went wrong in this app",
+        "Report it with the time of the run and the detail below.",
+    ),
+}
+
+
 def failure(exc: BaseException, *, refused: bool = False) -> str:
     """Any failure, rendered loudly: headline, quota line, one next step, detail.
 
@@ -938,6 +987,19 @@ def failure(exc: BaseException, *, refused: bool = False) -> str:
     to be true.
     """
     detail = str(exc).strip() or "No detail was attached to the error."
+    category = getattr(exc, "category", None)
+    if category in _CATEGORIES and not refused:
+        headline, step = _CATEGORIES[category]
+        used = getattr(exc, "gpu_used", None)
+        quota = (
+            "Nothing ran. No GPU time was used."
+            if used is False or category == "refused"
+            else "Any GPU time this run used is billed."
+        )
+        return (
+            f"### {headline}\n\n{quota} {step}\n\n"
+            f'<details class="mr-detail"><summary>Detail</summary><p>{_e(detail)}</p></details>'
+        )
     if refused:
         if isinstance(exc, ConstraintError):
             headline = "Refused before running: fix the input"
@@ -980,7 +1042,6 @@ def failure(exc: BaseException, *, refused: bool = False) -> str:
 
 def recent_run_label(
     *,
-    index: int,
     mode: Any,
     seed: int,
     size: tuple[int, int] | None,
@@ -998,11 +1059,3 @@ def recent_run_label(
 
 def example_label() -> str:
     return "Fills the form. Nothing runs until you press Generate."
-
-
-def examples_heading() -> str:
-    return "Try an example"
-
-
-def join_lines(lines: Iterable[str]) -> str:
-    return "\n\n".join(line for line in lines if line)

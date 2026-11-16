@@ -27,7 +27,7 @@ from typing import Any
 import gradio as gr
 
 from .. import modes
-from . import chrome, components, handlers, render, showcase, uploads
+from . import chrome, components, handlers, render, showcase
 from .fields import FIELD_KEYS, PARKED_FIELDS
 
 __all__ = ["DEFAULT_MODE", "build_ui"]
@@ -145,7 +145,6 @@ def build_ui() -> gr.Blocks:
     show = showcase.load_showcase(known_modes=tuple(modes.MODES))
     if show.root is not None:
         gr.set_static_paths([show.root])
-    gr.set_static_paths([uploads.uploads_dir()])
 
     from .. import zerogpu
     from ..config import load_config
@@ -437,6 +436,14 @@ def build_ui() -> gr.Blocks:
                         scale=0,
                         min_width=120,
                     )
+                    use_prompt = gr.Button(
+                        "Use this prompt",
+                        visible=False,
+                        elem_classes=["mr-quiet"],
+                        size="sm",
+                        scale=0,
+                        min_width=140,
+                    )
                 status = gr.Markdown(render.READY, elem_id="run-status", visible=False)
                 with gr.Column(elem_id="recent"):
                     recent_head = gr.Markdown(
@@ -473,6 +480,7 @@ def build_ui() -> gr.Blocks:
         monitor_state = gr.State({"kind": "sample" if sample0 else "idle", "mode": DEFAULT_MODE})
         recent = gr.State([])
         last_seed = gr.State(None)
+        last_prompt = gr.State(None)
 
         field_inputs = [pool[key] for key in FIELD_KEYS]
         parked_keys = [spec.key for spec in PARKED_FIELDS]
@@ -945,10 +953,11 @@ def build_ui() -> gr.Blocks:
             status,
             run_summary,
             reuse_seed,
+            use_prompt,
             monitor_state,
         ]
 
-        def _start(mode_id: str, enhance: Any) -> list[Any]:
+        def _start(mode_id: str, enhance: Any, prompt: Any) -> list[Any]:
             mode = modes.get_mode(mode_id)
             return [
                 gr.update(interactive=False, value="Generating…"),
@@ -960,7 +969,8 @@ def build_ui() -> gr.Blocks:
                 gr.update(value=None, visible=True),
                 gr.update(value=None, visible=False),
                 render.monitor_caption(kind="running", mode=mode),
-                gr.update(value=handlers.on_generate_start(mode_id, enhance), visible=True),
+                gr.update(value=handlers.on_generate_start(mode_id, enhance, prompt), visible=True),
+                gr.update(visible=False),
                 gr.update(visible=False),
                 gr.update(visible=False),
                 {"kind": "running", "mode": mode_id},
@@ -979,6 +989,8 @@ def build_ui() -> gr.Blocks:
             run_summary,
             reuse_seed,
             last_seed,
+            use_prompt,
+            last_prompt,
             monitor_state,
             recent,
             recent_head,
@@ -1006,7 +1018,7 @@ def build_ui() -> gr.Blocks:
             if ok:
                 result = outcome.result
                 params = outcome.params
-                facts = _run_facts(mode, result, params, outcome.took)
+                facts = handlers.run_facts(outcome)
                 entries.insert(0, _recent_entry(mode_id, result, params, facts, outcome))
                 entries = entries[:RECENT_LIMIT]
                 has_video = outcome.video is not None
@@ -1021,6 +1033,10 @@ def build_ui() -> gr.Blocks:
                 summary = gr.update(value=render.run_summary(facts), visible=True)
                 seed_button = gr.update(value=f"Reuse seed {result.seed}", visible=True)
                 seed_value = int(result.seed)
+                sent = facts.prompt_sent
+                differs = bool(sent) and sent.strip() != str(params.get("prompt") or "").strip()
+                prompt_button = gr.update(visible=differs)
+                prompt_value = sent if differs else None
                 monitor_next = {"kind": "run", "mode": mode_id}
             else:
                 monitor = [
@@ -1032,6 +1048,8 @@ def build_ui() -> gr.Blocks:
                 summary = gr.update(visible=False)
                 seed_button = gr.update(visible=False)
                 seed_value = None
+                prompt_button = gr.update(visible=False)
+                prompt_value = None
                 monitor_next = {"kind": "failed", "mode": mode_id}
             return [
                 gr.update(value="Generate", interactive=review_out[2]["interactive"]),
@@ -1043,6 +1061,8 @@ def build_ui() -> gr.Blocks:
                 summary,
                 seed_button,
                 seed_value,
+                prompt_button,
+                prompt_value,
                 monitor_next,
                 entries,
                 gr.update(visible=bool(entries)),
@@ -1052,7 +1072,7 @@ def build_ui() -> gr.Blocks:
 
         generation = generate_button.click(
             fn=_start,
-            inputs=[mode_selector, pool["enhance_prompt"]],
+            inputs=[mode_selector, pool["enhance_prompt"], pool["prompt"]],
             outputs=start_outputs,
             js=_SCROLL_TO_MONITOR,
             **_PRIVATE,
@@ -1075,6 +1095,12 @@ def build_ui() -> gr.Blocks:
         generation.then(**finish)
         generation.failure(**finish)
 
+        use_prompt.click(
+            fn=lambda sent: sent if sent else gr.update(),
+            inputs=[last_prompt],
+            outputs=[pool["prompt"]],
+            **_PRIVATE,
+        )
         reuse_seed.click(
             fn=lambda seed: seed if seed is not None else -1,
             inputs=[last_seed],
@@ -1288,7 +1314,11 @@ def _monitor_for_mode(show: showcase.Showcase, mode: Any, monitor: dict) -> tupl
     return (
         [
             gr.update(value=render.monitor_idle(mode), visible=not sample.is_video),
-            gr.update(value=str(sample.path) if sample.is_video else None, visible=sample.is_video),
+            gr.update(
+                value=str(sample.path) if sample.is_video else None,
+                visible=sample.is_video,
+                autoplay=False,
+            ),
             gr.update(
                 value=None if sample.is_video else str(sample.path), visible=not sample.is_video
             ),
@@ -1358,30 +1388,6 @@ def _fill_example(show: showcase.Showcase, mode_id: str, index: int) -> list:
     ]
 
 
-def _run_facts(mode: Any, result: Any, params: dict, took: float) -> render.RunFacts:
-    from .. import pipelines
-
-    stage_2 = bool(params.get("enable_stage_2")) and not mode.skip_stage_2
-    if mode.min_resolution:
-        size = (modes.MIN_RESOLUTION, modes.MIN_RESOLUTION)
-    else:
-        size = (int(params.get("width") or 0), int(params.get("height") or 0))
-    if stage_2:
-        scale = pipelines.STAGE_2_SPATIAL_SCALE
-        size = (size[0] * scale, size[1] * scale)
-    frames = None if params.get("auto_duration") else params.get("num_frames")
-    seconds = (int(frames) / handlers.FRAME_RATE) if frames else None
-    return render.RunFacts(
-        mode=mode,
-        seed=int(result.seed),
-        returned_size=size,
-        seconds=seconds,
-        stage_2=stage_2,
-        loras=handlers._staged_names(params.get("loras")),
-        took=took,
-    )
-
-
 def _recent_entry(
     mode_id: str, result: Any, params: dict, facts: render.RunFacts, outcome: handlers.RunOutcome
 ) -> dict:
@@ -1405,7 +1411,6 @@ def _recent_rows(entries: list) -> list:
             entry = entries[index]
             mode = modes.get_mode(entry["mode"])
             label = render.recent_run_label(
-                index=index,
                 mode=mode,
                 seed=entry["seed"],
                 size=entry["size"],
