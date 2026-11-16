@@ -476,26 +476,20 @@ def _supplied_kinds(request: GenerationRequest) -> frozenset[str]:
 
 
 def _alternative_label(spec, missing, supplied) -> str | None:
-    """A mode with the same exports that needs none of what is missing.
+    """A mode with the same exports that can run on what the user has already supplied.
 
-    Prefers one whose inputs the user has already supplied, then one that needs
-    only a prompt.
+    Only a mode every one of whose required inputs is supplied: suggesting one
+    that is just as stuck (Text to sound with no prompt suggesting Video to
+    sound) is no way out. None when there is no such mode.
     """
-    candidates = [
-        other
-        for other in modes.MODES.values()
-        if other.id != spec.id
-        and set(other.exports) == set(spec.exports)
-        and not set(other.inputs) & set(missing)
-    ]
-    for prefer in (
-        lambda other: set(other.inputs) <= supplied,
-        lambda other: set(other.inputs) == {"text"},
-        lambda other: True,
-    ):
-        for other in candidates:
-            if prefer(other):
-                return other.label
+    for other in modes.MODES.values():
+        if (
+            other.id != spec.id
+            and set(other.exports) == set(spec.exports)
+            and not set(other.inputs) & set(missing)
+            and set(other.inputs) <= set(supplied)
+        ):
+            return other.label
     return None
 
 

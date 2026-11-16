@@ -122,10 +122,40 @@ def test_a_missing_required_input_is_refused_before_the_dispatch(mode_id, kind, 
     spec = modes.get_mode(mode_id)
     assert spec.label in message, f"the error does not name the mode: {message!r}"
     assert KIND_WORDS[kind] in message, f"the error does not name the missing input: {message!r}"
-    others = [modes.get_mode(m).label for m in MODE_IDS if m != mode_id]
-    assert any(label in message for label in others), (
-        f"the error gives no way out: it should name a mode that does not need it: {message!r}"
+    assert "supplied" not in message and "none was" not in message, message
+    # A suggested mode must be one the user can run with what is already supplied.
+    suggestion = message.partition(" switch to ")[2].rstrip(".")
+    if suggestion:
+        (other,) = [m for m in MODE_IDS if modes.get_mode(m).label == suggestion]
+        assert other != mode_id, message
+        assert set(modes.get_mode(other).inputs) <= set(supplied_kinds(fields)), (
+            f"{mode_id} suggests {other!r}, which is just as stuck: {message!r}"
+        )
+
+
+def supplied_kinds(fields) -> set:
+    kinds = {kind for kind in ("image", "video", "audio") if fields.get(kind) is not None}
+    if str(fields.get("prompt") or "").strip():
+        kinds.add("text")
+    return kinds
+
+
+def test_the_missing_input_sentence_states_the_need_plainly(refused):
+    error = refused(mode="text_to_video")
+    assert str(error) == "Text to video needs a prompt."
+
+
+def test_a_mode_is_suggested_only_when_what_is_supplied_runs_it(refused):
+    # An image to video run with a prompt but no image: Text to video runs on the prompt.
+    error = refused(mode="image_text_to_video", prompt="a lighthouse")
+    assert str(error) == (
+        "Image + text to video needs an image. To use what you have, switch to Text to video."
     )
+
+
+def test_no_mode_is_suggested_when_nothing_supplied_would_run_one(refused):
+    error = refused(mode="text_to_audio")
+    assert str(error) == f"{modes.get_mode('text_to_audio').label} needs a prompt."
 
 
 def test_a_blank_prompt_counts_as_missing(refused):

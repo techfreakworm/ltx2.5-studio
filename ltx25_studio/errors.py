@@ -467,13 +467,11 @@ class MissingInputError(ConstraintError):
         self.missing = tuple(missing)
         self.alternative = alternative
         nouns = [_INPUT_WORDS.get(kind, (kind, f"add {kind}"))[0] for kind in self.missing]
-        actions = [_INPUT_WORDS.get(kind, (kind, f"add {kind}"))[1] for kind in self.missing]
-        remedy = _and(actions)
-        remedy = remedy[0].upper() + remedy[1:]
+        # A plain statement: on a fresh page "and none was supplied" read as an error.
+        message = f"{mode} needs {_and(nouns)}."
         if alternative:
-            remedy += f", or switch to {alternative}"
-        none = {1: "none was", 2: "neither was"}.get(len(self.missing), "none were")
-        super().__init__(f"{mode} needs {_and(nouns)}, and {none} supplied. {remedy}.")
+            message += f" To use what you have, switch to {alternative}."
+        super().__init__(message)
 
 
 class AudioVideoDesyncError(ConstraintError):
