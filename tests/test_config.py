@@ -165,7 +165,20 @@ def test_a_gguf_transformer_is_optional_and_must_be_a_gguf_file(monkeypatch, tmp
     gguf = tmp_path / "transformer-Q8_0.gguf"
     gguf.write_bytes(b"")
     monkeypatch.setenv(config.ENV_TRANSFORMER_GGUF, str(gguf))
-    assert config.load_config().transformer_gguf == str(gguf.resolve())
+    assert config.load_config().transformer_gguf == str(gguf)
+
+
+def test_a_gguf_in_the_hf_cache_is_accepted_through_its_snapshot_link(monkeypatch, tmp_path):
+    """The HF cache links ``snapshots/<rev>/x-Q8_0.gguf`` to an extensionless blob."""
+    blob = tmp_path / "blobs" / "4f2a9c"
+    blob.parent.mkdir()
+    blob.write_bytes(b"x")
+    link = tmp_path / "snapshots" / "ac3c540c" / "distilled" / "x-Q8_0.gguf"
+    link.parent.mkdir(parents=True)
+    link.symlink_to(blob)
+    monkeypatch.setenv(config.ENV_TRANSFORMER_GGUF, str(link))
+
+    assert config.load_config().transformer_gguf == str(link)
 
 
 # --------------------------------------------------------------------------

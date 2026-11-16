@@ -804,3 +804,103 @@ def test_the_cuda_path_never_gets_the_rope_handling(monkeypatch, tmp_path):
         pipelines._base_pipeline(device="cuda")
     finally:
         pipelines.clear_cache()
+
+
+# --------------------------------------------------------------------------
+# start-up on mps/cpu checks what the local runner loads (review local-runtime-1)
+#
+# The strict start-up check demanded the Space's whole allow-list (safetensors
+# transformer shards and the stage-2 parts), so the app could not start on a Mac
+# holding the GGUF layout the local runner is built for.
+# --------------------------------------------------------------------------
+
+#: What the GGUF layout on a Mac leaves out: the transformer shards and the stage-2 parts.
+NOT_IN_THE_GGUF_LAYOUT = (
+    "transformer/diffusion_pytorch_model-0",
+    "latent_upsampler/",
+    "temporal_latent_upsampler/",
+    "diffusion_decoder/",
+)
+
+
+def _gguf_layout(monkeypatch, tmp_path, *, drop=()):
+    """A pinned HF cache with the GGUF layout, plus the GGUF file; returns the config."""
+    from ltx25_studio import model_files, preflight
+
+    monkeypatch.setenv("HF_HUB_CACHE", str(tmp_path / "hub"))
+    monkeypatch.delenv(config.ENV_MODEL_SNAPSHOT_DIR, raising=False)
+    import json
+
+    repo = preflight.cache_repo_dir()
+    allow = model_files.download_allow_list()
+    for path in allow:
+        if path.startswith(NOT_IN_THE_GGUF_LAYOUT) or path in drop:
+            continue
+        target = model_files.local_path(path, repo_cache=repo)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        content = b"x"
+        if path.endswith(".safetensors.index.json"):
+            folder = path.rsplit("/", 1)[0]
+            shards = [p.rsplit("/", 1)[1] for p in allow if p.startswith(folder + "/")]
+            weight_map = {f"w{i}": name for i, name in enumerate(shards) if name.endswith("s")}
+            content = json.dumps({"weight_map": weight_map}).encode()
+        elif path.endswith(".json"):
+            content = b"{}"
+        target.write_bytes(content)
+    gguf = tmp_path / "x-Q8_0.gguf"
+    gguf.write_bytes(b"x")
+    monkeypatch.setenv(config.ENV_TRANSFORMER_GGUF, str(gguf))
+    return config.load_config()
+
+
+def _resolution(name):
+    resolution = device.resolve(_real_spaces(), config.load_config())
+    import dataclasses
+
+    return dataclasses.replace(resolution, device=name)
+
+
+@pytest.mark.parametrize("name", ["cpu", "mps"])
+def test_a_local_device_starts_with_the_gguf_layout(monkeypatch, tmp_path, name):
+    pytest.importorskip("diffusers")
+    from ltx25_studio import preflight
+
+    runtime = _gguf_layout(monkeypatch, tmp_path)
+    monkeypatch.setattr(device, "mps_self_test", lambda *a, **k: None)
+
+    assert preflight.run(runtime, strict=True, resolution=_resolution(name)) == "verified"
+
+
+def test_a_local_device_still_refuses_a_file_the_local_runner_needs(monkeypatch, tmp_path):
+    pytest.importorskip("diffusers")
+    from ltx25_studio import local_runtime, preflight
+
+    runtime = _gguf_layout(monkeypatch, tmp_path, drop=("vae/diffusion_pytorch_model.safetensors",))
+
+    with pytest.raises(local_runtime.LocalFilesMissingError) as caught:
+        preflight.run(runtime, strict=True, resolution=_resolution("cpu"))
+    assert "vae" in str(caught.value)
+
+
+def test_a_local_device_without_the_gguf_needs_the_safetensors_transformer(monkeypatch, tmp_path):
+    pytest.importorskip("diffusers")
+    from ltx25_studio import local_runtime, preflight
+
+    runtime = _gguf_layout(monkeypatch, tmp_path)
+    monkeypatch.delenv(config.ENV_TRANSFORMER_GGUF)
+    runtime = config.load_config()
+
+    with pytest.raises(local_runtime.LocalFilesMissingError) as caught:
+        preflight.run(runtime, strict=True, resolution=_resolution("cpu"))
+    assert "transformer" in str(caught.value)
+
+
+def test_cuda_still_demands_the_whole_allow_list(monkeypatch, tmp_path):
+    pytest.importorskip("diffusers")
+    from ltx25_studio import preflight
+    from ltx25_studio.errors import MissingModelFileError
+
+    runtime = _gguf_layout(monkeypatch, tmp_path)
+
+    with pytest.raises(MissingModelFileError):
+        preflight.run(runtime, strict=True, resolution=_resolution("cuda"))

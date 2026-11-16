@@ -221,11 +221,15 @@ def _snapshot_dir(name: str) -> str | None:
 
 
 def _gguf_file(name: str) -> str | None:
-    """A local ``.gguf`` transformer file for the local runner, or None."""
+    """A local ``.gguf`` transformer file for the local runner, or None.
+
+    The name is checked as given: in the HF cache ``snapshots/<rev>/x.gguf`` is a
+    link to an extensionless blob, and the link (not the blob) is returned.
+    """
     raw = (os.environ.get(name) or "").strip()
     if not raw:
         return None
-    path = os.path.realpath(os.path.expanduser(raw))
+    path = os.path.abspath(os.path.expanduser(raw))
     if not (os.path.isfile(path) and path.endswith(".gguf")):
         raise ConfigError(variable=name, value=raw, legal=("an existing .gguf file",))
     return path

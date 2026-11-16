@@ -50,6 +50,7 @@ __all__ = [
     "check_diffusers_version",
     "missing_cached_files",
     "ensure_weights",
+    "local_missing_files",
     "require_cache_complete",
     "run",
 ]
@@ -151,7 +152,12 @@ def run(runtime_config, *, strict: bool = False, spaces_module=None, resolution=
     from . import pipelines, zerogpu
 
     log = logging.getLogger("ltx25_studio")
-    missing = missing_cached_files()
+    local = _local_runner_device(resolution)
+    if local:
+        absent = local_missing_files(runtime_config)
+        missing = tuple(str(path) for path, _command in absent)
+    else:
+        missing = missing_cached_files()
     self_test = None
     if resolution is not None and resolution.device == "mps":
         from . import device
@@ -173,8 +179,34 @@ def run(runtime_config, *, strict: bool = False, spaces_module=None, resolution=
     import diffusers
 
     check_diffusers_version(diffusers.__version__)
-    require_cache_complete()
+    if local:
+        if absent:
+            from .local_runtime import LocalFilesMissingError
+
+            raise LocalFilesMissingError(missing=absent)
+    else:
+        require_cache_complete()
     return "verified"
+
+
+def _local_runner_device(resolution) -> bool:
+    """True where generation goes to the local runner: mps/cpu, no snapshot override."""
+    device = getattr(resolution, "device", None)
+    return device in ("mps", "cpu") and snapshot_override() is None
+
+
+def local_missing_files(runtime_config) -> list:
+    """What the local runner loads and is not on disk: ``[(path, download command)]``.
+
+    The small set, the text encoder, and the safetensors transformer or the
+    configured GGUF -- not the Space's whole allow-list: stage 2 is refused at
+    real sizes off CUDA, and a GGUF replaces the transformer shards.
+    """
+    from . import local_runtime
+
+    return local_runtime.missing_files(
+        snapshot_dir(), transformer_gguf=getattr(runtime_config, "transformer_gguf", None)
+    )
 
 
 def check_diffusers_version(found: str) -> None:
