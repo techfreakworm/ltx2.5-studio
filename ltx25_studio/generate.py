@@ -534,9 +534,10 @@ def _audio_facts(source) -> tuple[float, int]:
             channels = int(getattr(stream.codec_context, "channels", 0) or 0)
             if stream.duration is not None and stream.time_base is not None:
                 seconds = float(stream.duration * stream.time_base)
-            elif container.duration is not None:
-                seconds = container.duration / av.time_base
             else:
+                # The sound's own samples (Matroska and WebM give a stream no
+                # duration). Never container.duration: the longest stream, which
+                # may be a picture that outlasts the sound.
                 samples = sum(frame.samples for frame in container.decode(stream))
                 seconds = samples / float(stream.rate) if stream.rate else None
     except constraints.ConstraintError:
@@ -649,8 +650,9 @@ def _condition_source(entry):
 def _video_seconds(source) -> float:
     """Open a video input, check it has a picture and its first frame decodes; its length.
 
-    Bounded work (an open and one frame), before a GPU is reserved: a missing,
-    audio-only or undecodable clip is refused here, not in the billed worker.
+    Before a GPU is reserved: a missing, audio-only or undecodable clip is refused
+    here, not in the billed worker. The length is the picture's (see
+    :func:`_picture_seconds`).
     """
     import av
 
@@ -662,19 +664,12 @@ def _video_seconds(source) -> float:
                     f"{name} has no picture in it, so it cannot be used as a video. Upload a "
                     f"video file."
                 )
-            stream = container.streams.video[0]
-            if next(container.decode(stream), None) is None:
+            seconds, readable = _picture_seconds(container, container.streams.video[0])
+            if not readable:
                 raise constraints.ConstraintError(
                     f"{name} opened but none of its frames could be read. Re-export it as an "
                     f"MP4 (H.264) file."
                 )
-            seconds = None
-            if stream.duration is not None and stream.time_base is not None:
-                seconds = float(stream.duration * stream.time_base)
-            elif container.duration is not None:
-                seconds = container.duration / av.time_base
-            elif stream.frames and stream.average_rate:
-                seconds = stream.frames / float(stream.average_rate)
     except constraints.ConstraintError:
         raise
     except Exception as exc:  # noqa: BLE001 -- every open failure has one answer here
@@ -683,6 +678,34 @@ def _video_seconds(source) -> float:
             f"been removed. Upload it again, as an MP4, MOV or WebM file."
         ) from exc
     return float(seconds) if seconds else 0.0
+
+
+def _picture_seconds(container, stream) -> tuple[float | None, bool]:
+    """``(the picture's length, whether a frame decodes)``, in one pass over its packets.
+
+    The video stream's own duration where it has one (MP4, MOV); else its packets
+    counted over its own frame rate. Matroska and WebM give a stream no duration,
+    and their millisecond timestamps make a span one frame short. Never
+    ``container.duration``: the longest stream, so a clip whose sound outlasts its
+    picture was planned past its last frame (F70). Counting stops once the clip
+    is longer than any run.
+    """
+    known = None
+    if stream.duration is not None and stream.time_base is not None:
+        known = float(stream.duration * stream.time_base)
+    rate = float(stream.average_rate or stream.guessed_rate or 0)
+    enough = math.ceil((constraints.MAX_SECONDS + 1.0) * rate)
+    readable, packets = False, 0
+    for packet in container.demux(stream):
+        if not readable and packet.decode():
+            readable = True
+        if packet.size:
+            packets += 1
+        if readable and (known is not None or not rate or packets > enough):
+            break
+    if known is not None:
+        return known, readable
+    return (packets / rate if rate else None), readable
 
 
 def _length_from_clip(
@@ -955,11 +978,20 @@ def _prepared_conditions(kwargs: dict, request: GenerationRequest) -> None:
     Conversion to ``LTX2VideoCondition`` happens later, in ``StageRunner``, where
     diffusers is present. The normalisation here is pure arithmetic and always
     runs, which is what makes it a guard rather than a formatting step.
+
+    Runs after :func:`_prepared_variation`, so the anchors are checked against the
+    frames that will really run: a clip that decoded shorter than planned has
+    shortened ``kwargs["num_frames"]``, and a shot past it is refused here, never
+    skipped by diffusers.
     """
     raw = kwargs.get("conditions")
     if not raw:
         return ()
     cap = _decode_cap(request)
+    bound = _anchor_bound(request)
+    if kwargs.get("num_frames"):
+        cap = min(cap, int(kwargs["num_frames"]))
+        bound = min(bound, int(kwargs["num_frames"]))
     # The largest size a condition is resized to: the stage-2 size when it runs.
     scale = 2 if kwargs.get("enable_stage_2") else 1
     size = (
@@ -972,7 +1004,7 @@ def _prepared_conditions(kwargs: dict, request: GenerationRequest) -> None:
             _decoded_video_condition(entry, cap, request.frame_rate, size=size, notes=notes)
             for entry in raw
         ),
-        num_frames=_anchor_bound(request),
+        num_frames=bound,
         temporal_compression_ratio=constraints.DEFAULT_TEMPORAL_COMPRESSION_RATIO,
     )
     return tuple(notes)
@@ -2357,8 +2389,10 @@ def generate(
         # simply wrong rather than merely coarse.
         reporter.phase("preparing the inputs")
         kwargs = _pipeline_kwargs(spec, request)
-        condition_notes = _prepared_conditions(kwargs, request)
+        # The clip first: its decoded frame count is the run's length, and the
+        # conditions are checked against that, not against what the file promised.
         clip_notes = _prepared_variation(kwargs, request, spec)
+        condition_notes = _prepared_conditions(kwargs, request)
         lora_reports = _apply_loras(pipe, request)
         try:
             # Before `_prepared_audio`, because the audio encode samples from a
