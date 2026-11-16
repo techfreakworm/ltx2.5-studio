@@ -36,6 +36,7 @@ from ..errors import LoRAFormatError, LoRAHeaderError, LoRATruncatedError
 
 __all__ = [
     "CONNECTOR_CONVENTIONS",
+    "DTYPE_BITS",
     "HEADER_LENGTH_BYTES",
     "KEY_PREFIXES",
     "MAX_HEADER_BYTES",
@@ -49,11 +50,40 @@ __all__ = [
 #: The container's fixed-width length prefix.
 HEADER_LENGTH_BYTES = 8
 
-#: Sanity bound on the declared header length. The largest real adapter header
-#: measured is ~160 KB for 1152 tensors, so a 3320-tensor adapter lands well
-#: under a megabyte. Anything past this is a corrupt prefix, not a big model --
-#: most often an HTML error page from a gated repo being read as safetensors.
-MAX_HEADER_BYTES = 100_000_000
+#: Bound on the declared header length, the same one the Hub range reader uses.
+#: The largest real adapter header measured is ~0.4 MB (the official 2.5
+#: adapter, licence included). Past this is a corrupt prefix or a hostile file,
+#: and parsing it would cost hundreds of MB in the web process.
+MAX_HEADER_BYTES = 16_000_000
+
+#: Bits per element of every dtype the safetensors loader reads (0.8.0,
+#: measured). A tensor of any other dtype is refused by the loader.
+DTYPE_BITS = MappingProxyType(
+    {
+        "BOOL": 8,
+        "F4": 4,
+        "F6_E2M3": 6,
+        "F6_E3M2": 6,
+        "U8": 8,
+        "I8": 8,
+        "F8_E5M2": 8,
+        "F8_E4M3": 8,
+        "F8_E8M0": 8,
+        "F8_E4M3FNUZ": 8,
+        "F8_E5M2FNUZ": 8,
+        "I16": 16,
+        "U16": 16,
+        "F16": 16,
+        "BF16": 16,
+        "I32": 32,
+        "U32": 32,
+        "F32": 32,
+        "C64": 64,
+        "F64": 64,
+        "I64": 64,
+        "U64": 64,
+    }
+)
 
 #: The four verified prefixes, mapped to a convention name (PLAN §4.1).
 #: ``diffusion_model.`` dominates in the wild: every real community adapter
@@ -205,9 +235,13 @@ def parse_safetensors_header(blob: bytes, *, source: str) -> dict:
     """Decode the header JSON, or raise a specific format error."""
     try:
         header = json.loads(blob.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+    except (UnicodeDecodeError, ValueError) as exc:
         raise LoRAFormatError(
-            source=source, reason=f"the safetensors header is not valid JSON ({exc})"
+            source=source, reason=f"the safetensors header is not valid JSON ({_shown(exc, 200)})"
+        ) from exc
+    except RecursionError as exc:
+        raise LoRAFormatError(
+            source=source, reason="the safetensors header nests too deeply to be one"
         ) from exc
     if not isinstance(header, dict):
         raise LoRAFormatError(
@@ -225,6 +259,67 @@ def read_safetensors_header(path: str | Path) -> tuple[dict, int]:
     path = Path(path)
     blob, declared, _ = _read_header_bytes(path)
     return parse_safetensors_header(blob, source=str(path)), declared
+
+
+def _shown(value, limit: int = 60) -> str:
+    """``repr(value)`` cut short, so a hostile header cannot become a huge message."""
+    text = str(value) if isinstance(value, Exception) else repr(value)
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def _kind(value) -> str:
+    names = {dict: "an object", list: "a list", str: "text", bool: "true or false"}
+    if value is None:
+        return "null"
+    return names.get(type(value), "a number")
+
+
+def _counts(value) -> bool:
+    """A JSON list of whole numbers of 0 or more (``true`` is not a number here)."""
+    return isinstance(value, list) and all(type(item) is int and item >= 0 for item in value)
+
+
+def _checked_entries(header: dict, *, source: str) -> tuple[dict, dict]:
+    """``(metadata, {name: (dtype, shape, begin, end)})`` with every entry typed as the
+    safetensors loader requires, or a :class:`LoRAFormatError` naming the first fault."""
+
+    def refuse(reason):
+        raise LoRAFormatError(source=source, reason=reason)
+
+    raw = header.get("__metadata__")
+    if raw is None:
+        metadata = {}
+    elif not isinstance(raw, dict):
+        refuse(f"its __metadata__ is {_kind(raw)}, not a table of text values")
+    else:
+        for key, value in raw.items():
+            if not isinstance(value, str):
+                refuse(f"its __metadata__ entry {_shown(key)} is {_kind(value)}, not text")
+        metadata = dict(raw)
+
+    entries = {}
+    for name, entry in header.items():
+        if name == "__metadata__":
+            continue
+        if not isinstance(entry, dict):
+            refuse(f"tensor {_shown(name)} is described by {_kind(entry)}, not an object")
+        dtype, shape = entry.get("dtype"), entry.get("shape")
+        offsets = entry.get("data_offsets")
+        if not isinstance(dtype, str) or dtype not in DTYPE_BITS:
+            found = "no dtype" if dtype is None else f"dtype {_shown(dtype)}"
+            refuse(f"tensor {_shown(name)} has {found}, which is not one safetensors reads")
+        if not _counts(shape):
+            refuse(
+                f"tensor {_shown(name)} has shape {_shown(shape)}; a shape is a list of "
+                f"whole numbers of 0 or more"
+            )
+        if not (_counts(offsets) and len(offsets) == 2):
+            refuse(
+                f"tensor {_shown(name)} has data_offsets {_shown(offsets)}; they must be two "
+                f"whole numbers of 0 or more"
+            )
+        entries[name] = (dtype, tuple(shape), offsets[0], offsets[1])
+    return metadata, entries
 
 
 def _prefix_of(key: str) -> str:
@@ -259,19 +354,12 @@ def inspect_lora(path: str | Path) -> LoRAInspection:
     path = Path(path)
     blob, declared, file_bytes = _read_header_bytes(path)
     header = parse_safetensors_header(blob, source=str(path))
+    # No metadata key, `__metadata__: null` and `__metadata__: {}` all mean "none";
+    # all three are common in the wild (PLAN §4.5) and none is an error.
+    metadata, entries = _checked_entries(header, source=str(path))
 
-    raw_metadata = header.pop("__metadata__", None)
-    # Two distinct shapes mean the same thing: no metadata key at all, and
-    # `__metadata__: {}`. Both are common in the wild (PLAN §4.5), so neither is
-    # an error and both must normalise to the same empty mapping.
-    metadata = {str(k): str(v) for k, v in raw_metadata.items()} if raw_metadata else {}
-
-    keys = tuple(header)
-    shapes = {
-        name: (entry.get("dtype"), tuple(entry.get("shape", ())))
-        for name, entry in header.items()
-        if isinstance(entry, dict)
-    }
+    keys = tuple(entries)
+    shapes = {name: (dtype, shape) for name, (dtype, shape, _begin, _end) in entries.items()}
     prefixes = tuple(dict.fromkeys(_prefix_of(key) for key in keys))
 
     return LoRAInspection(

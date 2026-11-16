@@ -418,3 +418,124 @@ def test_the_header_hash_survives_the_fork_transport(good_lora):
 
     inspection = lora_inspect.inspect_lora(good_lora)
     assert pickle.loads(pickle.dumps(inspection)).header_sha256 == inspection.header_sha256
+
+
+# --------------------------------------------------------------------------
+# lora-8 — the header bound, and every entry checked the way safetensors checks it
+# --------------------------------------------------------------------------
+
+
+def raw_adapter(path, header, payload=b""):
+    """A file holding exactly ``header`` (an object, or raw JSON bytes) and ``payload``."""
+    blob = header if isinstance(header, bytes) else json.dumps(header).encode("utf-8")
+    path.write_bytes(struct.pack("<Q", len(blob)) + blob + payload)
+    return path
+
+
+def f32(begin, end, shape=(2,)):
+    return {"dtype": "F32", "shape": list(shape), "data_offsets": [begin, end]}
+
+
+def test_the_header_bound_is_the_remote_readers_16_mb():
+    """The largest real adapter header is ~0.4 MB; the Hub range reader already
+    refuses anything over 16 MB, and an upload gets the same bound."""
+    from ltx25_studio.lora import manifest
+
+    assert lora_inspect.MAX_HEADER_BYTES == manifest.MAX_REMOTE_HEADER_BYTES == 16_000_000
+
+
+def test_a_well_formed_20_mb_header_is_refused_before_it_is_read(tmp_path, read_spy):
+    """Parsing it costs hundreds of MB of RAM in the web process for nothing."""
+    path = raw_adapter(tmp_path / "padded.safetensors", {"__metadata__": {"pad": "x" * 20_000_000}})
+    read_spy.watch(path)
+    with pytest.raises(LoRAHeaderError) as excinfo:
+        lora_inspect.inspect_lora(path)
+    assert "padded.safetensors" in str(excinfo.value)
+    assert read_spy.bytes_read < 64, f"read {read_spy.bytes_read} bytes of a refused header"
+
+
+#: Headers the safetensors loader refuses, with an 8-byte payload behind each.
+MALFORMED_ENTRIES = {
+    "shape is a number": {"t": {"dtype": "F32", "shape": 2, "data_offsets": [0, 8]}},
+    "shape holds a float": {"t": {"dtype": "F32", "shape": [2.0], "data_offsets": [0, 8]}},
+    "shape holds a negative": {"t": {"dtype": "F32", "shape": [-2], "data_offsets": [0, 8]}},
+    "shape holds a boolean": {"t": {"dtype": "U8", "shape": [True], "data_offsets": [0, 8]}},
+    "dtype is a number": {"t": {"dtype": 5, "shape": [2], "data_offsets": [0, 8]}},
+    "dtype is not one safetensors knows": {
+        "t": {"dtype": "bf16", "shape": [4], "data_offsets": [0, 8]}
+    },
+    "no dtype": {"t": {"shape": [2], "data_offsets": [0, 8]}},
+    "no shape": {"t": {"dtype": "F32", "data_offsets": [0, 8]}},
+    "no data offsets": {"t": {"dtype": "F32", "shape": [2]}},
+    "three data offsets": {"t": {"dtype": "F32", "shape": [2], "data_offsets": [0, 8, 8]}},
+    "a float data offset": {"t": {"dtype": "F32", "shape": [2], "data_offsets": [0, 8.0]}},
+    "an entry that is a list": {"t": [1, 2]},
+    "an entry that is text": {"t": "F32"},
+    "metadata that is a list": {"__metadata__": ["x"], "t": f32(0, 8)},
+    "a metadata value that is a number": {"__metadata__": {"k": 1}, "t": f32(0, 8)},
+    "a metadata value that is an object": {"__metadata__": {"k": {"x": "y"}}, "t": f32(0, 8)},
+}
+
+
+@pytest.mark.parametrize("header", MALFORMED_ENTRIES.values(), ids=MALFORMED_ENTRIES)
+def test_a_malformed_entry_is_a_format_error_not_a_python_error(header, tmp_path):
+    path = raw_adapter(tmp_path / "malformed.safetensors", header, b"\x01" * 8)
+    with pytest.raises(LoRAFormatError) as excinfo:
+        lora_inspect.inspect_lora(path)
+    message = str(excinfo.value)
+    assert "malformed.safetensors" in message
+    assert len(message) < 600, f"a {len(message)}-character message is not one a person reads"
+
+
+def test_deeply_nested_json_is_a_format_error_not_a_recursion_error(tmp_path):
+    blob = b'{"__metadata__": {"k": ' + b"[" * 100_000 + b"]" * 100_000 + b"}}"
+    path = raw_adapter(tmp_path / "nested.safetensors", blob)
+    with pytest.raises(LoRAFormatError) as excinfo:
+        lora_inspect.inspect_lora(path)
+    assert "nested.safetensors" in str(excinfo.value)
+
+
+def test_a_hostile_value_is_not_quoted_in_full(tmp_path):
+    header = {"t": {"dtype": "F32", "shape": [1.5] * 200_000, "data_offsets": [0, 8]}}
+    path = raw_adapter(tmp_path / "long.safetensors", header, b"\x01" * 8)
+    with pytest.raises(LoRAFormatError) as excinfo:
+        lora_inspect.inspect_lora(path)
+    assert len(str(excinfo.value)) < 600
+
+
+@pytest.mark.parametrize("header", MALFORMED_ENTRIES.values(), ids=MALFORMED_ENTRIES)
+def test_the_safetensors_loader_refuses_every_entry_we_refuse(header, tmp_path):
+    """Refusing at Validate is only right if the worker's loader would refuse too."""
+    safetensors = pytest.importorskip("safetensors")
+    path = raw_adapter(tmp_path / "malformed.safetensors", header, b"\x01" * 8)
+    with (
+        pytest.raises(Exception),  # noqa: B017 -- SafetensorError's import path varies
+        safetensors.safe_open(str(path), framework="numpy") as handle,
+    ):
+        list(handle.keys())
+
+
+#: Headers the safetensors loader accepts, each with the payload it needs.
+ACCEPTED_HEADERS = {
+    "an extra field in an entry": ({"t": {**f32(0, 8), "note": "x"}}, 8),
+    "null metadata": ({"__metadata__": None, "t": f32(0, 8)}, 8),
+    "keys out of offset order": ({"b": f32(8, 16), "a": f32(0, 8)}, 16),
+    "a scalar": ({"t": {"dtype": "F32", "shape": [], "data_offsets": [0, 4]}}, 4),
+    "a zero-size tensor": (
+        {"z": {"dtype": "F32", "shape": [0, 4], "data_offsets": [0, 0]}, "t": f32(0, 8)},
+        8,
+    ),
+    "an empty header": ({}, 0),
+    "metadata only": ({"__metadata__": {"k": "v"}}, 0),
+    "a 4-bit dtype": ({"t": {"dtype": "F4", "shape": [4], "data_offsets": [0, 2]}}, 2),
+}
+
+
+@pytest.mark.parametrize(("header", "size"), ACCEPTED_HEADERS.values(), ids=ACCEPTED_HEADERS)
+def test_headers_the_safetensors_loader_accepts_are_accepted(header, size, tmp_path):
+    path = raw_adapter(tmp_path / "fine.safetensors", header, b"\x01" * size)
+    result = lora_inspect.inspect_lora(path)
+    assert set(result.keys) == {k for k in header if k != "__metadata__"}
+    safetensors = pytest.importorskip("safetensors")
+    with safetensors.safe_open(str(path), framework="numpy") as handle:
+        assert set(handle.keys()) == set(result.keys)

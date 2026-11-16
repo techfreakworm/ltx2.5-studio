@@ -29,7 +29,7 @@ from types import MappingProxyType
 
 from ..errors import LoRAError
 from ..model_files import REPO_ID, REVISION
-from .inspect import HEADER_LENGTH_BYTES
+from .inspect import HEADER_LENGTH_BYTES, MAX_HEADER_BYTES
 
 __all__ = [
     "MANIFEST_COUNT",
@@ -153,10 +153,11 @@ def render_document(document: Mapping) -> str:
 # a server that ignores ``Range`` is refused before its body is read.
 # --------------------------------------------------------------------------
 
-#: Refuse a declared header larger than this. The largest real LTX adapter
-#: header measured is ~0.4 MB (the official 2.5 adapter, with a 34 KB licence
-#: in its metadata); a transformer shard header is ~0.13 MB.
-MAX_REMOTE_HEADER_BYTES = 16_000_000
+#: Refuse a declared header larger than this: the bound an uploaded file gets.
+#: The largest real LTX adapter header measured is ~0.4 MB (the official 2.5
+#: adapter, with a 34 KB licence in its metadata); a transformer shard header
+#: is ~0.13 MB.
+MAX_REMOTE_HEADER_BYTES = MAX_HEADER_BYTES
 
 _TIMEOUT_SECONDS = 30.0
 
