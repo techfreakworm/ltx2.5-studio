@@ -612,6 +612,8 @@ button:disabled { cursor: not-allowed !important; }
   #commission button, #rail button, #commission button.secondary, #rail button.secondary,
   #commission .mr-secondary, footer button, footer a { min-height: 44px !important; }
   #commission button.reset-button, #commission .reset-button { min-width: 44px !important; }
+  #monitor button, #monitor a[download] { min-width: 44px !important; min-height: 44px !important;
+    display: inline-flex; align-items: center; justify-content: center; }
   footer button, footer a { display: inline-flex !important; align-items: center; }
   .mr-chips label { min-height: 44px; }
 }
