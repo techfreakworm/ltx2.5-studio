@@ -546,3 +546,87 @@ def test_a_repeat_fetch_refreshes_the_access_stamp(tmp_path):
         cache_dir=tmp_path,
     )
     assert (folder / fetch.LAST_USED_MARKER).stat().st_mtime > before + 1000
+
+
+# --------------------------------------------------------------------------
+# review r1 lora-6 — a 401 says what is known: gated, missing or private, or a
+# bad token, and only a real gate is called gated. Built from real responses
+# raised through huggingface_hub's own hf_raise_for_status.
+# --------------------------------------------------------------------------
+
+LISTING_URL = "https://huggingface.co/api/models/org/name"
+DOWNLOAD_URL = f"https://huggingface.co/org/name/resolve/{SHA}/adapter.safetensors"
+BAD_TOKEN = {"X-Error-Message": "Invalid credentials in Authorization header"}
+
+
+def hub_error(status, url, **headers):
+    """The exception huggingface_hub itself raises for this response."""
+    httpx = pytest.importorskip("httpx")
+    hub_utils = pytest.importorskip("huggingface_hub.utils")
+    response = httpx.Response(status, headers=headers, request=httpx.Request("GET", url))
+    with pytest.raises(Exception) as caught:  # noqa: B017 -- whatever the Hub raises
+        hub_utils.hf_raise_for_status(response)
+    return caught.value
+
+
+def listing_refusal(exc) -> str:
+    with pytest.raises(LoRAFetchError) as caught:
+        _failing_fetcher(exc)("org/name")
+    assert caught.value.__cause__ is exc
+    return str(caught.value)
+
+
+def download_refusal(exc) -> str:
+    def download(repo_id, filename, revision=None):
+        raise exc
+
+    with pytest.raises(LoRAFetchError) as caught:
+        fetch_lora(
+            "org/name",
+            max_bytes=CAP,
+            repo_files=lambda repo: {"adapter.safetensors": 512},
+            download=download,
+        )
+    return str(caught.value)
+
+
+def test_a_missing_or_private_repo_listed_without_a_token_is_not_called_gated():
+    """The Hub answers an anonymous listing of a missing or private repo with
+    401 RepoNotFound, which huggingface_hub raises as RepositoryNotFoundError."""
+    message = listing_refusal(hub_error(401, LISTING_URL, **{"X-Error-Code": "RepoNotFound"}))
+    assert "gated" not in message
+    assert "not found" in message and "private" in message
+
+
+def test_an_invalid_token_is_named_as_the_token_when_listing():
+    message = listing_refusal(hub_error(401, LISTING_URL, **BAD_TOKEN))
+    assert "gated" not in message
+    assert "token" in message and "invalid" in message
+
+
+def test_an_invalid_token_is_named_as_the_token_when_downloading():
+    message = download_refusal(hub_error(401, DOWNLOAD_URL, **BAD_TOKEN))
+    assert "gated" not in message
+    assert "token" in message and "invalid" in message
+
+
+def test_a_bare_401_at_the_listing_says_what_it_could_be_rather_than_gated():
+    message = listing_refusal(hub_error(401, LISTING_URL))
+    assert "401" in message
+    assert "gated" in message and "private" in message and "misspelt" in message
+    assert "is gated." not in message, "a bare 401 does not prove the repo is gated"
+
+
+@pytest.mark.parametrize(
+    ("status", "url", "step"),
+    [(403, LISTING_URL, listing_refusal), (401, DOWNLOAD_URL, download_refusal)],
+    ids=["listing", "download"],
+)
+def test_a_real_gate_is_called_gated_at_either_step(status, url, step):
+    message = step(hub_error(status, url, **{"X-Error-Code": "GatedRepo"}))
+    assert "gated" in message and "terms" in message
+
+
+def test_a_typo_seen_with_a_valid_token_is_not_found():
+    message = listing_refusal(hub_error(404, LISTING_URL, **{"X-Error-Code": "RepoNotFound"}))
+    assert "not found" in message and "gated" not in message

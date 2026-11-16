@@ -11,8 +11,10 @@ What it guarantees:
 2. **The size bound is enforced from the listing, before any download**, and
    the download is pinned to the commit that listing saw (``revision=sha``),
    so the file that was measured is the file that arrives.
-3. **Gated repos say so.** They list fine and fail at the download (HTTP 401,
-   ``GatedRepoError``); both steps map that to the same actionable message.
+3. **A refusal says what is known.** A gated repo (the Hub's ``GatedRepo``
+   code, ``GatedRepoError``) is called gated at either step; a missing or
+   private repo, and a rejected token, are named as such; a 401 the Hub does
+   not explain says what it could be rather than guessing one.
 4. **The cache is bounded.** Adapters download into their own directory
    (:func:`lora_cache_dir`, beside the Hub cache, never inside another model's
    folder), each fetch stamps its repo folder, and :func:`evict_lora_cache`
@@ -383,16 +385,65 @@ def _gated(source, repo_id: str) -> LoRAFetchError:
     )
 
 
-def _is_gated(exc: Exception) -> bool:
-    if "GatedRepoError" in {cls.__name__ for cls in type(exc).__mro__}:
-        return True
-    return getattr(getattr(exc, "response", None), "status_code", None) == 401
+def _not_found(source, repo_id: str) -> LoRAFetchError:
+    return LoRAFetchError(
+        source=source,
+        reason=(
+            f"{repo_id!r} was not found on the Hub. The Hub reports private repos "
+            f"the same way, so: check the spelling, or check the repo's visibility "
+            f"against this Space's token"
+        ),
+    )
+
+
+def _bad_token(source) -> LoRAFetchError:
+    return LoRAFetchError(
+        source=source,
+        reason=(
+            "the Hub rejected the access token this app sends (HTTP 401, invalid "
+            "credentials): it is expired, revoked or mistyped. Replace the token, or remove "
+            "it to fetch public adapters without one"
+        ),
+    )
+
+
+def _hub_refusal(exc: Exception) -> tuple[set, int | None, str, str]:
+    """``(class names in the MRO, HTTP status, X-Error-Code, server message)``.
+
+    Read by name and attribute, so nothing here needs huggingface_hub importable.
+    """
+    names = {cls.__name__ for cls in type(exc).__mro__}
+    response = getattr(exc, "response", None)
+    headers = getattr(response, "headers", None)
+    try:
+        code = headers.get("X-Error-Code") if headers is not None else None
+        header_message = headers.get("X-Error-Message") if headers is not None else None
+    except Exception:  # noqa: BLE001 -- a stand-in response may have odd headers
+        code = header_message = None
+    message = " ".join(
+        str(part) for part in (header_message, getattr(exc, "server_message", None)) if part
+    )
+    return names, getattr(response, "status_code", None), code or "", message
 
 
 def _mapped_download_error(source, repo_id: str, exc: Exception) -> LoRAFetchError:
-    """Gated repos list fine and fail here, so the download step maps them too."""
-    if _is_gated(exc):
+    """The repo listed fine moments ago, so a bare 401 here is most likely a gate."""
+    names, status, code, message = _hub_refusal(exc)
+    if "GatedRepoError" in names:
         return _gated(source, repo_id)
+    if "invalid credentials" in message.lower():
+        return _bad_token(source)
+    if "RepositoryNotFoundError" in names and code == "RepoNotFound":
+        return _not_found(source, repo_id)
+    if status == 401:
+        return LoRAFetchError(
+            source=source,
+            reason=(
+                f"the Hub listed {repo_id!r} but refused to download it (HTTP 401). The "
+                f"likeliest reason is that it is gated: accept its terms on the Hub with this "
+                f"Space's token's account, or use an ungated adapter"
+            ),
+        )
     return LoRAFetchError(
         source=source, reason=f"the download failed ({type(exc).__name__}: {exc})"
     )
@@ -402,20 +453,27 @@ def _mapped_hub_error(source, repo_id: str, exc: Exception) -> LoRAFetchError:
     """Typed, actionable messages for the listing's failure shapes.
 
     Matched by class name in the MRO, so the mapping cannot crash when
-    huggingface_hub is absent or renames a module. ``GatedRepoError`` subclasses
-    ``RepositoryNotFoundError`` and is checked first.
+    huggingface_hub is absent or renames a module. Only ``GatedRepoError`` (the
+    Hub's own ``GatedRepo`` code) is called gated: huggingface_hub also raises
+    ``RepositoryNotFoundError`` for any bare 401, which a missing, private or
+    gated repo can all produce, so that case says what it could be.
     """
-    if _is_gated(exc):
+    names, status, code, message = _hub_refusal(exc)
+    if "GatedRepoError" in names:
         return _gated(source, repo_id)
-    if "RepositoryNotFoundError" in {cls.__name__ for cls in type(exc).__mro__}:
+    if "invalid credentials" in message.lower():
+        return _bad_token(source)
+    if status in (401, 403) and code != "RepoNotFound":
         return LoRAFetchError(
             source=source,
             reason=(
-                f"{repo_id!r} was not found on the Hub. The Hub reports private repos "
-                f"the same way, so: check the spelling, or check the repo's visibility "
-                f"against this Space's token"
+                f"the Hub refused access to {repo_id!r} (HTTP {status}). The repo may be "
+                f"gated, private or misspelt: check the spelling, and that this Space's token "
+                f"can see it"
             ),
         )
+    if "RepositoryNotFoundError" in names:
+        return _not_found(source, repo_id)
     return LoRAFetchError(
         source=source,
         reason=f"listing the repo failed ({type(exc).__name__}: {exc})",
