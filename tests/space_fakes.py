@@ -8,8 +8,11 @@ Listens on 127.0.0.1 only and serves what ``scripts/space_matrix.py`` talks to:
   ``GET /gradio_api/file=<path>``.
 
 ``/config`` and ``/gradio_api/info`` are built from ``ltx25_studio.ui.fields`` with the component
-mapping ``ui/components.py`` uses; ``test_the_fake_publishes_what_the_real_app_publishes`` checks
-them against the real ``build_ui()`` so the fake cannot drift from what Gradio publishes.
+mapping ``ui/components.py`` uses;
+``test_the_contract_check_passes_on_the_real_app_and_the_fake_publishes_the_same`` checks them
+against the real ``build_ui()`` so the fake cannot drift from what Gradio publishes. The files
+a run returns follow the app too (:meth:`FakeSpace.app_files`), pinned per mode against the real
+handler, ``generate()`` and writer by ``test_the_fake_returns_the_files_the_real_app_returns``.
 
 Every request is recorded (method, path, query, headers, body size), and every queue join is
 decoded BY THE FAKE'S OWN slot map, so a test can assert which value reached which field name
@@ -59,6 +62,15 @@ def component_name(kind: str) -> str:
     return _COMPONENT.get(kind, kind.capitalize())
 
 
+class _AsTheApp:
+    def __repr__(self) -> str:
+        return "AS_THE_APP"
+
+
+#: ``Reply.audio`` by default: the audio file the app returns for the call's mode (``app_files``).
+AS_THE_APP: Any = _AsTheApp()
+
+
 @dataclass
 class Reply:
     """What the fake does with one ``/on_generate`` join.
@@ -69,11 +81,16 @@ class Reply:
     as given, or one built around ``message``) · ``foreign_error`` (an uncaught exception) ·
     ``unexpected_error`` · ``no_artifact`` (success-shaped, no file) · ``timeout`` (never
     completes; heartbeats only).
+
+    ``video`` and ``audio`` are the files an ``ok`` reply returns. ``audio`` left at
+    :data:`AS_THE_APP` is what the app returns beside ``video`` for the call's mode; ``None``
+    returns no audio file, and a path returns that file (the ``video`` path itself returns the
+    video file in both outputs).
     """
 
     kind: str = "ok"
     video: Path | None = None
-    audio: Path | None = None
+    audio: Any = AS_THE_APP
     status: str = "**Done.** Seed 7."
     record: dict | None = None
     message: str = ""
@@ -320,6 +337,52 @@ class FakeSpace:
     def paths(self) -> list[str]:
         return [r["path"] for r in self.requests]
 
+    def app_files(self, mode_id: str, reply: Reply) -> list[tuple[Path, str] | None]:
+        """What an ``ok`` reply returns in ``/on_generate``'s two file outputs, as
+        ``(local file, the name it is served under)``.
+
+        ``reply.video`` is served under the app's name for it. With ``reply.audio`` left at
+        :data:`AS_THE_APP`, a mode that exports video and audio also returns the video's sound
+        as a wav of its own, as ``outputs.write_output`` writes it; any other mode returns no
+        audio file beside a video.
+        """
+        from ltx25_studio import modes, outputs
+
+        video = None if reply.video is None else (Path(reply.video), outputs.VIDEO_FILENAME)
+        if reply.audio is AS_THE_APP:
+            exports = modes.get_mode(mode_id).exports
+            sound = self._sound_of(reply.video) if video and {"audio", "video"} <= set(exports) else None
+            audio = None if sound is None else (sound, outputs.AUDIO_FILENAME)
+        elif reply.audio is None:
+            audio = None
+        else:
+            audio = (Path(reply.audio), Path(reply.audio).name)
+        return [video, audio]
+
+    def _sound_of(self, video: Path) -> Path | None:
+        """The video file's first audio stream, written again as a pcm_s16le wav at its rate and layout."""
+        import av
+
+        from ltx25_studio import outputs
+
+        digest = hashlib.sha256(Path(video).read_bytes()).hexdigest()[:20]
+        target = self.tmp / "sound" / digest / outputs.AUDIO_FILENAME
+        with av.open(str(video)) as source:
+            if not source.streams.audio:
+                return None
+            stream = source.streams.audio[0]
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with av.open(str(target), "w", format="wav") as out:
+                layout = getattr(stream.layout, "name", None) or "stereo"
+                encoder = out.add_stream("pcm_s16le", rate=int(stream.rate), layout=layout)
+                for frame in source.decode(stream):
+                    frame.pts = None
+                    for packet in encoder.encode(frame):
+                        out.mux(packet)
+                for packet in encoder.encode():
+                    out.mux(packet)
+        return target
+
     def serve_file(self, local: Path, *, name: str | None = None) -> dict:
         """Publish a local file the way Gradio's cache does and return its FileData."""
         local = Path(local)
@@ -423,12 +486,15 @@ class FakeSpace:
         if reply.record is not None:
             status += f'\n<script type="application/json" class="run-record">{json.dumps(reply.record)}</script>'
         if reply.kind == "ok":
-            video = self.serve_file(reply.video, name="output.mp4") if reply.video else None
-            audio = None
-            if reply.audio is not None:
-                same = reply.video is not None and Path(reply.audio) == Path(reply.video)
-                audio = video if same else self.serve_file(reply.audio, name=Path(reply.audio).name)
-            self._completed(session, event_id, [video, audio, status])
+            video, audio = self.app_files(join["params"]["mode"], reply)
+            served_video = None if video is None else self.serve_file(video[0], name=video[1])
+            if audio is None:
+                served_audio = None
+            elif video is not None and audio[0] == video[0]:
+                served_audio = served_video
+            else:
+                served_audio = self.serve_file(audio[0], name=audio[1])
+            self._completed(session, event_id, [served_video, served_audio, status])
         elif reply.kind == "quota":
             card = (
                 "### The run stopped\n\nAny GPU time this run used is billed. Read the detail below.\n\n"

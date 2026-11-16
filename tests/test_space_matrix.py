@@ -16,6 +16,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import pickle
+import shutil
 import sys
 import uuid
 from dataclasses import replace
@@ -88,7 +89,7 @@ SIZE = 64
 RATE = 24
 
 
-def write_frames(path, stack, *, rate=RATE, with_audio=False):
+def write_frames(path, stack, *, rate=RATE, with_audio=False, silent_audio=False):
     stack = np.ascontiguousarray(stack.astype(np.uint8))
     with av.open(str(path), "w") as container:
         video = container.add_stream("h264", rate=rate)
@@ -107,7 +108,7 @@ def write_frames(path, stack, *, rate=RATE, with_audio=False):
             container.mux(packet)
         if audio is not None:
             for index in range(8):
-                for packet in audio.encode(_audio_frame(index, silent=False, rate=48000)):
+                for packet in audio.encode(_audio_frame(index, silent=silent_audio, rate=48000)):
                     container.mux(packet)
             for packet in audio.encode():
                 container.mux(packet)
@@ -124,8 +125,8 @@ def moving_stack(frames=9, size=SIZE):
     return stack
 
 
-def write_video(path, *, frames=9, size=SIZE, with_audio=False):
-    return write_frames(path, moving_stack(frames, size), with_audio=with_audio)
+def write_video(path, *, frames=9, size=SIZE, with_audio=False, silent_audio=False):
+    return write_frames(path, moving_stack(frames, size), with_audio=with_audio, silent_audio=silent_audio)
 
 
 def structureless_stack(frames=9, seed=11):
@@ -280,6 +281,8 @@ def test_the_contract_check_passes_on_the_real_app_and_the_fake_publishes_the_sa
     mirrored = space_matrix.find_endpoint(fake.config, fake.info, space_matrix.ENDPOINT)
     assert mirrored.input_types == real.input_types
     assert [p["component"] for p in mirrored.parameters] == [p["component"] for p in real.parameters]
+    assert [r["component"] for r in mirrored.returns] == [r["component"] for r in real.returns]
+    assert [r["component"].lower() for r in real.returns][:2] == list(space_matrix.OUTPUT_SLOTS)
     for ours, theirs in zip(mirrored.parameters[1:], real.parameters[1:], strict=True):
         assert theirs["label"].startswith(ours["label"])
     real_lora = space_matrix.find_endpoint(config, info, space_matrix.LORA_ENDPOINT)
@@ -589,7 +592,7 @@ def test_an_audio_mode_takes_its_length_from_the_audio(tmp_path, space):
     # Chained audio is only measurable once its producer ran: the gate runs again, live, on the real file.
     wav = write_wav(tmp_path / "made.wav", blocks=60)
     both = write_video(tmp_path / "a2v.mp4", frames=frames, with_audio=True)
-    fake = space().reply(Reply(audio=wav), Reply(video=both, audio=both))
+    fake = space().reply(Reply(audio=wav), Reply(video=both))
     chained = [{"label": "t2a", "mode": "text_to_audio", "prompt": "rain"},
                {**call, "audio": {"from_call": "t2a"}}]
     code, lines, out, _ = live(tmp_path, fake, chained)
@@ -1262,9 +1265,7 @@ def test_a_lora_strength_is_set_through_a_published_route(tmp_path, space):
 
 
 def test_every_call_leaves_its_evidence(tmp_path, space):
-    fake = space(step_delay=0.003).reply(Reply(video=write_video(tmp_path / "v.mp4", with_audio=True),
-                                               audio=None))
-    fake.replies[0].audio = fake.replies[0].video
+    fake = space(step_delay=0.003).reply(Reply(video=write_video(tmp_path / "v.mp4", with_audio=True)))
     call = {"label": "t2av", "mode": "text_to_audio_video", "prompt": "a captain", "width": SIZE,
             "height": SIZE, "num_frames": 9, "seed": 3, "expect": {"has_audio": True}}
     code, lines, out, _ = live(tmp_path, fake, [call])
@@ -1272,7 +1273,7 @@ def test_every_call_leaves_its_evidence(tmp_path, space):
     folder = out / "t2av"
     names = {p.name for p in folder.iterdir()}
     assert {"request.json", "events.jsonl", "result.json", "verify.json", "timing.json"} <= names
-    assert any(name.endswith(".mp4") for name in names)
+    assert {"video_output.mp4", "audio_output.wav"} <= names, "the video with its sound, and the sound on its own"
     request = json.loads((folder / "request.json").read_text())
     assert request["fields"]["prompt"] == "a captain" and request["mode"] == "text_to_audio_video"
     events = [json.loads(line) for line in (folder / "events.jsonl").read_text().splitlines()]
@@ -1288,12 +1289,14 @@ def test_every_call_leaves_its_evidence(tmp_path, space):
     assert verify["ok"] and verify["expected"]["geometry"] == [SIZE, SIZE] and verify["decoded_frames"] == 9
     assert {c["name"] for c in verify["content"]["video"]["checks"]} >= {"freeze_floor", "motion"}
     assert "conditions" in verify["content"]["video"]["picture_health"]
-    (track,) = verify["content"]["audio"]["tracks"]
-    assert {"level_dbfs", "peak", "clipped_samples", "silence_ratio", "spectral_flatness",
-            "spectral_centroid_hz", "band_energy_share", "band_level_dbfs", "onsets"} <= set(track)
+    for measured in (verify["content"]["audio"], verify["content"]["audio_in_video"]):
+        (track,) = measured["tracks"]
+        assert {"level_dbfs", "peak", "clipped_samples", "silence_ratio", "spectral_flatness",
+                "spectral_centroid_hz", "band_energy_share", "band_level_dbfs", "onsets"} <= set(track)
+    assert verify["sound_lengths"]["difference_seconds"] <= verify["sound_lengths"]["tolerance_seconds"]
     result = json.loads((folder / "result.json").read_text())
-    assert set(result["artifacts"]) == {"video", "audio"}
-    assert result["artifacts"]["video"]["path"] == result["artifacts"]["audio"]["path"], "downloaded once"
+    assert {track: Path(info["path"]).name for track, info in result["artifacts"].items()} == {
+        "video": "video_output.mp4", "audio": "audio_output.wav"}
     assert json.loads((out / "summary.json").read_text())["calls"][0]["status"] == "ok"
 
 
@@ -1355,7 +1358,6 @@ def test_media_from_the_assets_directory_is_uploaded_into_its_own_slot(tmp_path,
     assets.mkdir()
     write_wav(assets / "speech.wav")
     fake = space().reply(Reply(video=write_video(tmp_path / "v.mp4", with_audio=True)))
-    fake.replies[0].audio = fake.replies[0].video
     call = {"label": "a2v", "mode": "audio_to_video", "audio": "speech.wav", "width": SIZE, "height": SIZE,
             "num_frames": 9, "noise_scale": 0.4}
     code, lines, out, _ = live(tmp_path, fake, [call], assets=assets)
@@ -1372,6 +1374,224 @@ def test_evidence_never_mixes_with_an_earlier_run(tmp_path, space):
     (out / "t2v" / "request.json").write_text("{}")
     code, lines, _out, _ = live(tmp_path, fake, [t2v()], out=out)
     assert code == space_matrix.EXIT_ILLEGAL and fake.requests == []
+
+
+# ---------------------------------------------------------------------------
+# what a call returns: its files, judged as a set
+# ---------------------------------------------------------------------------
+
+#: The registry's modes that export video and audio: an mp4 with both, and the sound as a wav.
+JOINT_MODES = tuple(m for m, spec in modes.MODES.items() if {"audio", "video"} <= set(spec.exports))
+
+
+def file_shape(path):
+    """A returned file as a player sees it: its container, its streams, and its sound's codec,
+    channels and rate."""
+    with av.open(str(path)) as container:
+        sound = container.streams.audio[0].codec_context if container.streams.audio else None
+        return {"container": container.format.name, "streams": sorted(s.type for s in container.streams),
+                "sound": None if sound is None else (sound.name, sound.channels, sound.sample_rate)}
+
+
+def sound_samples(path):
+    with av.open(str(path)) as container:
+        stream = container.streams.audio[0]
+        return sum(frame.samples for frame in container.decode(stream)), int(stream.rate)
+
+
+def the_apps_outputs(mode_id, root, monkeypatch):
+    """``/on_generate``'s two files for ``mode_id``: the real handler over the real ``generate()``
+    and the real writer, the pipeline faked (pair with ``audio_input_ready``)."""
+    from conftest import inputs_for
+    from test_encoder_contract import VocoderPipe
+    from test_exports_contract import factory_returning
+
+    from ltx25_studio import generate
+    from ltx25_studio.ui import handlers
+
+    real = generate.generate
+    monkeypatch.setattr(generate, "generate", lambda **params: real(
+        pipeline_factory=factory_returning(VocoderPipe()), encoder=None, output_root=root,
+        retention_bytes=10**9, **params))
+    values = {spec.key: spec.default for spec in fields.FIELDS}
+    values.update(seed=7, **inputs_for(mode_id))
+    video, audio, status = handlers.on_generate(mode_id, *(values[key] for key in fields.FIELD_KEYS))
+    assert video is not None or audio is not None, status
+    return video, audio
+
+
+@pytest.mark.parametrize("mode_id", list(modes.MODES))
+def test_the_fake_returns_the_files_the_real_app_returns(mode_id, tmp_path, monkeypatch, audio_input_ready):
+    """Mode by mode, the fake's two file outputs are the app's: the same outputs filled, each the
+    same kind of file under the same name. Handed the app's own video, the fake adds the sound on
+    its own where the app does. Its earlier replies put the mp4 in both outputs, so the suite
+    never met the wav every video-with-sound run has returned since 20155a1."""
+    from ltx25_studio import constraints
+
+    app_video, app_audio = the_apps_outputs(mode_id, tmp_path / "app", monkeypatch)
+    reply = Reply(video=Path(app_video)) if app_video is not None else Reply(audio=Path(app_audio))
+    served = FakeSpace(tmp_path / "fake").app_files(mode_id, reply)
+    for slot, app, fake in zip(space_matrix.OUTPUT_SLOTS, (app_video, app_audio), served, strict=True):
+        assert (fake is None) == (app is None), f"{mode_id}: the app's {slot} output is {app}, the fake's {fake}"
+        if app is not None:
+            assert fake[1] == Path(app).name, f"{mode_id}: the fake serves {fake[1]}, the app {Path(app).name}"
+            assert file_shape(fake[0]) == file_shape(app), f"{mode_id}: {slot}"
+    if mode_id in JOINT_MODES:
+        (ours, rate), (theirs, app_rate) = sound_samples(served[1][0]), sound_samples(app_audio)
+        assert abs(ours / rate - theirs / app_rate) <= constraints.DEFAULT_LENGTH_TOLERANCE_SECONDS
+
+
+def call_for(mode_id, **values):
+    """A call for ``mode_id`` at the test size, with what it requires from the assets
+    :func:`write_inputs` writes."""
+    spec = modes.get_mode(mode_id)
+    call = {"label": mode_id, "mode": mode_id, "width": SIZE, "height": SIZE, "num_frames": 9, **values}
+    inputs = {"text": ("prompt", "a captain shouts on the deck"), "image": ("image", "picture.png"),
+              "video": ("video", "clip.mp4"), "audio": ("audio", "speech.wav")}
+    call.update(inputs[kind] for kind in spec.inputs)
+    return call
+
+
+def write_inputs(root):
+    root.mkdir(parents=True, exist_ok=True)
+    write_png(root / "picture.png")
+    write_video(root / "clip.mp4")
+    write_wav(root / "speech.wav")
+    return root
+
+
+@pytest.mark.parametrize("mode_id", JOINT_MODES)
+def test_a_mode_with_sound_passes_with_its_video_and_the_sound_on_its_own(tmp_path, space, mode_id):
+    """What the Space returned for m05 on 2026-11-16: the mp4 carrying both tracks, and the same
+    sound as a wav. The mp4 is judged against every track; the wav as audio only."""
+    fake = space().reply(Reply(video=write_video(tmp_path / "v.mp4", with_audio=True)))
+    call = call_for(mode_id, expect={"has_audio": True})
+    code, lines, out, _ = live(tmp_path, fake, [call], assets=write_inputs(tmp_path / "assets"))
+    assert code == space_matrix.EXIT_OK, "\n".join(lines)
+    verify = json.loads((out / mode_id / "verify.json").read_text())
+    assert verify["ok"] and verify["problems"] == []
+    assert verify["expected"]["files"] == {"video": ["video", "audio"], "audio": ["audio"]}
+    assert {s["slot"]: (Path(s["path"]).name, s["judged_as"], s["ok"]) for s in verify["streams"]} == {
+        "video": ("video_output.mp4", f"every track {mode_id} exports: video, audio", True),
+        "audio": ("audio_output.wav", "the sound on its own: audio only", True),
+    }
+    lengths = verify["sound_lengths"]
+    assert lengths["difference_seconds"] <= lengths["tolerance_seconds"] == 0.05
+    outputs = json.loads((out / mode_id / "result.json").read_text())["outputs"]
+    assert [o["orig_name"] for o in outputs[:2]] == ["output.mp4", "output.wav"]
+
+
+def returned(folder, **video):
+    """The files the app returns for a mode with sound, named as the harness downloads them:
+    ``video_output.mp4`` and its sound as ``audio_output.wav`` (the fake's own, pinned above)."""
+    folder.mkdir(parents=True, exist_ok=True)
+    mp4 = write_video(folder / "video_output.mp4", with_audio=True, **video)
+    _video, (sound, _name) = FakeSpace(folder / "fake").app_files("text_to_audio_video", Reply(video=mp4))
+    return mp4, Path(shutil.copyfile(sound, folder / "audio_output.wav"))
+
+
+def junk(path):
+    path.write_bytes(b"not a sound")
+    return path
+
+
+def tone(samples, *, channels=2, rate=48000, amplitude=0.3):
+    t = np.arange(samples) / rate
+    return np.stack([amplitude * np.sin(2 * np.pi * 330.0 * t)] * channels)
+
+
+#: Each way the two files can break, and the words the verdict must say it in.
+BROKEN = {
+    "no video file": ("no video file came back: text_to_audio_video returns a video file with video and audio",),
+    "a video file without its sound": ("video_output.mp4: mode declares it exports audio, and the file has NO "
+                                       "audio stream",),
+    "silence in the video file": ("video_output.mp4: audio track 0 is digital silence",),
+    "no sound file": ("no audio file came back: text_to_audio_video returns its sound on its own beside the "
+                      "video, as an audio-only file",),
+    "the video file again": ("video_output.mp4: the video file came back as the audio output too: "
+                             "text_to_audio_video returns its sound there as a file of its own, audio only",),
+    "not a media file": ("audio_output.bin: it could not be opened as a media container", "NOT a pass"),
+    "a video as the sound": ("audio_output.mp4: the sound on its own has a video stream",),
+    "mono": ("audio_output.wav: audio has 1 channel(s), expected 2",),
+    "24 kHz": ("audio_output.wav: audio sample rate is 24000, expected 48000",),
+    "silence": ("audio_output.wav: audio track 0 is digital silence",),
+    "shorter": ("audio_output.wav is ", "s and the sound in video_output.mp4 ",
+                "the sound on its own does not match the video's sound (the app allows 0.05 s"),
+}
+
+
+@pytest.mark.parametrize("shape", ["as the app returns them", *BROKEN])
+def test_a_mode_with_sound_is_judged_over_the_files_it_returns(tmp_path, shape):
+    """The video file must carry every track the mode exports; the sound beside it is judged as
+    audio only, and as the video's own sound. Each break fails, in words that say what is wrong."""
+    mp4, wav = returned(tmp_path / "files", silent_audio=shape == "silence in the video file")
+    samples, rate = sound_samples(wav)
+    other = tmp_path / "other"
+    other.mkdir()
+    sound = other / "audio_output.wav"
+    files = {
+        "as the app returns them": lambda: {"video": mp4, "audio": wav},
+        "no video file": lambda: {"audio": wav},
+        "a video file without its sound": lambda: {"video": write_video(other / "video_output.mp4"), "audio": wav},
+        "silence in the video file": lambda: {"video": mp4, "audio": returned(other)[1]},
+        "no sound file": lambda: {"video": mp4},
+        "the video file again": lambda: {"video": mp4, "audio": mp4},
+        "not a media file": lambda: {"video": mp4, "audio": junk(other / "audio_output.bin")},
+        "a video as the sound": lambda: {"video": mp4, "audio": shutil.copyfile(mp4, other / "audio_output.mp4")},
+        "mono": lambda: {"video": mp4, "audio": write_samples(sound, tone(samples, channels=1))},
+        "24 kHz": lambda: {"video": mp4, "audio": write_samples(sound, tone(samples // 2, rate=24000), rate=24000)},
+        "silence": lambda: {"video": mp4, "audio": write_samples(sound, np.zeros((2, samples)))},
+        "shorter": lambda: {"video": mp4, "audio": write_samples(sound, tone(samples // 2))},
+    }[shape]()
+    (call,) = space_matrix.parse_plan([call_for("text_to_audio_video")], base=tmp_path)
+    verify = space_matrix.verify_call(call, {k: Path(v) for k, v in files.items()}, sampling_rate=rate)
+    if shape == "as the app returns them":
+        assert verify["ok"] and verify["problems"] == [], verify["problems"]
+        return
+    assert not verify["ok"]
+    assert any(all(words in problem for words in BROKEN[shape]) for problem in verify["problems"]), (
+        f"{shape}: {verify['problems']}")
+
+
+@pytest.mark.parametrize(
+    "mode_id, files, words",
+    [
+        ("text_to_audio_video", "the video file twice", "the video file came back as the audio output too"),
+        ("text_to_video", "a sound beside the video", "text_to_video returns no audio file (it exports video), and "
+                                                      "this one came back as its audio output"),
+        ("text_to_audio", "a video beside the sound", "text_to_audio returns no video file (it exports audio), and "
+                                                      "this one came back as its video output"),
+    ],
+)
+def test_a_file_the_mode_does_not_return_stops_the_plan_as_a_mismatch(tmp_path, space, mode_id, files, words):
+    video = write_video(tmp_path / "v.mp4", with_audio=True)
+    sound = write_wav(tmp_path / "a.wav")
+    reply = {"the video file twice": Reply(video=video, audio=video),
+             "a sound beside the video": Reply(video=write_video(tmp_path / "silent.mp4"), audio=sound),
+             "a video beside the sound": Reply(video=video, audio=sound)}[files]
+    fake = space().reply(reply, Reply(video=video))
+    code, lines, out, _ = live(tmp_path, fake, [call_for(mode_id), t2v("next")], assets=write_inputs(tmp_path / "in"))
+    assert code == space_matrix.EXIT_CALL_FAILED and len(fake.joins_for("/on_generate")) == 1
+    assert json.loads((out / "summary.json").read_text())["calls"][0]["status"] == "mismatch"
+    assert any(line.startswith("  -> MISMATCH") and words in line for line in lines), "\n".join(lines)
+
+
+def test_a_video_only_and_an_audio_only_call_are_judged_as_before(tmp_path, space):
+    """One file each, judged by ``verify_streams`` against the mode's whole export list."""
+    import verify_streams
+
+    fake = space().reply(Reply(video=write_video(tmp_path / "v.mp4")), Reply(audio=write_wav(tmp_path / "a.wav")))
+    calls = [t2v(), {"label": "t2a", "mode": "text_to_audio", "prompt": "rain"}]
+    code, lines, out, _ = live(tmp_path, fake, calls)
+    assert code == space_matrix.EXIT_OK, "\n".join(lines)
+    for label, mode_id, slot in (("t2v", "text_to_video", "video"), ("t2a", "text_to_audio", "audio")):
+        verify = json.loads((out / label / "verify.json").read_text())
+        (stream,) = verify["streams"]
+        assert (stream["slot"], stream["judged_as"], stream["ok"]) == (slot, f"every track {mode_id} exports: {slot}",
+                                                                       True)
+        size = {"size": f"{SIZE}x{SIZE}"} if slot == "video" else {}
+        assert stream["expected"] == {**verify_streams.expected_streams(mode_id), **size}
+        assert "audio_in_video" not in verify["content"] and verify["sound_lengths"] is None
 
 
 # ---------------------------------------------------------------------------

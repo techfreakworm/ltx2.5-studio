@@ -81,6 +81,7 @@ __all__ = [
     "GATE_ACCEPTED",
     "GATE_DEFERRED",
     "LORA_ENDPOINT",
+    "OUTPUT_SLOTS",
     "UNBILLED_CATEGORIES",
     "Call",
     "Ledger",
@@ -104,8 +105,10 @@ __all__ = [
     "redact",
     "reservation_seconds",
     "resume_split",
+    "returned_files",
     "schedule_days",
     "utc_day",
+    "verify_call",
 ]
 
 # ---------------------------------------------------------------------------
@@ -118,6 +121,8 @@ ENDPOINT = "/on_generate"
 LORA_ENDPOINT = "/on_validate_lora"
 LORA_WEIGHT_ENDPOINT = "/on_lora_weight"
 API_PREFIX = "/gradio_api"
+#: ``/on_generate``'s file outputs, in order; the report follows them (``[Video, Audio, Markdown]``).
+OUTPUT_SLOTS = ("video", "audio")
 
 #: ``/on_generate``'s parameters after ``mode_id``: the field spec minus ``gr.State``, which
 #: Gradio does not publish. Read again from ``fields.FIELDS`` at call time (see :func:`api_fields`)
@@ -1741,29 +1746,111 @@ def _count_frames(path) -> int | None:
         return None
 
 
+def returned_files(spec) -> dict[str, tuple[str, ...]]:
+    """The file the app returns in each output slot for this mode, by the tracks it carries.
+
+    From the registry's ``exports``, as the app returns them: a slot holds a file exactly when
+    the mode exports that track (``ui.handlers``). The video file carries every exported track;
+    beside it, a mode that also exports audio returns the same sound as a file of its own,
+    audio only (``outputs.write_output``). An audio-only mode's one file is its audio.
+    """
+    exported = [slot for slot in OUTPUT_SLOTS if slot in spec.exports]
+    return {slot: tuple(exported) if index == 0 else (slot,) for index, slot in enumerate(exported)}
+
+
+def _sound_on_its_own(path, *, sampling_rate: int | None) -> dict:
+    """The sound beside the video file, judged as audio only: an audio stream and no video,
+    stereo, at the expected rate. A file that cannot be probed is never a pass."""
+    expected = {"video": False, "audio": True, "audio_channels": verify_streams.EXPECTED_AUDIO_CHANNELS}
+    if sampling_rate is not None:
+        expected["sampling_rate"] = sampling_rate
+    actual = verify_streams.probe_streams(path)
+    if actual is None:
+        return {"probed": False, "ok": False, "expected": expected, "actual": {}, "problems": [
+            "it could not be opened as a media container, so nothing about the sound on its own has been "
+            "established. This is NOT a pass"]}
+    problems = []
+    if not actual["audio"]:
+        problems.append("the sound on its own has NO audio stream")
+    if actual["video"]:
+        problems.append("the sound on its own has a video stream: the audio output must be the sound by itself")
+    channels = actual.get("audio_channels")
+    if actual["audio"] and channels is not None and channels != verify_streams.EXPECTED_AUDIO_CHANNELS:
+        problems.append(f"audio has {channels} channel(s), expected {verify_streams.EXPECTED_AUDIO_CHANNELS} — "
+                        f"something downmixed the vocoder's stereo output")
+    if actual["audio"] and sampling_rate is not None and actual.get("sampling_rate") not in (None, sampling_rate):
+        problems.append(f"audio sample rate is {actual.get('sampling_rate')}, expected {sampling_rate} — the file "
+                        f"disagrees with the vocoder")
+    return {"probed": True, "ok": not problems, "expected": expected, "actual": actual, "problems": problems}
+
+
+def _described(slot: str, tracks: tuple[str, ...], *, beside: bool) -> str:
+    if beside:
+        return "its sound on its own beside the video, as an audio-only file"
+    return f"a {slot} file with " + " and ".join(tracks)
+
+
+def _seconds(measured: dict | None) -> float | None:
+    """The first audio track's length, from its sample count and rate."""
+    tracks = (measured or {}).get("tracks") or [{}]
+    samples, rate = tracks[0].get("samples"), tracks[0].get("sample_rate")
+    return samples / rate if samples is not None and rate else None
+
+
 def verify_call(call: Call, artifacts: dict[str, Path], *, sampling_rate: int | None) -> dict:
-    """Stream layout, geometry and frame count against the call's expectation, plus measurements."""
+    """What the mode promises, judged over the set of files the call returned, plus measurements.
+
+    Each file is judged by what its slot holds (:func:`returned_files`): the video file against
+    every track the mode exports (``verify_streams``, with the geometry); the sound beside it as
+    audio only, and its length against the video's own sound. A promised file that did not come
+    back, and a file the mode never returns, are mismatches.
+    """
     problems: list[str] = []
     streams = []
     rate = call.expect.get("sample_rate", sampling_rate)
     geometry = call.expected_geometry()
-    for path in dict.fromkeys(artifacts.values()):
-        has_video = "video" in call.exports and artifacts.get("video") == path
-        verdict = verify_streams.verify(
-            call.mode,
-            path,
-            frame_rate=call.expect.get("frame_rate"),
-            sampling_rate=rate if "audio" in call.exports else None,
-            geometry=geometry if has_video else None,
-        )
-        streams.append({"path": str(path), "ok": verdict.ok, "probed": verdict.probed,
-                        "expected": verdict.expected, "actual": verdict.actual, "problems": verdict.problems})
-        problems += [f"{Path(path).name}: {p}" for p in verdict.problems]
-    probe = streams[0]["actual"] if streams else {}
-    for track in ("video", "audio"):
-        wanted = call.expect.get(f"has_{track}")
-        if wanted is not None and bool(probe.get(track)) != bool(wanted):
-            problems.append(f"expected has_{track}={wanted}, the artifact has {track}={bool(probe.get(track))}")
+    files = returned_files(call.spec)
+    primary = next(iter(files))
+    for slot in dict.fromkeys([*OUTPUT_SLOTS, *artifacts]):
+        path, tracks = artifacts.get(slot), files.get(slot)
+        if path is None:
+            if tracks:
+                problems.append(f"no {slot} file came back: {call.mode} returns "
+                                f"{_described(slot, tracks, beside=slot != primary)}")
+            continue
+        if tracks is None:
+            actual = verify_streams.probe_streams(path)
+            entry = {"judged_as": f"a file {call.mode} never returns", "probed": actual is not None, "ok": False,
+                     "expected": None, "actual": actual or {}, "problems": [
+                         f"{call.mode} returns no {slot} file (it exports {' and '.join(call.exports)}), and this "
+                         f"one came back as its {slot} output: a file the mode never returns is not a pass"]}
+        elif slot == primary:
+            verdict = verify_streams.verify(
+                call.mode,
+                path,
+                frame_rate=call.expect.get("frame_rate"),
+                sampling_rate=rate if "audio" in tracks else None,
+                geometry=geometry if "video" in tracks else None,
+            )
+            entry = {"judged_as": f"every track {call.mode} exports: {', '.join(tracks)}", "probed": verdict.probed,
+                     "ok": verdict.ok, "expected": verdict.expected, "actual": verdict.actual,
+                     "problems": verdict.problems}
+        elif path == artifacts.get(primary):
+            actual = verify_streams.probe_streams(path)
+            entry = {"judged_as": "the sound on its own: audio only", "probed": actual is not None, "ok": False,
+                     "expected": None, "actual": actual or {}, "problems": [
+                         f"the {primary} file came back as the {slot} output too: {call.mode} returns its sound "
+                         f"there as a file of its own, audio only"]}
+        else:
+            entry = {"judged_as": "the sound on its own: audio only", **_sound_on_its_own(path, sampling_rate=rate)}
+        streams.append({"slot": slot, "path": str(path), **entry})
+        problems += [f"{Path(path).name}: {p}" for p in entry["problems"]]
+    if primary in artifacts:
+        probe = next(s["actual"] for s in streams if s["slot"] == primary) or {}
+        for track in ("video", "audio"):
+            wanted = call.expect.get(f"has_{track}")
+            if wanted is not None and bool(probe.get(track)) != bool(wanted):
+                problems.append(f"expected has_{track}={wanted}, the {primary} file has {track}={bool(probe.get(track))}")
     frames = None
     if "video" in artifacts:
         frames = _count_frames(artifacts["video"])
@@ -1775,18 +1862,38 @@ def verify_call(call: Call, artifacts: dict[str, Path], *, sampling_rate: int | 
         content["video"] = measure_video(artifacts["video"])
     if "audio" in artifacts:
         content["audio"] = measure_audio(artifacts["audio"])
-        for track in content["audio"].get("tracks", []):
+    if primary == "video" and "audio" in files[primary] and primary in artifacts \
+            and artifacts[primary] != artifacts.get("audio"):
+        # The video file's own sound, which the sound on its own must match.
+        content["audio_in_video"] = measure_audio(artifacts[primary])
+    for key, slot in (("audio", "audio"), ("audio_in_video", primary)):
+        for track in (content.get(key) or {}).get("tracks", []):
             level = track.get("level_dbfs")
             if level is not None and level < SILENT_DBFS:
-                problems.append(f"audio track {track['index']} is digital silence: {level:.1f} dBFS < {SILENT_DBFS:g}")
+                problems.append(f"{Path(artifacts[slot]).name}: audio track {track['index']} is digital silence: "
+                                f"{level:.1f} dBFS < {SILENT_DBFS:g}")
+    lengths = None
+    own, inside = _seconds(content.get("audio")), _seconds(content.get("audio_in_video"))
+    if own is not None and inside is not None:
+        tolerance = constraints.DEFAULT_LENGTH_TOLERANCE_SECONDS
+        lengths = {"sound_on_its_own_seconds": round(own, 4), "sound_in_video_seconds": round(inside, 4),
+                   "difference_seconds": round(abs(own - inside), 4), "tolerance_seconds": tolerance}
+        if abs(own - inside) > tolerance:
+            problems.append(
+                f"{Path(artifacts['audio']).name} is {own:.3f} s and the sound in {Path(artifacts[primary]).name} "
+                f"{inside:.3f} s: the sound on its own does not match the video's sound (the app allows "
+                f"{tolerance:g} s between a run's audio and video)"
+            )
     return {
         "ok": not problems,
         "problems": problems,
         "expected": {"geometry": list(geometry) if geometry else None, "frames": call.expected_frames(),
                      "sample_rate": rate if "audio" in call.exports else None,
+                     "files": {slot: list(tracks) for slot, tracks in files.items()},
                      **{k: v for k, v in call.expect.items() if k.startswith("has_")}},
         "decoded_frames": frames,
         "streams": streams,
+        "sound_lengths": lengths,
         "content": content,
         "content_note": (
             "Content figures are measurements. The frame checks carry this harness's thresholds, the "
@@ -2251,8 +2358,8 @@ def run_call(ctx: Session, call: Call) -> Outcome:
             error = output.get("error") or message.get("message") or (
                 "the Space raised an error and did not say what (its show_error is off)"
             )
-        missing = [index for index, track in enumerate(("video", "audio"))
-                   if track in call.exports and not (index < len(data_out) and _file_path(data_out[index]))]
+        missing = [slot for index, slot in enumerate(OUTPUT_SLOTS)
+                   if slot in returned_files(call.spec) and not (index < len(data_out) and _file_path(data_out[index]))]
         failure = classify(record, title=output.get("title"), error=error, status=status) if error or missing \
             else None
         category = failure["category"] if failure else None
@@ -2283,7 +2390,7 @@ def run_call(ctx: Session, call: Call) -> Outcome:
 
         artifacts: dict[str, Path] = {}
         downloaded: dict[str, Path] = {}
-        for index, track in enumerate(("video", "audio")):
+        for index, track in enumerate(OUTPUT_SLOTS):
             server_path = _file_path(data_out[index]) if index < len(data_out) else None
             if not server_path:
                 continue
@@ -2294,7 +2401,7 @@ def run_call(ctx: Session, call: Call) -> Outcome:
         evidence.write("timing.json", timing)
         result["artifacts"] = {k: {"path": str(v), "bytes": v.stat().st_size, "sha256": _sha256(v)} for k, v in artifacts.items()}
         if failure:
-            tracks = " and ".join(("video", "audio")[index] for index in missing)
+            tracks = " and ".join(missing)
             outcome.detail = redact(error or f"no {tracks} file; the Space said: {_plain(status)[:600]}")
             outcome.status = "failed"
             evidence.write("result.json", {**result, "outcome": "failed", "detail": outcome.detail})
