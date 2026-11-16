@@ -289,7 +289,6 @@ NOISE_CHOICES: tuple[tuple[str, float], ...] = tuple(
         strict=True,
     )
 )
-
 #: The decoder choices: ``(label, value, what it does)``. The values are
 #: ``config.DECODER_CHOICES``; the reservation does not depend on the choice.
 DECODER_OPTIONS: tuple[tuple[str, str, str], ...] = (
@@ -299,8 +298,14 @@ DECODER_OPTIONS: tuple[tuple[str, str, str], ...] = (
 )
 
 
-def decoder_line(value: Any) -> str:
-    """The selected decoder, in one line."""
+#: Under Upscale ×2 the decoder choice is not a lever (``pipelines.StageRunner``).
+UPSCALE_DECODER_LINE = "Upscale ×2 always finishes with the model's diffusion decoder."
+
+
+def decoder_line(value: Any, *, upscaling: bool = False) -> str:
+    """The selected decoder, in one line; under Upscale ×2, the decoder it always uses."""
+    if upscaling:
+        return UPSCALE_DECODER_LINE
     return next((words for _l, v, words in DECODER_OPTIONS if v == value), DECODER_OPTIONS[0][2])
 
 
@@ -482,16 +487,23 @@ def _lamp(text: str, *, lit: bool, kind: str = "cost") -> str:
 
 
 def _lamps(facts: CostFacts) -> str:
+    """A lamp lights only for a cost that applies; a request that won't run costs nothing,
+    so in the refused state every lamp is dark."""
     extras = dict(facts.extras)
+    live = facts.state != "refused"
     lamps = []
     if facts.stage_2_offered:
         seconds = extras.get("Upscale ×2")
-        lamps.append(_lamp(f"Upscale +{seconds} s" if seconds else "Upscale", lit=facts.stage_2))
+        lamps.append(
+            _lamp(f"Upscale +{seconds} s" if seconds else "Upscale", lit=live and facts.stage_2)
+        )
     if facts.enhance_offered:
         seconds = extras.get("Enhance")
-        lamps.append(_lamp(f"Enhance +{seconds} s" if seconds else "Enhance", lit=facts.enhance))
+        lamps.append(
+            _lamp(f"Enhance +{seconds} s" if seconds else "Enhance", lit=live and facts.enhance)
+        )
     seconds = extras.get("LoRA")
-    lamps.append(_lamp(f"LoRA +{seconds} s" if seconds else "LoRA", lit=bool(facts.loras)))
+    lamps.append(_lamp(f"LoRA +{seconds} s" if seconds else "LoRA", lit=live and bool(facts.loras)))
     if facts.discards_video:
         lamps.append(_lamp("Video thrown away", lit=True))
     if facts.encodes_audio:

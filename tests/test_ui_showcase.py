@@ -149,7 +149,7 @@ def test_an_example_writes_only_what_it_names(tmp_path):
         "height": 480,
         "preset": "3:2",
         "num_frames": 121,
-        "seconds": 5.04,
+        "seconds": 5.0,
         "auto_duration": False,
         "seed": 16,
     }, "enhance, upscale, other media, strength and the noise level stay as the user left them"

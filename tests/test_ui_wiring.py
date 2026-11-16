@@ -177,80 +177,44 @@ def test_the_real_mode_switch_parks_a_hidden_value_and_restores_it_intact(demo):
     container-visibility updates cannot bite here.
     """
     from conftest import audio_file
+    from test_ui_form import Form
 
     switch = next(f for f in demo.fns.values() if getattr(f.fn, "__name__", "") == "_switch")
-    slots = dict(zip(["mode", *FIELD_KEYS], dependency(demo, "on_generate").inputs, strict=True))
     assert not any(
         isinstance(c, (gr.Row, gr.Column, gr.Group, gr.Accordion)) for c in switch.outputs
     )
-    parked_slots = switch.inputs[10:]
-    keys = [k for k in FIELD_KEYS if slots[k] in parked_slots]
-    values = {spec_key: field_by_key(spec_key).default for spec_key in keys}
-    values["prompt"] = "a captain at the wheel"
+    form = Form(demo)
     audio = audio_file()
+    parked = next(c for c in switch.outputs if isinstance(c, gr.State) and c.value == {})
+    form.user(form.fields["prompt"], "a captain at the wheel")
 
-    def go(previous, mode, parked):
-        args = [
-            previous,
-            mode,
-            parked,
-            "Moderately",
-            "Match my clip",
-            "3:2",
-            {"kind": "idle"},
-            121,
-            704,
-            480,
-            *(values[k] for k in keys),
-        ]
-        out = switch.fn(*args)
-        parked = out[switch.outputs.index(switch.inputs[2])]
-        for key in keys:
-            update = out[switch.outputs.index(slots[key])]
-            if "value" in update:
-                values[key] = update["value"]
-        return parked, out
+    form.pick_mode("audio_to_video")
+    form.user(form.fields["audio"], audio)  # the user adds a sound in Audio -> video + sound
+    form.pick_mode("text_to_audio_video")
+    assert form.field("audio") is None, "a hidden audio file would be submitted with 05"
+    assert not form.visible(form.fields["audio"])
+    assert form.get(parked) == {"audio": audio}
+    assert form.field("prompt") == "a captain at the wheel", "a prompt both modes take stays put"
 
-    parked, _ = go("text_to_audio_video", "audio_to_video", {})
-    values["audio"] = audio  # the user adds a sound in Audio -> video + sound
-    parked, out = go("audio_to_video", "text_to_audio_video", parked)
-    assert values["audio"] is None, "a hidden audio file would be submitted with 05"
-    assert out[switch.outputs.index(slots["audio"])]["visible"] is False
-    assert parked == {"audio": audio}
-    assert values["prompt"] == "a captain at the wheel", "a prompt both modes take stays put"
-
-    parked, out = go("text_to_audio_video", "audio_to_video", parked)
-    assert values["audio"] == audio, "the user's file did not come back intact"
-    assert out[switch.outputs.index(slots["audio"])]["visible"] is True
-    assert parked == {}
+    form.pick_mode("audio_to_video")
+    assert form.field("audio") == audio, "the user's file did not come back intact"
+    assert form.visible(form.fields["audio"])
+    assert form.get(parked) == {}
 
 
 def test_the_trigger_word_note_shows_only_in_the_modes_without_a_prompt(demo):
-    switch = next(f for f in demo.fns.values() if getattr(f.fn, "__name__", "") == "_switch")
+    from test_ui_form import Form
+
     note = next(
         b
         for b in demo.blocks.values()
         if "mr-lora-note" in (getattr(b, "elem_classes", None) or [])
     )
-    slots = dict(zip(["mode", *FIELD_KEYS], dependency(demo, "on_generate").inputs, strict=True))
-    keys = [k for k in FIELD_KEYS if slots[k] in switch.inputs[10:]]
+    form = Form(demo)
     shown = set()
     for mode_id in modes.MODES:
-        args = [
-            mode_id,
-            mode_id,
-            {},
-            "Moderately",
-            "Match my clip",
-            "3:2",
-            {"kind": "idle"},
-            121,
-            704,
-            480,
-            *(field_by_key(k).default for k in keys),
-        ]
-        out = switch.fn(*args)
-        if out[switch.outputs.index(note)]["visible"]:
+        form.pick_mode(mode_id)
+        if form.visible(note):
             shown.add(mode_id)
     assert shown == {"image_to_video", "image_to_audio_video"}
     assert note.visible is False, "05, the default, has a prompt"

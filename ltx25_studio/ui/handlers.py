@@ -162,6 +162,71 @@ def mode_view(mode_id: str) -> ModeView:
     )
 
 
+#: Tie-break for :func:`media_order` when the registry leaves two kinds unordered.
+_MEDIA_PREFERENCE = ("audio", "video", "image")
+
+
+def media_order(specs: Any = None) -> tuple[str, ...]:
+    """The order the media inputs are built in, read off the registry.
+
+    In every mode the inputs it requires come before the ones it may take, so
+    the first media input a mode shows is one it needs. The page is built once,
+    so one order must hold for every mode: each mode adds "required before
+    optional" constraints and this is their topological order. A registry no
+    single order can satisfy raises here, at build time.
+    """
+    specs = tuple(modes.MODES.values()) if specs is None else tuple(specs)
+    after: dict[str, set[str]] = {kind: set() for kind in _MEDIA_PREFERENCE}
+    for spec in specs:
+        required = [k for k in _MEDIA_PREFERENCE if modes.requires(spec, k)]
+        optional = [k for k in _MEDIA_PREFERENCE if modes.accepts(spec, k) and k not in required]
+        for kind in optional:
+            after[kind].update(required)
+    order: list[str] = []
+    while len(order) < len(_MEDIA_PREFERENCE):
+        ready = [k for k in _MEDIA_PREFERENCE if k not in order and after[k] <= set(order)]
+        if not ready:
+            raise RuntimeError(
+                "no single order of the media inputs puts every mode's required inputs before "
+                f"its optional ones: {sorted(set(_MEDIA_PREFERENCE) - set(order))}"
+            )
+        order.append(ready[0])
+    return tuple(order)
+
+
+def media_label(mode: Any, kind: str) -> str:
+    """A media input's label: the kind, marked optional where the mode only may take it."""
+    from .fields import field_by_key
+
+    base = field_by_key(kind).label
+    return base if modes.requires(mode, kind) else f"{base} (optional)"
+
+
+def decoder_view(mode_id: str, upscale: Any, choice: Any = "auto") -> tuple[bool, bool, str]:
+    """``(visible, interactive, line)`` for the decoder choice.
+
+    Upscale ×2 always finishes with the model's diffusion decoder, whatever the
+    choice (``pipelines.StageRunner``), so while it is on the choice is not a
+    lever: it is shown but cannot be changed, and the line says why.
+    """
+    mode = modes.get_mode(mode_id)
+    visible = "video" in mode.exports
+    upscaling = bool(upscale) and not mode.skip_stage_2
+    return visible, not upscaling, render.decoder_line(choice, upscaling=upscaling)
+
+
+def length_fields_view(mode_id: str, auto: Any) -> dict[str, bool]:
+    """Which exact-length fields Advanced shows: the frame count while the length is set,
+    the shortest and longest seconds while the model picks it."""
+    view = mode_view(mode_id)
+    picking = bool(auto)
+    return {
+        "num_frames": not picking,
+        "min_seconds": view.active["min_seconds"] and picking,
+        "max_seconds": view.active["max_seconds"] and picking,
+    }
+
+
 def on_mode_change(mode_id: str) -> tuple[str, tuple[FieldUpdate, ...]]:
     """The purpose line plus one :class:`FieldUpdate` per toggleable field."""
     try:
@@ -311,8 +376,9 @@ def frames_for_seconds(seconds: Any) -> int:
 
 
 def seconds_for_frames(frames: Any) -> float:
+    """Seconds for the length slider, to its 0.1 s step (121 frames read 5.0, not 5.04)."""
     count = _as_int(frames) or 0
-    return round(count / FRAME_RATE, 2)
+    return round(count / FRAME_RATE, 1)
 
 
 def frames_matching_clip(seconds: float | None) -> int | None:
@@ -414,7 +480,8 @@ def on_snap(width: Any, height: Any, num_frames: Any) -> tuple[int, int, int, st
 
 
 def on_auto_duration_toggle(auto: Any) -> tuple[bool, bool, bool]:
-    """Visibility for (num_frames, min_seconds, max_seconds)."""
+    """Visibility for (num_frames, min_seconds, max_seconds) in a mode where the model may
+    pick the length; :func:`length_fields_view` is the per-mode answer."""
     chosen = bool(auto)
     return (not chosen, chosen, chosen)
 

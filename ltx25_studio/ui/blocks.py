@@ -28,9 +28,26 @@ import gradio as gr
 
 from .. import modes
 from . import chrome, components, handlers, render, showcase
-from .fields import FIELD_KEYS, PARKED_FIELDS
+from .fields import FIELD_KEYS, PARKED_FIELDS, field_by_key
 
 __all__ = ["DEFAULT_MODE", "build_ui"]
+
+#: The media kinds, in the order the switch's caption outputs list them.
+_MEDIA = ("image", "video", "audio")
+
+#: Parked fields whose visibility is the mode's own (``ModeView.active``).
+_SHOWN_BY_MODE = (
+    "prompt",
+    "enhance_prompt",
+    "image",
+    "video",
+    "audio",
+    "strength",
+    "auto_duration",
+    "decoder",
+)
+
+_DEFAULT_FRAMES = field_by_key("num_frames").default
 
 _TITLE = "LTX-2.5 Studio"
 
@@ -219,42 +236,37 @@ def build_ui() -> gr.Blocks:
                             elem_classes=["mr-example-note"],
                         )
 
-                # -- what you give ------------------------------------------
+                # -- what you give: in every mode the inputs it requires come
+                # first and the ones it may take after (DOM order = focus order)
                 with gr.Column(elem_classes=["mr-divide"]):
-                    components.render_fields(
-                        pool,
-                        "image",
-                        captions=captions,
-                        visible=view0.active["image"],
-                        elem_id="in-image",
-                    )
-                    components.render_fields(
-                        pool,
-                        "video",
-                        captions=captions,
-                        visible=view0.active["video"],
-                        elem_id="in-video",
-                    )
-                    components.render_fields(
-                        pool, "strength", visible=view0.active["strength"], elem_id="lever-strength"
-                    )
-                    components.render_fields(
-                        pool,
-                        "audio",
-                        captions=captions,
-                        visible=view0.active["audio"],
-                        elem_id="in-audio",
-                    )
-                    noise_choice = gr.Radio(
-                        choices=[name for name, _ in render.NOISE_CHOICES],
-                        value="Moderately",
-                        label=render.FIELD_COPY["noise_scale"][0],
-                        info=render.FIELD_COPY["noise_scale"][1],
-                        visible=view0.active["noise_scale"],
-                        elem_id="lever-noise",
-                        elem_classes=["mr-chips", "mr-words"],
-                    )
-                    components.render_fields(pool, "noise_scale", visible=False)
+                    noise_choice = None
+                    for kind in handlers.media_order():
+                        components.render_fields(
+                            pool,
+                            kind,
+                            captions=captions,
+                            visible=view0.active[kind],
+                            elem_id=f"in-{kind}",
+                            label=handlers.media_label(mode0, kind),
+                        )
+                        if kind == "video":
+                            components.render_fields(
+                                pool,
+                                "strength",
+                                visible=view0.active["strength"],
+                                elem_id="lever-strength",
+                            )
+                        if kind == "audio":
+                            noise_choice = gr.Radio(
+                                choices=[name for name, _ in render.NOISE_CHOICES],
+                                value="Moderately",
+                                label=render.FIELD_COPY["noise_scale"][0],
+                                info=render.FIELD_COPY["noise_scale"][1],
+                                visible=view0.active["noise_scale"],
+                                elem_id="lever-noise",
+                                elem_classes=["mr-chips", "mr-words"],
+                            )
+                            components.render_fields(pool, "noise_scale", visible=False)
                     components.render_fields(
                         pool,
                         "prompt",
@@ -307,8 +319,8 @@ def build_ui() -> gr.Blocks:
                     seconds = gr.Slider(
                         minimum=1.0,
                         maximum=20.0,
-                        step=0.5,
-                        value=5.0,
+                        step=0.1,
+                        value=handlers.seconds_for_frames(_DEFAULT_FRAMES),
                         label="Length (seconds)",
                         info="Written as a legal frame count; the exact frames are in Advanced.",
                         elem_id="seconds",
@@ -355,13 +367,18 @@ def build_ui() -> gr.Blocks:
                             pool, "width", "height", visible=view0.sizes_picture, min_width=120
                         )
                     dims_hint = gr.Markdown(elem_classes=["mr-hint"], visible=view0.sizes_picture)
+                    # The frame count while the length is set; the shortest and longest
+                    # seconds while the model picks it. Never both.
+                    lengths0 = handlers.length_fields_view(DEFAULT_MODE, False)
                     with gr.Row():
-                        components.render_fields(pool, "num_frames", min_width=120)
+                        components.render_fields(
+                            pool, "num_frames", visible=lengths0["num_frames"], min_width=120
+                        )
                         components.render_fields(
                             pool,
                             "min_seconds",
                             "max_seconds",
-                            visible=view0.active["min_seconds"],
+                            visible=lengths0["min_seconds"],
                             min_width=120,
                         )
                     frames_hint = gr.Markdown(elem_classes=["mr-hint"])
@@ -379,6 +396,7 @@ def build_ui() -> gr.Blocks:
                     decoder_line = gr.Markdown(
                         render.decoder_line("auto"),
                         visible=view0.active["decoder"],
+                        elem_id="decoder-line",
                         elem_classes=["mr-hint"],
                     )
 
@@ -491,6 +509,9 @@ def build_ui() -> gr.Blocks:
         recent = gr.State([])
         last_seed = gr.State(None)
         last_prompt = gr.State(None)
+        # The frame count the user set. "Match my clip" writes a clip's count into
+        # the shared frames field; a mode without a timed input gets this back.
+        user_frames = gr.State(_DEFAULT_FRAMES)
 
         field_inputs = [pool[key] for key in FIELD_KEYS]
         parked_keys = [spec.key for spec in PARKED_FIELDS]
@@ -538,7 +559,7 @@ def build_ui() -> gr.Blocks:
             parked,
             purpose,
             *parked_components,
-            *[captions[key] for key in ("image", "video", "audio")],
+            *[captions[key] for key in _MEDIA],
             noise_choice,
             shape_preset,
             match_line,
@@ -548,13 +569,10 @@ def build_ui() -> gr.Blocks:
             seconds,
             length_line,
             pool["num_frames"],
-            pool["width"],
-            pool["height"],
             dims_hint,
-            pool["min_seconds"],
-            pool["max_seconds"],
             lora_note,
             decoder_line,
+            user_frames,
             *example_outputs,
             monitor_idle,
             video_out,
@@ -562,68 +580,114 @@ def build_ui() -> gr.Blocks:
             monitor_caption,
             monitor_state,
         ]
+        #: What a switch reads besides the mode it goes to; the first is the mode it leaves.
+        switch_state = [
+            current_mode,
+            parked,
+            noise_choice,
+            length_source,
+            shape_preset,
+            monitor_state,
+            pool["num_frames"],
+            pool["enable_stage_2"],
+            user_frames,
+            *parked_components,
+        ]
 
-        def _switch(
-            previous: str,
+        def _mode_change(
             mode_id: str,
+            previous: str,
             parked_now: dict,
             noise: str,
             source: str,
             preset: str,
             monitor: dict,
             num_frames: Any,
-            width: Any,
-            height: Any,
+            upscale: Any,
+            frames_user: Any,
             *parked_values: Any,
+            restored: dict | None = None,
         ) -> list[Any]:
+            """Every control's state after moving to ``mode_id``.
+
+            The values the new mode does not use are parked by
+            ``handlers.mode_switch`` against the mode actually left. With
+            ``restored`` (a recent run's settings), that run's own fields are
+            written over the result; its media are not, so what the restored
+            mode does not take stays parked.
+            """
             view = handlers.mode_view(mode_id)
             mode = modes.get_mode(mode_id)
             before = dict(zip(parked_keys, parked_values, strict=True))
             if previous == mode_id:
-                after, parked_next = before, dict(parked_now or {})
+                after, parked_next = dict(before), dict(parked_now or {})
             else:
                 after, parked_next = handlers.mode_switch(previous, mode_id, before, parked_now)
-            for key in ("image", "video", "audio"):
+            frames_user = handlers._as_int(frames_user) or _DEFAULT_FRAMES
+            upscale = bool(upscale)
+            if restored is not None:
+                for key in parked_keys:
+                    if key in restored and key not in _MEDIA and view.active.get(key):
+                        after[key] = restored[key]
+                if restored.get("num_frames"):
+                    frames_user = int(restored["num_frames"])
+                if view.upscale:
+                    upscale = bool(restored.get("enable_stage_2"))
+                if view.active["noise_scale"]:
+                    noise = _noise_choice(restored.get("noise_scale"))
+                if view.timed_by_audio:
+                    matched = restored.get("auto_duration")
+                    source = render.LENGTH_MATCH if matched else render.LENGTH_SET
+                elif view.timed_input:
+                    source = render.LENGTH_SET
+                if view.sizes_picture:
+                    preset = handlers.preset_for(after["width"], after["height"])
+            for key in _MEDIA:
                 if not _exists(after.get(key)) and isinstance(after.get(key), str):
                     after[key] = None
             if view.active["noise_scale"]:
                 after["noise_scale"] = _noise_value(noise)
-            length = _length_state(view, source, after, num_frames)
             if view.timed_by_audio:
                 after["auto_duration"] = source == render.LENGTH_MATCH
+            length = _length_state(view, source, after, num_frames)
+            frames_value = length["frames"] if length["frames"] is not None else frames_user
+            lengths = handlers.length_fields_view(mode_id, after["auto_duration"])
+            match = _match_size_line(view, preset, after)
+            if match["size"]:
+                after["width"], after["height"] = match["size"]
+            shape_choices = _shape_choices(view)
+            preset_value = (
+                preset
+                if preset in shape_choices
+                else handlers.preset_for(after["width"], after["height"])
+            )
+            seconds_visible = (view.timed_input and source == render.LENGTH_SET) or (
+                not view.timed_input and not after["auto_duration"]
+            )
+            _shown, decoder_free, decoder_text = handlers.decoder_view(
+                mode_id, upscale, after["decoder"]
+            )
 
             updates = []
             for key in parked_keys:
                 changed = after[key] is not before[key] and after[key] != before.get(key)
                 kwargs: dict[str, Any] = {}
-                if key in (
-                    "prompt",
-                    "enhance_prompt",
-                    "image",
-                    "video",
-                    "audio",
-                    "strength",
-                    "auto_duration",
-                    "decoder",
-                ):
+                if key in _SHOWN_BY_MODE:
                     kwargs["visible"] = view.active[key]
+                if key in ("width", "height"):
+                    kwargs["visible"] = view.sizes_picture
+                if key in ("min_seconds", "max_seconds"):
+                    kwargs["visible"] = lengths[key]
                 if key == "prompt":
                     kwargs["label"] = view.prompt_label
                     kwargs["placeholder"] = view.prompt_placeholder
-                if changed or (key == "noise_scale") or (key == "auto_duration"):
+                if key in _MEDIA and view.active[key]:
+                    kwargs["label"] = handlers.media_label(mode, key)
+                if key == "decoder":
+                    kwargs["interactive"] = decoder_free
+                if changed or key in ("noise_scale", "auto_duration"):
                     kwargs["value"] = after[key]
                 updates.append(gr.update(**kwargs))
-            caption_updates = [
-                gr.update(value=view.captions.get(k, ""), visible=view.active[k])
-                for k in ("image", "video", "audio")
-            ]
-            match = _match_size_line(view, preset, after)
-            shape_choices = _shape_choices(view)
-            preset_value = preset if preset in shape_choices else "3:2"
-            seconds_visible = (not view.timed_input and not after["auto_duration"]) or (
-                view.timed_input and source == render.LENGTH_SET
-            )
-            frames_value = length["frames"] if length["frames"] is not None else num_frames
             example_updates = _example_updates(show, mode_id, len(example_buttons), example_note)
             monitor_updates, monitor_next = _monitor_for_mode(show, mode, monitor)
             return [
@@ -631,7 +695,10 @@ def build_ui() -> gr.Blocks:
                 parked_next,
                 view.purpose,
                 *updates,
-                *caption_updates,
+                *[
+                    gr.update(value=view.captions.get(k, ""), visible=view.active[k])
+                    for k in _MEDIA
+                ],
                 gr.update(
                     visible=view.active["noise_scale"],
                     value=_noise_choice(after["noise_scale"])
@@ -641,46 +708,28 @@ def build_ui() -> gr.Blocks:
                 gr.update(visible=view.sizes_picture, choices=shape_choices, value=preset_value),
                 gr.update(visible=bool(match["line"]) and view.sizes_picture, value=match["line"]),
                 gr.update(visible=view.pinned_line is not None, value=view.pinned_line or ""),
-                gr.update(visible=view.upscale),
-                gr.update(visible=view.timed_input),
+                gr.update(visible=view.upscale, value=upscale),
+                gr.update(visible=view.timed_input, value=source),
                 gr.update(
-                    visible=seconds_visible,
-                    value=handlers.seconds_for_frames(frames_value) if frames_value else 5.0,
+                    visible=seconds_visible, value=handlers.seconds_for_frames(frames_value)
                 ),
                 gr.update(visible=view.timed_input, value=length["line"]),
-                gr.update(value=frames_value),
-                gr.update(
-                    visible=view.sizes_picture,
-                    **({"value": match["size"][0]} if match["size"] else {}),
-                ),
-                gr.update(
-                    visible=view.sizes_picture,
-                    **({"value": match["size"][1]} if match["size"] else {}),
-                ),
+                gr.update(value=frames_value, visible=lengths["num_frames"]),
                 gr.update(visible=view.sizes_picture),
-                gr.update(visible=view.active["min_seconds"]),
-                gr.update(visible=view.active["max_seconds"]),
                 gr.update(visible=not view.active["prompt"]),
-                gr.update(visible=view.active["decoder"]),
+                gr.update(visible=view.active["decoder"], value=decoder_text),
+                frames_user,
                 *example_updates,
                 *monitor_updates,
                 monitor_next,
             ]
 
-        switch_inputs = [
-            current_mode,
-            mode_selector,
-            parked,
-            noise_choice,
-            length_source,
-            shape_preset,
-            monitor_state,
-            pool["num_frames"],
-            pool["width"],
-            pool["height"],
-            *parked_components,
-        ]
-        mode_selector.change(fn=_switch, inputs=switch_inputs, outputs=switch_outputs, **_PRIVATE)
+        def _switch(mode_id: str, *state: Any) -> list[Any]:
+            return _mode_change(mode_id, *state)
+
+        mode_selector.change(
+            fn=_switch, inputs=[mode_selector, *switch_state], outputs=switch_outputs, **_PRIVATE
+        )
 
         # =================================================================
         # shape, length and the exact fields in Advanced
@@ -804,34 +853,61 @@ def build_ui() -> gr.Blocks:
             **_PRIVATE,
         )
 
+        def _set_seconds(value: Any) -> list[Any]:
+            frames = handlers.frames_for_seconds(value)
+            return [frames, frames]
+
+        def _set_frames(frames: Any) -> list[Any]:
+            return [handlers.seconds_for_frames(frames), handlers._as_int(frames) or _DEFAULT_FRAMES]
+
         seconds.input(
-            fn=lambda value: handlers.frames_for_seconds(value),
+            fn=_set_seconds,
             inputs=[seconds],
-            outputs=[pool["num_frames"]],
+            outputs=[pool["num_frames"], user_frames],
             **_PRIVATE,
         )
         pool["num_frames"].input(
-            fn=lambda frames: handlers.seconds_for_frames(frames),
+            fn=_set_frames,
             inputs=[pool["num_frames"]],
-            outputs=[seconds],
+            outputs=[seconds, user_frames],
             **_PRIVATE,
         )
 
-        def _on_auto(auto: Any, mode_id: str, source: str) -> Any:
+        def _on_auto(auto: Any, mode_id: str, source: str) -> list[Any]:
             view = handlers.mode_view(mode_id)
-            if view.timed_input:
-                return gr.update(visible=source == render.LENGTH_SET)
-            return gr.update(visible=not bool(auto))
+            lengths = handlers.length_fields_view(mode_id, auto)
+            seconds_visible = (source == render.LENGTH_SET) if view.timed_input else not bool(auto)
+            return [
+                gr.update(visible=seconds_visible),
+                gr.update(visible=lengths["num_frames"]),
+                gr.update(visible=lengths["min_seconds"]),
+                gr.update(visible=lengths["max_seconds"]),
+            ]
 
         pool["auto_duration"].change(
             fn=_on_auto,
             inputs=[pool["auto_duration"], mode_selector, length_source],
-            outputs=[seconds],
+            outputs=[seconds, pool["num_frames"], pool["min_seconds"], pool["max_seconds"]],
             **_PRIVATE,
         )
 
+        decoder_inputs = [mode_selector, pool["enable_stage_2"], pool["decoder"]]
+
+        def _decoder_state(mode_id: str, upscale: Any, choice: Any) -> list[Any]:
+            _shown, free, text = handlers.decoder_view(mode_id, upscale, choice)
+            return [gr.update(interactive=free), text]
+
+        pool["enable_stage_2"].change(
+            fn=_decoder_state,
+            inputs=decoder_inputs,
+            outputs=[pool["decoder"], decoder_line],
+            **_PRIVATE,
+        )
         pool["decoder"].change(
-            fn=render.decoder_line, inputs=[pool["decoder"]], outputs=[decoder_line], **_PRIVATE
+            fn=lambda mode_id, upscale, choice: handlers.decoder_view(mode_id, upscale, choice)[2],
+            inputs=decoder_inputs,
+            outputs=[decoder_line],
+            **_PRIVATE,
         )
         noise_choice.input(
             fn=_noise_value, inputs=[noise_choice], outputs=[pool["noise_scale"]], **_PRIVATE
@@ -847,12 +923,13 @@ def build_ui() -> gr.Blocks:
                 frame_text,
                 handlers.preset_for(w, h),
                 handlers.seconds_for_frames(f),
+                f,
             ]
 
         snap_button.click(
             fn=_snap,
             inputs=shape_inputs,
-            outputs=[*shape_inputs, dims_hint, frames_hint, shape_preset, seconds],
+            outputs=[*shape_inputs, dims_hint, frames_hint, shape_preset, seconds, user_frames],
             **_PRIVATE,
         )
 
@@ -1129,20 +1206,27 @@ def build_ui() -> gr.Blocks:
         # =================================================================
         # recent runs: restore settings, reuse seed
         # =================================================================
-        restore_outputs = [
-            current_mode,
-            mode_selector,
-            *[pool[k] for k in _RESTORED],
-            shape_preset,
-            seconds,
-            noise_choice,
-            length_source,
-        ]
+        # Restore runs the real mode switch against the mode actually left (so
+        # what the restored mode does not use is parked, never submitted), then
+        # writes the restored run's own settings, in ONE step: a chained step
+        # would race the radio's own change event. Writing the radio leaves its
+        # change handler nothing to do (previous == mode).
+        restore_outputs = [*switch_outputs, mode_selector, pool["seed"]]
+
+        def _restore(index: int, entries: list, *state: Any) -> list[Any]:
+            entries = list(entries or [])
+            if index >= len(entries):
+                return [*_mode_change(state[0], *state), gr.update(), gr.update()]
+            entry = entries[index]
+            settings = dict(entry.get("settings") or {})
+            out = _mode_change(entry["mode"], *state, restored=settings)
+            seed = gr.update(value=settings["seed"]) if "seed" in settings else gr.update()
+            return [*out, entry["mode"], seed]
 
         for index, (_text, restore, reuse) in enumerate(recent_rows):
             restore.click(
-                fn=lambda entries, i=index: _restore(entries, i),
-                inputs=[recent],
+                fn=lambda entries, *state, i=index: _restore(i, entries, *state),
+                inputs=[recent, *switch_state],
                 outputs=restore_outputs,
                 **_PRIVATE,
             )
@@ -1165,11 +1249,14 @@ def build_ui() -> gr.Blocks:
                 seconds,
                 noise_choice,
                 length_source,
+                user_frames,
             ]
             for index, button in enumerate(example_buttons):
                 button.click(
-                    fn=lambda mode_id, i=index: _fill_example(show, mode_id, i),
-                    inputs=[mode_selector],
+                    fn=lambda mode_id, frames_user, i=index: _fill_example(
+                        show, mode_id, i, frames_user
+                    ),
+                    inputs=[mode_selector, user_frames],
                     outputs=example_outputs_fill,
                     **_PRIVATE,
                 )
@@ -1359,12 +1446,13 @@ def _example_updates(show: showcase.Showcase, mode_id: str, slots: int, note: An
     return out
 
 
-def _fill_example(show: showcase.Showcase, mode_id: str, index: int) -> list:
+def _fill_example(show: showcase.Showcase, mode_id: str, index: int, frames_user: Any) -> list:
     """Write the example's own values; leave every other control untouched."""
     examples = show.for_mode(mode_id)
     out = handlers.example_values(examples[index], mode_id) if index < len(examples) else {}
     keys = [*_EXAMPLE_FIELDS, "preset", "seconds", "noise_choice", "length_source"]
-    return [gr.update(value=out[k]) if k in out else gr.update() for k in keys]
+    filled = [gr.update(value=out[k]) if k in out else gr.update() for k in keys]
+    return [*filled, out.get("num_frames", frames_user)]
 
 
 def _recent_entry(
@@ -1404,28 +1492,3 @@ def _recent_rows(entries: list) -> list:
         else:
             out += [gr.update(visible=False), gr.update(visible=False), gr.update(visible=False)]
     return out
-
-
-def _restore(entries: list, index: int) -> list:
-    entries = list(entries or [])
-    count = 2 + len(_RESTORED) + 4
-    if index >= len(entries):
-        return [gr.update() for _ in range(count)]
-    entry = entries[index]
-    settings = entry["settings"]
-    mode_id = entry["mode"]
-    view = handlers.mode_view(mode_id)
-    preset = handlers.preset_for(settings.get("width"), settings.get("height"))
-    frames = settings.get("num_frames")
-    noise = _noise_choice(settings.get("noise_scale"))
-    return [
-        mode_id,
-        mode_id,
-        *[gr.update(value=settings.get(k)) for k in _RESTORED],
-        gr.update(value=preset),
-        gr.update(value=handlers.seconds_for_frames(frames)) if frames else gr.update(),
-        gr.update(value=noise) if view.active["noise_scale"] else gr.update(),
-        gr.update(value=render.LENGTH_MATCH if settings.get("auto_duration") else render.LENGTH_SET)
-        if view.timed_by_audio
-        else gr.update(),
-    ]

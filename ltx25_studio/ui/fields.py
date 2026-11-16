@@ -217,6 +217,7 @@ FIELDS: tuple[Field, ...] = (
         default=704,
         options={"step": 32, "precision": 0},
         visible_when=_sizes_the_picture,
+        parks=True,
         **_copy("width"),
     ),
     Field(
@@ -226,6 +227,7 @@ FIELDS: tuple[Field, ...] = (
         default=480,
         options={"step": 32, "precision": 0},
         visible_when=_sizes_the_picture,
+        parks=True,
         **_copy("height"),
     ),
     Field(
@@ -252,6 +254,7 @@ FIELDS: tuple[Field, ...] = (
         default=2.0,
         options={"step": 0.1},
         visible_when=_model_may_pick_length,
+        parks=True,
         **_copy("min_seconds"),
     ),
     Field(
@@ -261,6 +264,7 @@ FIELDS: tuple[Field, ...] = (
         default=5.0,
         options={"step": 0.1},
         visible_when=_model_may_pick_length,
+        parks=True,
         **_copy("max_seconds"),
     ),
     Field(
