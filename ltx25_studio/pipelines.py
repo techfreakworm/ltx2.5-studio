@@ -65,8 +65,10 @@ __all__ = [
     "BASE_KIND",
     "assert_compression_ratios",
     "assert_frame_rate_default",
+    "check_decoder_size",
     "clear_cache",
     "configure_vae_tiling",
+    "decoder_minimum",
     "derive_pipeline",
     "get_pipeline",
     "mmap_backing_report",
@@ -77,6 +79,7 @@ __all__ = [
     "VAE_TILE_STRIDE_WIDTH",
     "VAE_TILE_STRIDE_NUM_FRAMES",
     "stage_1_kwargs",
+    "stage_2_geometry",
     "stage_2_size_note",
     "STAGE_2_SPATIAL_SCALE",
     "distilled_kwargs",
@@ -1146,11 +1149,106 @@ def upsample_kwargs(latents) -> dict:
     return {"latents": latents, "output_type": "latent"}
 
 
-#: Stage 2 takes its size from the upsampled latents, so these must not be sent.
-#: Upstream's recipe is explicit: *"Stage 2 takes its size from the upsampled
-#: latents, so pass no height/width."* Forwarding the request's stage-1 values
-#: would ask for a render half the size of the latents it was handed.
+#: The request's own size never reaches stage 2. ``LTX2Pipeline`` takes its size
+#: from the upsampled latents; ``LTX2ConditionPipeline`` builds its conditioning
+#: mask from height/width (default 512x768) even when handed latents, so it is
+#: given the upsampled size explicitly (:func:`stage_2_geometry`).
 STAGE_2_STRIPPED_KEYS = ("height", "width")
+
+
+def stage_2_geometry(latents, *, kind, spatial_ratio, temporal_ratio) -> dict:
+    """Stage 2's ``num_frames`` (and, for the condition pipeline, its size), read off the latents.
+
+    ``latents`` are the upsampled ``[B, C, F, H, W]`` latents. Under the duration
+    head the request has no frame count, so it comes from stage 1's latent frames.
+    """
+    shape = getattr(latents, "shape", None)
+    if shape is None or len(shape) != 5:
+        if kind == "text2video":
+            return {}
+        raise ModelLoadError(
+            component="stage graph",
+            reason=(
+                "the upsampled latents have no [B, C, F, H, W] shape to size stage 2 from; "
+                "refusing to guess the size the condition pipeline builds its mask from"
+            ),
+        )
+    _batch, _channels, frames, height, width = (int(n) for n in shape)
+    geometry = {"num_frames": (frames - 1) * int(temporal_ratio) + 1}
+    if kind != "text2video":
+        geometry["height"] = height * int(spatial_ratio)
+        geometry["width"] = width * int(spatial_ratio)
+    return geometry
+
+
+def decoder_minimum(config) -> tuple[int, int, int]:
+    """Smallest decoded video ``(width, height, frames)`` the diffusion decoder accepts.
+
+    Every neighbourhood-attention stage raises when its grid is smaller than its
+    kernel. The grids are walked as ``LTX2VideoDiffusionDecoder3d`` builds them:
+    trailing ghost frames padded, each upsample (dropping the duplicate leading
+    frame on a temporal x2), the ghosts cropped before stage 5.
+    """
+    kernels = [tuple(int(k) for k in row) for row in config["decoder_stage_kernels"]]
+    strides = [tuple(int(s) for s in row) for row in config["decoder_upsample_strides"]]
+    stage5 = tuple(int(k) for k in config["decoder_stage5_kernel"])
+    temporal_ratio = int(config["temporal_compression_ratio"])
+    spatial_ratio = int(config["spatial_compression_ratio"])
+    pad = (kernels[0][0] // 2) * 2
+
+    def fits(axis: int, latent: int) -> bool:
+        size = latent + (pad if axis == 0 else 0)
+        for kernel, stride in zip(kernels, strides, strict=True):
+            if size < kernel[axis]:
+                return False
+            size = size * stride[axis] - (1 if axis == 0 and stride[0] == 2 else 0)
+        if axis == 0:
+            size -= pad * temporal_ratio
+        return size >= stage5[axis]
+
+    def smallest(axis: int) -> int:
+        latent = 1
+        while not fits(axis, latent):
+            latent += 1
+        return latent
+
+    frames, height, width = (smallest(axis) for axis in range(3))
+    return width * spatial_ratio, height * spatial_ratio, (frames - 1) * temporal_ratio + 1
+
+
+def _decoder_config(decoder):
+    """The diffusion decoder model's config, or None (a stand-in in the offline gate)."""
+    model = getattr(decoder, "diffusion_decoder", None)
+    return getattr(model, "config", None)
+
+
+def check_decoder_size(decoder, *, width, height, num_frames, scale: int, stage_2: bool) -> None:
+    """Raise ``DecoderTooSmallError`` if the decoder cannot take this request.
+
+    ``scale`` is how much the graph enlarges the request before decoding (2 for
+    stage 2, 1 for a single-stage diffusion decode).
+    """
+    config = _decoder_config(decoder)
+    if config is None or not (width and height and num_frames):
+        return
+    from .constraints import DIMENSION_MULTIPLE
+    from .errors import DecoderTooSmallError
+
+    minimum = decoder_minimum(config)
+    output = (int(width) * scale, int(height) * scale, int(num_frames))
+    if all(got >= need for got, need in zip(output, minimum, strict=True)):
+        return
+
+    def request_side(side: int, need: int) -> int:
+        per_request = -(-need // scale)
+        return max(side, -(-per_request // DIMENSION_MULTIPLE) * DIMENSION_MULTIPLE)
+
+    smallest = (
+        request_side(int(width), minimum[0]),
+        request_side(int(height), minimum[1]),
+        max(int(num_frames), minimum[2]),
+    )
+    raise DecoderTooSmallError(output=output, minimum=minimum, smallest=smallest, stage_2=stage_2)
 
 
 def stage_2_kwargs(latents, *, audio_latents=None) -> dict:
@@ -1279,17 +1377,35 @@ class StageRunner:
             self.device, kwargs.get("width"), kwargs.get("height"), _frames_upper_bound(kwargs)
         )
         self._stage_2_ready()
+        check_decoder_size(
+            self.decoder,
+            width=kwargs.get("width"),
+            height=kwargs.get("height"),
+            num_frames=_frames_lower_bound(kwargs),
+            scale=STAGE_2_SPATIAL_SCALE,
+            stage_2=True,
+        )
 
         stage_1 = self.pipeline(
-            **kwargs, **stage_1_kwargs(), **_sampling_kwargs(progress, index=1, passes=2)
+            **_merged(kwargs, stage_1_kwargs(), _sampling_kwargs(progress, index=1, passes=2))
         )
         if progress is not None:
             progress.upscaling()
-        upsampled = self.upsampler(**upsample_kwargs(_latents_of(stage_1)))
+        upsampled = _latents_of(self.upsampler(**upsample_kwargs(_latents_of(stage_1))))
+        # Stage 2's own values win: the audio-input modes already carry
+        # noise_scale and audio_latents in the request.
         stage_2 = self.pipeline(
-            **{k: v for k, v in kwargs.items() if k not in STAGE_2_STRIPPED_KEYS},
-            **stage_2_kwargs(_latents_of(upsampled), audio_latents=_audio_of(stage_1)),
-            **_sampling_kwargs(progress, index=2, passes=2),
+            **_merged(
+                {k: v for k, v in kwargs.items() if k not in STAGE_2_STRIPPED_KEYS},
+                stage_2_geometry(
+                    upsampled,
+                    kind=self.kind,
+                    spatial_ratio=self._ratio("spatial"),
+                    temporal_ratio=self._ratio("temporal"),
+                ),
+                stage_2_kwargs(upsampled, audio_latents=_audio_of(stage_1)),
+                _sampling_kwargs(progress, index=2, passes=2),
+            )
         )
         if progress is not None:
             progress.decoding()
@@ -1298,6 +1414,16 @@ class StageRunner:
             latents, generator = _for_the_cpu_decoder(latents, generator)
         decoded = self.decoder(**decode_kwargs(latents, generator=generator))
         return self._with_audio(decoded, stage_2)
+
+    def _ratio(self, axis: str) -> int:
+        """The VAE's compression ratio on ``axis``, read off the pipeline."""
+        default = (
+            DEFAULT_SPATIAL_COMPRESSION_RATIO
+            if axis == "spatial"
+            else DEFAULT_TEMPORAL_COMPRESSION_RATIO
+        )
+        value = getattr(self.pipeline, f"vae_{axis}_compression_ratio", None)
+        return int(value) if isinstance(value, int) else default
 
     def _with_audio(self, decoded, stage_2):
         """Reunite the diffusion-decoded frames with the audio stage 2 produced.
@@ -1331,8 +1457,9 @@ class StageRunner:
 
         # Upstream's own finish for this path. These latents are already
         # denormalized, which is what `audio_vae.decode` expects.
-        mel = audio_vae.decode(audio_latents.to(audio_vae.dtype), return_dict=False)[0]
-        audio = vocoder(mel)
+        with _no_grad():
+            mel = audio_vae.decode(audio_latents.to(audio_vae.dtype), return_dict=False)[0]
+            audio = vocoder(mel)
 
         # Upstream's own class, taken off the object we already hold rather than
         # imported. Same type `LTX2PipelineOutput` that the single-stage path
@@ -1351,6 +1478,41 @@ def _frames_upper_bound(kwargs) -> int:
     seconds = float(kwargs.get("max_seconds") or 0)
     rate = float(kwargs.get("frame_rate") or DEFAULT_FRAME_RATE)
     return int(seconds * rate) + 1
+
+
+def _frames_lower_bound(kwargs) -> int | None:
+    """``num_frames``, or the fewest the duration head may choose when it is unset."""
+    if kwargs.get("num_frames"):
+        return int(kwargs["num_frames"])
+    if kwargs.get("min_seconds") is None or kwargs.get("max_seconds") is None:
+        return None
+    from .constraints import duration_head_frame_range
+
+    shortest, _longest = duration_head_frame_range(
+        min_seconds=float(kwargs["min_seconds"]),
+        max_seconds=float(kwargs["max_seconds"]),
+        frame_rate=float(kwargs.get("frame_rate") or DEFAULT_FRAME_RATE),
+    )
+    return shortest
+
+
+def _merged(*mappings) -> dict:
+    """One call's kwargs from several dicts; a later dict wins on a shared key."""
+    merged: dict = {}
+    for mapping in mappings:
+        merged.update(mapping)
+    return merged
+
+
+def _no_grad():
+    """``torch.no_grad()``, or a no-op where torch is absent (the offline gate)."""
+    try:
+        import torch
+    except ImportError:
+        import contextlib
+
+        return contextlib.nullcontext()
+    return torch.no_grad()
 
 
 def _for_the_cpu_decoder(latents, generator):

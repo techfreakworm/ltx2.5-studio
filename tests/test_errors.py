@@ -58,6 +58,15 @@ ERROR_SPECS = {
         {"mode": "Image to video", "missing": ("image",), "alternative": "Text to video"},
         ["Image to video", "image", "Text to video"],
     ),
+    "DecoderTooSmallError": (
+        {
+            "output": (192, 128, 9),
+            "minimum": (224, 224, 17),
+            "smallest": (128, 128, 17),
+            "stage_2": True,
+        },
+        ["192×128", "224×224", "17 frames", "128×128", "stage 2"],
+    ),
     # -- model files (PLAN §5.2) -----------------------------------------
     "MissingModelFileError": (
         {

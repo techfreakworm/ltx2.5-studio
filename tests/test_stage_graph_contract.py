@@ -1626,3 +1626,185 @@ def test_the_cap_is_one_constant_not_a_number_in_four_docstrings():
             f"ZEROGPU_DISK_CAP_GB, and a number in two places is a number that "
             f"will diverge."
         )
+
+
+# --------------------------------------------------------------------------
+# stage 2 for every mode that offers it (F08)
+#
+# Two bugs reproduced on the real tiny pipelines (tests/test_real_pipeline_tiny.py
+# runs the real classes): the condition pipeline sizes its mask from height/width
+# even when it is handed latents, and the audio-input modes carried noise_scale
+# and audio_latents into a call that added both again.
+# --------------------------------------------------------------------------
+
+
+class ShapedLatents(FakeTensor):
+    """Upsampled latents with the ``[B, C, F, H, W]`` shape the real upsampler returns."""
+
+    def __init__(self, tag, shape):
+        super().__init__(tag)
+        self.shape = tuple(shape)
+
+
+def condition_two_stage(*, upsampled_shape=(1, 8, 3, 5, 7), audio=True):
+    pipeline = AudioPipeline(audio=audio)
+    upsampler = Recorder("upsampler", output=Staged(ShapedLatents("upsampled", upsampled_shape)))
+    decoder = Recorder("decoder", output=Staged("decoded"))
+    runner = pipelines.StageRunner(pipeline, kind="condition", upsampler=upsampler, decoder=decoder)
+    return runner, pipeline
+
+
+def test_condition_stage_2_is_given_the_upsampled_size_not_the_pipeline_default():
+    """``LTX2ConditionPipeline`` builds its mask from height/width (default 512x768).
+
+    Read off the upsampled latents (H, W x the VAE's 32), never the request
+    doubled: that is what the latents actually are.
+    """
+    runner, pipeline = condition_two_stage(upsampled_shape=(1, 8, 3, 5, 7))
+
+    runner(prompt="a lighthouse", height=96, width=128, num_frames=17, enable_stage_2=True)
+
+    stage_1, stage_2 = pipeline.calls
+    assert (stage_1["height"], stage_1["width"]) == (96, 128)
+    assert (stage_2["height"], stage_2["width"]) == (5 * 32, 7 * 32), stage_2
+    assert stage_2["num_frames"] == 17
+
+
+def test_stage_2_frame_count_comes_from_stage_1_under_automatic_duration():
+    """With no num_frames the condition mask would be sized from a second head guess."""
+    runner, pipeline = condition_two_stage(upsampled_shape=(1, 8, 4, 4, 4))
+
+    runner(prompt="a", height=64, width=64, min_seconds=1.0, max_seconds=5.0, enable_stage_2=True)
+
+    _stage_1, stage_2 = pipeline.calls
+    assert stage_2["num_frames"] == (4 - 1) * 8 + 1, stage_2
+
+
+def test_a_condition_stage_2_with_unreadable_latents_refuses():
+    """No shape means no size to give stage 2; guessing it is the bug being fixed."""
+    pipeline = AudioPipeline()
+    runner = pipelines.StageRunner(
+        pipeline,
+        kind="condition",
+        upsampler=Recorder("upsampler", output=Staged("no-shape")),
+        decoder=Recorder("decoder", output=Staged("decoded")),
+    )
+
+    with pytest.raises(ModelLoadError):
+        runner(prompt="a", height=64, width=64, num_frames=9, enable_stage_2=True)
+
+
+@pytest.mark.parametrize("kind", ["text2video", "condition"])
+def test_stage_2_values_win_over_the_requests_noise_scale_and_audio_latents(kind):
+    """The audio-input modes carry both; ``**a, **b`` of the two was a TypeError.
+
+    Stage 2's noise_scale is its first sigma and its audio is stage 1's, not the
+    user's upload a second time.
+    """
+    if kind == "condition":
+        runner, pipeline = condition_two_stage()
+    else:
+        runner, pipeline, _up, _dec = two_stage()
+
+    runner(
+        prompt="a lighthouse",
+        height=64,
+        width=64,
+        num_frames=17,
+        noise_scale=0.5,
+        audio_latents=FakeTensor("upload"),
+        enable_stage_2=True,
+    )
+
+    stage_1, stage_2 = pipeline.calls
+    assert stage_1["noise_scale"] == 0.5 and stage_1["audio_latents"] == FakeTensor("upload")
+    assert stage_2["noise_scale"] == pipelines.STAGE_2_DISTILLED_SIGMA_VALUES[0]
+    assert stage_2["audio_latents"] == FakeTensor("audio-latents"), stage_2["audio_latents"]
+
+
+class _DecoderModel:
+    def __init__(self, config):
+        self.config = config
+
+
+class _ConfiguredDecoder(Recorder):
+    """A decoder pipeline carrying the real model's config, as upstream's does."""
+
+    def __init__(self, config):
+        super().__init__("decoder", output=Staged("decoded"))
+        self.diffusion_decoder = _DecoderModel(config)
+
+
+#: ``diffusion_decoder/config.json`` at the pinned revision, the fields that set
+#: its minimum input. Recorded from the file, not derived from our code.
+REAL_DECODER_CONFIG = {
+    "decoder_stage_kernels": [[3, 7, 7], [3, 7, 7], [3, 5, 5], [3, 5, 5]],
+    "decoder_upsample_strides": [[1, 2, 2], [2, 1, 1], [2, 2, 2], [2, 2, 2]],
+    "decoder_stage5_kernel": [11, 11, 11],
+    "spatial_compression_ratio": 32,
+    "temporal_compression_ratio": 8,
+}
+
+
+def test_the_decoder_minimum_is_read_off_its_kernels():
+    """224 px per side (stage 1's 7x7 window on the latent grid) and 17 frames
+    (stage 5's 11-frame window, on the 8k+1 grid), as (width, height, frames)."""
+    assert pipelines.decoder_minimum(REAL_DECODER_CONFIG) == (224, 224, 17)
+
+
+def test_stage_2_below_the_decoders_minimum_refuses_before_any_denoise():
+    from ltx25_studio.errors import DecoderTooSmallError
+
+    pipeline = AudioPipeline()
+    runner = pipelines.StageRunner(
+        pipeline,
+        kind="text2video",
+        upsampler=Recorder("upsampler", output=Staged("up")),
+        decoder=_ConfiguredDecoder(REAL_DECODER_CONFIG),
+    )
+
+    with pytest.raises(DecoderTooSmallError) as caught:
+        runner(prompt="a", width=96, height=64, num_frames=9, enable_stage_2=True)
+
+    assert not pipeline.calls, "stage 1 ran before the decoder's size was checked"
+    message = str(caught.value)
+    assert "128×128" in message and "17 frames" in message, message
+    assert caught.value.smallest == (128, 128, 17)
+
+
+def test_stage_2_at_the_decoders_minimum_runs():
+    pipeline = AudioPipeline(audio=False)
+    runner = pipelines.StageRunner(
+        pipeline,
+        kind="text2video",
+        upsampler=Recorder("upsampler", output=Staged("up")),
+        decoder=_ConfiguredDecoder(REAL_DECODER_CONFIG),
+    )
+
+    runner(prompt="a", width=128, height=128, num_frames=17, enable_stage_2=True)
+
+    assert len(pipeline.calls) == 2
+
+
+def test_the_stage_2_audio_finish_runs_without_autograd():
+    """The waveform came back with requires_grad=True: vocoder activations kept alive."""
+    torch = pytest.importorskip("torch")
+    seen = []
+
+    class GradCheckingVae(FakeAudioVae):
+        def decode(self, latents, return_dict=True):
+            seen.append(("vae", torch.is_grad_enabled()))
+            return super().decode(latents, return_dict=return_dict)
+
+    class GradCheckingVocoder(FakeVocoder):
+        def __call__(self, mel):
+            seen.append(("vocoder", torch.is_grad_enabled()))
+            return super().__call__(mel)
+
+    runner, pipeline, _up, _dec = two_stage()
+    pipeline.audio_vae = GradCheckingVae()
+    pipeline.vocoder = GradCheckingVocoder()
+
+    runner(prompt="a lighthouse", enable_stage_2=True)
+
+    assert seen == [("vae", False), ("vocoder", False)], seen

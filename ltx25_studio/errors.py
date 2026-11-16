@@ -47,6 +47,7 @@ __all__ = [
     "ConfigError",
     "ConstraintError",
     "DecodeError",
+    "DecoderTooSmallError",
     "DimensionError",
     "EmptyOutputError",
     "EncodeError",
@@ -276,6 +277,32 @@ class OverLimitError(ConstraintError):
         reason = f" ({why})" if why else ""
         super().__init__(
             f"{name}={value} is above the maximum of {limit}{reason}. Use {nearest} instead."
+        )
+
+
+class DecoderTooSmallError(ConstraintError):
+    """The diffusion decoder cannot decode a video this small.
+
+    Its neighbourhood-attention windows need a minimum grid; below it the decode
+    raises after the denoise has already been paid for.
+    """
+
+    def __init__(self, *, output, minimum, smallest, stage_2):
+        #: ``(width, height, frames)`` the decoder would have been handed.
+        self.output = tuple(output)
+        #: ``(width, height, frames)`` the decoder needs at least.
+        self.minimum = tuple(minimum)
+        #: ``(width, height, frames)``: the closest request that works.
+        self.smallest = tuple(smallest)
+        self.stage_2 = bool(stage_2)
+        what = "Stage 2 cannot finish" if stage_2 else "The diffusion decoder cannot decode"
+        fix = "turn stage 2 off" if stage_2 else "choose the standard decoder"
+        super().__init__(
+            f"{what} a video this small: its final decoder needs at least "
+            f"{self.minimum[0]}×{self.minimum[1]} pixels and {self.minimum[2]} frames, and this "
+            f"run would give it {self.output[0]}×{self.output[1]} at {self.output[2]} frames. "
+            f"The smallest request that works is {self.smallest[0]}×{self.smallest[1]} at "
+            f"{self.smallest[2]} frames. Make the video larger or longer, or {fix}."
         )
 
 

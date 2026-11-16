@@ -148,3 +148,109 @@ def test_the_rope_handling_matches_the_float64_cpu_reference(tmp_path):
     for stream, numbers in shipped.items():
         relative = numbers["max_abs"] / numbers["ref_abs_max"]
         assert relative < 1e-3, (stream, numbers)
+
+
+# --------------------------------------------------------------------------
+# in-process: the stage graph on the real tiny classes, through generate()
+#
+# CPU, fp32, the tiny decoder with its default processor. Stage 2 at 64x64x9
+# returns 128x128x9, the tiny decoder's minimum.
+# --------------------------------------------------------------------------
+
+STAGE_2_MODES = tuple(m for m, spec in modes.MODES.items() if not spec.skip_stage_2)
+
+
+def load_smoke():
+    """``scripts/local_smoke.py`` as a module (it is a script, not a package)."""
+    import importlib.util
+
+    if "local_smoke" in sys.modules:
+        return sys.modules["local_smoke"]
+    spec = importlib.util.spec_from_file_location("local_smoke", SMOKE)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["local_smoke"] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.fixture(scope="module")
+def tiny_cpu():
+    return load_smoke().tiny_stack(device="cpu")
+
+
+@pytest.fixture
+def pipeline_calls(monkeypatch):
+    """Every kwargs dict that reaches a real diffusers LTX-2 pipeline, in order."""
+    from diffusers import LTX2ConditionPipeline, LTX2Pipeline
+
+    seen: list[tuple[str, dict]] = []
+    for cls in (LTX2ConditionPipeline, LTX2Pipeline):
+        original = cls.__call__
+
+        def spy(self, *args, _original=original, **kwargs):
+            seen.append((type(self).__name__, dict(kwargs)))
+            return _original(self, *args, **kwargs)
+
+        monkeypatch.setattr(cls, "__call__", spy)
+    return seen
+
+
+def run_tiny(tiny, mode_id, out, **overrides):
+    from ltx25_studio import generate
+
+    smoke = load_smoke()
+    media = out / "media"
+    media.mkdir(parents=True, exist_ok=True)
+    width = overrides.get("width", 64)
+    frames = overrides.get("num_frames", 9)
+    request = dict(
+        mode=mode_id,
+        seed=7,
+        width=64,
+        height=64,
+        num_frames=9,
+        frame_rate=24.0,
+        **smoke._media_for(mode_id, media, width, frames),
+    )
+    request.update(overrides)
+    return generate.generate(
+        **request,
+        pipeline_factory=lambda pipeline: tiny[pipeline],
+        output_root=out / "outputs",
+        retention_bytes=10**9,
+    )
+
+
+@pytest.mark.parametrize("mode_id", STAGE_2_MODES)
+def test_every_stage_2_mode_runs_on_the_real_tiny_pipelines(
+    tiny_cpu, mode_id, tmp_path, pipeline_calls
+):
+    from verify_streams import probe_streams
+
+    result = run_tiny(tiny_cpu, mode_id, tmp_path, enable_stage_2=True)
+
+    denoises = [kwargs for _cls, kwargs in pipeline_calls]
+    assert len(denoises) == 2, [sorted(k) for k in denoises]
+    stage_2 = denoises[1]
+    assert stage_2["num_frames"] == 9, stage_2.get("num_frames")
+    if modes.get_mode(mode_id).pipeline == "condition":
+        assert (stage_2["width"], stage_2["height"]) == (128, 128)
+    actual = probe_streams(result.output_path)
+    assert (actual["width"], actual["height"]) == (128, 128), actual
+
+
+def test_stage_2_image_to_video_is_sized_from_the_upsampled_latents(tiny_cpu, tmp_path):
+    """Was: ``ValueError: Provided `latents` tensor has shape ... expected ...``.
+
+    The condition pipeline sized its mask from its 512x768 defaults.
+    """
+    result = run_tiny(tiny_cpu, "image_to_video", tmp_path, enable_stage_2=True)
+
+    assert result.output_path.is_file()
+
+
+def test_stage_2_audio_to_video_does_not_pass_noise_scale_twice(tiny_cpu, tmp_path):
+    """Was: ``TypeError: got multiple values for keyword argument 'noise_scale'``."""
+    result = run_tiny(tiny_cpu, "audio_to_video", tmp_path, enable_stage_2=True)
+
+    assert result.output_path.is_file()

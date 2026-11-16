@@ -73,25 +73,7 @@ TINY_STAGE_2 = {
 #: Known failures that belong to another owner. ``case -> (exception class,
 #: message substring, reason)``. A listed case that passes is an UNEXPECTED
 #: PASS: remove its entry in the same change as the fix.
-_STAGE_2_SIZE_BUG = (
-    "DecodeError",
-    "expected shape",
-    "StageRunner strips height/width for stage 2 and LTX2ConditionPipeline.prepare_latents "
-    "sizes its mask from the 512x768 defaults (recon B N1; pipelines.py StageRunner, next brief)",
-)
-EXPECTED_FAILURES: dict[str, tuple[str, str, str]] = {
-    "stage2:image_to_video": _STAGE_2_SIZE_BUG,
-    "stage2:image_text_to_video": _STAGE_2_SIZE_BUG,
-    "stage2:video_to_video": _STAGE_2_SIZE_BUG,
-    "stage2:image_to_audio_video": _STAGE_2_SIZE_BUG,
-    "stage2:image_text_to_audio_video": _STAGE_2_SIZE_BUG,
-    "stage2:audio_to_video": (
-        "DecodeError",
-        "multiple values for keyword argument",
-        "StageRunner forwards the request's noise_scale/audio_latents and stage_2_kwargs adds "
-        "them again (probe bug B; pipelines.py StageRunner, next brief)",
-    ),
-}
+EXPECTED_FAILURES: dict[str, tuple[str, str, str]] = {}
 
 #: Cases not run on a device, with the measured reason. Unlike an expected
 #: failure these never execute, so they cannot turn red by themselves.
@@ -216,6 +198,65 @@ def composite_snapshot(tiny: Path, into: Path, *, fetch: bool) -> tuple[Path, st
         model = cls.from_config({**configs[sub], **TINY_STAGE_2[sub]}).to(torch.bfloat16)
         model.save_pretrained(into / sub, safe_serialization=True)
     return into, None
+
+
+_TINY_STACKS: dict[tuple, dict] = {}
+
+
+def tiny_stack(*, device: str = "cpu", dtype: str = "float32") -> dict:
+    """In-process tiny pipelines for tests: ``{"condition", "text2video", "base"}``.
+
+    Built from the cached tiny snapshot (never downloads; refuses > 1 GB), the
+    text2video sibling derived from the base exactly as the app derives it, and
+    tiny random stage-2 parts from the real configs. The decoder keeps its
+    default processor, as the app does off CUDA. Cached per (device, dtype).
+    """
+    key = (device, dtype)
+    if key in _TINY_STACKS:
+        return _TINY_STACKS[key]
+    import torch
+    from diffusers import (
+        LTX2ConditionPipeline,
+        LTX2LatentUpsamplePipeline,
+        LTX2Pipeline,
+        LTX2VideoDiffusionDecoderModel,
+    )
+    from diffusers.pipelines.ltx2.latent_upsampler import LTX2LatentUpsamplerModel
+    from diffusers.pipelines.ltx2.pipeline_ltx2_diffusion_decode import (
+        LTX2VideoDiffusionDecodePipeline,
+    )
+
+    from ltx25_studio import pipelines
+
+    torch_dtype = getattr(torch, dtype)
+    base = LTX2ConditionPipeline.from_pretrained(
+        str(tiny_snapshot(fetch=False)), dtype=torch_dtype
+    ).to(device)
+    pipelines.configure_vae_tiling(base.vae)
+    _install_tiny_audio_vae_shim(base.audio_vae)
+    configs = {sub: _real_config(sub, fetch=False) for sub in TINY_STAGE_2}
+    torch.manual_seed(0)
+    upsampler_model = LTX2LatentUpsamplerModel.from_config(
+        {**configs["latent_upsampler"], **TINY_STAGE_2["latent_upsampler"]}
+    ).to(device=device, dtype=torch_dtype)
+    decoder_model = LTX2VideoDiffusionDecoderModel.from_config(
+        {**configs["diffusion_decoder"], **TINY_STAGE_2["diffusion_decoder"]}
+    ).to(device="cpu", dtype=torch_dtype)
+    decoder_model.enable_tiling()
+    upsampler = LTX2LatentUpsamplePipeline(vae=base.vae, latent_upsampler=upsampler_model)
+    decoder = LTX2VideoDiffusionDecodePipeline(
+        diffusion_decoder=decoder_model, scheduler=base.scheduler
+    )
+    stack = {"base": base}
+    for kind, pipe in (
+        ("condition", base),
+        ("text2video", pipelines.derive_pipeline(base, LTX2Pipeline)),
+    ):
+        stack[kind] = pipelines.StageRunner(
+            pipe, kind=kind, upsampler=upsampler, decoder=decoder, device=device
+        )
+    _TINY_STACKS[key] = stack
+    return stack
 
 
 # ---------------------------------------------------------------------------
@@ -391,6 +432,25 @@ def build_cases(device: str, media: Path, stage_2_ready: str | None) -> list[dic
                 width=SIZE,
                 height=SIZE,
                 num_frames=FRAMES,
+                frame_rate=FRAME_RATE,
+                prompt=PROMPT,
+                enable_stage_2=True,
+            ),
+        }
+    )
+    # Below the diffusion decoder's minimum (the tiny decoder's is 128x128x9
+    # decoded), refused before stage 1 runs.
+    cases.append(
+        {
+            "id": "stage2_too_small:text_to_video",
+            "mode": "text_to_video",
+            "expect_error": "DecoderTooSmallError",
+            "request": dict(
+                mode="text_to_video",
+                seed=SEED,
+                width=32,
+                height=32,
+                num_frames=STAGE_2_FRAMES,
                 frame_rate=FRAME_RATE,
                 prompt=PROMPT,
                 enable_stage_2=True,
