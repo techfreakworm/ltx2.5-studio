@@ -739,6 +739,9 @@ def build_conditions(
     that vanishes between the form and the model is the quietest failure there
     is.
     """
+    # Late: modes imports this module. Its reader takes a mapping's kind as well.
+    from .modes import condition_kind
+
     built = []
     for condition in conditions:
         fields = normalise_condition(
@@ -746,7 +749,7 @@ def build_conditions(
             num_frames=num_frames,
             temporal_compression_ratio=temporal_compression_ratio,
         )
-        kind = getattr(condition, "kind", "image")
+        kind = condition_kind(condition)
         source = fields["source"]
         if kind == "video" and not _already_decoded(source):
             source = decode_video_frames(

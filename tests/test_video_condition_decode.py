@@ -221,6 +221,27 @@ def test_a_video_condition_leaves_the_builder_decoded(tmp_path):
     assert upstream_accepts(built.source)
 
 
+def test_a_mapping_that_says_video_is_decoded_and_built_as_a_video(tmp_path):
+    """F64: a direct caller's dict carries its kind the way a spec does."""
+    entry = {"kind": "video", "source": str(write_video(tmp_path / "in.mp4")), "strength": 0.5}
+
+    (built,) = conditioning.build_conditions([entry], num_frames=121)
+
+    assert built.kind == "video"
+    assert not isinstance(built.source, (str, Path)) and upstream_accepts(built.source)
+    assert built.strength == pytest.approx(0.5)
+
+
+def test_a_mapping_that_names_no_kind_is_still_an_image():
+    import PIL.Image
+
+    image = PIL.Image.new("RGB", (8, 8))
+
+    (built,) = conditioning.build_conditions([{"source": image, "index": 0}], num_frames=9)
+
+    assert built.kind == "image" and built.source is image
+
+
 def test_the_index_and_strength_survive_the_decode(tmp_path):
     """Only the payload type was wrong. Everything else about the condition is
     plumbing that was already correct, and a decode that quietly resets an
