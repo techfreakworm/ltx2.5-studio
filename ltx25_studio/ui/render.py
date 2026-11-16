@@ -1299,6 +1299,12 @@ _CARDS: dict[str, tuple[str, str]] = {
         "Something went wrong in this app",
         "Press Generate again. If it happens again, report it with the detail below.",
     ),
+    # This machine's memory check declined a step before it started; the detail has the
+    # numbers (in use, needed, the limit) and what to change.
+    "memory": (
+        "This machine does not have enough free memory for this run",
+        "Close other apps, or make the run smaller, then press Generate again.",
+    ),
 }
 _GENERIC_CARD = (
     "The run did not finish",
@@ -1308,7 +1314,7 @@ _GENERIC_CARD = (
 #: cannot come from a local run) gets the generic card.
 _METER_CARDS = ("quota", "limit")
 #: Cards whose detail opens by itself: the detail holds the numbers to change.
-_OPEN_DETAIL = ("input", "quota", "limit")
+_OPEN_DETAIL = ("input", "quota", "limit", "memory")
 
 
 def failure(exc: BaseException, *, refused: bool = False, on_zerogpu: bool = True) -> str:
