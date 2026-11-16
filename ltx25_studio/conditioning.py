@@ -369,33 +369,127 @@ def _upright(frame, orientation: tuple[int, bool], colour: dict):
     return np.ascontiguousarray(array[:, ::-1] if mirror else array)
 
 
+def _upstream_geometry(source_height: int, source_width: int, height: int, width: int):
+    """``(scale, new_h, new_w, top, left)`` of upstream's resize to ``(height, width)``.
+
+    Quoted from ``preprocess_conditions`` at the pinned diffusers: scale so the
+    longer side fills, ``ceil`` each side, then centre-crop.
+    """
+    scale = max(height / source_height, width / source_width)
+    new_h, new_w = math.ceil(source_height * scale), math.ceil(source_width * scale)
+    return scale, new_h, new_w, (new_h - height) // 2, (new_w - width) // 2
+
+
+def _shrink_with_torch(array, geometry, size):
+    """Upstream's own resize: ``F.interpolate``, bilinear, ``align_corners=False``."""
+    import torch
+
+    _scale, new_h, new_w, top, left = geometry
+    height, width = size
+    pixels = torch.from_numpy(array).permute(2, 0, 1)[None].to(torch.float32)
+    pixels = torch.nn.functional.interpolate(
+        pixels, size=(new_h, new_w), mode="bilinear", align_corners=False
+    )[0, :, top : top + height, left : left + width]
+    return pixels.round().clamp(0, 255).to(torch.uint8).permute(1, 2, 0).contiguous().numpy()
+
+
+def _sample_points(count_in: int, count_out: int, first: int, count: int):
+    """Where torch's bilinear samples one axis, for outputs ``first`` to ``first + count``."""
+    import numpy as np
+
+    x = (np.arange(first, first + count, dtype=np.float64) + 0.5) * (count_in / count_out) - 0.5
+    x = np.maximum(x, 0.0)
+    low = np.minimum(np.floor(x).astype(np.int64), count_in - 1)
+    return low, np.minimum(low + 1, count_in - 1), (x - low).astype(np.float32)
+
+
+def _shrink_with_numpy(array, geometry, size):
+    """The same arithmetic as :func:`_shrink_with_torch`, where torch is not installed."""
+    import numpy as np
+
+    _scale, new_h, new_w, top, left = geometry
+    height, width = size
+    up, down, row_weight = _sample_points(array.shape[0], new_h, top, height)
+    left_of, right_of, column_weight = _sample_points(array.shape[1], new_w, left, width)
+    row_weight, column_weight = row_weight[:, None, None], column_weight[None, :, None]
+    rows = array[up].astype(np.float32) * (1 - row_weight)
+    rows += array[down].astype(np.float32) * row_weight
+    out = rows[:, left_of] * (1 - column_weight) + rows[:, right_of] * column_weight
+    return np.clip(np.rint(out), 0, 255).astype(np.uint8)
+
+
 class _Pictures:
-    """Decoded frames -> RGB arrays as a player shows them.
+    """Decoded frames -> RGB arrays as a player shows them, at most ``size``.
 
     Orientation and colour are properties of the stream, read off the first
-    frame converted; ``kind`` is set when the clip is HDR or wide-colour.
+    frame converted; ``kind`` is set when the clip is HDR or wide-colour. With
+    ``size``, a picture upstream would shrink is shrunk here, the moment it is
+    decoded.
     """
 
-    def __init__(self, stream):
+    def __init__(self, stream, size=None):
         self.stream = stream
+        self.size = size
         self.orientation = None
         self.colour: dict = {}
         self.kind: str | None = None
+        self.shrink = None
+        if size is not None:
+            try:
+                import torch  # noqa: F401 -- the pipeline's own resize, where it exists
+            except ImportError:
+                self.shrink = _shrink_with_numpy
+            else:
+                self.shrink = _shrink_with_torch
 
     def __call__(self, frame):
         if self.orientation is None:
             self.orientation = _orientation(frame, self.stream)
             self.colour, self.kind = _colour(frame)
-        return _upright(frame, self.orientation, self.colour)
+        array = _upright(frame, self.orientation, self.colour)
+        if self.shrink is None:
+            return array
+        geometry = _upstream_geometry(*array.shape[:2], *self.size)
+        return array if geometry[0] >= 1 else self.shrink(array, geometry, self.size)
 
 
-def _frame_by_frame(container, stream, picture, *, max_frames):
-    frames = []
+class _Stack:
+    """Frames written into one array as they arrive, so the result is the only copy:
+    no list of frames, and no ``np.stack`` copying it again."""
+
+    def __init__(self, capacity, source):
+        self.capacity, self.source = capacity, source
+        self.array, self.count = None, 0
+
+    def __len__(self):
+        return self.count
+
+    def append(self, frame):
+        import numpy as np
+
+        if self.array is None:
+            self.array = np.empty((self.capacity or 64, *frame.shape), dtype=frame.dtype)
+        elif frame.shape != self.array.shape[1:]:
+            raise ConstraintError(
+                f"{self.source} changes frame size partway through, so its frames cannot be "
+                f"stacked into one clip. Re-encode it at a single resolution."
+            )
+        if self.count == len(self.array):
+            grown = np.empty((2 * self.count, *frame.shape), dtype=frame.dtype)
+            grown[: self.count] = self.array
+            self.array = grown
+        self.array[self.count] = frame
+        self.count += 1
+
+    def result(self):
+        return self.array[: self.count]
+
+
+def _frame_by_frame(container, stream, picture, frames, *, max_frames):
     for frame in container.decode(stream):
         frames.append(picture(frame))
         if max_frames is not None and len(frames) >= max_frames:
             break
-    return frames
 
 
 #: The deepest picture reordering H.264 and HEVC allow. A frame's display time
@@ -450,7 +544,7 @@ def _display_times(frames, *, nominal: Fraction):
         yield release()
 
 
-def _at_rate(container, stream, picture, *, frame_rate: Fraction, max_frames):
+def _at_rate(container, stream, picture, frames, *, frame_rate: Fraction, max_frames):
     """The frame nearest each ``t = i / frame_rate``, from the first frame on.
 
     Ties go to the earlier frame. Targets past the last frame's display time
@@ -459,7 +553,6 @@ def _at_rate(container, stream, picture, *, frame_rate: Fraction, max_frames):
     """
     limit = float("inf") if max_frames is None else max_frames
     nominal = Fraction(stream.guessed_rate or stream.average_rate or frame_rate)
-    frames: list = []
     previous = None  # (seconds, frame)
     gap = None
     cached = (None, None)
@@ -478,7 +571,7 @@ def _at_rate(container, stream, picture, *, frame_rate: Fraction, max_frames):
             else:
                 take(frame)
         if len(frames) >= limit:
-            return frames
+            return
         if previous is not None and when > previous[0]:
             gap = when - previous[0]
         previous = (when, frame)
@@ -488,11 +581,15 @@ def _at_rate(container, stream, picture, *, frame_rate: Fraction, max_frames):
         shown_for = _duration(last) or gap or 1 / nominal
         while len(frames) < limit and Fraction(len(frames)) / frame_rate < last_seconds + shown_for:
             take(last)
-    return frames
 
 
 def decode_video_frames(
-    source, *, max_frames: int | None = None, frame_rate=None, notes: list | None = None
+    source,
+    *,
+    max_frames: int | None = None,
+    frame_rate=None,
+    notes: list | None = None,
+    size=None,
 ):
     """A video path -> the RGB frames the pipeline will actually take.
 
@@ -525,11 +622,17 @@ def decode_video_frames(
     BT.709 by FFmpeg's swscale rather than read as if it were SDR; with
     ``notes`` (a list), one sentence for the user is appended saying so.
 
-    **No resizing, deliberately.** Upstream scales the condition so the longer
-    side fills the target and centre-crops to exactly ``(height, width)``.
-    Re-deriving that here would be a second copy of somebody else's arithmetic,
-    and validating the source geometry against our own dimension rules would
-    reject a 1080p upload that upstream handles perfectly well.
+    **Size.** ``size`` is ``(height, width)``: the largest size the pipeline
+    will resize this condition to (for a two-stage run, the stage-2 size). Each
+    frame larger than that is reduced the moment it is decoded, with upstream's
+    own arithmetic (scale so the longer side fills, ``ceil`` each side,
+    bilinear with no antialias, centre-crop), so upstream's resize of it is an
+    exact identity and only the rounding to whole code values differs, by at
+    most half of one. A clip is never held at its own size: a 4K frame is
+    25 MB, 12 GB for 481 of them, before upstream makes a float32 copy on the
+    device. A picture smaller than ``size`` is left for upstream to enlarge,
+    and without ``size`` nothing is resized. Frames go straight into one
+    array, never a list stacked afterwards.
 
     ``max_frames`` bounds the decode, and it is not an optimisation.
     ``trim_conditioning_sequence`` keeps ``min(F, target - start)`` frames and
@@ -548,7 +651,6 @@ def decode_video_frames(
     no longer named anywhere.
     """
     import av
-    import numpy as np
 
     rate = None
     if frame_rate is not None:
@@ -562,6 +664,14 @@ def decode_video_frames(
                 f"condition cannot be matched to the generation's timing."
             )
 
+    if size is not None:
+        size = tuple(int(side) for side in size)
+        if len(size) != 2 or min(size) <= 0:
+            raise ConstraintError(
+                f"the condition size {size!r} is not a (height, width) of positive whole numbers."
+            )
+
+    frames = _Stack(max_frames, source)
     try:
         with av.open(str(source)) as container:
             if not container.streams.video:
@@ -570,13 +680,11 @@ def decode_video_frames(
                     f"Supply a video file rather than an audio-only or empty one."
                 )
             stream = container.streams.video[0]
-            picture = _Pictures(stream)
+            picture = _Pictures(stream, size)
             if rate is None:
-                frames = _frame_by_frame(container, stream, picture, max_frames=max_frames)
+                _frame_by_frame(container, stream, picture, frames, max_frames=max_frames)
             else:
-                frames = _at_rate(
-                    container, stream, picture, frame_rate=rate, max_frames=max_frames
-                )
+                _at_rate(container, stream, picture, frames, frame_rate=rate, max_frames=max_frames)
     except ConstraintError:
         raise
     except Exception as exc:  # noqa: BLE001 -- every decode failure has one answer here
@@ -587,20 +695,15 @@ def decode_video_frames(
             f"the GPU worker, by which point the file that caused it is unnamed."
         ) from exc
 
-    if not frames:
+    if not len(frames):
         raise ConstraintError(
             f"{source} declares a video stream and decoded to no frames at all. The file is "
             f"truncated or empty -- a header is not evidence that anything is behind it, and "
             f"an empty condition would leave the run looking like the prompt alone."
         )
-    if len({frame.shape for frame in frames}) > 1:
-        raise ConstraintError(
-            f"{source} changes frame size partway through, so its frames cannot be stacked "
-            f"into one clip. Re-encode it at a single resolution."
-        )
     if picture.kind is not None and notes is not None:
         notes.append(_colour_note(source, picture.kind))
-    return np.stack(frames)
+    return frames.result()
 
 
 def build_conditions(
@@ -610,6 +713,7 @@ def build_conditions(
     temporal_compression_ratio: int = DEFAULT_TEMPORAL_COMPRESSION_RATIO,
     frame_rate=None,
     notes: list | None = None,
+    size=None,
 ) -> tuple[ConditionSpec, ...]:
     """Normalise every condition into a range-checked :class:`ConditionSpec`.
 
@@ -627,6 +731,8 @@ def build_conditions(
     ``frame_rate`` is the generation's rate; a video condition is read at it by
     timestamp. Without it the video is read frame by frame. ``notes`` (a list)
     collects what the decode tells the user, such as an HDR clip's conversion.
+    ``size`` is the largest ``(height, width)`` the pipeline resizes a video
+    condition to; see :func:`decode_video_frames`.
 
     The returned list is always the same length as the input. A condition that
     cannot be built raises; it never comes back quietly shorter, because a shot
@@ -648,6 +754,7 @@ def build_conditions(
                 max_frames=num_frames if num_frames and num_frames > 0 else None,
                 frame_rate=frame_rate,
                 notes=notes,
+                size=size,
             )
         built.append(
             ConditionSpec(

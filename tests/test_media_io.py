@@ -460,6 +460,131 @@ def test_an_sdr_clip_carries_no_note(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# review r1, media-io-4 -- a condition larger than the generation is reduced to
+# the generation's size as it decodes, never held whole at its own size
+# ---------------------------------------------------------------------------
+
+
+def pattern(height, width, index=0):
+    """Gradients and a moving checkerboard: structure a resize can get wrong."""
+    y, x = np.mgrid[0:height, 0:width]
+    channels = (
+        (x * 255) // max(width - 1, 1),
+        (y * 255) // max(height - 1, 1),
+        ((x // 16 + y // 16 + index) % 2) * 255,
+    )
+    return np.stack(channels, axis=-1).astype(np.uint8)
+
+
+def upstream_preprocess(frames, *, height, width, num_frames):
+    """The pinned diffusers' own ``preprocess_conditions`` on a float32 VAE."""
+    torch = pytest.importorskip("torch")
+    upstream = pytest.importorskip("diffusers.pipelines.ltx2.pipeline_ltx2_condition")
+    pipeline = upstream.LTX2ConditionPipeline
+    stand_in = SimpleNamespace(
+        vae_temporal_compression_ratio=8,
+        vae=SimpleNamespace(dtype=torch.float32),
+        text_encoder=None,
+    )
+    stand_in.trim_conditioning_sequence = lambda start, count, target: (
+        pipeline.trim_conditioning_sequence(stand_in, start, count, target)
+    )
+    condition = upstream.LTX2VideoCondition(frames=frames, index=0, strength=1.0)
+    prepared = pipeline.preprocess_conditions(
+        stand_in, [condition], height=height, width=width, num_frames=num_frames, device="cpu"
+    )
+    return prepared[0][0]
+
+
+def test_a_large_condition_comes_back_at_the_generation_size(tmp_path):
+    source = write_clip(tmp_path / "big.mp4", [pattern(360, 640, k) for k in range(12)], rate=24)
+
+    frames = conditioning.decode_video_frames(source, frame_rate=24, size=(96, 128))
+
+    assert frames.shape == (12, 96, 128, 3) and frames.dtype == np.uint8
+
+
+def test_the_reduced_frames_are_what_upstream_makes_of_the_full_ones(tmp_path):
+    """The resize is upstream's own (bilinear, no antialias, then a centre crop),
+    so its resize becomes an identity: the only difference left is the rounding
+    to whole code values, at most half of one."""
+    source = write_clip(tmp_path / "big.mp4", [pattern(360, 640, k) for k in range(9)], rate=24)
+    full = conditioning.decode_video_frames(source, frame_rate=24)
+    reduced = conditioning.decode_video_frames(source, frame_rate=24, size=(96, 128))
+
+    ours = upstream_preprocess(reduced, height=96, width=128, num_frames=9)
+    theirs = upstream_preprocess(full, height=96, width=128, num_frames=9)
+
+    assert ours.shape == theirs.shape
+    assert float((ours - theirs).abs().max()) <= 0.5 / 127.5 + 1e-6
+
+
+def test_the_full_size_clip_is_never_held_whole(tmp_path):
+    """30 frames of 720p are 83 MB at their own size; the decode holds the
+    generation-size result and about one source frame at a time."""
+    import tracemalloc
+
+    source = write_clip(tmp_path / "hd.mp4", [pattern(720, 1280, k) for k in range(30)], rate=24)
+    tracemalloc.start()
+    try:
+        frames = conditioning.decode_video_frames(
+            source, frame_rate=24, max_frames=30, size=(96, 128)
+        )
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    whole_clip = 30 * 720 * 1280 * 3
+    assert frames.shape == (30, 96, 128, 3)
+    assert peak < whole_clip / 4, (
+        f"the decode peaked at {peak} bytes; the whole clip is {whole_clip}"
+    )
+
+
+def test_a_condition_smaller_than_the_generation_is_left_for_upstream_to_enlarge(tmp_path):
+    source = write_clip(tmp_path / "small.mp4", [pattern(64, 96)] * 3, rate=24)
+
+    assert np.array_equal(
+        conditioning.decode_video_frames(source, size=(128, 192)),
+        conditioning.decode_video_frames(source),
+    )
+
+
+def test_the_reduction_uses_the_upright_picture(tmp_path):
+    stored = np.rot90(portrait(), k=-1)
+    source = write_clip(tmp_path / "phone.mp4", [stored] * 3, rate=24, rotation=90)
+
+    frames = conditioning.decode_video_frames(source, frame_rate=24, size=(32, 16))
+
+    assert frames.shape[1:3] == (32, 16)
+    first = frames[0].astype(np.float32)
+    assert first[:8, :8].mean() > 200 and first[:8, -8:].mean() < 60
+
+
+def test_build_conditions_hands_the_size_on(tmp_path):
+    source = write_clip(tmp_path / "big.mp4", [pattern(360, 640, k) for k in range(9)], rate=24)
+    spec = conditioning.ConditionSpec(source=source, kind="video", index=0, strength=1.0)
+
+    built = conditioning.build_conditions([spec], num_frames=9, frame_rate=24, size=(96, 128))
+
+    assert built[0].source.shape == (9, 96, 128, 3)
+
+
+@pytest.mark.parametrize(("source", "size"), [((360, 640), (96, 128)), ((1080, 1920), (704, 1216))])
+def test_the_resize_without_torch_is_torchs_to_one_code_value(source, size):
+    """The torch-less fallback samples exactly where torch's bilinear does."""
+    pytest.importorskip("torch")
+    frame = np.random.default_rng(0).integers(0, 256, size=(*source, 3), dtype=np.uint8)
+    geometry = conditioning._upstream_geometry(*source, *size)
+
+    with_torch = conditioning._shrink_with_torch(frame, geometry, size)
+    with_numpy = conditioning._shrink_with_numpy(frame, geometry, size)
+
+    assert with_torch.shape == with_numpy.shape == (*size, 3)
+    assert int(np.abs(with_torch.astype(int) - with_numpy.astype(int)).max()) <= 1
+
+
+# ---------------------------------------------------------------------------
 # F17 -- the user's audio in the mp4
 # ---------------------------------------------------------------------------
 
