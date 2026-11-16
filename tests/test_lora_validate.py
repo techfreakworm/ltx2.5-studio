@@ -22,6 +22,9 @@ the check that actually protects the user, and it cannot run here.
 
 from __future__ import annotations
 
+import os
+import struct
+
 import pytest
 from lora_fixtures import (
     DIFFUSERS_PREFIX,
@@ -561,3 +564,30 @@ def test_the_size_cap_defaults_to_the_configured_limit(monkeypatch, tmp_path):
     with pytest.raises(LoRATooLargeError) as excinfo:
         lora_validate.validate_lora(path)
     assert "10000000" in str(excinfo.value)
+
+
+# --------------------------------------------------------------------------
+# lora-4 — an interrupted download is refused at Validate, not in the GPU window
+# --------------------------------------------------------------------------
+
+
+def test_an_interrupted_download_is_refused_at_validate(tmp_path):
+    """Header intact, two thirds of the tensor data missing: the loader in the
+    worker refuses this file, so Validate must refuse it first."""
+    from ltx25_studio.errors import LoRATruncatedError
+
+    path = good_adapter(tmp_path, "interrupted.safetensors")
+    with open(path, "rb") as handle:
+        (declared,) = struct.unpack("<Q", handle.read(8))
+    full = path.stat().st_size
+    os.truncate(path, 8 + declared + (full - 8 - declared) // 3)
+
+    with pytest.raises(LoRATruncatedError) as excinfo:
+        lora_validate.validate_lora(path, upload=True)
+    assert str(full) in str(excinfo.value), "the refusal names the size the header promised"
+    safetensors = pytest.importorskip("safetensors")
+    with (
+        pytest.raises(Exception),  # noqa: B017 -- SafetensorError's import path varies
+        safetensors.safe_open(str(path), framework="numpy") as handle,
+    ):
+        list(handle.keys())

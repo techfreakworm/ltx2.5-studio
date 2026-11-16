@@ -539,3 +539,59 @@ def test_headers_the_safetensors_loader_accepts_are_accepted(header, size, tmp_p
     safetensors = pytest.importorskip("safetensors")
     with safetensors.safe_open(str(path), framework="numpy") as handle:
         assert set(handle.keys()) == set(result.keys)
+
+
+# --------------------------------------------------------------------------
+# lora-4 — the tensor data must be exactly where the header says, all of it
+# --------------------------------------------------------------------------
+
+#: Layouts the safetensors loader refuses: ``(header, payload bytes present)``.
+LAYOUT_FAULTS = {
+    "bytes after the last tensor": ({"t": f32(0, 8)}, 12),
+    "a gap between tensors": ({"a": f32(0, 8), "b": f32(12, 20)}, 20),
+    "overlapping tensors": ({"a": f32(0, 8), "b": f32(4, 12)}, 12),
+    "data that does not start at zero": ({"a": f32(4, 12)}, 12),
+    "a span that is not shape times dtype": ({"a": f32(0, 8, shape=(3,))}, 8),
+    "reversed offsets": ({"a": f32(8, 0)}, 8),
+    "a 4-bit tensor that ends mid-byte": (
+        {"t": {"dtype": "F4", "shape": [3], "data_offsets": [0, 2]}},
+        2,
+    ),
+}
+
+
+@pytest.mark.parametrize(("header", "size"), LAYOUT_FAULTS.values(), ids=LAYOUT_FAULTS)
+def test_tensor_data_out_of_place_is_a_format_error(header, size, tmp_path):
+    path = raw_adapter(tmp_path / "misplaced.safetensors", header, b"\x01" * size)
+    with pytest.raises(LoRAFormatError) as excinfo:
+        lora_inspect.inspect_lora(path)
+    assert "misplaced.safetensors" in str(excinfo.value)
+
+
+@pytest.mark.parametrize(("header", "size"), LAYOUT_FAULTS.values(), ids=LAYOUT_FAULTS)
+def test_the_safetensors_loader_refuses_every_layout_we_refuse(header, size, tmp_path):
+    safetensors = pytest.importorskip("safetensors")
+    path = raw_adapter(tmp_path / "misplaced.safetensors", header, b"\x01" * size)
+    with (
+        pytest.raises(Exception),  # noqa: B017 -- SafetensorError's import path varies
+        safetensors.safe_open(str(path), framework="numpy") as handle,
+    ):
+        list(handle.keys())
+
+
+def test_a_payload_cut_short_is_refused_as_truncated_naming_both_sizes(tmp_path):
+    """What an interrupted download leaves under its final name."""
+    header = {"a": f32(0, 8), "b": f32(8, 16)}
+    path = raw_adapter(tmp_path / "cut.safetensors", header, b"\x01" * 10)
+    with pytest.raises(LoRATruncatedError) as excinfo:
+        lora_inspect.inspect_lora(path)
+    (declared,) = struct.unpack("<Q", path.read_bytes()[:8])
+    message = str(excinfo.value)
+    assert "cut.safetensors" in message
+    assert str(8 + declared + 16) in message and str(path.stat().st_size) in message
+    safetensors = pytest.importorskip("safetensors")
+    with (
+        pytest.raises(Exception),  # noqa: B017 -- SafetensorError's import path varies
+        safetensors.safe_open(str(path), framework="numpy") as handle,
+    ):
+        list(handle.keys())

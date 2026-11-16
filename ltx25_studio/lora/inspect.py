@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import struct
 from dataclasses import dataclass
 from pathlib import Path
@@ -322,6 +323,38 @@ def _checked_entries(header: dict, *, source: str) -> tuple[dict, dict]:
     return metadata, entries
 
 
+def _payload_bytes(entries: dict, *, source: str) -> int:
+    """Where the tensor data ends, checked by the safetensors loader's own rules.
+
+    In offset order, each tensor starts where the previous one ended (the
+    first at 0), and spans exactly its shape times its dtype size.
+    """
+    end_of_previous = 0
+    for name, (dtype, shape, begin, end) in sorted(
+        entries.items(), key=lambda item: (item[1][2], item[1][3])
+    ):
+        if begin != end_of_previous or end < begin:
+            raise LoRAFormatError(
+                source=source,
+                reason=(
+                    f"tensor {_shown(name)} is placed at bytes {begin}-{end} of the tensor data, "
+                    f"but the tensor before it ends at {end_of_previous}; tensors must follow "
+                    f"one another with no gap or overlap"
+                ),
+            )
+        bits = math.prod(shape) * DTYPE_BITS[dtype]
+        if bits % 8 or end - begin != bits // 8:
+            raise LoRAFormatError(
+                source=source,
+                reason=(
+                    f"tensor {_shown(name)} is {dtype} {_shown(list(shape))}, which is "
+                    f"{bits / 8:g} bytes, but its data offsets span {end - begin}"
+                ),
+            )
+        end_of_previous = end
+    return end_of_previous
+
+
 def _prefix_of(key: str) -> str:
     """The leading namespace of a tensor key, always with its trailing dot.
 
@@ -357,6 +390,22 @@ def inspect_lora(path: str | Path) -> LoRAInspection:
     # No metadata key, `__metadata__: null` and `__metadata__: {}` all mean "none";
     # all three are common in the wild (PLAN §4.5) and none is an error.
     metadata, entries = _checked_entries(header, source=str(path))
+
+    # The loader in the worker refuses a file whose data is not exactly where
+    # the header says; refusing it here keeps that failure out of the GPU window.
+    expected = HEADER_LENGTH_BYTES + declared + _payload_bytes(entries, source=str(path))
+    if file_bytes < expected:
+        raise LoRATruncatedError(
+            source=str(path), declared_bytes=expected, available_bytes=file_bytes
+        )
+    if file_bytes > expected:
+        raise LoRAFormatError(
+            source=str(path),
+            reason=(
+                f"the file is {file_bytes} bytes but its header accounts for {expected}; the "
+                f"{file_bytes - expected} bytes after the last tensor belong to no tensor"
+            ),
+        )
 
     keys = tuple(entries)
     shapes = {name: (dtype, shape) for name, (dtype, shape, _begin, _end) in entries.items()}
