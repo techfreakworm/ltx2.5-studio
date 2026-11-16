@@ -1,32 +1,33 @@
-"""Presentation only: turn objects and exceptions into Markdown a human reads.
+"""Every string a user reads, and the markup that carries it.
 
-PLAN §7.2 says the UI is the one layer allowed to render a typed exception as a
-string. This module is that layer, isolated from Gradio so it can be read and
-tested on a bare interpreter -- it imports nothing but the error hierarchy.
+Gradio-free: this module turns facts handed to it by ``handlers.py`` into
+Markdown or small HTML fragments. It does no arithmetic beyond wording, so a
+figure on screen cannot disagree with the module that computed it.
 
-**Everything here exists to make failure loud.** PLAN §5.3's post-mortem is of a
-bug in exactly this seam: generation returned an empty path and the UI rendered
-it with ``event.video_path if event.video_path else gr.update()``, a no-op update
-that looks identical to a form resetting itself. Nobody saw an error because
-nobody rendered one. It hid for a week.
+Rules the copy is written to (the UI brief, section 7.7):
 
-So the rules this module is written to:
-
-* every failure path produces a **non-empty** string naming what failed;
-* a validator's own message is surfaced **verbatim** -- the messages in
-  ``errors.py`` were written to be actionable, and flattening one to "invalid
-  file" throws away the only part the user could act on;
-* "no adapter applied" is stated positively rather than shown as blankness,
-  because an empty panel and a working-but-inert LoRA look the same;
-* a success-shaped result carrying an empty path gets the loudest message in
-  the file, because that is a bug in *us*.
+* plain words for someone spending GPU quota; no internal ids, file names or
+  exception class names as headlines;
+* every failure path produces a non-empty message that says what happened,
+  whether quota was used and one next step, with the verbatim detail kept;
+* a validator's or the backend's own message is quoted verbatim, never
+  flattened;
+* "no LoRA" is said in words, never shown as blankness.
 """
 
 from __future__ import annotations
 
+import html
+import os
+from collections.abc import Iterable, Sequence
+from dataclasses import dataclass, field
 from typing import Any
 
 from ..errors import (
+    ConstraintError,
+    DecodeError,
+    EmptyOutputError,
+    EncodeError,
     LoRAConventionError,
     LoRADimensionError,
     LoRAError,
@@ -41,162 +42,339 @@ from ..errors import (
     LoRATruncatedError,
     LoRAVersionError,
     LTXStudioError,
+    ModelLoadError,
+    PromptEnhancementError,
+    UnknownModeError,
 )
 
 __all__ = [
-    "STANDING_FACTS",
+    "COLUMN_NOTES",
+    "COLUMNS",
+    "FIELD_COPY",
+    "NOISE_CHOICES",
+    "READY",
+    "ROWS",
+    "SHAPE_PRESETS",
+    "CostFacts",
+    "RunFacts",
     "applied_loras",
-    "cost_readout",
+    "commit_line",
+    "cost_panel",
     "dimension_hint",
     "empty_output_bug",
     "failure",
     "frame_hint",
     "lora_accepted",
+    "lora_duplicate",
     "lora_idle",
     "lora_nothing_to_validate",
     "lora_rejected",
     "lora_stage_of",
+    "lora_summary_label",
     "lora_validating",
-    "shot_anchor_readout",
-    "mode_briefing",
+    "media_caption",
+    "mode_name",
+    "monitor_caption",
+    "monitor_idle",
+    "pinned_line",
+    "prompt_label",
+    "prompt_placeholder",
+    "purpose_line",
+    "quota_explainer",
+    "readiness_reason",
+    "recent_run_label",
+    "run_summary",
     "running",
+    "shot_anchor_readout",
+    "status_line",
     "success",
 ]
 
 
-def _join(values) -> str:
-    """Render a sequence as a readable comma-separated list."""
-    return ", ".join(str(v) for v in values)
+def _e(value: Any) -> str:
+    """Escape anything that is shown inside HTML markup."""
+    return html.escape(str(value), quote=True)
+
+
+def _num(value: Any) -> str:
+    """A figure, set in the numeral face."""
+    return f'<span class="mr-num">{_e(value)}</span>'
+
+
+def _size(width: Any, height: Any) -> str:
+    return f"{int(width)} × {int(height)}"
+
+
+def _size_html(size: tuple[int, int]) -> str:
+    """A size with each figure in the numeral face and a plain multiplication sign."""
+    return f"{_num(int(size[0]))} × {_num(int(size[1]))}"
+
+
+def _secs_html(value: float) -> str:
+    return f"{_num(f'{value:.1f}')} s"
+
+
+def _seconds(value: float) -> str:
+    return f"{value:.1f} s"
+
+
+def _and(items: Sequence[str]) -> str:
+    items = list(items)
+    if len(items) <= 1:
+        return "".join(items)
+    return ", ".join(items[:-1]) + " and " + items[-1]
 
 
 # ---------------------------------------------------------------------------
-# standing facts -- the honest cost of the model, always on screen
+# the matrix: what you start from x what you get back
 # ---------------------------------------------------------------------------
 
-#: The two truths a first-time user must meet before choosing anything, as
-#: ``(lamp label, sentence)`` pairs for the masthead's fact rail. The first is
-#: PLAN §3.1(b), stated where the user starts rather than buried in a README;
-#: the second is PLAN §8.6 — quota is the resource users actually run out of.
-#: ``chrome.masthead_html`` gives these their form; the words live here with
-#: every other string a user reads.
-STANDING_FACTS: tuple[tuple[str, str], ...] = (
-    (
-        "Joint A/V",
-        "Every run renders both video and audio and spends full video compute, whichever "
-        "track you export — the model has no video-off switch. The four modes marked ⚠ are "
-        "honest about this rather than pretending to be cheap.",
-    ),
-    (
-        "Metered",
-        "Runs on ZeroGPU: each generation reserves a GPU slot against your daily quota, "
-        "charged at 2× because this model needs the xlarge tier. Failed runs cost quota "
-        "too, and a timeout is never retried automatically — a retry would reuse an "
-        "expired proxy token and report the wrong cause.",
-    ),
+#: Rows, keyed by the set of inputs a mode REQUIRES. Placement is derived from
+#: the registry in ``chrome.py``; only the words live here.
+ROWS: tuple[tuple[frozenset[str], str], ...] = (
+    (frozenset({"text"}), "Text"),
+    (frozenset({"image"}), "Image"),
+    (frozenset({"image", "text"}), "Image + text"),
+    (frozenset({"video"}), "Video"),
+    (frozenset({"audio"}), "Audio"),
 )
 
+#: Columns, keyed by the set of tracks a mode exports.
+COLUMNS: tuple[tuple[frozenset[str], str], ...] = (
+    (frozenset({"audio", "video"}), "Video + sound"),
+    (frozenset({"video"}), "Video (silent)"),
+    (frozenset({"audio"}), "Sound only"),
+)
+
+#: Stated once, in words, under the column they belong to.
+COLUMN_NOTES: dict[str, str] = {
+    "Video (silent)": "The sound is rendered, then dropped. Same GPU time as with sound.",
+    "Sound only": "Renders a 256 × 256 video that is thrown away; you pay for that GPU time.",
+}
+
+#: One line per mode, shown under the matrix for the selected cell.
+_PURPOSE: dict[str, str] = {
+    "text_to_audio_video": "A clip with matching sound, from your words.",
+    "text_to_video": "A silent clip from your words.",
+    "text_to_audio": "Sound from your words: a voice, music, effects or ambience.",
+    "image_to_audio_video": "Your image, brought to life, with sound.",
+    "image_to_video": "Your image, brought to life, without sound.",
+    "image_text_to_audio_video": "Your image, moving the way you describe, with sound.",
+    "image_text_to_video": "Your image, moving the way you describe, without sound.",
+    "video_to_video": "Your clip, re-rendered. Describe a new look if you like.",
+    "video_to_audio": "A soundtrack for your clip.",
+    "audio_to_video": "A picture for your sound. Your audio stays as the soundtrack.",
+    "audio_to_audio": "Your sound, transformed.",
+}
+
+
+def _row_label(mode: Any) -> str:
+    required = frozenset(mode.inputs)
+    return next((label for key, label in ROWS if key == required), _and(sorted(required)))
+
+
+def _column_label(mode: Any) -> str:
+    exports = frozenset(mode.exports)
+    return next((label for key, label in COLUMNS if key == exports), " + ".join(sorted(exports)))
+
+
+def mode_name(mode: Any) -> str:
+    """The matrix name of a mode: ``Text → video + sound``."""
+    column = _column_label(mode)
+    return f"{_row_label(mode)} → {column[0].lower()}{column[1:]}"
+
+
+def purpose_line(mode: Any) -> str:
+    """The selected cell, in words, under the matrix."""
+    purpose = _PURPOSE.get(mode.id, mode.label + ".")
+    return f"**{mode_name(mode)}.** {purpose}"
+
 
 # ---------------------------------------------------------------------------
-# modes
+# field copy -- labels and info lines, keyed by the field spec in fields.py
 # ---------------------------------------------------------------------------
 
+#: ``key -> (label, info)``. Info lines become accessible descriptions, so
+#: each is at most two short sentences.
+FIELD_COPY: dict[str, tuple[str, str]] = {
+    "prompt": ("Prompt", ""),
+    "negative_prompt": ("Negative prompt", "Not used: this model always runs at guidance 1.0."),
+    "image": ("Image", "Used as the first frame."),
+    "video": ("Video clip", "The clip to work from."),
+    "audio": ("Audio", "The sound to work from."),
+    "conditions": ("Shot list", ""),
+    "width": ("Width", "Multiples of 32."),
+    "height": ("Height", "Multiples of 32."),
+    "auto_duration": (
+        "Let the model pick the length",
+        "Between the shortest and longest seconds in Advanced.",
+    ),
+    "num_frames": ("Frames", "Lengths come in steps of 8 frames: 113, 121, 129…"),
+    "min_seconds": ("Shortest (seconds)", "Used when the model picks the length."),
+    "max_seconds": ("Longest (seconds)", "Used when the model picks the length."),
+    "enable_stage_2": (
+        "Upscale ×2",
+        "Upsamples and refines after the first pass, for twice the width and height. "
+        "Reserves 1.5 times the GPU time.",
+    ),
+    "seed": ("Seed", "-1 picks a new seed each run. The seed used is in the run report."),
+    "strength": ("Stick to the source clip", "Higher keeps more of your clip. 0.99 at most."),
+    "noise_scale": ("How much to change your sound", ""),
+    "loras": ("LoRA adapters", ""),
+    "enhance_prompt": (
+        "Enhance my prompt",
+        "Gemma rewrites your prompt in detail on the GPU first, and reads your image if there "
+        "is one. Reserves {enhance_seconds} s more; usually uses a few seconds.",
+    ),
+}
 
-def mode_briefing(mode: Any) -> str:
-    """Describe one mode, including its cost note **verbatim** from the registry.
 
-    PLAN §3.2 makes this a requirement rather than a nicety: modes 8-11 still
-    render video internally, and "a user who does not know that will read the
-    runtime as a bug".
-    """
-    takes = ", ".join(mode.inputs) or "nothing"
-    gives = " + ".join(mode.exports)
-    lines = [
-        f"### {mode.label}",
-        f"**Takes** {takes} · **Returns** {gives}",
-    ]
+def prompt_label(mode: Any, *, required: bool) -> str:
+    return "Prompt" if required else "Prompt (optional)"
 
-    cost_note = getattr(mode, "cost_note", None)
-    if cost_note:
-        lines += ["", f"> ⚠️ **What this actually costs:** {cost_note}"]
 
-    mitigations = []
-    if getattr(mode, "min_resolution", False):
-        mitigations.append(
-            "runs at the **minimum legal resolution** — the resolution controls are greyed "
-            "out and show the size that will actually be used, because the video is rendered "
-            "and discarded and paying for pixels nobody sees would be waste"
-        )
-    if getattr(mode, "skip_stage_2", False):
-        mitigations.append("**skips stage-2 refinement** for the same reason")
-    if mitigations:
-        lines += ["", "Mitigations applied automatically: " + "; ".join(mitigations) + "."]
+_PLACEHOLDERS: dict[str, str] = {
+    "text_to_audio_video": (
+        "Describe the shot and what is heard: subject, action, camera, light, voices, sound."
+    ),
+    "text_to_video": "Describe the shot: subject, action, camera movement, light.",
+    "text_to_audio": "Describe the sound: a voice and what it says, music, effects or ambience.",
+    "image_text_to_audio_video": (
+        "Describe what happens in your image, and what is heard: motion, camera, sound."
+    ),
+    "image_text_to_video": "Describe what happens in your image: motion, camera, light.",
+    "video_to_video": "Optional. A new look for the clip, for example: as a watercolour painting.",
+    "video_to_audio": (
+        "Optional. What the sound should be, for example: footsteps on gravel, distant traffic."
+    ),
+    "audio_to_audio": (
+        "Optional. What to turn it into, for example: the same words, whispered in a cave."
+    ),
+    "audio_to_video": (
+        "Optional. What the picture should show, for example: a captain at the wheel in a storm."
+    ),
+}
 
-    return "\n".join(lines)
+
+def prompt_placeholder(mode: Any) -> str:
+    return _PLACEHOLDERS.get(mode.id, "Describe the shot.")
+
+
+_CAPTIONS: dict[tuple[str, str], str] = {
+    ("video_to_video", "video"): "The clip to re-render.",
+    ("video_to_audio", "video"): "The clip to make sound for.",
+    ("audio_to_audio", "audio"): "The sound to transform.",
+    ("audio_to_video", "audio"): "The sound to picture; it is also the soundtrack of the result.",
+    ("audio_to_video", "image"): "Optional. Used as the first frame.",
+}
+
+
+def media_caption(mode: Any, kind: str) -> str:
+    """The one line under a media input, written for the selected mode."""
+    return _CAPTIONS.get((mode.id, kind), FIELD_COPY[kind][1])
+
+
+#: The four choices that write ``noise_scale`` in Audio → sound.
+NOISE_CHOICES: tuple[tuple[str, float], ...] = (
+    ("A little", 0.42),
+    ("Moderately", 0.73),
+    ("A lot", 0.91),
+    ("Ignore my audio (new sound)", 1.0),
+)
+
+#: Shape presets: ``(name, width, height)``. All multiples of 32.
+SHAPE_PRESETS: tuple[tuple[str, int, int], ...] = (
+    ("3:2", 704, 480),
+    ("16:9", 960, 544),
+    ("9:16", 544, 960),
+    ("1:1", 640, 640),
+    ("4:3", 640, 480),
+)
+MATCH_INPUT = "Match input"
+LENGTH_MATCH = "Match my clip"
+LENGTH_SET = "Set the length"
+
+
+def pinned_line(mode: Any, size: int) -> str:
+    return f"Renders at {size} × {size} with no upscale, because the picture is thrown away."
+
+
+def length_line(*, seconds: float, frames: int) -> str:
+    return f"{frames} frames, {seconds:.2f} s at 24 fps."
+
+
+def match_clip_line(
+    *, clip_seconds: float | None, frames: int | None, fps: float, audio: bool, cap_seconds: float
+) -> str:
+    """What "Match my clip" will do, stated before the run."""
+    if audio:
+        if clip_seconds is None:
+            return f"Matches your audio's length, up to {cap_seconds:g} s."
+        line = f"Matches your {clip_seconds:.1f} s audio: {frames} frames."
+    else:
+        if clip_seconds is None:
+            return f"Matches your clip's length, up to {cap_seconds:g} s."
+        line = f"Matches your {clip_seconds:.1f} s clip: {frames} frames."
+    if clip_seconds is not None and clip_seconds > cap_seconds:
+        line += f" Trimmed to the first {frames / fps:.1f} s, the longest this model makes."
+    return line
+
+
+def match_input_line(
+    *, width: int, height: int, source_width: int, source_height: int, what: str
+) -> str:
+    return f"Matches your {what} ({source_width} × {source_height}): {width} × {height}."
 
 
 # ---------------------------------------------------------------------------
-# live constraint guidance -- PLAN §5.5
+# identity and quota
 # ---------------------------------------------------------------------------
 
+TAGLINE = "Video and sound from text, images, clips or audio. Bring your own LoRA."
 
-def _legal_frames_near(value: int, ratio: int, count: int = 4) -> str:
-    """A few legal frame counts around ``value``, so the rule is concrete."""
-    steps = max((value - 1) // ratio, 0)
-    first = max(steps - count // 2, 0)
-    return ", ".join(str(k * ratio + 1) for k in range(first, first + count + 1))
+
+def quota_explainer(*, multiplier: int, example_reserve: int) -> str:
+    """The "How quota works" disclosure, with the numbers this app actually uses."""
+    double = {1: "counts once", 2: "counts double"}.get(multiplier, f"counts {multiplier} times")
+    return (
+        "Each run reserves GPU time on Hugging Face ZeroGPU from your daily quota. This model "
+        f"needs the xlarge GPU, which {double}: a {example_reserve} s reservation needs "
+        f"{example_reserve * multiplier} s of quota free to start, and you are billed for the "
+        f"GPU time actually used, times {multiplier}. Runs that fail on the GPU are billed too. "
+        "A timed-out run is not retried for you; press Generate again."
+    )
+
+
+# ---------------------------------------------------------------------------
+# live constraint guidance, beside the exact fields in Advanced
+# ---------------------------------------------------------------------------
 
 
 def frame_hint(num_frames: Any, *, ratio: int, lower: int, upper: int, valid: bool) -> str:
-    """Guidance for the frame count, naming the silent-floor behaviour.
-
-    The caller has already asked ``constraints.py`` for the verdict; this only
-    words it. Upstream does not raise here -- it computes
-    ``(num_frames - 1) // ratio + 1`` and floors -- so this hint is genuinely
-    the only warning a user gets before the fact.
-    """
+    """Guidance for the frame count. ``constraints.py`` has already decided."""
     if valid:
-        return (
-            f"✅ **{num_frames} frames** is legal. Nearby legal values: "
-            f"{_legal_frames_near(int(num_frames), ratio)}."
-        )
+        return f"{num_frames} frames is a legal length ({int(num_frames) / 24:.2f} s)."
     return (
-        f"⚠️ **{num_frames} is not a legal frame count.** It must be k×{ratio} + 1. "
-        f"Upstream does **not** reject this — it silently floors it, so you would get "
-        f"**{lower}** frames and no warning at all. Legal values either side: **{lower}** or "
-        f"**{upper}**. Press *Snap to legal values* to fix it."
+        f"{num_frames} frames won't run. Use {lower} ({lower / 24:.1f} s) or "
+        f"{upper} ({upper / 24:.1f} s), or press Snap."
     )
 
 
 def dimension_hint(width: Any, height: Any, *, multiple: int, snapped: tuple[int, int]) -> str:
-    """Guidance for width/height. Upstream *does* raise on these, so the cost of
-    getting it wrong is a failed run rather than a silently wrong one."""
+    """Guidance for width and height. ``constraints.py`` has already decided."""
     bad = []
     if not (isinstance(width, int) and width >= multiple and width % multiple == 0):
-        bad.append(f"width **{width}** → **{snapped[0]}**")
+        bad.append(f"width {width} → {snapped[0]}")
     if not (isinstance(height, int) and height >= multiple and height % multiple == 0):
-        bad.append(f"height **{height}** → **{snapped[1]}**")
+        bad.append(f"height {height} → {snapped[1]}")
     if not bad:
-        return f"✅ {width}×{height} — both divisible by {multiple}."
-    return (
-        f"⚠️ Every spatial dimension must be a multiple of **{multiple}**; upstream raises "
-        f"otherwise. {' · '.join(bad)}. Press *Snap to legal values*."
-    )
+        return f"{width} × {height} runs: both are multiples of {multiple}."
+    return f"Sizes must be multiples of {multiple}: {', '.join(bad)}. Press Snap."
 
 
 def shot_anchor_readout(anchors: list[dict], *, out_of_range: list[int]) -> str:
-    """Show which latent each frame anchor lands on, and which frames share it.
-
-    The user types a frame; the model wants a latent index, and the conversion is
-    **8:1 lossy**. Frames 25 through 32 are the same anchor, so two shots the user
-    thinks are a third of a second apart can be identical. Telling them the rule
-    is weaker than showing them the span, because the rule is the part people
-    misread -- and finding out after a metered run is the expensive way.
-
-    The arithmetic is NOT done here: ``conditioning.latent_group_for`` owns it and
-    this only words the answer. A copy of that formula living in the UI would
-    eventually disagree with the real one, and a readout that disagrees with what
-    runs is worse than no readout at all.
-    """
+    """Where each shot-list frame anchor lands. Kept for the API's shot list;
+    the UI no longer shows a shot list (rows with text are refused)."""
     if not anchors:
         return (
             "_No shots yet._ Add a row to compose a multishot prompt. The anchor column takes a "
@@ -226,99 +404,241 @@ def shot_anchor_readout(anchors: list[dict], *, out_of_range: list[int]) -> str:
         )
     if out_of_range:
         body += (
-            f"\n\n⚠️ Anchor(s) {_join(out_of_range)} fall outside the clip. Upstream **skips an "
-            f"out-of-range condition with only a log line and generates anyway**, so that shot "
-            f"would silently have no effect. Fix the anchor or raise the frame count."
+            f"\n\n⚠️ Anchor(s) {', '.join(str(v) for v in out_of_range)} fall outside the clip. "
+            f"Upstream **skips an out-of-range condition with only a log line and generates "
+            f"anyway**, so that shot would silently have no effect. Fix the anchor or raise the "
+            f"frame count."
         )
     return body
 
 
 # ---------------------------------------------------------------------------
-# the annunciator -- what this run will actually cost and return
+# the cost panel -- what this run renders, returns and reserves
 # ---------------------------------------------------------------------------
 
 
-def cost_readout(
-    mode: Any,
-    *,
-    render_width: Any,
-    render_height: Any,
-    num_frames: Any,
-    auto_duration: bool,
-    min_seconds: Any,
-    max_seconds: Any,
-    frame_rate: float,
-    stage_2_on: bool,
-    stage_2_scale: int,
-    reserve_seconds: int,
-) -> str:
-    """The strip above Generate: the run's true size, length and cost, live.
+@dataclass(frozen=True)
+class CostFacts:
+    """Everything the cost panel states, computed by ``handlers.review``."""
 
-    Exists because two truths reached the user only after the money was spent:
+    mode_name: str
+    #: ``ready`` | ``incomplete`` (an input is missing) | ``refused`` (won't run)
+    state: str
+    reason: str | None = None
+    problems: tuple[str, ...] = ()
+    render_size: tuple[int, int] | None = None
+    pinned: bool = False
+    frames: int | None = None
+    seconds: float | None = None
+    auto_seconds: tuple[float, float] | None = None
+    length_from_audio: bool = False
+    returns: str = "video"
+    returned_size: tuple[int, int] | None = None
+    stage_2: bool = False
+    stage_2_offered: bool = True
+    enhance: bool = False
+    enhance_offered: bool = False
+    reserve: int | None = None
+    base: int | None = None
+    extras: tuple[tuple[str, int], ...] = ()
+    multiplier: int = 2
+    loras: tuple[tuple[str, float], ...] = ()
+    discards_video: bool = False
+    encodes_audio: bool = False
+    seed: int | None = None
+    notes: tuple[str, ...] = field(default_factory=tuple)
 
-    * **stage 2 doubles the output.** Requesting 704×480 with stage 2 on returns
-      a 1408×960 file — correct behaviour, and nothing said so at request time.
-      The lamp below states the returned size next to the requested one *before*
-      the button is pressed.
-    * **the audio-only modes pay full video compute.** The briefing quotes the
-      registry's cost note where the mode is chosen; this restates it at the
-      moment of commitment, where a user who scrolled past the briefing is
-      about to spend quota anyway.
 
-    Every number is passed in by the handler from the module that owns it
-    (``modes``, ``pipelines``, ``zerogpu``, ``constraints``) — this renderer
-    does no arithmetic beyond wording, so it cannot disagree with what runs.
-    """
-    size = f"{int(render_width)}×{int(render_height)}" if render_width and render_height else "?×?"
-    if auto_duration:
-        length = f"length chosen by the model ({min_seconds or '?'}–{max_seconds or '?'} s)"
-    elif num_frames:
-        length = (
-            f"{int(num_frames)} frames ≈ {int(num_frames) / frame_rate:.1f} s @ {frame_rate:g} fps"
+def _returns_words(facts: CostFacts) -> str:
+    size = _size_html(facts.returned_size) if facts.returned_size else ""
+    if facts.returns == "audio":
+        return "sound only (a WAV file)"
+    if facts.returns == "audio+video":
+        return f"{size} video with sound" if size else "video with sound"
+    return f"{size} silent video" if size else "silent video"
+
+
+def _lamp(text: str, *, lit: bool, kind: str = "cost") -> str:
+    state = "is-lit" if lit else "is-off"
+    return f'<span class="mr-lamp mr-lamp-{kind} {state}">{_e(text)}</span>'
+
+
+def _lamps(facts: CostFacts) -> str:
+    extras = dict(facts.extras)
+    lamps = []
+    if facts.stage_2_offered:
+        seconds = extras.get("Upscale ×2")
+        lamps.append(_lamp(f"Upscale +{seconds} s" if seconds else "Upscale", lit=facts.stage_2))
+    if facts.enhance_offered:
+        seconds = extras.get("Enhance")
+        lamps.append(_lamp(f"Enhance +{seconds} s" if seconds else "Enhance", lit=facts.enhance))
+    seconds = extras.get("LoRA")
+    lamps.append(_lamp(f"LoRA +{seconds} s" if seconds else "LoRA", lit=bool(facts.loras)))
+    if facts.discards_video:
+        lamps.append(_lamp("Video thrown away", lit=True))
+    if facts.encodes_audio:
+        lamps.append(_lamp("Audio encode", lit=True))
+    return '<div class="mr-lamps" aria-label="Costs that apply">' + "".join(lamps) + "</div>"
+
+
+def _length_words(facts: CostFacts) -> str:
+    if facts.auto_seconds is not None:
+        low, high = facts.auto_seconds
+        return f"length chosen by the model, {_num(f'{low:g}–{high:g}')} s"
+    if facts.length_from_audio and facts.frames is None:
+        return "the length of your audio"
+    if facts.frames is not None and facts.seconds is not None:
+        return f"{_secs_html(facts.seconds)} ({_num(facts.frames)} frames)"
+    return "length not set"
+
+
+def _lora_words(loras: Sequence[tuple[str, float]]) -> str:
+    if not loras:
+        return "none, base model only"
+    parts = [f"{_e(name)} at {_num(f'{weight:g}')}" for name, weight in loras]
+    return "; ".join(parts)
+
+
+def cost_panel(facts: CostFacts) -> str:
+    """The signature element: a labelled grid with cost lamps, at Generate."""
+    head = (
+        '<div class="mr-cost-head">'
+        f'<h2 class="mr-cost-title">{_e(facts.mode_name)}</h2>'
+        f"{_lamps(facts)}</div>"
+    )
+    if facts.state == "refused":
+        items = "".join(f"<li>{_e(p)}</li>" for p in facts.problems) or (
+            f"<li>{_e(facts.reason or 'This request would be refused.')}</li>"
         )
+        body = (
+            '<div class="mr-wont-run" role="note">'
+            '<p class="mr-wont-run-head"><span class="mr-lamp mr-lamp-cut is-lit">Won’t run</span>'
+            " Nothing is reserved for a request that would be refused.</p>"
+            f"<ul>{items}</ul></div>"
+        )
+        return f'<section class="mr-cost is-refused" aria-label="Cost of this run">{head}{body}</section>'
+
+    rows = []
+    if facts.render_size:
+        renders = f"{_size_html(facts.render_size)}, {_length_words(facts)}"
     else:
-        length = "? frames"
-    lines = [f"`{mode.id}` · renders {size} · {length} · reserves ≈{reserve_seconds} GPU-seconds"]
-
-    if mode.cost_note and mode.min_resolution:
-        mitigations = "resolution pinned to the minimum"
-        if mode.skip_stage_2:
-            mitigations += ", stage 2 skipped"
-        lines.append(
-            f"**FULL VIDEO COMPUTE** — audio-only export, but the video is still rendered "
-            f"at {size} and discarded. Mitigations applied: {mitigations}."
+        renders = _length_words(facts)
+    rows.append(("Renders", renders))
+    returns = _returns_words(facts)
+    if facts.stage_2:
+        returns += ", upscaled ×2"
+    rows.append(("Returns", returns))
+    if facts.reserve is not None:
+        reserve = f"{_num(facts.reserve)} s of GPU time"
+        if facts.extras:
+            parts = [f"{facts.base} s base"] + [f"{s} s {n.lower()}" for n, s in facts.extras]
+            reserve += f' <span class="mr-sub">({_e(" + ".join(parts))})</span>'
+        rows.append(("Reserves", reserve))
+        rows.append(("Needs", f"{_num(facts.reserve * facts.multiplier)} s of quota free to start"))
+    rows.append(
+        (
+            "Billed",
+            f"for GPU time used × {facts.multiplier}; runs that fail on the GPU are billed too",
         )
-    elif mode.cost_note:
-        lines.append(
-            "**AUDIO ENCODE ON TOP** — the input audio is encoded to latents before a "
-            "normal, full-cost video render."
+    )
+    rows.append(("LoRA", _lora_words(facts.loras)))
+    if facts.seed is not None and facts.seed >= 0:
+        rows.append(("Seed", f"{_num(facts.seed)} (fixed)"))
+    grid = "".join(f"<dt>{_e(label)}</dt><dd>{value}</dd>" for label, value in rows)
+    notes = ""
+    if facts.discards_video:
+        notes += (
+            '<p class="mr-cost-note">A 256 × 256 video is rendered and thrown away; you pay for '
+            "that GPU time.</p>"
         )
-
-    if stage_2_on:
-        if render_width and render_height:
-            doubled = f"{int(render_width) * stage_2_scale}×{int(render_height) * stage_2_scale}"
-            returned = f"returns **{doubled}**, not the {size} requested"
-        else:
-            returned = f"returns **{stage_2_scale}× the requested size**"
-        lines.append(
-            f"**STAGE 2 ×{stage_2_scale}** — {returned}: it renders at the size above, "
-            f"then upsamples and refines. GPU reservation ×1.5, included in the figure above."
+    if facts.encodes_audio:
+        notes += (
+            '<p class="mr-cost-note">Your audio is encoded first, then a full video render. '
+            "The file carries your own audio.</p>"
         )
+    pending = ""
+    if facts.state == "incomplete" and facts.reason:
+        pending = f'<p class="mr-cost-pending">{_e(facts.reason)}</p>'
+    return (
+        f'<section class="mr-cost is-{_e(facts.state)}" aria-label="Cost of this run">'
+        f'{head}<dl class="mr-cost-grid">{grid}</dl>{notes}{pending}</section>'
+    )
 
-    return "\n\n".join(lines)
+
+def commit_line(facts: CostFacts) -> str:
+    """The phone's commit bar: the cost in one line, or why Generate is off."""
+    if facts.state == "refused":
+        return "Won’t run: " + (facts.problems[0] if facts.problems else (facts.reason or ""))
+    if facts.state == "incomplete" and facts.reason:
+        return facts.reason
+    parts = []
+    if facts.render_size:
+        parts.append(_size(*facts.render_size))
+    if facts.auto_seconds is not None:
+        parts.append(f"{facts.auto_seconds[0]:g}–{facts.auto_seconds[1]:g} s")
+    elif facts.seconds is not None:
+        parts.append(_seconds(facts.seconds))
+    if facts.reserve is not None:
+        parts.append(f"needs {facts.reserve * facts.multiplier} s quota")
+    return ", ".join(parts)
+
+
+def readiness_reason(facts: CostFacts, *, running: bool = False) -> str:
+    """The line under Generate whenever it is disabled. Empty when ready."""
+    if running:
+        return "A run is in progress. Generate comes back when it finishes."
+    if facts.state == "ready":
+        return ""
+    if facts.state == "refused" and facts.problems:
+        return "Won’t run: " + " ".join(facts.problems)
+    return facts.reason or "This request would be refused."
 
 
 # ---------------------------------------------------------------------------
-# LoRA -- PLAN §4.3
+# the monitor and the status line under it
 # ---------------------------------------------------------------------------
 
-#: Which validator stage each error means. PLAN §4.3 numbers them; surfacing the
-#: number turns "it was rejected" into "it was rejected *here*, for *this*".
-#: The half-numbered stages are the gates ``validate.py`` added between the
-#: planned ones -- they are named as they are so the mapping stays legible
-#: against §4.3's table rather than silently renumbering it. Stage 0 is the
-#: Hub fetch (PLAN §4.6): everything that fails while no file exists locally
-#: yet, which is why it sits before the numbered table rather than inside it.
+READY = "Ready. Nothing is spent until you press Generate."
+
+
+def monitor_idle(mode: Any) -> str:
+    """The monitor with nothing to play: a designed state, not a stock player."""
+    return (
+        '<div class="mr-monitor-idle" role="img" aria-label="Empty monitor">'
+        '<span class="mr-crop tl"></span><span class="mr-crop tr"></span>'
+        '<span class="mr-crop bl"></span><span class="mr-crop br"></span>'
+        f'<p class="mr-idle-mode">{_e(mode_name(mode))}</p>'
+        '<p class="mr-idle-hint">Your result plays here.</p></div>'
+    )
+
+
+def monitor_caption(
+    *, kind: str, mode: Any = None, seed: Any = None, settings: str = "", caption: str = ""
+) -> str:
+    """The line under the monitor saying whose output is on it."""
+    if kind == "sample":
+        extra = f" {caption}" if caption else ""
+        bits = ", ".join(b for b in (settings, f"seed {seed}" if seed is not None else "") if b)
+        detail = f" {mode_name(mode)}" + (f", {bits}" if bits else "") + "."
+        return f"**Example output, not your run.**{detail}{extra}"
+    if kind == "run":
+        return f"**Your run.** {mode_name(mode)}, seed {seed}."
+    if kind == "running":
+        return f"**Running.** {mode_name(mode)}. Progress shows on the monitor."
+    if kind == "failed":
+        return "**This run failed.** The report below says why."
+    return READY
+
+
+def status_line(text: str) -> str:
+    return text
+
+
+# ---------------------------------------------------------------------------
+# LoRA
+# ---------------------------------------------------------------------------
+
+#: The validator stage each error comes from, and the plain headline for it.
 _LORA_STAGES: tuple[tuple[type, str, str], ...] = (
     (LoRAFetchError, "0", "fetch"),
     (LoRATooLargeError, "1", "size bound"),
@@ -334,6 +654,21 @@ _LORA_STAGES: tuple[tuple[type, str, str], ...] = (
     (LoRANotAttachedError, "7", "attach assertion"),
 )
 
+_LORA_HEADLINES: tuple[tuple[type, str], ...] = (
+    (LoRAFetchError, "Rejected: the adapter could not be fetched from the Hub"),
+    (LoRATooLargeError, "Rejected: the file is larger than this app accepts"),
+    (LoRAFormatError, "Rejected: this is not a .safetensors adapter"),
+    (LoRAHeaderError, "Rejected: the file header could not be read"),
+    (LoRATruncatedError, "Rejected: the file is cut short"),
+    (LoRAVersionError, "Rejected: this adapter was made for a different model version"),
+    (LoRAConventionError, "Rejected: the adapter's layer names are not ones this app knows"),
+    (LoRAInContextError, "Rejected: this is an in-context (IC) LoRA, which this app can't apply"),
+    (LoRAPairingError, "Rejected: the adapter's weights are incomplete"),
+    (LoRADimensionError, "Rejected: the adapter's shapes don't fit LTX-2.5"),
+    (LoRAModuleNotFoundError, "Rejected: the adapter targets layers LTX-2.5 doesn't have"),
+    (LoRANotAttachedError, "Rejected: the adapter attached to nothing"),
+)
+
 
 def lora_stage_of(exc: BaseException) -> tuple[str, str] | None:
     """The validator stage an exception came from, or ``None`` if unmapped."""
@@ -343,206 +678,315 @@ def lora_stage_of(exc: BaseException) -> tuple[str, str] | None:
     return None
 
 
+def lora_heading(cap: str) -> str:
+    return (
+        f"Add a LoRA from the Hub or upload a .safetensors file (up to {cap}). The file is "
+        "checked before any GPU time is used. Whether it fits LTX-2.5 is confirmed when you "
+        "generate; if it doesn't, that run stops and the time used is billed."
+    )
+
+
 def lora_nothing_to_validate() -> str:
-    """Pressing Validate with both routes empty. One string, used by the
-    instant state *and* the final verdict, so the two can never disagree."""
-    return "⚠️ Give me either a Hub repo id or an uploaded `.safetensors` file first."
+    return "Type a Hub repo id such as org/name, or upload a .safetensors file first."
 
 
 def lora_validating(source: str, *, hub: bool) -> str:
-    """Shown the instant Validate is pressed, so the panel is never silent.
-
-    The same rule as :func:`running`: the moment a press can take real time,
-    something on screen must say so. The Hub route is the one that earns it —
-    the fetch runs in the web process and a first download of a multi-GB
-    adapter is tens of seconds — and its message says what is happening in
-    fetch order: cap check first, then a bounded, cached download.
-    ``blocks.py`` mirrors the downloader's own progress bars onto the verdict
-    surface while this message stands.
-    """
     if hub:
         return (
-            f"⏳ **Fetching `{source}` from the Hub.** The size cap is checked against the "
-            f"repo's file listing before anything downloads; then the adapter is fetched "
-            f"once — bounded and cached, so re-validating it later is instant."
+            f"Fetching {source} from the Hub. Its size is checked against the limit before "
+            f"anything downloads; the file is cached, so checking it again is instant."
         )
-    return f"⏳ **Reading the header of `{source}`…**"
+    return f"Reading the header of {source}…"
 
 
 def lora_idle() -> str:
-    """The resting state. Says *no adapter is applied* rather than showing blank.
-
-    An empty panel and an adapter that loaded but attached to nothing look the
-    same to a user. PLAN §4.2 is about exactly that class of confusion, so the
-    UI never expresses "nothing applied" as absence.
-    """
-    return (
-        "**No LoRA applied.** Generation will use the base LTX-2.5 weights.\n\n"
-        "Paste a Hub repo id or upload a `.safetensors` adapter, then press *Validate*. "
-        "Nothing is downloaded in full to validate it — only the file header is read."
-    )
+    return "No LoRA: runs use the base model."
 
 
-def _shown(value: Any, absent: str = "not declared") -> str:
-    if value is None or value == "":
-        return f"_{absent}_"
-    return f"`{value}`"
+def shown_name(source: str) -> str:
+    """A local file by its name; a Hub id as typed."""
+    text = str(source)
+    return os.path.basename(text) if os.path.isabs(text) else text
 
 
 def lora_accepted(source: str, report: Any) -> str:
-    """Render an accepted adapter's detected properties.
-
-    Read tolerantly on purpose. PLAN §4.5 measured three real public LTX LoRAs
-    and **none** carried ``model_version``; two had no ``__metadata__`` at all.
-    "not declared" is therefore the honest, expected reading for most real
-    uploads — not a defect, and not something to hide.
-    """
-    warnings = tuple(getattr(report, "warnings", ()) or ())
+    """An accepted adapter: a roll-edged card, its detected properties below."""
+    name = shown_name(source)
+    rows = [
+        ("Layer names", getattr(report, "convention", None) or "not detected"),
+        ("Model version", getattr(report, "model_version", None) or "not declared"),
+        ("Rank", getattr(report, "rank", None) or "not declared"),
+        ("Alpha", getattr(report, "alpha", None) or "not declared"),
+    ]
+    targeted = getattr(report, "modules_targeted", None)
+    resolved = getattr(report, "modules_resolved", None)
+    if targeted:
+        rows.append(("Layers found in LTX-2.5", f"{resolved} of {targeted}"))
     lines = [
-        f"### ✅ Accepted — `{source}`",
+        f"#### Accepted: {name}",
+        "",
+        "Staged for the next run at strength 1.0. Set its strength below.",
         "",
         "| | |",
         "|---|---|",
-        f"| key convention | {_shown(getattr(report, 'convention', None), 'undetected')} |",
-        f"| `model_version` | {_shown(getattr(report, 'model_version', None))} |",
-        f"| rank | {_shown(getattr(report, 'rank', None))} |",
-        f"| alpha | {_shown(getattr(report, 'alpha', None))} |",
-        f"| tensors | {_shown(getattr(report, 'num_tensors', None), 'unknown')} |",
+        *(f"| {label} | {value} |" for label, value in rows),
     ]
-    if getattr(report, "targets_connectors", None) is not None:
-        touches = "yes" if report.targets_connectors else "no"
-        lines.append(f"| touches the connectors | `{touches}` |")
-    lines.append("")
-    lines.append(
-        "Stages 1–6 passed. **Stage 7 — the check that the adapter actually attaches to more "
-        "than zero modules — runs at generation time**, against real weights. That is the check "
-        "upstream does not do, and the one that catches an adapter built for another "
-        "architecture."
-    )
+    warnings = tuple(getattr(report, "warnings", ()) or ())
     if warnings:
-        lines += ["", "**Warnings:**"] + [f"- {w}" for w in warnings]
+        lines += ["", *(f"- {w}" for w in warnings)]
     return "\n".join(lines)
 
 
+def lora_duplicate(source: str, existing: dict) -> str:
+    name = shown_name(source)
+    shown = shown_name(existing.get("source", ""))
+    return (
+        f"#### Already staged: {name}\n\n"
+        f"This is the same adapter as {shown}, which is already staged. Set its strength "
+        f"instead of adding it twice."
+    )
+
+
+def lora_too_many(limit: int) -> str:
+    return (
+        f"#### Not added: {limit} adapters are already staged\n\nRemove one before adding another."
+    )
+
+
 def lora_rejected(source: str, exc: BaseException) -> str:
-    """Render a rejection, naming the stage and quoting the message verbatim."""
-    stage = lora_stage_of(exc)
-    heading = f"### ❌ Rejected — `{source}`"
-    if stage is not None:
-        number, name = stage
-        heading += f"\n\n**Failed at stage {number} — {name}.**"
-    detail = str(exc).strip() or exc.__class__.__name__
-    body = [heading, "", f"> {detail}", "", "**No adapter has been applied.**"]
-    if not isinstance(exc, LoRAError):
-        body.insert(1, f"\n_(unexpected `{exc.__class__.__name__}` — please report this)_")
-    return "\n".join(body)
+    """A rejection: plain headline, the verbatim validator message underneath."""
+    name = shown_name(source)
+    headline = next(
+        (text for error_type, text in _LORA_HEADLINES if isinstance(exc, error_type)),
+        "Rejected: the adapter could not be checked",
+    )
+    detail = str(exc).strip() or "No detail was attached to the error."
+    return f"### {headline}\n\n{name} was not staged. Nothing was spent.\n\n> {detail}"
 
 
 def applied_loras(applied: list[Any]) -> str:
-    """The running list of adapters that will be used by the next generation.
-
-    The empty state is one line, distinct from :func:`lora_idle`: the verdict
-    panel above it already carries the full how-to, and repeating it verbatim
-    here rendered the same paragraph twice in a row — which reads as a broken
-    template, not as reassurance. Still stated positively, never as blankness.
-    """
+    """The staged list in one line, for the bay and the API."""
     if not applied:
-        return "**Staged for the next run:** none — base LTX-2.5 weights."
-    names = "\n".join(f"- `{a.get('source', a)}`" for a in applied)
-    return f"**{len(applied)} adapter(s) will be applied to the next run:**\n{names}"
+        return lora_idle()
+    parts = [
+        f"{shown_name(a.get('source', a))} at {float(a.get('weight', 1.0)):g}" for a in applied
+    ]
+    return f"Staged for the next run: {'; '.join(parts)}."
+
+
+def lora_summary_label(applied: Sequence[dict]) -> str:
+    """The always-visible LoRA row's label."""
+    if not applied:
+        return "LoRA: none. Add an adapter"
+    weights = _and([f"{float(a.get('weight', 1.0)):g}" for a in applied])
+    noun = "adapter" if len(applied) == 1 else "adapters"
+    return f"LoRA: {len(applied)} {noun} at {weights}"
 
 
 # ---------------------------------------------------------------------------
-# generation outcomes -- PLAN §5.3
+# generation outcomes
 # ---------------------------------------------------------------------------
 
 
 def running(mode: Any, *, enhancing: bool = False) -> str:
-    """Shown the moment the button is pressed, so the UI is never silent.
-
-    ``enhancing`` changes the message because it changes what happens **first**.
-    With the toggle on, the run reserves its slot and then spends the first
-    couple of seconds of it rewriting the prompt rather than denoising. A
-    message describing something other than what is happening, right where the
-    user is waiting for it, is the same class of small lie as a hidden control.
-
-    ⚠️ This copy said "on the CPU ... costs no quota — only time" until the
-    placement it described was measured: the CPU rewrite took ~538 s, so the
-    "only time" it cost was nine minutes. Enhancement now runs on the GPU inside
-    the reservation. It is no longer free, and it is no longer slow, and the
-    caption has to give up the first claim to be honest about the second.
-    """
+    """Shown the moment Generate is pressed, so the page is never silent."""
     if enhancing:
         return (
-            f"⏳ **Enhancing your prompt — {mode.label}.** Rewriting it with Gemma on the GPU "
-            f"first, inside this run's own reservation — a second or two of quota, not a "
-            f"separate wait. The generation starts straight after it, and the prompt that was "
-            f"actually sent is reported with the result."
+            f"**Enhancing your prompt: {mode.label}.** Gemma rewrites it on the GPU first, "
+            f"inside this run's reservation, then generation starts. The prompt actually sent "
+            f"is in the report."
         )
     return (
-        f"⏳ **Running — {mode.label}.** Reserving a ZeroGPU slot, then loading, denoising and "
-        f"decoding. This is metered against your daily quota."
+        f"**Running: {mode.label}.** Reserving GPU time from your quota, then loading, "
+        f"sampling and decoding."
+    )
+
+
+@dataclass(frozen=True)
+class RunFacts:
+    """What the UI knows about a finished run, beyond the backend's result."""
+
+    mode: Any
+    seed: int
+    returned_size: tuple[int, int] | None
+    seconds: float | None
+    stage_2: bool
+    loras: tuple[tuple[str, float], ...]
+    took: float
+    prompt_sent: str | None = None
+
+
+def run_summary(facts: RunFacts) -> str:
+    """The head of the success report: what you got, in one block."""
+    rows = [("Mode", _e(mode_name(facts.mode)))]
+    if facts.returned_size and "video" in facts.mode.exports:
+        size = _size_html(facts.returned_size)
+        rows.append(("Size", size + (", upscaled ×2" if facts.stage_2 else ", no upscale")))
+    if facts.seconds is not None:
+        rows.append(("Length", _secs_html(facts.seconds)))
+    rows.append(("Seed", _num(facts.seed)))
+    rows.append(("LoRA", _lora_words(facts.loras)))
+    rows.append(("Took", f"{_num(f'{facts.took:.0f}')} s, wall-clock"))
+    grid = "".join(f"<dt>{label}</dt><dd>{value}</dd>" for label, value in rows)
+    return (
+        '<section class="mr-done" aria-label="What you got">'
+        '<p class="mr-done-head"><span class="mr-lamp mr-lamp-roll is-lit">Done</span></p>'
+        f'<dl class="mr-done-grid">{grid}</dl></section>'
     )
 
 
 def success(result: Any, mode: Any) -> str:
-    """Confirm a run and say where its artifacts live.
+    """The report Markdown ``/on_generate`` returns for a finished run.
 
-    PLAN §5.3 gives each run its own output subdirectory precisely so a run can
-    be correlated with its files. That is only useful if the UI shows which one.
+    A pure function of the result and the mode: the seed that was really used,
+    every note the run returned as plain text, then a collapsed Diagnostics
+    block. No post-run cost reminder.
     """
-    lines = [f"✅ **{mode.label}** complete."]
-    details = []
     seed = getattr(result, "seed", None)
-    if seed is not None:
-        details.append(f"seed `{seed}` — rerun with it and the same settings to reproduce")
+    head = f"Done: {mode.label}." + (f" Seed {seed}." if seed is not None else "")
+    lines = [f'<p class="mr-report-head">{_e(head)}</p>']
+    notes = [str(n) for n in (getattr(result, "warnings", ()) or ()) if str(n).strip()]
+    if notes:
+        lines.append('<div class="mr-notes">')
+        lines += [f"<p>{_e(n[0].upper() + n[1:])}</p>" for n in notes]
+        lines.append("</div>")
+    diagnostics = []
     run_dir = getattr(result, "run_dir", None)
     if run_dir:
-        details.append(f"run directory `{run_dir}`")
-    if details:
-        lines.append(" · ".join(details))
-    # The run's own notes — the stage-2 size note, the mono-widening note. They
-    # exist precisely so the user learns what changed *on screen*; leaving them
-    # in the sidecar would mean only the Space logs ever saw them.
-    for note in getattr(result, "warnings", ()) or ():
-        lines.append(f"> ⚠️ {note}")
-    cost_note = getattr(mode, "cost_note", None)
-    if cost_note:
-        lines.append(f"> ⚠️ Reminder: {cost_note}")
-    return "\n\n".join(lines)
+        diagnostics.append(f"Run folder: {run_dir}")
+    diagnostics.append(f"Mode id: {mode.id}")
+    lines.append(
+        '<details class="mr-diagnostics"><summary>Diagnostics</summary>'
+        + "".join(f"<p>{_e(d)}</p>" for d in diagnostics)
+        + "</details>"
+    )
+    return "\n".join(lines)
 
 
 def empty_output_bug(mode: Any, missing: list[str]) -> str:
-    """A run reported success and produced no file. This is a bug in *us*.
-
-    PLAN §5.3 is explicit that a success path capable of returning a falsy
-    artifact is a bug regardless of current reachability. The UI's job when it
-    sees one is to be as loud as possible -- never to render the empty value and
-    let it look like nothing happened.
-    """
+    """A run reported success and produced no file. That is a bug in this app."""
     tracks = " and ".join(missing)
     return (
-        f"### 🛑 Internal error — empty output\n\n"
-        f"**{mode.label}** reported success but produced no {tracks} file. That combination is "
-        f"supposed to be impossible: PLAN §5.3 requires an empty artifact to raise at the "
-        f"source rather than reach this layer.\n\n"
-        f"**Nothing above is from this run.** Please report this — it is the exact failure "
-        f"shape that hid for a week in the predecessor app."
+        "### The run finished but produced no file\n\n"
+        f"{mode.label} reported success without a {tracks} file, which this app treats as a "
+        "bug. The GPU time it used is billed. Nothing shown here is from this run. Report it, "
+        "with the time of the run, so it can be fixed."
     )
 
 
-def failure(exc: BaseException) -> str:
-    """Render any generation failure visibly and verbatim.
+#: ``(type, headline, next step, ran_on_gpu)``, most specific first.
+_FAILURES: tuple[tuple[type, str, str], ...] = (
+    (
+        PromptEnhancementError,
+        "The prompt enhancer is unavailable",
+        "Turn off Enhance my prompt and press Generate again.",
+    ),
+    (
+        LoRAError,
+        "An adapter could not be applied",
+        "Remove the adapter, or try a different one, and press Generate again.",
+    ),
+    (
+        ModelLoadError,
+        "The model failed to load",
+        "Press Generate again in a minute. If it keeps failing, report it with the detail below.",
+    ),
+    (
+        DecodeError,
+        "The model stopped while generating",
+        "Try a shorter or smaller run. If it happens again, report it with the detail below.",
+    ),
+    (
+        EncodeError,
+        "The result could not be written to a file",
+        "This is a bug in this app. Report it with the detail below.",
+    ),
+    (
+        EmptyOutputError,
+        "The run finished but produced no file",
+        "This is a bug in this app. Report it with the detail below.",
+    ),
+    (
+        UnknownModeError,
+        "This mode is not available",
+        "Reload the page and pick a mode from the matrix.",
+    ),
+)
 
-    Never returns an empty string and never returns a no-op: there is no code
-    path in which a user presses Generate and sees nothing change.
+
+def failure(exc: BaseException, *, refused: bool = False) -> str:
+    """Any failure, rendered loudly: headline, quota line, one next step, detail.
+
+    ``refused`` is set when the request was turned down before anything was
+    dispatched, which is the only case in which "no GPU time was used" is known
+    to be true.
     """
-    detail = str(exc).strip() or "no detail was attached to the error."
-    if isinstance(exc, LTXStudioError):
-        return f"### ❌ Generation failed\n\n**{exc.__class__.__name__}**\n\n> {detail}"
+    detail = str(exc).strip() or "No detail was attached to the error."
+    if refused:
+        if isinstance(exc, ConstraintError):
+            headline = "Refused before running: fix the input"
+            step = "Change what the detail below names, then press Generate again."
+        elif isinstance(exc, LoRAError):
+            headline = "Refused before running: an adapter is missing"
+            step = "Check the adapter again, or remove it, then press Generate again."
+        else:
+            headline = "Refused before running"
+            step = "Change what the detail below names, then press Generate again."
+        quota = "Nothing ran. No GPU time was used."
+        opened = " open"
+    else:
+        headline, step = next(
+            ((h, s) for t, h, s in _FAILURES if isinstance(exc, t)),
+            (
+                (
+                    "The run was refused",
+                    "Change what the detail below names, then press Generate again.",
+                )
+                if isinstance(exc, ConstraintError)
+                else (
+                    "The run stopped",
+                    "Read the detail below. If it is about quota or time, wait or make the run "
+                    "smaller; otherwise press Generate again.",
+                )
+                if not isinstance(exc, LTXStudioError)
+                else ("The run failed", "Press Generate again. If it repeats, report the detail.")
+            ),
+        )
+        quota = "Any GPU time this run used is billed."
+        opened = " open" if not isinstance(exc, LTXStudioError) else ""
     return (
-        f"### ❌ Generation failed — unexpected `{exc.__class__.__name__}`\n\n"
-        f"> {detail}\n\n"
-        f"This error is not one of ours, which usually means it came from the pipeline or the "
-        f"platform. The full traceback is in the Space logs."
+        f"### {headline}\n\n"
+        f"{quota} {step}\n\n"
+        f'<details class="mr-detail"{opened}><summary>Detail</summary>'
+        f"<p>{_e(detail)}</p></details>"
     )
+
+
+def recent_run_label(
+    *,
+    index: int,
+    mode: Any,
+    seed: int,
+    size: tuple[int, int] | None,
+    seconds: float | None,
+    at: str,
+) -> str:
+    bits = [mode_name(mode)]
+    if size and "video" in mode.exports:
+        bits.append(_size(*size))
+    if seconds is not None:
+        bits.append(_seconds(seconds))
+    bits.append(f"seed {seed}")
+    return f"**{at}** {', '.join(bits)}"
+
+
+def example_label() -> str:
+    return "Fills the form. Nothing runs until you press Generate."
+
+
+def examples_heading() -> str:
+    return "Try an example"
+
+
+def join_lines(lines: Iterable[str]) -> str:
+    return "\n\n".join(line for line in lines if line)

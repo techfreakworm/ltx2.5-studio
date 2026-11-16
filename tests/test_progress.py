@@ -149,15 +149,22 @@ def test_gradio_actually_injects_a_progress_handle_into_the_wired_handler():
     from gradio.helpers import special_args
 
     from ltx25_studio.ui import blocks
+    from ltx25_studio.ui.fields import FIELD_KEYS
 
-    inputs = ["text_to_video", *range(17)]
-    updated, progress_index, _event_index, _props = special_args(blocks._on_generate, inputs)
+    inputs = ["text_to_video", *range(len(FIELD_KEYS))]
+    request = object()
+    updated, progress_index, _event_index, _props = special_args(
+        blocks._on_generate, inputs, request=request
+    )
 
     assert progress_index is not None, (
         "Gradio found no gr.Progress in the wired handler's signature, so it will inject "
         "none and every progress call in generate() is a no-op that raises nothing"
     )
     assert isinstance(updated[progress_index], gr.Progress)
+    # The request rides in the next slot, so the finish step can find this run.
+    assert updated[progress_index + 1] is request
+    assert updated[progress_index + 2] == "text_to_video"
 
 
 def test_the_wrapper_still_forwards_the_mode_and_the_fields_in_order():
@@ -167,21 +174,22 @@ def test_the_wrapper_still_forwards_the_mode_and_the_fields_in_order():
 
     seen: dict = {}
 
-    def fake_on_generate(mode_id, *values, progress=None):
+    def fake_run(mode_id, *values, progress=None):
         seen.update(mode_id=mode_id, values=values, progress=progress)
-        return (None, None, "ok")
+        return blocks.handlers.RunOutcome(video=None, audio=None, status="ok", mode_id=mode_id)
 
-    original = blocks.handlers.on_generate
-    blocks.handlers.on_generate = fake_on_generate
+    original = blocks.handlers.run
+    blocks.handlers.run = fake_run
     try:
         handle = object()
-        blocks._on_generate(handle, "audio_to_video", *range(len(FIELD_KEYS)))
+        returned = blocks._on_generate(handle, None, "audio_to_video", *range(len(FIELD_KEYS)))
     finally:
-        blocks.handlers.on_generate = original
+        blocks.handlers.run = original
 
     assert seen["mode_id"] == "audio_to_video"
     assert seen["values"] == tuple(range(len(FIELD_KEYS)))
     assert seen["progress"] is handle
+    assert returned == (None, None, "ok"), "the endpoint returns (video, audio, status)"
 
 
 def test_the_published_endpoint_is_still_on_generate():
@@ -204,6 +212,43 @@ def test_the_published_endpoint_is_still_on_generate():
         "Audio",
         "Markdown",
     ], "the frozen (video, audio, markdown) return contract changed"
+
+
+def test_building_the_ui_leaves_existing_tqdm_bars_working():
+    """F33: ``gr.Progress(track_tqdm=True)`` patched ``tqdm`` for the whole process.
+
+    A default argument built inside ``build_ui()`` ran ``patch_tqdm()`` at every
+    boot, and a bar that already existed -- the enhancer prefetch's download bar,
+    started before the UI is built -- then raised ``AttributeError`` on its next
+    ``update``. Driven here with a real tqdm created before the build.
+    """
+    import io
+
+    from tqdm import tqdm
+
+    from ltx25_studio.ui import build_ui
+
+    bar = tqdm(total=3, file=io.StringIO())
+    build_ui()
+    bar.update(1)
+    bar.update(1)
+    bar.close()
+
+    created_after = tqdm(total=2, file=io.StringIO())
+    created_after.update(2)
+    created_after.close()
+
+
+def test_no_ui_event_turns_on_tqdm_tracking():
+    """Every Progress default the UI declares leaves tqdm alone."""
+    import inspect
+
+    from ltx25_studio.ui import blocks
+
+    for fn in (blocks._on_generate, blocks._on_validate_lora):
+        for parameter in inspect.signature(fn).parameters.values():
+            if isinstance(parameter.default, gr.Progress):
+                assert not parameter.default.track_tqdm, f"{fn.__name__} tracks tqdm"
 
 
 # --------------------------------------------------------------------------
