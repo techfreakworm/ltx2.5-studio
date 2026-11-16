@@ -96,14 +96,20 @@ def _model_may_pick_length(mode: Any) -> bool:
     return not _has_timed_input(mode)
 
 
+def _varies_clip(mode: Any) -> bool:
+    """The user's clip is the starting point of a variation, not a condition."""
+    return getattr(mode, "video_conditioning", None) == "variation"
+
+
 def _video_lever(mode: Any) -> bool:
-    """The clip-strength lever: a video input whose strength the mode does not fix."""
-    return modes.accepts(mode, "video") and mode.video_strength is None
+    """The clip-strength lever: a video CONDITION whose strength the mode does not fix.
+    A variation does not read strength (its slot stays, for the API)."""
+    return modes.accepts(mode, "video") and mode.video_strength is None and not _varies_clip(mode)
 
 
-def _audio_lever(mode: Any) -> bool:
-    """The change-level choice: audio the mode varies rather than holds fixed."""
-    return mode.audio_conditioning == "variation"
+def _varies_input(mode: Any) -> bool:
+    """The change-level choice: a sound or a clip the mode varies rather than holds fixed."""
+    return mode.audio_conditioning == "variation" or _varies_clip(mode)
 
 
 def _sizes_the_picture(mode: Any) -> bool:
@@ -304,7 +310,7 @@ FIELDS: tuple[Field, ...] = (
         group="media",
         default=0.5,
         options={"minimum": 0.0, "maximum": 1.0, "step": 0.01},
-        visible_when=_audio_lever,
+        visible_when=_varies_input,
         parks=True,
         **_copy("noise_scale"),
     ),

@@ -177,6 +177,18 @@ def _noise_choice(value: Any) -> str:
     return "Moderately"
 
 
+def _clip_value(choice: Any) -> float:
+    levels = dict(render.CLIP_CHOICES)
+    return levels.get(choice, levels[render.CLIP_DEFAULT])
+
+
+def _clip_choice(value: Any) -> str:
+    for name, level in render.CLIP_CHOICES:
+        if abs(level - float(value or 0)) < 1e-6:
+            return name
+    return render.CLIP_DEFAULT
+
+
 def build_ui() -> gr.Blocks:
     """Assemble the Studio. Returns an unlaunched :class:`gradio.Blocks`."""
     show = showcase.load_showcase(known_modes=tuple(modes.MODES))
@@ -263,7 +275,7 @@ def build_ui() -> gr.Blocks:
                 # -- what you give: in every mode the inputs it requires come
                 # first and the ones it may take after (DOM order = focus order)
                 with gr.Column(elem_classes=["mr-divide"]):
-                    noise_choice = None
+                    noise_choice = clip_choice = None
                     for kind in handlers.media_order():
                         components.render_fields(
                             pool,
@@ -280,13 +292,22 @@ def build_ui() -> gr.Blocks:
                                 visible=view0.active["strength"],
                                 elem_id="lever-strength",
                             )
+                            clip_choice = gr.Radio(
+                                choices=[name for name, _ in render.CLIP_CHOICES],
+                                value=render.CLIP_DEFAULT,
+                                label=render.CLIP_LEVER[0],
+                                info=render.CLIP_LEVER[1],
+                                visible=view0.varies_clip,
+                                elem_id="lever-clip",
+                                elem_classes=["mr-chips", "mr-words"],
+                            )
                         if kind == "audio":
                             noise_choice = gr.Radio(
                                 choices=[name for name, _ in render.NOISE_CHOICES],
                                 value="Moderately",
                                 label=render.FIELD_COPY["noise_scale"][0],
                                 info=render.FIELD_COPY["noise_scale"][1],
-                                visible=view0.active["noise_scale"],
+                                visible=view0.varies_sound,
                                 elem_id="lever-noise",
                                 elem_classes=["mr-chips", "mr-words"],
                             )
@@ -593,6 +614,7 @@ def build_ui() -> gr.Blocks:
             *parked_components,
             *[captions[key] for key in _MEDIA],
             noise_choice,
+            clip_choice,
             shape_preset,
             match_line,
             pinned_line,
@@ -618,6 +640,7 @@ def build_ui() -> gr.Blocks:
             current_mode,
             parked,
             noise_choice,
+            clip_choice,
             length_source,
             shape_preset,
             monitor_state,
@@ -632,6 +655,7 @@ def build_ui() -> gr.Blocks:
             previous: str,
             parked_now: dict,
             noise: str,
+            clip: str,
             source: str,
             preset: str,
             monitor: dict,
@@ -666,8 +690,10 @@ def build_ui() -> gr.Blocks:
                     frames_user = int(restored["num_frames"])
                 if view.upscale:
                     upscale = bool(restored.get("enable_stage_2"))
-                if view.active["noise_scale"]:
+                if view.varies_sound:
                     noise = _noise_choice(restored.get("noise_scale"))
+                if view.varies_clip:
+                    clip = _clip_choice(restored.get("noise_scale"))
                 if view.timed_by_audio:
                     matched = restored.get("auto_duration")
                     source = render.LENGTH_MATCH if matched else render.LENGTH_SET
@@ -678,8 +704,10 @@ def build_ui() -> gr.Blocks:
             for key in _MEDIA:
                 if not _exists(after.get(key)) and isinstance(after.get(key), str):
                     after[key] = None
-            if view.active["noise_scale"]:
+            if view.varies_sound:
                 after["noise_scale"] = _noise_value(noise)
+            if view.varies_clip:
+                after["noise_scale"] = _clip_value(clip)
             if view.timed_by_audio:
                 after["auto_duration"] = source == render.LENGTH_MATCH
             length = _length_state(view, source, after, num_frames)
@@ -694,9 +722,9 @@ def build_ui() -> gr.Blocks:
                 if preset in shape_choices
                 else handlers.preset_for(after["width"], after["height"])
             )
-            seconds_visible = (view.timed_input and source == render.LENGTH_SET) or (
-                not view.timed_input and not after["auto_duration"]
-            )
+            seconds_visible = (
+                view.timed_input and source == render.LENGTH_SET and not view.length_from_clip
+            ) or (not view.timed_input and not after["auto_duration"])
             _shown, decoder_free, decoder_text = handlers.decoder_view(
                 mode_id, upscale, after["decoder"]
             )
@@ -735,16 +763,18 @@ def build_ui() -> gr.Blocks:
                     for k in _MEDIA
                 ],
                 gr.update(
-                    visible=view.active["noise_scale"],
-                    value=_noise_choice(after["noise_scale"])
-                    if view.active["noise_scale"]
-                    else noise,
+                    visible=view.varies_sound,
+                    value=_noise_choice(after["noise_scale"]) if view.varies_sound else noise,
+                ),
+                gr.update(
+                    visible=view.varies_clip,
+                    value=_clip_choice(after["noise_scale"]) if view.varies_clip else clip,
                 ),
                 gr.update(visible=view.sizes_picture, choices=shape_choices, value=preset_value),
                 gr.update(visible=bool(match["line"]) and view.sizes_picture, value=match["line"]),
                 gr.update(visible=view.pinned_line is not None, value=view.pinned_line or ""),
                 gr.update(visible=view.upscale, value=upscale),
-                gr.update(visible=view.timed_input, value=source),
+                gr.update(visible=view.timed_input and not view.length_from_clip, value=source),
                 gr.update(visible=seconds_visible, value=handlers.seconds_for_frames(frames_value)),
                 gr.update(visible=view.timed_input, value=length["line"]),
                 gr.update(value=frames_value, visible=lengths["num_frames"]),
@@ -913,7 +943,11 @@ def build_ui() -> gr.Blocks:
         def _on_auto(auto: Any, mode_id: str, source: str) -> list[Any]:
             view = handlers.mode_view(mode_id)
             lengths = handlers.length_fields_view(mode_id, auto)
-            seconds_visible = (source == render.LENGTH_SET) if view.timed_input else not bool(auto)
+            seconds_visible = (
+                (source == render.LENGTH_SET and not view.length_from_clip)
+                if view.timed_input
+                else not bool(auto)
+            )
             return [
                 gr.update(visible=seconds_visible),
                 gr.update(visible=lengths["num_frames"]),
@@ -948,6 +982,9 @@ def build_ui() -> gr.Blocks:
         )
         noise_choice.input(
             fn=_noise_value, inputs=[noise_choice], outputs=[pool["noise_scale"]], **_PRIVATE
+        )
+        clip_choice.input(
+            fn=_clip_value, inputs=[clip_choice], outputs=[pool["noise_scale"]], **_PRIVATE
         )
 
         def _snap(width: Any, height: Any, frames: Any) -> list[Any]:
@@ -1338,6 +1375,7 @@ def build_ui() -> gr.Blocks:
                 shape_preset,
                 seconds,
                 noise_choice,
+                clip_choice,
                 length_source,
                 user_frames,
             ]
@@ -1466,6 +1504,8 @@ def _length_state(view: handlers.ModeView, source: str, values: dict, frames: An
 
     if not view.timed_input:
         return {"frames": None, "line": ""}
+    if view.length_from_clip:
+        source = render.LENGTH_MATCH
     if source != render.LENGTH_MATCH:
         return {"frames": None, "line": "Set with the slider below; Advanced has the exact frames."}
     audio = view.timed_by_audio
@@ -1547,7 +1587,7 @@ def _fill_example(show: showcase.Showcase, mode_id: str, index: int, frames_user
     """Write the example's own values; leave every other control untouched."""
     examples = show.for_mode(mode_id)
     out = handlers.example_values(examples[index], mode_id) if index < len(examples) else {}
-    keys = [*_EXAMPLE_FIELDS, "preset", "seconds", "noise_choice", "length_source"]
+    keys = [*_EXAMPLE_FIELDS, "preset", "seconds", "noise_choice", "clip_choice", "length_source"]
     filled = [gr.update(value=out[k]) if k in out else gr.update() for k in keys]
     return [*filled, out.get("num_frames", frames_user)]
 

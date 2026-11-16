@@ -80,14 +80,24 @@ class Form:
 
     # -- what a user does ---------------------------------------------------------------------
     def user(self, component, value: Any) -> None:
-        """The user sets a control: ``input`` listeners, then ``change`` if the value changed."""
+        """The user sets a control: ``input`` (and a slider's ``release``) listeners, then
+        ``change`` if the value changed."""
         old = self.values.get(component._id)
         self.values[component._id] = value
-        for f in self.listeners(component, "input"):
-            self.run(f)
+        for event in ("input", "release"):
+            for f in self.listeners(component, event):
+                self.run(f)
         if not _same(old, value):
             for f in self.listeners(component, "change"):
                 self.run(f)
+
+    def copy(self) -> Form:
+        """An independent page in the same state (values replaced, never mutated in place)."""
+        twin = copy.copy(self)
+        twin.values = dict(self.values)
+        twin.props = {key: dict(props) for key, props in self.props.items()}
+        twin.ran = []
+        return twin
 
     def pick_mode(self, mode_id: str) -> None:
         self.user(self.radio, mode_id)

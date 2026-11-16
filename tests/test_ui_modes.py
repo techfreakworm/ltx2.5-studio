@@ -91,14 +91,30 @@ def test_the_negative_prompt_and_the_shot_list_are_shown_nowhere(mode_id):
     assert not view.active["conditions"], "a shot row with text is refused before every run"
 
 
-def test_the_clip_strength_lever_is_offered_only_for_video_to_video():
+def test_the_clip_strength_lever_is_offered_only_where_a_video_condition_reads_it():
+    """Video to video varies its clip (no condition, no strength); Video to audio fixes it."""
     shown = {m for m in MODE_IDS if handlers.mode_view(m).active["strength"]}
-    assert shown == {"video_to_video"}
+    reads = {
+        m
+        for m, spec in modes.MODES.items()
+        if modes.accepts(spec, "video")
+        and spec.video_strength is None
+        and getattr(spec, "video_conditioning", None) is None
+    }
+    assert shown == reads
 
 
-def test_the_noise_lever_is_offered_only_for_audio_to_sound():
+def test_the_change_choice_is_offered_where_the_mode_varies_a_sound_or_a_clip():
     shown = {m for m in MODE_IDS if handlers.mode_view(m).active["noise_scale"]}
-    assert shown == {"audio_to_audio"}
+    varies = {
+        m
+        for m, spec in modes.MODES.items()
+        if "variation" in (spec.audio_conditioning, getattr(spec, "video_conditioning", None))
+    }
+    assert shown == varies
+    assert {m for m in MODE_IDS if handlers.mode_view(m).varies_clip} == {
+        m for m, spec in modes.MODES.items() if getattr(spec, "video_conditioning", None)
+    }
 
 
 def test_let_the_model_pick_appears_only_where_no_input_has_a_length():
@@ -171,11 +187,11 @@ def test_a_prompt_is_parked_where_it_is_not_used_and_comes_back():
 
 def test_media_is_parked_and_restored_by_the_mode_that_takes_it():
     clip = video_file()
-    values = defaults() | {"video": clip, "strength": 0.4}
+    values = defaults() | {"video": clip, "noise_scale": 0.725}
     hidden, parked = handlers.mode_switch("video_to_video", "text_to_video", values, {})
-    assert hidden["video"] is None and hidden["strength"] == 0.8
+    assert hidden["video"] is None and hidden["noise_scale"] == 0.5
     back, _ = handlers.mode_switch("text_to_video", "video_to_video", hidden, parked)
-    assert back["video"] == clip and back["strength"] == 0.4
+    assert back["video"] == clip and back["noise_scale"] == 0.725
 
 
 def test_a_value_shared_by_both_modes_stays_put():
@@ -303,8 +319,9 @@ def test_a_form_full_of_stale_values_runs_exactly_like_a_clean_one(mode_id, capt
             # clean form the same visible value so only hidden values differ.
             after[key] = clean.get(key, after[key])
     after |= required
-    if view.active["decoder"]:
-        clean["decoder"] = after["decoder"]  # shown, so the user's choice is not stale
+    for shown in ("decoder", "noise_scale"):
+        if view.active[shown]:
+            clean[shown] = after[shown]  # shown, so the user's choice is not stale
 
     base, leak = capture(mode_id, clean), capture(mode_id, after)
     assert leak["result"] is not None, leak["status"]
@@ -326,10 +343,11 @@ def test_the_levers_follow_the_registrys_own_attributes():
     for mode_id in MODE_IDS:
         spec = modes.get_mode(mode_id)
         view = handlers.mode_view(mode_id)
+        varies_clip = getattr(spec, "video_conditioning", None) == "variation"
         assert view.active["strength"] == (
-            modes.accepts(spec, "video") and spec.video_strength is None
+            modes.accepts(spec, "video") and spec.video_strength is None and not varies_clip
         )
-        assert view.active["noise_scale"] == (spec.audio_conditioning == "variation")
+        assert view.active["noise_scale"] == (spec.audio_conditioning == "variation" or varies_clip)
 
 
 def test_the_change_choices_write_the_levels_the_audio_module_supports():

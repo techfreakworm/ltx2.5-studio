@@ -12,12 +12,17 @@ The directory is ``LTX25_EXAMPLES_DIR`` (default ``examples/``) and the file is
              "image": "media/harbour.png",          # optional; also "video", "audio"
              "settings": {"shape": "16:9", "seconds": 5.0, "upscale": false,
                           "seed": 42, "enhance": false, "strength": 0.8,
-                          "noise": "Moderately", "auto": false}}
+                          "noise": "Moderately", "auto_duration": false}}
              # "width"/"height" give an exact size and win over "shape".
+             # "auto" is accepted for "auto_duration"; "noise" names a change
+             # choice (Audio -> sound, or Video -> video).
              # An example writes only what it names; nothing else changes.
           ],
           "sample": {"file": "samples/t2av.mp4", "caption": "...",
                      "settings": "704 × 480, 5 s", "seed": 42}
+                     # "settings" may instead be {"size": "704 × 480", "seconds": 5,
+                     # "upscale": true, "enhance": true, "auto_duration": true}:
+                     # the caption then says each in words.
         }
       }
     }
@@ -58,6 +63,7 @@ _SETTINGS = {
     "strength",
     "noise",
     "auto",
+    "auto_duration",
 }
 
 
@@ -73,7 +79,8 @@ class Example:
 class Sample:
     path: Path
     caption: str = ""
-    settings: str = ""
+    #: Free text, or a mapping of the settings the caption names in words.
+    settings: str | dict = ""
     seed: int | None = None
 
     @property
@@ -160,10 +167,13 @@ def load_showcase(directory: str | os.PathLike | None = None, *, known_modes=())
             path = _inside(root, sample.get("file"))
             if path is not None:
                 seed = sample.get("seed")
+                raw_settings = sample.get("settings") or ""
                 samples[mode_id] = Sample(
                     path=path,
                     caption=str(sample.get("caption") or ""),
-                    settings=str(sample.get("settings") or ""),
+                    settings=dict(raw_settings)
+                    if isinstance(raw_settings, dict)
+                    else str(raw_settings),
                     seed=int(seed) if isinstance(seed, int) else None,
                 )
     return Showcase(root=root, examples=examples, samples=samples)

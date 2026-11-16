@@ -127,6 +127,11 @@ class ModeView:
     match_input: bool
     sizes_picture: bool
     upscale: bool
+    #: The change choice for the user's sound (Audio -> sound) or clip (Video -> video).
+    varies_sound: bool = False
+    varies_clip: bool = False
+    #: The length is always the clip's (a clip variation): no length choice is offered.
+    length_from_clip: bool = False
 
 
 def mode_view(mode_id: str) -> ModeView:
@@ -159,6 +164,9 @@ def mode_view(mode_id: str) -> ModeView:
         and (modes.accepts(mode, "image") or modes.accepts(mode, "video")),
         sizes_picture=not mode.min_resolution,
         upscale=not mode.skip_stage_2,
+        varies_sound=mode.audio_conditioning == "variation",
+        varies_clip=getattr(mode, "video_conditioning", None) == "variation",
+        length_from_clip=getattr(mode, "video_conditioning", None) == "variation",
     )
 
 
@@ -221,7 +229,7 @@ def length_fields_view(mode_id: str, auto: Any) -> dict[str, bool]:
     view = mode_view(mode_id)
     picking = bool(auto)
     return {
-        "num_frames": not picking,
+        "num_frames": not picking and not view.length_from_clip,
         "min_seconds": view.active["min_seconds"] and picking,
         "max_seconds": view.active["max_seconds"] and picking,
     }
@@ -415,7 +423,7 @@ def example_values(example: Any, mode_id: str) -> dict[str, Any]:
         if size:
             out["width"], out["height"] = size
             out["preset"] = preset_for(*size)
-    if "seconds" in settings:
+    if "seconds" in settings and not view.length_from_clip:
         frames = frames_for_seconds(settings["seconds"])
         out["num_frames"] = frames
         out["seconds"] = seconds_for_frames(frames)
@@ -423,18 +431,22 @@ def example_values(example: Any, mode_id: str) -> dict[str, Any]:
             out["auto_duration"] = False
         if view.timed_input:
             out["length_source"] = render.LENGTH_SET
-    if "auto" in settings and view.active["auto_duration"]:
-        out["auto_duration"] = bool(settings["auto"])
+    auto = settings.get("auto_duration", settings.get("auto"))
+    if auto is not None and view.active["auto_duration"]:
+        out["auto_duration"] = bool(auto)
     if "upscale" in settings and view.upscale:
         out["enable_stage_2"] = bool(settings["upscale"])
     if "seed" in settings:
         out["seed"] = int(settings["seed"])
     if "strength" in settings and view.active["strength"]:
         out["strength"] = float(settings["strength"])
-    noise = dict(render.NOISE_CHOICES).get(settings.get("noise"))
-    if noise is not None and view.active["noise_scale"]:
-        out["noise_scale"] = noise
-        out["noise_choice"] = settings["noise"]
+    named = settings.get("noise")
+    if view.varies_sound and named in dict(render.NOISE_CHOICES):
+        out["noise_scale"] = dict(render.NOISE_CHOICES)[named]
+        out["noise_choice"] = named
+    if view.varies_clip and named in dict(render.CLIP_CHOICES):
+        out["noise_scale"] = dict(render.CLIP_CHOICES)[named]
+        out["clip_choice"] = named
     return out
 
 
@@ -993,8 +1005,10 @@ def run_facts(outcome: RunOutcome) -> render.RunFacts:
     else:
         origin = generate_module.LENGTH_FROM_REQUEST
     device, on_zerogpu = _run_device(result)
-    varies_audio = mode_view(mode.id).active["noise_scale"]
+    view = mode_view(mode.id)
+    varies_audio = view.varies_sound
     level = fact(result, "audio_level", _as_float(params.get("noise_scale")))
+    clip_level = fact(result, "video_level", None) if view.varies_clip else None
     sent = fact(result, "prompt", None)
     typed = str(params.get("prompt") or "").strip()
     elapsed = fact(result, "elapsed_seconds", None)
@@ -1010,6 +1024,7 @@ def run_facts(outcome: RunOutcome) -> render.RunFacts:
         prompt_sent=sent if sent and str(sent).strip() != typed else None,
         length_source=fact(result, "length_source", origin),
         audio_level=level if varies_audio else None,
+        video_level=clip_level,
         decoder=fact(result, "decoder", None),
         device=device,
         on_zerogpu=on_zerogpu,

@@ -290,6 +290,26 @@ NOISE_CHOICES: tuple[tuple[str, float], ...] = tuple(
         strict=True,
     )
 )
+
+#: The three choices that write ``noise_scale`` in Video → video: the clip-variation
+#: levels ``audio_conditioning`` supports, lowest first. "A lot" is the mode's default
+#: and the only level at which the prompt visibly acts (measured on real weights).
+CLIP_CHOICES: tuple[tuple[str, float], ...] = tuple(
+    zip(
+        ("A little", "Moderately", "A lot"),
+        audio_conditioning.VIDEO_VARIATION_LEVELS,
+        strict=True,
+    )
+)
+CLIP_DEFAULT = "A lot"
+
+#: The clip choice's label and its line. It is not a field of its own: it writes
+#: ``noise_scale``, as the change choice in Audio → sound does.
+CLIP_LEVER = (
+    "How much to change your clip",
+    "The prompt steers the result only at “A lot”; at the lower settings your clip is "
+    "re-rendered almost as it is.",
+)
 #: The decoder choices: ``(label, value, what it does)``. The values are
 #: ``config.DECODER_CHOICES``; the reservation does not depend on the choice.
 DECODER_OPTIONS: tuple[tuple[str, str, str], ...] = (
@@ -707,13 +727,34 @@ def monitor_idle(mode: Any) -> str:
     )
 
 
+def sample_settings_words(settings: Any) -> str:
+    """A sample's settings in words: free text as given, or a mapping said in words."""
+    if not isinstance(settings, dict):
+        return str(settings or "")
+    words = []
+    if settings.get("size"):
+        words.append(str(settings["size"]))
+    elif settings.get("width") and settings.get("height"):
+        words.append(_size(settings["width"], settings["height"]))
+    if settings.get("seconds"):
+        words.append(f"{float(settings['seconds']):g} s")
+    if settings.get("upscale"):
+        words.append("upscaled ×2")
+    if settings.get("enhance"):
+        words.append("prompt enhanced")
+    if settings.get("auto_duration", settings.get("auto")):
+        words.append("length chosen by the model")
+    return ", ".join(words)
+
+
 def monitor_caption(
-    *, kind: str, mode: Any = None, seed: Any = None, settings: str = "", caption: str = ""
+    *, kind: str, mode: Any = None, seed: Any = None, settings: Any = "", caption: str = ""
 ) -> str:
     """The line under the monitor saying whose output is on it."""
     if kind == "sample":
         extra = f" {caption}" if caption else ""
-        bits = ", ".join(b for b in (settings, f"seed {seed}" if seed is not None else "") if b)
+        said = sample_settings_words(settings)
+        bits = ", ".join(b for b in (said, f"seed {seed}" if seed is not None else "") if b)
         detail = f" {mode.label}" + (f", {bits}" if bits else "") + "."
         return f"**Example output, not your run.**{detail}{extra}"
     if kind == "run":
@@ -950,6 +991,8 @@ class RunFacts:
     length_source: str | None = None
     #: The level actually used to change the user's sound (Audio -> sound).
     audio_level: float | None = None
+    #: The level actually used to change the user's clip (Video -> video).
+    video_level: float | None = None
     #: The decoder that ran: "diffusion" or "conv".
     decoder: str | None = None
     #: The device the run's time was measured on ("cuda", "mps", "cpu"), when known.
@@ -990,10 +1033,11 @@ def run_summary(facts: RunFacts) -> str:
         rows.append(("Length", _secs_html(facts.seconds) + origin))
     elif origin:
         rows.append(("Length", origin.lstrip(", ").capitalize()))
-    if facts.audio_level is not None:
-        named = next((n for n, v in NOISE_CHOICES if abs(v - facts.audio_level) < 1e-6), None)
-        level = _num(_two_places(facts.audio_level))
-        rows.append(("Change", f"{_e(named)} ({level})" if named else level))
+    for used, choices in ((facts.audio_level, NOISE_CHOICES), (facts.video_level, CLIP_CHOICES)):
+        if used is not None:
+            named = next((n for n, v in choices if abs(v - used) < 1e-6), None)
+            level = _num(_two_places(used))
+            rows.append(("Change", f"{_e(named)} ({level})" if named else level))
     rows.append(("Seed", _num(facts.seed)))
     rows.append(("LoRA", _lora_words(facts.loras)))
     if facts.decoder:

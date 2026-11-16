@@ -215,3 +215,128 @@ def test_the_summary_says_where_the_length_came_from_and_how_much_the_sound_chan
     )
     assert facts.length_source == "model" and facts.audio_level is None
     assert modes.get_mode("text_to_video").label
+
+
+# --------------------------------------------------------------------------
+# pending (b): every mode's example and sample come from the manifest alone
+# --------------------------------------------------------------------------
+
+#: Media per mode, as the lead's manifest will name them: a clip for 04 and 09, an
+#: audio file for 10 and 11, an image as well for 11.
+FIXTURE_MEDIA = {
+    "image_to_video": {"image": "media/still.png"},
+    "image_text_to_video": {"image": "media/still.png"},
+    "image_to_audio_video": {"image": "media/still.png"},
+    "image_text_to_audio_video": {"image": "media/still.png"},
+    "video_to_video": {"video": "media/clip.mp4"},
+    "video_to_audio": {"video": "media/clip.mp4"},
+    "audio_to_audio": {"audio": "media/voice.wav"},
+    "audio_to_video": {"audio": "media/voice.wav", "image": "media/still.png"},
+}
+#: The optional settings an entry may carry, and the words a sample caption gives them.
+OPTIONAL = {
+    "upscale": "upscaled ×2",
+    "enhance": "prompt enhanced",
+    "auto_duration": "length chosen by the model",
+}
+
+
+def _fixture_manifest(root):
+    """A text-only manifest for all 11 modes; the media files are placeholders made here."""
+    for name in ("media/still.png", "media/clip.mp4", "media/voice.wav"):
+        (root / name).parent.mkdir(parents=True, exist_ok=True)
+        (root / name).write_bytes(b"placeholder")
+    entries = {}
+    for mode_id, spec in modes.MODES.items():
+        settings = {"seed": 21}
+        if not spec.skip_stage_2:
+            settings["upscale"] = True
+        if modes.accepts(spec, "text"):
+            settings["enhance"] = True
+        if not (modes.accepts(spec, "video") or modes.requires(spec, "audio")):
+            settings["auto_duration"] = True
+        sample_settings = {
+            "size": "704 × 480",
+            **{k: v for k, v in settings.items() if k in OPTIONAL},
+        }
+        (root / "samples").mkdir(exist_ok=True)
+        (root / "samples" / f"{mode_id}.mp4").write_bytes(b"placeholder")
+        entries[mode_id] = {
+            "examples": [
+                {
+                    "label": f"Example for {mode_id}",
+                    "prompt": "a lighthouse at dusk" if modes.accepts(spec, "text") else "",
+                    **FIXTURE_MEDIA.get(mode_id, {}),
+                    "settings": settings,
+                }
+            ],
+            "sample": {"file": f"samples/{mode_id}.mp4", "settings": sample_settings, "seed": 21},
+        }
+    write(root, {"modes": entries})
+    return entries
+
+
+def test_a_manifest_with_entries_for_all_eleven_modes_loads_without_a_code_change(tmp_path):
+    from ltx25_studio.ui import handlers
+
+    entries = _fixture_manifest(tmp_path)
+    shown = showcase.load_showcase(tmp_path, known_modes=tuple(modes.MODES))
+    assert set(shown.examples) == set(modes.MODES) == set(shown.samples)
+    for mode_id, entry in entries.items():
+        (example,) = shown.for_mode(mode_id)
+        assert {k: p.name for k, p in example.media.items()} == {
+            k: v.split("/")[-1] for k, v in FIXTURE_MEDIA.get(mode_id, {}).items()
+        }
+        out = handlers.example_values(example, mode_id)
+        view = handlers.mode_view(mode_id)
+        for kind in example.media:
+            assert out.get(kind) == str(example.media[kind]), (mode_id, kind)
+        settings = entry["examples"][0]["settings"]
+        if "upscale" in settings:
+            assert out["enable_stage_2"] is True, mode_id
+        if "enhance" in settings:
+            assert out["enhance_prompt"] is True, mode_id
+        if "auto_duration" in settings:
+            assert out["auto_duration"] is True and view.active["auto_duration"], mode_id
+
+
+def test_the_optional_settings_show_in_the_sample_caption(tmp_path):
+    from ltx25_studio.ui import blocks
+
+    entries = _fixture_manifest(tmp_path)
+    shown = showcase.load_showcase(tmp_path, known_modes=tuple(modes.MODES))
+    for mode_id, entry in entries.items():
+        caption = blocks._sample_caption(modes.get_mode(mode_id), shown.sample_for(mode_id))
+        assert caption.startswith("**Example output, not your run.**")
+        for key, words in OPTIONAL.items():
+            assert (words in caption) == (key in entry["sample"]["settings"]), (
+                mode_id,
+                key,
+                caption,
+            )
+        assert "704 × 480" in caption and "seed 21" in caption
+
+
+def test_clicking_an_example_fills_the_form_in_every_mode(tmp_path, monkeypatch):
+    pytest.importorskip("gradio")
+    from test_ui_form import Form
+
+    from ltx25_studio.ui import build_ui
+
+    _fixture_manifest(tmp_path)
+    monkeypatch.setenv(showcase.EXAMPLES_ENV, str(tmp_path))
+    form = Form(build_ui())
+    buttons = [
+        b
+        for b in form.demo.blocks.values()
+        if "mr-example" in (getattr(b, "elem_classes", None) or [])
+    ]
+    for mode_id, spec in modes.MODES.items():
+        form.pick_mode(mode_id)
+        form.click(buttons[0])
+        for kind, name in FIXTURE_MEDIA.get(mode_id, {}).items():
+            assert str(form.field(kind)).endswith(name.split("/")[-1]), (mode_id, kind)
+        if not spec.skip_stage_2:
+            assert form.field("enable_stage_2") is True, mode_id
+        if modes.accepts(spec, "text"):
+            assert form.field("enhance_prompt") is True, mode_id
