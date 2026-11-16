@@ -623,13 +623,14 @@ STRUCTURE_ANALYSIS_SIZE = 256
 #: Frames looked at per video, evenly spaced, both ends included.
 STRUCTURE_SAMPLE_FRAMES = 16
 
-# Thresholds from a labelled set of 38 outputs, every one looked at, measured
-# 2026-11-16: 23 good, 3 flat grey, 9 veiled, 3 colour static. Brackets: the
+# Thresholds from a labelled set of 42 outputs, every one looked at, measured
+# 2026-11-16: 27 good, 3 flat grey, 9 veiled, 3 colour static. Brackets: the
 # worst good and worst bad value at the analysis size. Colourfulness is
 # Hasler & Süsstrunk's (15 "slightly", 33 "moderately colourful").
-FLAT_MAX_LUMA_STD = 6.0  # luma std, 0..255 (good >= 22.0, grey <= 4.3)
-VEILED_MIN_BLACK_LEVEL = 40.0  # luma p1 (veiled >= 57.6)
-VEILED_MAX_WHITE_LEVEL = 135.0  # luma p99 (good >= 155.0, veiled <= 115.1)
+FLAT_MAX_LUMA_STD = 6.0  # luma std, 0..255 (good >= 14.9, grey <= 4.3)
+# veiled needs both: no good file has lifted blacks AND dim highlights.
+VEILED_MIN_BLACK_LEVEL = 40.0  # luma p1 (veiled >= 57.6; dim-highlight good <= 1.0)
+VEILED_MAX_WHITE_LEVEL = 135.0  # luma p99 (veiled <= 115.1; lifted-black good >= 176.8)
 VEILED_MAX_COLOURFULNESS = 20.0  # (veiled <= 13.8)
 STATIC_MAX_CORRELATION = 0.10  # luma correlation at 1/8 frame (good >= 0.188, static <= 0.033)
 STATIC_MIN_COLOURFULNESS = 33.0  # (static >= 62.9)

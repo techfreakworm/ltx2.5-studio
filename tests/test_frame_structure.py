@@ -236,6 +236,28 @@ def test_a_bright_overcast_picture_is_not_called_washed_out(name):
     assert check.conditions == () and check.notes == ()
 
 
+def test_a_dark_black_and_white_night_with_true_blacks_yields_no_note():
+    """Dim highlights and no colour, like a veiled frame, and a narrow brightness spread; what
+    it has that a veil takes away is true blacks."""
+    check = outputs.assess_picture(stack(load("good_15")))
+    measured = check.measurements
+    assert measured.white_level < outputs.VEILED_MAX_WHITE_LEVEL
+    assert measured.colourfulness < outputs.VEILED_MAX_COLOURFULNESS
+    assert measured.black_level < outputs.VEILED_MIN_BLACK_LEVEL / 10
+    assert measured.luma_std > outputs.FLAT_MAX_LUMA_STD * 2
+    assert check.conditions == () and check.notes == ()
+
+
+def test_a_soft_snowfall_scene_yields_no_note():
+    """Soft and low in detail by content: kept out of every condition, not just one."""
+    check = outputs.assess_picture(stack(load("good_16")))
+    measured = check.measurements
+    assert measured.black_level < outputs.VEILED_MIN_BLACK_LEVEL
+    assert measured.white_level > outputs.VEILED_MAX_WHITE_LEVEL
+    assert measured.long_range_correlation > outputs.STATIC_MAX_CORRELATION
+    assert check.conditions == () and check.notes == ()
+
+
 def test_a_black_and_white_picture_yields_no_note():
     real = load("good_14")
     frame = load("good_1")
@@ -391,12 +413,16 @@ def test_the_check_needs_neither_torch_nor_a_media_stack():
 # thresholds, and the numbers that put them there
 # ---------------------------------------------------------------------------
 
-# Worst value per class on the labelled dataset (38 files), as measured by this check.
-WORST_GOOD_LUMA_STD = 22.03
+# Measured by this check on the labelled dataset (42 files: 27 good, 3 grey, 9 veiled, 3 static).
+WORST_GOOD_LUMA_STD = 14.93
 WORST_GREY_LUMA_STD = 4.30
 WORST_VEILED_BLACK_LEVEL = 57.6
-WORST_GOOD_WHITE_LEVEL = 155.0
 WORST_VEILED_WHITE_LEVEL = 115.1
+# veiled needs both ends of the range pulled in, so a good file is kept out by either end:
+# good files with lifted blacks (p1 >= 40) all keep highlights of at least this (the beach),
+GOOD_LIFTED_BLACKS_MIN_WHITE_LEVEL = 176.8
+# and good files with dim highlights (p99 < 135) all keep blacks of at most this (the night).
+GOOD_DIM_HIGHLIGHTS_MAX_BLACK_LEVEL = 1.0
 WORST_VEILED_COLOURFULNESS = 13.8
 WORST_GOOD_CORRELATION = 0.188
 WORST_STATIC_CORRELATION = 0.033
@@ -404,10 +430,11 @@ WORST_STATIC_COLOURFULNESS = 62.9
 
 
 def test_the_thresholds_sit_between_the_measured_classes_with_room_either_side():
-    assert WORST_GREY_LUMA_STD * 1.3 < outputs.FLAT_MAX_LUMA_STD < WORST_GOOD_LUMA_STD / 3.5
+    assert WORST_GREY_LUMA_STD * 1.3 < outputs.FLAT_MAX_LUMA_STD < WORST_GOOD_LUMA_STD / 2.4
     assert outputs.VEILED_MIN_BLACK_LEVEL * 1.4 < WORST_VEILED_BLACK_LEVEL
+    assert GOOD_DIM_HIGHLIGHTS_MAX_BLACK_LEVEL * 10 < outputs.VEILED_MIN_BLACK_LEVEL
     assert WORST_VEILED_WHITE_LEVEL * 1.15 < outputs.VEILED_MAX_WHITE_LEVEL
-    assert outputs.VEILED_MAX_WHITE_LEVEL * 1.1 < WORST_GOOD_WHITE_LEVEL
+    assert outputs.VEILED_MAX_WHITE_LEVEL * 1.3 < GOOD_LIFTED_BLACKS_MIN_WHITE_LEVEL
     assert WORST_VEILED_COLOURFULNESS * 1.4 < outputs.VEILED_MAX_COLOURFULNESS
     assert WORST_STATIC_CORRELATION + 0.05 < outputs.STATIC_MAX_CORRELATION
     assert outputs.STATIC_MAX_CORRELATION + 0.05 < WORST_GOOD_CORRELATION

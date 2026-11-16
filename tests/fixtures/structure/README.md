@@ -26,6 +26,8 @@ before any statistic was measured.
 | good_12 | local run X3a (text to audio and video), 49 frames | 24 of 49 | overcast beach with a dog: naturally low in contrast, lifted blacks, little colour |
 | good_13 | local run X3a, same clip | 0 of 49 | overcast beach, first frame |
 | good_14 | local run X2a (text to video), 49 frames | 24 of 49 | black-and-white noir street: no colour at all |
+| good_15 | local run X1 (text to video, duration head), 121 frames | 60 of 121 | low-key black-and-white night: dark, dim highlights, no colour, true blacks |
+| good_16 | local run M04e (video to video), 121 frames | 60 of 121 | cabin in heavy snowfall at dusk: soft and low in detail by content |
 | bad_grey_1 | the operator's failing output, 512x960x121 | 0 of 121 | flat grey |
 | bad_grey_2 | the operator's failing output | 60 of 121 | flat grey |
 | bad_washed_1 | local run X4, the audio-to-video path before its fix, 704x480x113 | 0 of 113 | ship under a grey veil |
