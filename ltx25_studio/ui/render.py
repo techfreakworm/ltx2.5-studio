@@ -165,7 +165,9 @@ _PURPOSE: dict[str, str] = {
     "image_text_to_video": "Your image, moving the way you describe, without sound.",
     "video_to_video": "Your clip, re-rendered. Describe a new look if you like.",
     "video_to_audio": "A soundtrack for your clip.",
-    "audio_to_video": "A picture for your sound. Your audio stays as the soundtrack.",
+    "audio_to_video": (
+        "A picture for your sound. Your audio stays as the soundtrack. Speech is not lip-synced."
+    ),
     "audio_to_audio": "Your sound, transformed.",
 }
 
@@ -276,7 +278,7 @@ _CAPTIONS: dict[tuple[str, str], str] = {
     ("audio_to_video", "audio"): (
         "The sound to picture; it is also the soundtrack of the result. Speech is not "
         "lip-synced. For a face that speaks in time, use Image + text to video with sound and "
-        "put the line in quotes."
+        "write the words in quotes in your prompt; the model voices them itself."
     ),
     ("audio_to_video", "image"): "Optional. Used as the first frame.",
 }

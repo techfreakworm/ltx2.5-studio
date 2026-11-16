@@ -29,10 +29,16 @@ CLASS_NAMES = tuple(
     if name.endswith("Error") and isinstance(getattr(errors, name), type)
 )
 #: Measured on real weights: in Audio to video the mouth does not follow the recorded words,
-#: while speech the model writes itself (Image + text to video with sound) is in time.
+#: while speech the model writes itself (Image + text to video with sound) is in time. The
+#: remedy says why the user's own recording is not used there (review round 3, R3 item 5).
 NOT_LIP_SYNCED = (
     "Speech is not lip-synced. For a face that speaks in time, use Image + text to video "
-    "with sound and put the line in quotes."
+    "with sound and write the words in quotes in your prompt; the model voices them itself."
+)
+#: Mode 11's purpose line, always in view under the matrix, carries the limit too (R3 item 4).
+PURPOSE_11 = (
+    "**Audio to video.** A picture for your sound. Your audio stays as the soundtrack. "
+    "Speech is not lip-synced."
 )
 
 
@@ -192,14 +198,19 @@ def _texts(form, block) -> list[str]:
     return [text for text in held if isinstance(text, str)]
 
 
-def test_the_lip_sync_line_is_under_the_audio_in_audio_to_video_and_nowhere_else():
+def test_the_lip_sync_line_is_under_the_audio_in_audio_to_video_and_nowhere_else(
+    tmp_path, monkeypatch
+):
     """Through the built page's own mode switch: the line shows, visibly, under the audio
     input in Audio to video, is held by no other component there, and by none in any other
-    mode; the mode it sends people to is named by its label."""
+    mode; the mode it sends people to is named by its label. The purpose line says the
+    limit in Audio to video only. No shipped manifest: the page's own words."""
     pytest.importorskip("gradio", reason="gradio is a declared dev dependency")
     from test_ui_form import Form
 
-    from ltx25_studio.ui import build_ui
+    from ltx25_studio.ui import build_ui, showcase
+
+    monkeypatch.setenv(showcase.EXAMPLES_ENV, str(tmp_path / "no-examples"))
 
     assert modes.get_mode("image_text_to_audio_video").label in NOT_LIP_SYNCED
     demo = build_ui()
@@ -211,19 +222,46 @@ def test_the_lip_sync_line_is_under_the_audio_in_audio_to_video_and_nowhere_else
     def holders() -> list:
         return [b for b in blocks if any(NOT_LIP_SYNCED in t for t in _texts(form, b))]
 
-    assert holders() == [], "the built page, before any mode is picked"
+    purpose = form.by_id("purpose")
+
+    def says_it() -> list:
+        return [b for b in blocks if any("lip-synced" in t for t in _texts(form, b))]
+
+    assert holders() == [] and says_it() == [], "the built page, before any mode is picked"
     for mode_id in MODE_IDS:
         form.pick_mode(mode_id)
         if mode_id == "audio_to_video":
             assert holders() == [audio_caption]
             assert form.visible(audio_caption) and form.visible(form.fields["audio"])
+            assert form.get(purpose) == PURPOSE_11
+            assert form.get(purpose).endswith("Speech is not lip-synced.")
+            assert says_it() == sorted([audio_caption, purpose], key=lambda b: b._id)
         else:
-            assert holders() == [], mode_id
+            assert holders() == [] and says_it() == [], mode_id
     form.pick_mode("audio_to_audio")
     assert holders() == [], "switching away from Audio to video takes the line away"
+    assert says_it() == [], "and the purpose line's limit with it"
     assert form.get(audio_caption) == render.media_caption(
         modes.get_mode("audio_to_audio"), "audio"
     )
+
+
+def test_mode_11_states_its_limit_in_its_purpose_line_and_the_remedy_under_its_audio():
+    mode = modes.get_mode("audio_to_video")
+    assert render.purpose_line(mode) == PURPOSE_11
+    assert handlers.mode_view("audio_to_video").purpose == PURPOSE_11
+    caption = render.media_caption(mode, "audio")
+    assert caption.endswith(
+        "use Image + text to video with sound and write the words in quotes in your prompt; "
+        "the model voices them itself."
+    )
+    for mode_id in MODE_IDS:
+        if mode_id != "audio_to_video":
+            other = modes.get_mode(mode_id)
+            assert "lip-synced" not in render.purpose_line(other), mode_id
+            for kind in ("image", "video", "audio"):
+                if modes.accepts(other, kind):
+                    assert "lip-synced" not in render.media_caption(other, kind), mode_id
 
 
 def test_the_start_message_says_enhancing_only_when_the_prompt_will_be_enhanced():
