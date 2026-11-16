@@ -94,7 +94,7 @@ def run(mode_id, tmp_path, monkeypatch, *, progress=None, encoder=None, **overri
     would skip the entire mechanism this file is about and every assertion below
     would pass against nothing.
     """
-    from conftest import STUB_SAMPLING_RATE, STUB_WAVEFORM
+    from conftest import STUB_SAMPLING_RATE, STUB_WAVEFORM, audio_file
 
     from ltx25_studio import audio as audio_module
 
@@ -105,11 +105,14 @@ def run(mode_id, tmp_path, monkeypatch, *, progress=None, encoder=None, **overri
     runner = pipelines.StageRunner(inner, kind="condition")
     # A REAL mp4 for the video modes: `conditioning.decode_video_frames` decodes a
     # video condition before the pipeline sees it, so a path-shaped string there
-    # is refused — the same fixture rule `test_ui_generate_seam` records.
+    # is refused — the same fixture rule `test_ui_generate_seam` records. A REAL
+    # wav for the audio modes, for the same reason: generate() opens it with av
+    # before the dispatch.
     from test_ui_generate_seam import conditioning_video
 
+    real = {"video": conditioning_video, "audio": audio_file}
     media = {
-        kind: (conditioning_video() if kind == "video" else f"conditioning-input.{kind}")
+        kind: (real[kind]() if kind in real else f"conditioning-input.{kind}")
         for kind in modes.get_mode(mode_id).inputs
     }
     media.pop("text", None)
