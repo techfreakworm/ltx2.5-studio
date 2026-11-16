@@ -13,9 +13,8 @@ several of its rules are silent-failure rules.
     detected during startup".
 
   * **Never pass ``size=`` unguarded.** The parameter exists in ``spaces``
-    0.51.1, but the platform pins its own version and lags -- live Spaces report
-    0.49.3 / 0.50.0 / 0.50.4, and we deliberately do not pin it. Against a
-    platform build that predates the parameter,
+    0.51.x (the Space runs 0.51.3), but the platform pins its own version and we
+    deliberately do not pin it. Against a platform build that predates it,
     ``@spaces.GPU(duration=..., size="xlarge")`` raises a **TypeError at module
     import**, which on a Space means the app simply never starts and looks like
     a mysterious failure rather than a version problem.
@@ -38,12 +37,12 @@ several of its rules are silent-failure rules.
     ``docs/MIG_ALLOCATOR_SIGHTINGS.md`` §1.
 
     So ``size`` is NOT optional, and ``LTX25_ZEROGPU_SIZE`` must be set to a real
-    value -- the Space now runs ``xlarge``. The defensive construction below is
+    value -- ``xlarge`` is now the default. The defensive construction below is
     what makes that safe: build the decorator kwargs by checking
     ``inspect.signature(spaces.GPU).parameters``, include ``size`` only if the
-    running ``spaces`` accepts it, log the detected version and whether it was
-    passed, and log the size we actually got after packing so the quota cost is
-    visible rather than inferred. Same treatment for any other newer kwarg.
+    running ``spaces`` accepts it, log the version and the size VALUE passed
+    (:func:`describe_gpu_kwargs`), and compare the partition the worker measures
+    against the request (:func:`partition_note`).
 
     ⚠️ **And note what the filter does on an old ``spaces``: it silently drops
     ``size``, which is exactly the failure above.** It trades an import-time
@@ -94,6 +93,8 @@ __all__ = [
     "AUTOPRUNE_PATTERN",
     "assert_returnable",
     "check_duration_signature",
+    "describe_gpu_kwargs",
+    "partition_note",
     "unbacked_parameters",
     "read_process_maps",
     "parse_maps",
@@ -157,12 +158,9 @@ def is_zerogpu(spaces_module) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# PARKED — the mmap-backing guard. Not wired into any live path.
-#
-# ZeroGPU-only: it cannot fire off-Space, and ZeroGPU is parked until the app is
-# proven on a dedicated GPU host. These helpers are kept rather than deleted
-# because they are tested and mutation-checked, and re-enabling is one call in
-# `pipelines._base_pipeline`. See docs/ZEROGPU_DISK.md for what they are for.
+# The mmap-backing guard, reported (log-only) by `pipelines.mmap_backing_report`
+# from `_base_pipeline`. ZeroGPU-only in effect: macOS has no /proc maps.
+# See docs/ZEROGPU_DISK.md for what it is for.
 # ---------------------------------------------------------------------------
 
 #: What ZeroGPU's post-pack cleanup unlinks, from `ZEROGPU_MMAP_AUTOPRUNE_PATTERN`.
@@ -355,7 +353,6 @@ LORA_DURATION_SECONDS = 60
 #: reports why, while a run killed at the boundary is not.
 ENHANCE_DURATION_SECONDS = 180
 
-
 def _request_field(params, name):
     """Read a field from the call as the LIVE dispatch actually shapes it.
 
@@ -423,10 +420,78 @@ def spaces_version(spaces_module) -> str | None:
 
     Takes the module rather than importing it: ``spaces`` is a deploy-environment
     package, and importing it from library code makes the library unimportable
-    off-Space. ``app.py`` owns that import -- it is also the only place where the
-    before-torch ordering can actually be guaranteed.
+    off-Space. The real package defines no ``__version__``, so the installed
+    distribution's metadata answers; the local stub carries its own.
     """
-    return getattr(spaces_module, "__version__", None) if spaces_module is not None else None
+    if spaces_module is None:
+        return None
+    version = getattr(spaces_module, "__version__", None)
+    if version:
+        return str(version)
+    import importlib.metadata
+
+    try:
+        return importlib.metadata.version("spaces")
+    except importlib.metadata.PackageNotFoundError:
+        return None
+
+
+#: Below this, a partition is not the ~95 GiB ``xlarge`` slice (``large`` is
+#: 47.375 GiB measured).
+XLARGE_MIN_GIB = 80.0
+
+
+def partition_note(total_bytes, requested_size) -> str | None:
+    """A plain warning when the measured GPU partition is not what was asked for.
+
+    ``total_bytes`` is the worker's ``total_memory`` reading; ``None`` (not
+    measured, e.g. off CUDA) says nothing.
+    """
+    if total_bytes is None:
+        return None
+    gib = total_bytes / 1024**3
+    if gib >= XLARGE_MIN_GIB:
+        return None
+    if requested_size == "xlarge":
+        return (
+            f"xlarge was requested but this GPU slice has {gib:.1f} GiB (xlarge is about "
+            f"95 GiB). Large videos and stage 2 may run out of memory on it."
+        )
+    if requested_size in (None, "auto"):
+        return (
+            f"no GPU size was requested, so the platform gave its default slice: {gib:.1f} "
+            f"GiB, about half of xlarge. Set LTX25_ZEROGPU_SIZE=xlarge for the full GPU."
+        )
+    return None
+
+
+def describe_gpu_kwargs(kwargs, runtime_config) -> str:
+    """The ``@spaces.GPU`` arguments as VALUES, for the startup log."""
+    from .config import ENV_ZEROGPU_SIZE
+
+    base = runtime_config.gpu_duration_seconds
+    duration = kwargs.get("duration")
+    if callable(duration):
+        seconds = (
+            f"duration={getattr(duration, '__name__', 'callable')} (base {base} s; x1.5 with "
+            f"stage 2, +{LORA_DURATION_SECONDS} s with LoRAs, +{ENHANCE_DURATION_SECONDS} s "
+            f"with prompt enhancement)"
+        )
+    else:
+        seconds = f"duration={duration} s"
+    if "size" not in kwargs:
+        size = (
+            f"size NOT passed: the installed spaces does not accept it, so the platform "
+            f"default (large) applies whatever {ENV_ZEROGPU_SIZE} says"
+        )
+    elif kwargs["size"] is None:
+        size = (
+            f"size not requested ({ENV_ZEROGPU_SIZE}={runtime_config.zerogpu_size}): the "
+            f"platform default (large, about half the GPU) applies"
+        )
+    else:
+        size = f"size={kwargs['size']}"
+    return f"{size}, {seconds}"
 
 
 def _looks_like_a_cuda_tensor(value) -> bool:
@@ -494,11 +559,10 @@ def assert_returnable(value):
 def gpu_decorator_kwargs(gpu_callable, **kwargs) -> dict:
     """Keep only the kwargs the installed ``spaces.GPU`` actually accepts.
 
-    The platform pins its own ``spaces`` and lags PyPI -- live Spaces report
-    0.49.3 / 0.50.0 / 0.50.4, and we deliberately do not pin it. Passing ``size``
-    to a build that predates the parameter raises ``TypeError`` **at module
-    import**, which on a Space looks like a mysterious startup failure rather
-    than a version problem.
+    The platform pins its own ``spaces`` and we deliberately do not pin it.
+    Passing ``size`` to a build that predates the parameter raises ``TypeError``
+    **at module import**, which on a Space looks like a mysterious startup
+    failure rather than a version problem.
 
     ⛔ **Dropping ``size`` does NOT cost nothing, whatever this docstring used to
     say.** The old text claimed ZeroGPU's ``startup()`` promotion made the kwarg
@@ -513,7 +577,8 @@ def gpu_decorator_kwargs(gpu_callable, **kwargs) -> dict:
     it was built for: against a ``spaces`` too old for ``size``, it drops the
     kwarg and the Space runs at half capacity rather than not starting. Still the
     right trade -- a half-size GPU is diagnosable and a dead import is not -- but
-    the caller must log what was passed, which ``app.py`` does.
+    the caller must log what was passed, which ``app.py`` does with
+    :func:`describe_gpu_kwargs`.
     """
     try:
         accepted = inspect.signature(gpu_callable).parameters

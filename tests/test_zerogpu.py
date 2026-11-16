@@ -120,10 +120,9 @@ def test_size_is_passed_when_the_installed_spaces_accepts_it():
 
 
 def test_size_is_dropped_when_the_installed_spaces_predates_it():
-    """Live Spaces report 0.49.3 / 0.50.0 / 0.50.4 and we deliberately do not pin
-    ``spaces``. Passing ``size`` to one of those raises ``TypeError`` at module
-    import — which on a Space looks like a mysterious failure, not a version
-    problem."""
+    """We deliberately do not pin ``spaces``. Passing ``size`` to a build that
+    predates the parameter raises ``TypeError`` at module import — which on a
+    Space looks like a mysterious failure, not a version problem."""
 
     def gpu(*, duration=None):  # the older platform signature
         return None
@@ -133,15 +132,46 @@ def test_size_is_dropped_when_the_installed_spaces_predates_it():
     assert kwargs["duration"] == 60
 
 
-def test_dropping_size_costs_us_nothing():
-    """ZeroGPU's own ``startup()`` promotes to xlarge past its 42.00 GiB
-    threshold, and ours is 67.23 GiB — so the kwarg neither avoids nor incurs the
-    2x quota cost. Dropping it must therefore never raise."""
+def test_dropping_size_still_never_raises_and_the_cost_is_reported():
+    """Dropping ``size`` is NOT free: ZeroGPU's ``startup()`` promotion never
+    reaches the scheduler, so no ``size`` means the platform default ``large``
+    (47.375 GiB measured, half of xlarge). The filter must still not raise, and
+    the worker's measured partition is what makes the cost visible."""
 
     def gpu(*, duration=None):
         return None
 
     assert zerogpu.gpu_decorator_kwargs(gpu, duration=60, size="xlarge")["duration"] == 60
+    assert zerogpu.partition_note(int(47.375 * 1024**3), "xlarge") is not None
+
+
+# --------------------------------------------------------------------------
+# the measured partition against the requested size
+# --------------------------------------------------------------------------
+
+
+def test_a_half_size_partition_under_xlarge_is_warned_about():
+    note = zerogpu.partition_note(int(47.375 * 1024**3), "xlarge")
+
+    assert note is not None and "xlarge" in note and "47.4" in note, note
+
+
+def test_a_full_xlarge_partition_says_nothing():
+    assert zerogpu.partition_note(int(94.971 * 1024**3), "xlarge") is None
+
+
+def test_an_unrequested_size_names_the_platform_default():
+    note = zerogpu.partition_note(int(47.375 * 1024**3), "auto")
+
+    assert note is not None and "LTX25_ZEROGPU_SIZE=xlarge" in note, note
+
+
+def test_an_explicit_large_is_not_second_guessed():
+    assert zerogpu.partition_note(int(47.375 * 1024**3), "large") is None
+
+
+def test_an_unmeasured_partition_says_nothing():
+    assert zerogpu.partition_note(None, "xlarge") is None
 
 
 def test_an_unknown_kwarg_is_dropped_rather_than_exploding():
@@ -543,9 +573,10 @@ def test_a_pipeline_without_a_components_dict_is_walked_by_known_names():
 
 
 def test_base_pipeline_runs_the_report_before_the_device_move():
-    """The wiring claim itself, and its placement: packing happens inside
-    .to(device), so a report AFTER the move reads the post-pack world and can
-    no longer see the precondition it exists to check."""
+    """The wiring claim itself, and its placement. Packing happens later, at
+    ``demo.launch()``; but after ``.to(device)`` on ZeroGPU ``named_parameters()``
+    returns the platform's fakes, so the report must read the tensors before the
+    move or it can no longer see the precondition it exists to check."""
     import inspect
 
     from ltx25_studio import pipelines

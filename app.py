@@ -27,9 +27,9 @@ except ImportError:  # local development, where ZeroGPU does not exist
 
     spaces = _zerogpu_bootstrap.local_spaces_stub()
 
+from ltx25_studio import device, outputs, pipelines, preflight, zerogpu
 from ltx25_studio import enhance as enhance_module
 from ltx25_studio import generate as generate_module
-from ltx25_studio import outputs, pipelines, preflight, zerogpu
 from ltx25_studio.config import load_config
 from ltx25_studio.ui import build_ui
 
@@ -43,20 +43,21 @@ CONFIG = load_config()
 
 ON_ZEROGPU = zerogpu.is_zerogpu(spaces)
 
-# CAPABILITY, not identity. Gating the download, the preflight and the CUDA move
-# on "is this a Space" meant a real 97 GB GPU box did none of them, because it
-# simply was not a Space: no weights, no pipeline, no device move, and a
-# non-strict preflight that therefore did not complain either.
+# The generation device: CUDA on ZeroGPU or a CUDA box, an explicit LTX25_DEVICE
+# opt-in for MPS/CPU, otherwise none (UI only). Unguarded like CONFIG: an
+# impossible setting (int8 off CUDA, mps without MPS) stops startup by name.
 #
-# `will_use_gpu` short-circuits on `spaces` before probing CUDA, so on a Space we
-# never touch torch.cuda at module scope — which is the rule the whole
-# import-order dance exists to protect.
-WILL_USE_GPU = zerogpu.will_use_gpu(spaces)
+# CAPABILITY, not identity, for the CUDA path: a real GPU box that is not a
+# Space still downloads, preflights strictly and moves to CUDA. On a Space the
+# resolver answers from `spaces` alone and never touches torch.cuda at module
+# scope — the rule the whole import-order dance exists to protect.
+DEVICE = device.resolve(spaces, CONFIG)
+WILL_USE_GPU = DEVICE.device == "cuda"
 _log.info(
-    "spaces=%s zerogpu=%s will_use_gpu=%s",
+    "spaces=%s zerogpu=%s device=%s",
     zerogpu.spaces_version(spaces),
     ON_ZEROGPU,
-    WILL_USE_GPU,
+    DEVICE.describe(),
 )
 
 # Weights are fetched HERE, at runtime, not by `preload_from_hub`. On a PRIVATE
@@ -69,16 +70,14 @@ if WILL_USE_GPU:
 
 # Version assertion, cache completeness and the resource report.
 #
-# strict=WILL_USE_GPU is a DECISION, not inheritance. Strict means the pinned
-# diffusers revision and cache completeness are enforced rather than reported,
-# and the rule is: any host that is about to do GPU work must fail loudly on a
-# missing file, not quietly render something wrong. That covers a real GPU box
-# as well as a Space. A laptop with no CUDA gets the report only, because
-# enforcing 72 GB of weights there would fail every local run for no reason.
-#
-# It is also only meaningful because ensure_weights ran first: this verifies the
-# download we just performed, not a preload we never controlled.
-preflight.run(CONFIG, strict=WILL_USE_GPU, spaces_module=spaces)
+# Strict wherever this process will generate: the pinned diffusers revision and
+# cache completeness are enforced rather than reported, because a host about to
+# generate must fail loudly on a missing file, not quietly render something
+# wrong. A UI-only machine gets the report only. On CUDA this verifies the
+# download ensure_weights just performed; on an MPS/CPU opt-in it verifies the
+# snapshot (or LTX25_MODEL_SNAPSHOT_DIR) is complete. MPS also runs its
+# numerics self-test here, once, and the report carries the result.
+preflight.run(CONFIG, strict=DEVICE.generation_enabled, spaces_module=spaces, resolution=DEVICE)
 
 # PLAN §2.7: sweep on startup as well as after each run. Resolved from the same
 # config the writer uses, so the two cannot drift onto different directories.
@@ -92,10 +91,11 @@ except Exception as _exc:  # noqa: BLE001 - a bad sweep must not stop startup
     _log.warning("startup output sweep skipped: %s", _exc)
 
 # PLAN §8.3: build on CPU, then move at MODULE SCOPE. ZeroGPU intercepts this
-# call, rewrites it to .to("cpu") and packs every tensor to disk. Doing it lazily
-# inside the decorated function skips packing entirely and re-transfers from RAM
-# on every cold worker.
-if WILL_USE_GPU:
+# call and registers every tensor; it packs them to disk at demo.launch(). Doing
+# it lazily inside the decorated function skips packing entirely and
+# re-transfers from RAM on every cold worker. MPS/CPU build lazily, on the
+# first Generate, through the same resolved device.
+if DEVICE.device == "cuda":
     pipelines.get_pipeline(pipeline="condition", device="cuda")
     pipelines.get_pipeline(pipeline="text2video", device="cuda")
 
@@ -133,7 +133,7 @@ _GPU_KWARGS = zerogpu.gpu_decorator_kwargs(
     duration=zerogpu.estimate_duration,
     size=None if CONFIG.zerogpu_size == "auto" else CONFIG.zerogpu_size,
 )
-_log.info("spaces.GPU kwargs: %s", sorted(_GPU_KWARGS))
+_log.info("spaces.GPU: %s", zerogpu.describe_gpu_kwargs(_GPU_KWARGS, CONFIG))
 
 
 # Bound at import, deliberately: the entrypoint must call the real generate, not
@@ -150,10 +150,14 @@ def run_generation(**params):
     Never returns a CUDA tensor: unpickling one in the main process triggers a
     blocked lazy CUDA init and the call **hangs** with no error at all, which is
     the worst failure shape available to us.
+
+    Refuses first, typed and before any load, on a machine with no generation
+    device or an MPS torch that failed its self-test. Free on CUDA.
     """
+    DEVICE.require_generation(injected=params.get("pipeline_factory") is not None)
     token = generate_module._IN_GPU_WORKER.set(True)
     try:
-        return zerogpu.assert_returnable(_GENERATE(**params))
+        return zerogpu.assert_returnable(DEVICE.annotate(_GENERATE(**params)))
     finally:
         generate_module._IN_GPU_WORKER.reset(token)
 

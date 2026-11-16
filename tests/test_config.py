@@ -7,6 +7,11 @@ were removed the same way.
 
 The quantization lever below is the counter-example — it is real, it changes
 output, and it exists because bf16 does not fit ZeroGPU's disk.
+
+**The defaults must work with no Space variable set.** A duplicated Space, or
+this one after its variables are cleared, runs on the defaults alone; until
+2026-11 those were a half-size GPU, a 60 s reservation and a bf16 load that
+does not fit the platform's disk cap.
 """
 
 from __future__ import annotations
@@ -14,6 +19,29 @@ from __future__ import annotations
 import pytest
 
 from ltx25_studio import config
+
+# --------------------------------------------------------------------------
+# defaults that work without a Space variable
+# --------------------------------------------------------------------------
+
+
+def test_the_default_zerogpu_size_is_xlarge():
+    """``auto`` sends no ``size`` and the scheduler then grants ``large`` --
+    47.4 GiB measured, half of xlarge. ZeroGPU does not promote by itself."""
+    assert config.load_config().zerogpu_size == "xlarge"
+
+
+@pytest.mark.parametrize("value", ["auto", "large", "xlarge"])
+def test_every_size_stays_selectable(monkeypatch, value):
+    monkeypatch.setenv(config.ENV_ZEROGPU_SIZE, value)
+
+    assert config.load_config().zerogpu_size == value
+
+
+def test_the_default_reservation_is_the_working_one():
+    """The Space has run 180 s by variable since August; 60 under-reserves."""
+    assert config.load_config().gpu_duration_seconds == 180
+
 
 # --------------------------------------------------------------------------
 # the quantization lever
@@ -25,14 +53,17 @@ from ltx25_studio import config
 # --------------------------------------------------------------------------
 
 
-def test_the_default_is_bf16_the_baseline_everything_was_measured_against():
-    assert config.load_config().quantization == "bf16"
+def test_the_default_quantization_is_auto():
+    """``auto`` is int8 on ZeroGPU and bf16 everywhere else; the resolution is
+    pinned in ``test_device_path.py`` where the device is known."""
+    assert config.load_config().quantization == "auto"
 
 
-def test_int8_is_selectable(monkeypatch):
-    monkeypatch.setenv(config.ENV_QUANTIZATION, "int8")
+@pytest.mark.parametrize("value", ["bf16", "int8"])
+def test_an_explicit_precision_is_honoured(monkeypatch, value):
+    monkeypatch.setenv(config.ENV_QUANTIZATION, value)
 
-    assert config.load_config().quantization == "int8"
+    assert config.load_config().quantization == value
 
 
 def test_an_unrecognised_precision_is_refused_rather_than_defaulted(monkeypatch):
@@ -52,3 +83,99 @@ def test_an_unrecognised_precision_is_refused_rather_than_defaulted(monkeypatch)
 # `test_bound_b_is_expressed_as_an_argument` asserts it behaviourally instead.
 # A source-text test earns its place only while the thing it checks has no
 # observable form; this one stopped earning it the moment the API gave it one.
+
+
+# --------------------------------------------------------------------------
+# the device levers
+# --------------------------------------------------------------------------
+
+
+def test_the_device_defaults_to_auto():
+    assert config.load_config().device == "auto"
+
+
+@pytest.mark.parametrize("value", ["auto", "cuda", "mps", "cpu"])
+def test_every_device_is_selectable(monkeypatch, value):
+    monkeypatch.setenv(config.ENV_DEVICE, value)
+
+    assert config.load_config().device == value
+
+
+def test_an_unknown_device_is_refused(monkeypatch):
+    monkeypatch.setenv(config.ENV_DEVICE, "rocm")
+
+    with pytest.raises(config.ConfigError) as excinfo:
+        config.load_config()
+    assert "rocm" in str(excinfo.value) and config.ENV_DEVICE in str(excinfo.value)
+
+
+def test_the_cpu_precision_defaults_to_fp32_the_reference(monkeypatch):
+    assert config.load_config().cpu_dtype == "fp32"
+    monkeypatch.setenv(config.ENV_CPU_DTYPE, "bf16")
+    assert config.load_config().cpu_dtype == "bf16"
+    monkeypatch.setenv(config.ENV_CPU_DTYPE, "fp16")
+    with pytest.raises(config.ConfigError):
+        config.load_config()
+
+
+def test_the_mps_self_test_is_enforced_by_default(monkeypatch):
+    assert config.load_config().mps_self_test == "enforce"
+    monkeypatch.setenv(config.ENV_MPS_SELF_TEST, "warn")
+    assert config.load_config().mps_self_test == "warn"
+    monkeypatch.setenv(config.ENV_MPS_SELF_TEST, "off")
+    with pytest.raises(config.ConfigError):
+        config.load_config()
+
+
+# --------------------------------------------------------------------------
+# the model-source override: optional, and validated loudly
+# --------------------------------------------------------------------------
+
+
+def test_no_snapshot_override_by_default():
+    assert config.load_config().model_snapshot_dir is None
+
+
+def test_a_snapshot_override_must_exist(monkeypatch, tmp_path):
+    monkeypatch.setenv(config.ENV_MODEL_SNAPSHOT_DIR, str(tmp_path / "nowhere"))
+
+    with pytest.raises(config.ConfigError) as excinfo:
+        config.load_config()
+    assert config.ENV_MODEL_SNAPSHOT_DIR in str(excinfo.value)
+
+
+def test_a_snapshot_override_must_be_a_diffusers_layout(monkeypatch, tmp_path):
+    """A directory with no ``model_index.json`` is not a pipeline snapshot, and
+    finding that out at the first Generate is the late failure §5 forbids."""
+    monkeypatch.setenv(config.ENV_MODEL_SNAPSHOT_DIR, str(tmp_path))
+
+    with pytest.raises(config.ConfigError) as excinfo:
+        config.load_config()
+    assert "model_index.json" in str(excinfo.value)
+
+
+def test_a_valid_snapshot_override_is_resolved(monkeypatch, tmp_path):
+    (tmp_path / "model_index.json").write_text("{}")
+    monkeypatch.setenv(config.ENV_MODEL_SNAPSHOT_DIR, str(tmp_path))
+
+    assert config.load_config().model_snapshot_dir == str(tmp_path.resolve())
+
+
+# --------------------------------------------------------------------------
+# the one-line summary says what is running
+# --------------------------------------------------------------------------
+
+
+def test_describe_names_the_quantisation_and_the_device(monkeypatch):
+    """The live Space printed ``expected_weights=72.19GB`` on an int8 container
+    and never the precision: the summary must name both levers it depends on."""
+    monkeypatch.setenv(config.ENV_QUANTIZATION, "int8")
+    monkeypatch.setenv(config.ENV_DEVICE, "cpu")
+
+    line = config.load_config().describe()
+
+    assert "quantization=int8" in line, line
+    assert "device=cpu" in line, line
+    assert "expected_weights" not in line, (
+        f"72.19 GB is the download, not what an int8 load holds: {line}"
+    )

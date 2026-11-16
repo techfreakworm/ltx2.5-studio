@@ -336,14 +336,29 @@ def test_the_startup_report_is_a_non_empty_string(runtime_config):
     )
 
 
-def test_the_startup_report_names_the_resolved_precision(runtime_config):
+@pytest.mark.parametrize("quantization", ["bf16", "int8"])
+def test_the_startup_report_names_the_resolved_precision(monkeypatch, quantization):
     """ "So the running configuration is never inferred."
 
     A report that omits the precision leaves the single most expensive
     configuration question — what dtype are we actually running — to guesswork.
+    It used to print a fixed ``bf16`` whatever was configured; the live int8
+    Space said ``bf16 (fixed; no precision switch)``.
     """
-    report = pipelines.startup_report(runtime_config)
-    assert "bf16" in report, f"the report does not state the resolved precision:\n\n{report}"
+    from ltx25_studio import config, device, zerogpu
+
+    monkeypatch.setenv(config.ENV_QUANTIZATION, quantization)
+    monkeypatch.setattr(zerogpu, "host_has_cuda", lambda: True)
+    runtime_config = config.load_config()
+    resolution = device.resolve(None, runtime_config)
+
+    report = pipelines.startup_report(runtime_config, missing_files=(), resolution=resolution)
+
+    line = next((row for row in report.splitlines() if "precision" in row), "")
+    assert line.split(":", 1)[1].strip().startswith(quantization), (
+        f"the report does not state the resolved precision:\n\n{report}"
+    )
+    assert "no precision switch" not in report
 
 
 def test_the_startup_report_names_the_files_that_are_missing(runtime_config):
@@ -366,7 +381,7 @@ def test_the_startup_report_survives_being_given_nothing(runtime_config):
     being built converts a diagnosable failure into an undiagnosable one.
     """
     report = pipelines.startup_report(
-        runtime_config, cached_files=None, missing_files=(), gpu_size=None
+        runtime_config, cached_files=None, missing_files=(), resolution=None
     )
     assert report.strip()
 
@@ -789,6 +804,7 @@ def install_fake_stack(monkeypatch, snapshot, **classes):
 
     torch = types.ModuleType("torch")
     torch.bfloat16 = "bfloat16"
+    torch.float32 = "float32"
     monkeypatch.setitem(sys.modules, "torch", torch)
 
     made = {}
@@ -932,7 +948,7 @@ def test_getting_a_pipeline_does_not_build_the_stage_2_parts(tmp_path, monkeypat
     snapshot.mkdir(parents=True)
     recorders = install_fake_stack(monkeypatch, snapshot)
 
-    pipelines.get_pipeline()
+    pipelines.get_pipeline(device="cpu")
 
     for name in ("LTX2LatentUpsamplerModel", "LTX2VideoDiffusionDecoderModel"):
         assert not recorders[name].calls, (
@@ -1165,9 +1181,10 @@ def test_the_dtype_is_still_sent_when_quantising(monkeypatch, tmp_path):
     """The a14ebe8 lesson: an omitted dtype is not a neutral omission."""
     sent, _recorders = _loaded(monkeypatch, tmp_path, "int8")
 
-    assert sent.get("torch_dtype") is not None, (
-        "quantising dropped torch_dtype; diffusers then resolves it to float32"
+    assert sent.get("dtype") is not None, (
+        "quantising dropped the dtype; diffusers then resolves it to float32"
     )
+    assert "torch_dtype" not in sent, "the pinned diffusers deprecates torch_dtype for dtype"
 
 
 def test_the_load_still_comes_from_the_local_snapshot_when_quantising(monkeypatch, tmp_path):
@@ -1557,27 +1574,39 @@ def test_the_footprint_says_it_is_a_floor(monkeypatch):
     )
 
 
-def test_the_footprint_is_reported_at_both_phases():
-    """Before packing answers 'is there room?'; after answers 'did we fit?'."""
-    assert "[before packing]" in pipelines.disk_footprint()
-    assert "[after packing]" in pipelines.disk_footprint(phase="after packing")
+def test_no_footprint_line_is_labelled_as_a_post_pack_measurement():
+    """ZeroGPU packs at ``demo.launch()`` (spaces ``startup()`` -> ``pack()``),
+    not inside ``.to(device)``: the old "after packing" line read an empty
+    offload directory six seconds before the platform began packing, and
+    printed ``packed 0.0`` under a label that said the opposite."""
+    import re
+
+    assert "after packing" not in pipelines.disk_footprint()
+    phases = re.findall(r'disk_footprint\(phase="([^"]*)"\)', inspect.getsource(pipelines))
+    assert phases, "the second footprint line is gone"
+    assert all("after packing" not in phase and "before launch" in phase for phase in phases), (
+        phases
+    )
+    assert "before launch" in pipelines.disk_footprint()
 
 
-def test_the_after_packing_report_comes_after_the_device_move():
-    """ZeroGPU packs inside `.to(device)`, so reporting before it would print
-    'after packing' over a measurement taken before any packing happened.
+def test_an_empty_packed_copy_is_not_printed_as_a_measurement(monkeypatch):
+    monkeypatch.setattr(pipelines, "_directory_bytes", lambda path: 0)
 
-    A mislabelled report is the defect this check exists to remove, and the
-    first version of it had exactly that bug.
-    """
+    line = pipelines.disk_footprint()
+
+    assert "packed 0.0" not in line, line
+    assert "not written yet" in line, line
+
+
+def test_the_second_footprint_still_comes_after_the_device_move():
+    """It answers "what does the disk hold once the base has moved" -- a real,
+    pre-launch question -- and its label says exactly that."""
     source = inspect.getsource(pipelines._base_pipeline)
     move = source.index("built.to(device)")
-    report = source.index('disk_footprint(phase="after packing")')
+    report = source.index("disk_footprint(phase=")
 
-    assert move < report, (
-        "the after-packing footprint is reported before .to(device), which is "
-        "where ZeroGPU packs. The label would be false."
-    )
+    assert move < report
 
 
 def test_the_cap_is_one_constant_not_a_number_in_four_docstrings():

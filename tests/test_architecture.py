@@ -147,6 +147,7 @@ def test_handlers_hold_no_business_logic():
 
 EXPECTED_MODULES = (
     "config.py",
+    "device.py",
     "model_files.py",
     "errors.py",
     "constraints.py",

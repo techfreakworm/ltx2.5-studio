@@ -45,6 +45,7 @@ __all__ = [
     "EXPECTED_DIFFUSERS_VERSION",
     "cache_repo_dir",
     "snapshot_dir",
+    "snapshot_override",
     "check_diffusers_version",
     "missing_cached_files",
     "ensure_weights",
@@ -126,26 +127,36 @@ def ensure_weights(
     return tuple(fetched)
 
 
-def run(runtime_config, *, strict: bool = False, spaces_module=None) -> str:
-    """Log the startup report, and hard-check the environment when on a Space.
+def run(runtime_config, *, strict: bool = False, spaces_module=None, resolution=None) -> str:
+    """Log the startup report, and hard-check the environment when about to generate.
 
     ``strict`` gates the checks that only make sense with real weights present:
-    the pinned-revision assertion and cache completeness. Off-Space they would
-    fail every local run for no reason; on-Space they are the difference between
-    an immediate, named failure and one that surfaces 70 GB into a download.
+    the pinned-revision assertion and cache completeness. A UI-only machine gets
+    the report alone; a machine that will generate gets a named failure now
+    instead of one 70 GB into a download.
+
+    ``resolution`` is the ``device.DeviceResolution`` app.py resolved; the MPS
+    self-test result is reported when that device is ``mps``.
     """
     import logging
 
-    from . import pipelines
+    from . import pipelines, zerogpu
 
     log = logging.getLogger("ltx25_studio")
     missing = missing_cached_files()
+    self_test = None
+    if resolution is not None and resolution.device == "mps":
+        from . import device
+
+        self_test = device.mps_self_test()
     log.info(
         "%s",
         pipelines.startup_report(
             runtime_config,
             missing_files=missing,
-            gpu_size=getattr(spaces_module, "__version__", None) and "pending pack",
+            resolution=resolution,
+            spaces_version=zerogpu.spaces_version(spaces_module),
+            mps_self_test=self_test,
         ),
     )
     if not strict:
@@ -185,11 +196,22 @@ def cache_repo_dir(hub_cache: str | os.PathLike[str] | None = None) -> Path:
     return root / f"models--{model_files.REPO_ID.replace('/', '--')}"
 
 
+def snapshot_override() -> Path | None:
+    """``LTX25_MODEL_SNAPSHOT_DIR``, validated, or None when unset."""
+    from .config import load_config
+
+    override = load_config().model_snapshot_dir
+    return Path(override) if override else None
+
+
 def snapshot_dir(
     hub_cache: str | os.PathLike[str] | None = None,
     revision: str | None = None,
 ) -> Path:
     """The local snapshot directory for the pinned revision.
+
+    ``LTX25_MODEL_SNAPSHOT_DIR`` replaces it when set and no explicit cache or
+    revision is asked for (tests and local work on another checkpoint).
 
     **Construct every pipeline from this path, never from the repo id.** Passing
     the repo id sends ``from_pretrained`` through hub resolution, which fetches
@@ -211,15 +233,44 @@ def snapshot_dir(
     manifest, and every load afterwards behaves differently. **Depending on the
     absence of a cache metadata file is not a design.**
     """
+    if hub_cache is None and revision is None:
+        override = snapshot_override()
+        if override is not None:
+            return override
     return cache_repo_dir(hub_cache) / "snapshots" / (revision or model_files.REVISION)
+
+
+def _declared_components(snapshot: Path) -> tuple[str, ...]:
+    """Components an override snapshot's ``model_index.json`` says it has."""
+    import json
+
+    index = json.loads((snapshot / "model_index.json").read_text())
+    return tuple(
+        name
+        for name, value in index.items()
+        if not name.startswith("_")
+        and isinstance(value, list)
+        and len(value) == 2
+        and value[1] is not None
+    )
 
 
 def missing_cached_files(
     hub_cache: str | os.PathLike[str] | None = None,
     revision: str | None = None,
 ) -> tuple[str, ...]:
-    """Allow-list paths that are not present in the cache snapshot."""
+    """Allow-list paths that are not present in the cache snapshot.
+
+    With ``LTX25_MODEL_SNAPSHOT_DIR`` set, the components that directory's own
+    ``model_index.json`` declares and that are absent or empty instead.
+    """
     snapshot = snapshot_dir(hub_cache, revision)
+    if hub_cache is None and revision is None and snapshot_override() is not None:
+        return tuple(
+            name
+            for name in _declared_components(snapshot)
+            if not (snapshot / name).is_dir() or not any((snapshot / name).iterdir())
+        )
     return tuple(
         path for path in model_files.download_allow_list() if not (snapshot / path).exists()
     )
@@ -238,6 +289,12 @@ def require_cache_complete(
     missing = missing_cached_files(hub_cache, revision)
     if not missing:
         return
+    override = snapshot_override() if hub_cache is None and revision is None else None
+    if override is not None:
+        raise MissingModelFileError(
+            filename=f"{missing[0]}/ ({len(missing)} declared component(s) missing)",
+            url=str(override / missing[0]),
+        )
     first = missing[0]
     url = (
         f"{model_files.HUB_BASE_URL}/{model_files.REPO_ID}/blob/"

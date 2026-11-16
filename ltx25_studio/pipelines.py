@@ -4,9 +4,11 @@ PLAN §7.4, §8, §5.5.
 
 **Placement (§8).** ZeroGPU replaces CPU offload with its own O_DIRECT
 disk-packing engine. The correct pattern inverts normal GPU-box practice: build
-on CPU, call ``.to("cuda")`` at module scope -- where it is intercepted,
-rewritten to ``.to("cpu")`` and every tensor is packed to disk -- and apply
-``@spaces.GPU`` statically at import. ``enable_model_cpu_offload()`` is
+on CPU, call ``.to("cuda")`` at module scope -- where it is intercepted and each
+tensor is registered for packing; the platform writes the packed copy at
+``demo.launch()`` -- and apply ``@spaces.GPU`` statically at import. Off CUDA
+(``LTX25_DEVICE=mps|cpu``) the same build moves to that device; see
+``device.py`` for what each device needs. ``enable_model_cpu_offload()`` is
 **counterproductive** here and must not be used: anything accelerate parks on
 CPU is never registered for packing, so it stays resident in main-process RAM
 (our tightest budget), is fork-inherited by every worker, and is re-copied
@@ -93,11 +95,9 @@ __all__ = [
 #: Mandatory. See the module docstring -- the default silently corrupts output.
 DIFFUSION_DECODE_DENORMALIZE = False
 
-#: The dtype every component loads at, and its short label for the log.
-#: **Not configurable.** A precision variable existed, was wired to nothing, and
-#: reported a footprint nobody was loading (PLAN §2.6). Fixed here so the value
-#: the loader uses and the value the startup report prints cannot disagree --
-#: which is the whole reason the report states it at all.
+#: The checkpoint's dtype and the load dtype on CUDA and MPS. int8 is applied on
+#: top of it to ``QUANTIZED_COMPONENTS`` (``LTX25_QUANTIZATION``); a CPU load
+#: may use float32 (``LTX25_CPU_DTYPE``). ``device.resolve`` decides per device.
 WEIGHT_DTYPE = "bfloat16"
 WEIGHT_DTYPE_LABEL = "bf16"
 
@@ -739,10 +739,14 @@ def _base_pipeline(*, dtype=None, device: str | None = None, quantization: str |
     if _BASE_CACHE_KEY in _CACHE:
         return _CACHE[_BASE_CACHE_KEY]
 
-    if quantization is None:
-        from .config import load_config
+    from . import device as device_module
 
-        quantization = load_config().quantization
+    if quantization is None:
+        quantization = device_module.quantization_for(device)
+    if device == "mps":
+        # Before any weight is read: a torch that computes wrong results on this
+        # GPU must refuse here, not after a load (enforce), or say so (warn).
+        device_module.require_mps_numerics()
 
     try:
         import torch
@@ -757,7 +761,7 @@ def _base_pipeline(*, dtype=None, device: str | None = None, quantization: str |
         ) from exc
 
     try:
-        # ⚠️ `torch_dtype` MUST match the checkpoint's on-disk dtype. It is not a
+        # ⚠️ The load `dtype` MUST match the checkpoint's on-disk dtype. It is not a
         # free parameter, and the reason is invisible from here.
         #
         # ZeroGPU frees the 72 GB HF snapshot after packing, but only by reading
@@ -770,9 +774,11 @@ def _base_pipeline(*, dtype=None, device: str | None = None, quantization: str |
         #
         # The checkpoint is bf16 and WEIGHT_DTYPE is bfloat16, so this is a
         # no-op load rather than a conversion. Do not "helpfully" add a cast.
+        # (A CPU load at float32 is a deliberate cast; ZeroGPU never sees one.)
         before = peak_rss_gib()
         quantization_config = _quantization_config(quantization)
-        load_kwargs = {"torch_dtype": dtype or getattr(torch, WEIGHT_DTYPE)}
+        weight_dtype = dtype or getattr(torch, device_module.weight_dtype_for(device))
+        load_kwargs = {"dtype": weight_dtype}
         if quantization_config is not None:
             # Covers `QUANTIZED_COMPONENTS` -- see `_quantization_config`.
             load_kwargs["quantization_config"] = quantization_config
@@ -800,7 +806,7 @@ def _base_pipeline(*, dtype=None, device: str | None = None, quantization: str |
         if quantization_config is not None:
             what = f"quantised {', '.join(QUANTIZED_COMPONENTS)} as {quantization}"
         else:
-            what = f"no components quantised; all at {WEIGHT_DTYPE_LABEL}"
+            what = f"no components quantised; all at {_dtype_label(weight_dtype)}"
         _log().info(
             "%s | peak RSS %.2f -> %.2f GiB",
             what,
@@ -822,25 +828,26 @@ def _base_pipeline(*, dtype=None, device: str | None = None, quantization: str |
     # raise, but a wrong raise here bricks a working Space at startup;
     # promotion to ModelLoadError is a separate decision, to be taken after
     # reading these lines from a live boot -- not a default smuggled in with
-    # the wiring. Runs BEFORE the device move because packing happens inside
-    # `.to(device)`: this is the last moment the precondition can be seen.
+    # the wiring. Runs BEFORE the device move: on ZeroGPU, after `.to(device)`
+    # `named_parameters()` returns the platform's fakes, not the mmap'd tensors.
     for checked, offending, message in mmap_backing_report(built):
         (_log().warning if offending else _log().info)("%s%s", "" if checked else "⚠️ ", message)
 
+    if device == "mps":
+        # MPS has no float64; the RoPE frequency grid is float64 by config.
+        # Computed on the CPU at that precision, as CUDA computes it.
+        handled = device_module.compute_rope_on_cpu(*_parameter_bearing_components(built))
+        _log().info("RoPE computed on the CPU in float64 for %d modules", len(handled))
+
     if device:
-        # ZeroGPU intercepts this, rewrites it to .to("cpu") and packs every
-        # tensor to disk -- which is why it must happen at module scope, not
-        # lazily inside a @spaces.GPU function. Doing it there skips packing
-        # entirely and re-transfers from RAM on every cold worker. Only the base
-        # is moved: everything else shares these very modules.
+        # On ZeroGPU this is intercepted at module scope and each tensor is
+        # registered for packing; the packed copy is written at demo.launch().
+        # Doing it lazily inside a @spaces.GPU function skips packing and
+        # re-transfers from RAM on every cold worker. Only the base is moved:
+        # everything else shares these very modules.
         built.to(device)
-        # The second reporting point, and it must be HERE. ZeroGPU intercepts
-        # `.to(device)` and packs every tensor to disk inside that call, so this
-        # is the first moment the packed copy exists. Reporting it before the
-        # move would print "after packing" over a measurement taken before any
-        # packing happened -- a mislabelled report, which is the defect this
-        # whole check exists to remove.
-        _log().info("disk %s", disk_footprint(phase="after packing"))
+        # A pre-launch reading, labelled as one: nothing has been packed yet.
+        _log().info("disk %s", disk_footprint(phase="after the device move, before launch"))
 
     vae = getattr(built, "vae", None)
     if vae is not None:
@@ -865,9 +872,14 @@ def _stage_2_parts(base, *, dtype=None, device: str | None = None):
     Both stage-2 pipelines are thin wrappers: the upsampler shares the base's
     ``vae`` and the decoder shares its ``scheduler``, so the only new weights are
     the two model checkpoints themselves.
+
+    Off CUDA the decoder keeps its default FlexAttention processor and stays on
+    the CPU: NATTEN has no macOS build and FlexAttention refuses MPS tensors.
+    That path is dense, so ``device.check_stage_2_size`` bounds it.
     """
     if _STAGE_2_CACHE_KEY in _CACHE:
         return _CACHE[_STAGE_2_CACHE_KEY]
+    from . import device as device_module
 
     try:
         import torch
@@ -891,7 +903,8 @@ def _stage_2_parts(base, *, dtype=None, device: str | None = None):
 
     # Same rule as the base load, and the same reason: the checkpoints are bf16,
     # so this is a no-op rather than a conversion. See `_base_pipeline`.
-    weight_dtype = dtype or getattr(torch, WEIGHT_DTYPE)
+    weight_dtype = dtype or getattr(torch, device_module.weight_dtype_for(device))
+    on_cuda = device in (None, "cuda")
 
     def _load(cls, component):
         spec = model_files.get_component(component)
@@ -899,7 +912,7 @@ def _stage_2_parts(base, *, dtype=None, device: str | None = None):
             return cls.from_pretrained(
                 _snapshot_path(),
                 subfolder=spec.subfolder,
-                torch_dtype=weight_dtype,
+                dtype=weight_dtype,
             )
         except Exception as exc:
             raise ModelLoadError(component=component, reason=str(exc)) from exc
@@ -922,7 +935,8 @@ def _stage_2_parts(base, *, dtype=None, device: str | None = None):
     #     when the kernel files are already cached.
     #   * `DIFFUSERS_DISABLE_REMOTE_CODE` set in the environment makes this raise.
     # Constructing it lazily is what keeps both of those out of app startup.
-    decoder_model.set_attn_processor(LTX2VideoVaeNeighborhoodNattenProcessor())
+    if on_cuda:
+        decoder_model.set_attn_processor(LTX2VideoVaeNeighborhoodNattenProcessor())
     # Tiling bounds peak memory by the tile size rather than by the video size.
     decoder_model.enable_tiling()
 
@@ -931,7 +945,8 @@ def _stage_2_parts(base, *, dtype=None, device: str | None = None):
         # `.to(device)` does not reach them. Without this the stage-2 path dies
         # on a CPU/CUDA mismatch the first time anyone ticks the box.
         upsampler_model.to(device)
-        decoder_model.to(device)
+        # Off CUDA the decoder stays on the CPU (FlexAttention refuses MPS).
+        decoder_model.to(device if on_cuda else "cpu")
 
     upsampler = LTX2LatentUpsamplePipeline(vae=base.vae, latent_upsampler=upsampler_model)
     # `vae` is deliberately omitted: it is optional here and consulted only to
@@ -946,9 +961,19 @@ def _stage_2_parts(base, *, dtype=None, device: str | None = None):
 
 
 def get_pipeline(*, pipeline: str = BASE_KIND, dtype=None, device: str | None = None):
-    """The runner for one workflow, sharing one loaded copy of the model."""
+    """The runner for one workflow, sharing one loaded copy of the model.
+
+    With no ``device`` the process's resolved device is used, and a machine with
+    no generation device (or an MPS torch that fails its self-test) is refused
+    before anything is loaded -- never a silent full load on the CPU.
+    """
     if pipeline in _CACHE:
         return _CACHE[pipeline]
+
+    if device is None:
+        from . import device as device_module
+
+        device = device_module.current().require_generation()
 
     base = _base_pipeline(dtype=dtype, device=device)
     if pipeline == BASE_KIND:
@@ -966,6 +991,7 @@ def get_pipeline(*, pipeline: str = BASE_KIND, dtype=None, device: str | None = 
     runner = StageRunner(
         built,
         kind=pipeline,
+        device=device,
         stage_2_factory=lambda: _stage_2_parts(base, dtype=dtype, device=device),
     )
     _CACHE[pipeline] = runner
@@ -1173,11 +1199,15 @@ class StageRunner:
     wrong and the run still succeeds and still returns a video.
     """
 
-    def __init__(self, pipeline, *, kind, upsampler=None, decoder=None, stage_2_factory=None):
+    def __init__(
+        self, pipeline, *, kind, upsampler=None, decoder=None, stage_2_factory=None, device=None
+    ):
         self.pipeline = pipeline
         self.kind = kind
         self.upsampler = upsampler
         self.decoder = decoder
+        #: The generation device; off CUDA the diffusion decoder runs on the CPU.
+        self.device = device
         #: Built on the first stage-2 request, never at construction. The parts
         #: are ~2.1 GB of weights AND a NATTEN kernel resolved over the network,
         #: and eight of the eleven modes never touch them. Building eagerly
@@ -1222,6 +1252,11 @@ class StageRunner:
             # the stage-2 path, which is how eleven of twelve host runs were
             # generated with a linear schedule and SFT guidance.
             return self.pipeline(**kwargs, **distilled_kwargs(), **_sampling_kwargs(progress))
+        from . import device as device_module
+
+        device_module.check_stage_2_size(
+            self.device, kwargs.get("width"), kwargs.get("height"), _frames_upper_bound(kwargs)
+        )
         self._stage_2_ready()
 
         stage_1 = self.pipeline(
@@ -1237,9 +1272,10 @@ class StageRunner:
         )
         if progress is not None:
             progress.decoding()
-        decoded = self.decoder(
-            **decode_kwargs(_latents_of(stage_2), generator=kwargs.get("generator"))
-        )
+        latents, generator = _latents_of(stage_2), kwargs.get("generator")
+        if self.device == "mps":
+            latents, generator = _for_the_cpu_decoder(latents, generator)
+        decoded = self.decoder(**decode_kwargs(latents, generator=generator))
         return self._with_audio(decoded, stage_2)
 
     def _with_audio(self, decoded, stage_2):
@@ -1285,6 +1321,28 @@ class StageRunner:
         # default local gate. A branch that cannot be exercised offline is how
         # the audio came to be dropped in the first place.
         return type(stage_2)(frames=_latents_of(decoded), audio=audio)
+
+
+def _frames_upper_bound(kwargs) -> int:
+    """``num_frames``, or the most the duration head may choose when it is unset."""
+    if kwargs.get("num_frames"):
+        return int(kwargs["num_frames"])
+    seconds = float(kwargs.get("max_seconds") or 0)
+    rate = float(kwargs.get("frame_rate") or DEFAULT_FRAME_RATE)
+    return int(seconds * rate) + 1
+
+
+def _for_the_cpu_decoder(latents, generator):
+    """MPS latents and generator, made usable by the decoder on the CPU.
+
+    The CPU generator is seeded from the run's own seed, so a decode stays
+    reproducible: an MPS generator cannot seed a CPU ``randn``.
+    """
+    import torch
+
+    if getattr(generator, "device", None) is not None and generator.device.type != "cpu":
+        generator = torch.Generator(device="cpu").manual_seed(generator.initial_seed())
+    return latents.to("cpu"), generator
 
 
 def _sampling_kwargs(progress, *, index: int = 1, passes: int = 1) -> dict:
@@ -1405,7 +1463,24 @@ def _directory_bytes(path) -> int:
     return total
 
 
-def disk_footprint(*, phase: str = "before packing") -> str:
+def _snapshot_bytes() -> int:
+    """Bytes of the snapshot weights load from, following its symlinks."""
+    from . import preflight
+
+    override = preflight.snapshot_override()
+    if override is None:
+        return _directory_bytes(preflight.cache_repo_dir())
+    total = 0
+    for root, _dirs, files in os.walk(override, followlinks=True):
+        for name in files:
+            try:
+                total += os.stat(os.path.join(root, name)).st_size
+            except OSError:
+                continue
+    return total
+
+
+def disk_footprint(*, phase: str = "at startup, before launch") -> str:
     """**What we consume against the cap** — and it is a floor, which it says.
 
     ⚠️ ``shutil.disk_usage(".")`` was here and could never see the constraint.
@@ -1425,31 +1500,63 @@ def disk_footprint(*, phase: str = "before packing") -> str:
     survived two evictions: it looked like a total. *A floor that declares
     itself is useful; a floor that does not is worse than nothing.*
 
-    Reported at two points because they answer different questions:
-
-    * **before packing** — is there room to pack? This is the report that would
-      have predicted both evictions *before* they happened.
-    * **after packing** — did we fit, and by how much? This is where the
-      53.197 GB packed prediction gets tested from inside rather than inferred.
+    Both readings are taken before ``demo.launch()``, which is when ZeroGPU
+    writes the packed copy, and are labelled so: at startup, and after the base
+    has moved to its device. An empty packed directory is reported as "not
+    written yet", never as a measured ``0.0``.
     """
-    from . import preflight
-
-    snapshot = _directory_bytes(preflight.cache_repo_dir()) / 1e9
+    snapshot = _snapshot_bytes() / 1e9
     packed_dir = os.environ.get("ZEROGPU_OFFLOAD_DIR") or os.path.expanduser("~/.zerogpu/tensors")
-    packed = _directory_bytes(packed_dir) / 1e9
+    packed_bytes = _directory_bytes(packed_dir)
+    packed = packed_bytes / 1e9
+    packed_text = (
+        f"packed {packed:.1f}"
+        if packed_bytes
+        else "packed copy not written yet (ZeroGPU writes it at launch)"
+    )
     measured = snapshot + packed
     remaining = ZEROGPU_DISK_CAP_GB - measured
     verdict = "OVER" if measured + IMAGE_FOOTPRINT_GB > ZEROGPU_DISK_CAP_GB else "OK"
     return (
         f"[{phase}] {measured:.1f} GB measured of {ZEROGPU_DISK_CAP_GB:.0f} GB cap "
-        f"[{verdict}] = snapshot {snapshot:.1f} + packed {packed:.1f}; "
+        f"[{verdict}] = snapshot {snapshot:.1f} + {packed_text}; "
         f"{remaining:.1f} GB left for the image (~{IMAGE_FOOTPRINT_GB:.0f} GB, "
         f"NOT measurable from inside) and anything else. "
         f"**Measured is a FLOOR, not the total.**"
     )
 
 
-def startup_report(runtime_config, *, cached_files=None, missing_files=None, gpu_size=None) -> str:
+def _dtype_label(dtype) -> str:
+    name = str(dtype).removeprefix("torch.")
+    return {"bfloat16": "bf16", "float32": "fp32", "float16": "fp16"}.get(name, name)
+
+
+def precision_summary(resolution) -> str:
+    """What each component is loaded as, from the resolved configuration."""
+    if resolution is None:
+        return "unknown (no device resolved)"
+    base = _dtype_label(resolution.weight_dtype)
+    if resolution.device is None:
+        return f"not loaded (UI only); a load here would be {base}"
+    if resolution.quantization == "int8":
+        return (
+            f"int8 for {', '.join(QUANTIZED_COMPONENTS)} (bitsandbytes LLM.int8; the "
+            f"transformer keeps its conditioning, projection and gate Linears bf16 via "
+            f"{len(TRANSFORMER_INT8_SKIP_MODULES)} skip patterns); {base} for every other "
+            f"component"
+        )
+    return f"{base} for every component on {resolution.device}"
+
+
+def startup_report(
+    runtime_config,
+    *,
+    cached_files=None,
+    missing_files=None,
+    resolution=None,
+    spaces_version=None,
+    mps_self_test=None,
+) -> str:
     """The lines we will be reading at a distance when something goes wrong.
 
     Deliberately verbose. When R1 fails on a metered Space behind a 72 GB build,
@@ -1457,12 +1564,13 @@ def startup_report(runtime_config, *, cached_files=None, missing_files=None, gpu
     burning several -- and there is no opportunity to add a print statement
     afterwards.
 
-    Reports the resolved precision and expected footprint (so the running
-    configuration is never inferred), the measured RAM and disk (so an eviction
-    or an OOM has numbers attached), **how many of the expected files were found
-    in cache** (so "preload worked" is distinguishable from "preload silently did
-    nothing"), and the ZeroGPU size actually obtained after packing (so the 2x
-    quota cost is visible rather than assumed).
+    Reports the resolved device and precision (so the running configuration is
+    never inferred), the snapshot on disk and the measured disk floor, **how many
+    of the expected files were found in cache**, the ZeroGPU size requested and
+    the reservation, and the installed ``spaces``. The packed copy and the
+    granted GPU slice cannot be known here: the platform packs at launch and
+    the worker measures the slice on each run, and the report says so rather
+    than printing a number nobody measured.
     """
 
     # `missing_files=None` means "go and look", NOT "nothing is missing". The
@@ -1476,28 +1584,55 @@ def startup_report(runtime_config, *, cached_files=None, missing_files=None, gpu
 
         missing_files = preflight.missing_cached_files()
 
-    expected_files = len(model_files.download_allow_list())
+    from . import preflight
+    from .zerogpu import ENHANCE_DURATION_SECONDS, LORA_DURATION_SECONDS
+
+    override = preflight.snapshot_override()
+    if override is None:
+        expected_files = len(model_files.download_allow_list())
+        unit, source = "files", f"pinned {model_files.REPO_ID} @ {model_files.REVISION}"
+    else:
+        expected_files = len(preflight._declared_components(override))
+        unit, source = "declared components", f"{override} (LTX25_MODEL_SNAPSHOT_DIR)"
     found = expected_files - len(missing_files) if cached_files is None else cached_files
     try:
         disk = disk_footprint()
+        snapshot = f"{_snapshot_bytes() / 1e9:.2f} GB measured"
     except OSError:  # pragma: no cover - unusual filesystems
-        disk = "unavailable"
+        disk = snapshot = "unavailable"
+
+    if runtime_config.zerogpu_size == "auto":
+        size = "not requested (auto): the platform default, large, applies"
+    else:
+        size = f"requested {runtime_config.zerogpu_size}"
+    reservation = (
+        f"reservation {runtime_config.gpu_duration_seconds} s per run (x1.5 with stage 2, "
+        f"+{LORA_DURATION_SECONDS} s with LoRAs, +{ENHANCE_DURATION_SECONDS} s with prompt "
+        f"enhancement); the granted slice is measured by the worker on each run"
+    )
 
     lines = [
         "LTX-2.5 Studio starting",
         f"  config          : {runtime_config.describe()}",
-        f"  dtype           : {WEIGHT_DTYPE_LABEL} (fixed; no precision switch)",
-        f"  weights cached  : {found}/{expected_files} files"
+        f"  device          : {resolution.describe() if resolution is not None else 'unknown'}",
+        f"  precision       : {precision_summary(resolution)}",
+        f"  weights cached  : {found}/{expected_files} {unit}"
         + (f"  MISSING {len(missing_files)}" if missing_files else ""),
+        f"  snapshot on disk: {snapshot} ({source}; download set "
+        f"{runtime_config.download_gb:.2f} GB)",
         f"  disk            : {disk}",
-        f"  zerogpu size    : {gpu_size or 'not yet known (reported after packing)'}",
-        f"  model revision  : {model_files.REVISION}",
+        "  packed copy     : not measured yet, ZeroGPU writes it at launch after this report",
+        f"  zerogpu size    : {size}; {reservation}",
+        f"  spaces          : {spaces_version or 'not installed'}",
     ]
+    if mps_self_test is not None:
+        lines.append(f"  mps self-test   : {mps_self_test.describe()}")
+    lines.append(f"  model revision  : {model_files.REVISION}")
     if missing_files:
         lines.append(f"  first missing   : {missing_files[0]}")
     return "\n".join(lines)
 
 
 def clear_cache() -> None:
-    """Drop cached pipelines. Used by tests and by a precision switch."""
+    """Drop cached pipelines. Used by tests and by the local smoke tier."""
     _CACHE.clear()

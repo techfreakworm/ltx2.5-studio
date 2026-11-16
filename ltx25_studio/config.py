@@ -24,9 +24,16 @@ from . import model_files
 from .errors import ConfigError
 
 __all__ = [
+    "CPU_DTYPE_CHOICES",
+    "DEVICE_CHOICES",
+    "ENV_CPU_DTYPE",
+    "ENV_DEVICE",
     "ENV_GPU_DURATION_SECONDS",
     "ENV_LORA_MAX_GB",
+    "ENV_MODEL_SNAPSHOT_DIR",
+    "ENV_MPS_SELF_TEST",
     "ENV_QUANTIZATION",
+    "MPS_SELF_TEST_CHOICES",
     "QUANTIZATION_CHOICES",
     "ENV_OUTPUT_DIR",
     "ENV_OUTPUT_RETENTION_GB",
@@ -46,46 +53,47 @@ ENV_LORA_MAX_GB = "LTX25_LORA_MAX_GB"
 ENV_QUANTIZATION = "LTX25_QUANTIZATION"
 ENV_PROMPT_ENHANCER_REPO = "LTX25_PROMPT_ENHANCER_REPO"
 ENV_PREFETCH_ENHANCER = "LTX25_PREFETCH_ENHANCER"
+ENV_DEVICE = "LTX25_DEVICE"
+ENV_CPU_DTYPE = "LTX25_CPU_DTYPE"
+ENV_MODEL_SNAPSHOT_DIR = "LTX25_MODEL_SNAPSHOT_DIR"
+ENV_MPS_SELF_TEST = "LTX25_MPS_SELF_TEST"
 
-#: ``auto`` means "do not pass ``size`` at all". ZeroGPU promotes us to xlarge
-#: by itself once packed weights exceed its 42.00 GiB threshold, and passing the
-#: kwarg to a platform ``spaces`` that predates it is an import-time TypeError.
+#: ``auto`` passes no ``size`` and the platform then allocates its default,
+#: ``large`` (47.375 GiB measured). ZeroGPU does NOT promote by itself: its
+#: ``startup()`` promotion only changes the duration factor, never the size it
+#: schedules (zerogpu.py docstring; docs/MIG_ALLOCATOR_SIGHTINGS.md §1).
 ZEROGPU_SIZES = ("auto", "large", "xlarge")
 
-#: NOTE: there is deliberately NO precision/quantisation variable here.
-#: One existed and was wired to nothing -- `pipelines.get_pipeline` never read
-#: the config, so setting it changed no behaviour while `expected_weights_gb`
-#: confidently reported 53.20 GB for a load that was still 72.19 GB. An
-#: advertised lever attached to nothing is worse than no lever: it does not fail
-#: silently, it *speaks*, and it misdirects the next decision. Wiring it properly
-#: needs bitsandbytes or torchao -- neither pinned, neither verifiable without a
-#: GPU. Note the ORIGINAL reason given here was wrong: the packer's handling of
-#: quantised tensors is NOT unknown. `spaces/zero/torch/bitsandbytes.py` is a
-#: version check that no-ops for bnb >= 0.46.0, so modern bitsandbytes needs no
-#: special handling at all; there is no equivalent module for torchao, which is
-#: what actually makes bnb the supported path and torchao not (PLAN §2.6,
-#: docs/ZEROGPU_DISK.md). The lever is gone because it was WIRED TO NOTHING,
-#: which remains true and is reason enough.
-DEFAULT_ZEROGPU_SIZE = "auto"
-DEFAULT_GPU_DURATION_SECONDS = 60
+DEFAULT_ZEROGPU_SIZE = "xlarge"
+DEFAULT_GPU_DURATION_SECONDS = 180
 DEFAULT_OUTPUT_RETENTION_GB = 20.0
 DEFAULT_OUTPUT_DIR = "outputs"
 DEFAULT_LORA_MAX_GB = 12.0
 
-#: Weight precision for the **transformer only**. bf16 is the default and is the
-#: baseline every measurement on this build was taken against.
-#:
-#: ``int8`` exists for ZeroGPU, where bf16 does not fit: the packing peak is
-#: ``snapshot + packed + image`` and bf16 gives 152.4-156.4 GB against
-#: ``pipelines.ZEROGPU_DISK_CAP_GB``. Quantising the transformer alone brings the peak to 133.4-137.4 GB --
-#: see ``docs/ZEROGPU_DISK.md`` §4.2 for the derivation and both bounds.
-#:
-#: ⚠️ **A real lever, unlike the ones removed from this file.** It changes
-#: output quality, which is why it is a separate switch rather than folded into
-#: the recipe: an int8-vs-bf16 pair at one seed answers "what does int8 cost?"
-#: in one look, and only if the two can be run independently.
-DEFAULT_QUANTIZATION = "bf16"
-QUANTIZATION_CHOICES = ("bf16", "int8")
+#: Weight precision for ``pipelines.QUANTIZED_COMPONENTS``. ``auto`` is int8 on
+#: ZeroGPU, where bf16 does not fit the disk cap (packing peak 152.4-156.4 GB
+#: against ``pipelines.ZEROGPU_DISK_CAP_GB``; docs/ZEROGPU_DISK.md §4.2), and
+#: bf16 everywhere else. ``bf16``/``int8`` are honoured as given; int8 off CUDA
+#: is refused at startup by ``device.resolve``. A real lever: it changes output
+#: quality, so an int8-vs-bf16 pair at one seed must stay possible.
+DEFAULT_QUANTIZATION = "auto"
+QUANTIZATION_CHOICES = ("auto", "bf16", "int8")
+
+#: The generation device. ``auto`` is CUDA on ZeroGPU or wherever CUDA exists,
+#: and no generation device anywhere else (the UI starts; Generate explains how
+#: to opt in). ``mps`` and ``cpu`` are explicit opt-ins for local runs.
+DEFAULT_DEVICE = "auto"
+DEVICE_CHOICES = ("auto", "cuda", "mps", "cpu")
+
+#: Weight dtype when the device is the CPU. fp32 is the numerical reference the
+#: tiny-checkpoint tier compares everything against.
+DEFAULT_CPU_DTYPE = "fp32"
+CPU_DTYPE_CHOICES = ("fp32", "bf16")
+
+#: What happens when the MPS numerics self-test fails: ``enforce`` refuses to
+#: generate, ``warn`` runs anyway and says so in the log and the report.
+DEFAULT_MPS_SELF_TEST = "enforce"
+MPS_SELF_TEST_CHOICES = ("enforce", "warn")
 
 #: The prompt enhancer (PLAN §3.5), loaded lazily by ``enhance.py`` on first use
 #: inside the GPU worker and then KEPT for the life of that worker -- freeing it
@@ -113,6 +121,9 @@ QUANTIZATION_CHOICES = ("bf16", "int8")
 #: pipeline types the component as anyway.
 #:
 #: Set this to ``google/gemma-4-E2B-it`` for the bf16 build.
+#:
+#: A repo other than this default loads at its Hub head, unpinned; the default
+#: is pinned by ``enhance.ENHANCER_REVISION``.
 DEFAULT_PROMPT_ENHANCER_REPO = "google/gemma-4-E2B-it-qat-mobile-transformers"
 
 #: Fetch the enhancer's weights into the HF cache **at startup**, so the first
@@ -167,6 +178,25 @@ def _flag(name: str, default: bool) -> bool:
     raise ConfigError(variable=name, value=raw, legal=tuple(sorted(_TRUE | _FALSE)))
 
 
+def _snapshot_dir(name: str) -> str | None:
+    """A local diffusers-layout directory to load every component from, or None.
+
+    Validated here, at startup: a typo would otherwise surface as a load
+    failure on the first Generate, or worse, fall back to the pinned snapshot.
+    """
+    raw = (os.environ.get(name) or "").strip()
+    if not raw:
+        return None
+    path = os.path.realpath(os.path.expanduser(raw))
+    if not os.path.isfile(os.path.join(path, "model_index.json")):
+        raise ConfigError(
+            variable=name,
+            value=raw,
+            legal=("an existing directory that contains model_index.json (a diffusers snapshot)",),
+        )
+    return path
+
+
 def _number(name: str, default: float, *, minimum: float, integer: bool = False):
     raw = os.environ.get(name)
     if raw is None or raw == "":
@@ -196,27 +226,33 @@ class RuntimeConfig:
     quantization: str = DEFAULT_QUANTIZATION
     prompt_enhancer_repo: str = DEFAULT_PROMPT_ENHANCER_REPO
     prefetch_enhancer: bool = DEFAULT_PREFETCH_ENHANCER
+    device: str = DEFAULT_DEVICE
+    cpu_dtype: str = DEFAULT_CPU_DTYPE
+    model_snapshot_dir: str | None = None
+    mps_self_test: str = DEFAULT_MPS_SELF_TEST
 
     @property
     def lora_max_bytes(self) -> int:
         return int(self.lora_max_gb * 1e9)
 
     @property
-    def expected_weights_gb(self) -> float:
-        """On-disk weight footprint. Always the full bf16 subset.
+    def download_gb(self) -> float:
+        """The pinned download set on disk: bf16 files, whatever the quantisation.
 
-        There is no precision switch, so this is simply what
-        ``model_files`` declares -- and being a single honest number beats being
-        a configurable one that reported a footprint nobody was loading.
+        Not the loaded footprint -- an int8 load holds less in memory and packs
+        smaller, from the same files.
         """
         return model_files.total_size_gb()
 
     def describe(self) -> str:
-        """One-line startup summary."""
+        """One-line startup summary of the levers as configured (not resolved)."""
+        snapshot = self.model_snapshot_dir or "pinned"
         return (
             f"zerogpu_size={self.zerogpu_size} "
             f"duration={self.gpu_duration_seconds}s "
-            f"expected_weights={self.expected_weights_gb:.2f}GB "
+            f"quantization={self.quantization} "
+            f"device={self.device} "
+            f"snapshot={snapshot} "
             f"outputs<={self.output_retention_gb:.0f}GB"
         )
 
@@ -242,4 +278,8 @@ def load_config() -> RuntimeConfig:
         prompt_enhancer_repo=(os.environ.get(ENV_PROMPT_ENHANCER_REPO) or "").strip()
         or DEFAULT_PROMPT_ENHANCER_REPO,
         prefetch_enhancer=_flag(ENV_PREFETCH_ENHANCER, DEFAULT_PREFETCH_ENHANCER),
+        device=_choice(ENV_DEVICE, DEFAULT_DEVICE, DEVICE_CHOICES),
+        cpu_dtype=_choice(ENV_CPU_DTYPE, DEFAULT_CPU_DTYPE, CPU_DTYPE_CHOICES),
+        model_snapshot_dir=_snapshot_dir(ENV_MODEL_SNAPSHOT_DIR),
+        mps_self_test=_choice(ENV_MPS_SELF_TEST, DEFAULT_MPS_SELF_TEST, MPS_SELF_TEST_CHOICES),
     )

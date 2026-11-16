@@ -44,6 +44,8 @@ __all__ = [
     "REPO_ID",
     "REVISION",
     "ROOT_FILES",
+    "TINY_REPO_ID",
+    "TINY_REVISION",
     "ComponentSpec",
     "config_filename",
     "download_allow_list",
@@ -66,11 +68,13 @@ REVISION = "871165de037793df7d75c23a02dd7f45fd364c97"
 
 HUB_BASE_URL = "https://huggingface.co"
 
-#: Weight precision. Default is bf16: it is what the model card documents and
-#: what the official Space pattern uses. Quantised variants are a documented
-#: fallback rather than the default, because ZeroGPU's tensor packer is
-#: a decision deferred rather than a capability we lack (PLAN §2.6,
-#: technical risk #1). Switching lives here so it stays a one-line change.
+#: A public ~95 MB random-weight checkpoint with this pipeline's layout, for the
+#: real-pipeline test tier only (``scripts/local_smoke.py``). Never a default.
+TINY_REPO_ID = "optimum-intel-internal-testing/tiny-random-ltx2.5"
+TINY_REVISION = "3f43040b4719f6dad170a6d07b30921ee1a8f405"
+
+#: The checkpoint's on-disk dtype. Quantisation is a load-time choice
+#: (``LTX25_QUANTIZATION``), not a different download.
 DEFAULT_DTYPE = "bfloat16"
 
 #: Repo-root files needed alongside the components.
