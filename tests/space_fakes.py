@@ -64,9 +64,11 @@ class Reply:
     """What the fake does with one ``/on_generate`` join.
 
     ``kind``: ``ok`` · ``quota`` (the handler caught the platform's refusal and rendered it) ·
-    ``quota_raised`` (it escaped: ``success=False`` with the platform's title) · ``app_error`` (a
-    typed failure card) · ``foreign_error`` (an uncaught exception) · ``unexpected_error`` ·
-    ``no_artifact`` (success-shaped, no file) · ``timeout`` (never completes; heartbeats only).
+    ``quota_raised`` (it escaped: ``success=False`` with the platform's title) · ``raised`` (any
+    error that escaped, with ``title`` and ``message``) · ``app_error`` (a failure card: ``status``
+    as given, or one built around ``message``) · ``foreign_error`` (an uncaught exception) ·
+    ``unexpected_error`` · ``no_artifact`` (success-shaped, no file) · ``timeout`` (never
+    completes; heartbeats only).
     """
 
     kind: str = "ok"
@@ -75,7 +77,10 @@ class Reply:
     status: str = "**Done.** Seed 7."
     record: dict | None = None
     message: str = ""
+    title: str = ""
     progress_steps: int = 8
+    #: The ``log`` event the Space sends while the call waits (the harness prints it).
+    log: str = "Waiting for a GPU to become available"
 
 
 @dataclass
@@ -104,6 +109,7 @@ class FakeSpace:
         config_patch=None,
         step_delay: float = 0.002,
         heartbeat_interval: float = 0.02,
+        echo_token_on_upload: bool = False,
     ):
         if field_spec is None:
             from ltx25_studio.ui import fields
@@ -126,6 +132,8 @@ class FakeSpace:
         self.logs_hold = logs_hold
         self.step_delay = step_delay
         self.heartbeat_interval = heartbeat_interval
+        #: A misbehaving server: uploads fail with the request's Authorization header in the body.
+        self.echo_token_on_upload = echo_token_on_upload
 
         self.requests: list[dict] = []
         self.joins: list[dict] = []
@@ -397,7 +405,7 @@ class FakeSpace:
         self._put(
             session,
             event_id,
-            {"msg": "log", "log": "Waiting for a GPU to become available", "level": "info", "title": "ZeroGPU queue", "duration": 10, "visible": True},
+            {"msg": "log", "log": reply.log, "level": "info", "title": "ZeroGPU queue", "duration": 10, "visible": True},
         )
         for step in range(1, reply.progress_steps + 1):
             self._put(
@@ -434,6 +442,16 @@ class FakeSpace:
                 {
                     "msg": "process_completed",
                     "output": {"error": reply.message or QUOTA_MESSAGE, "title": "ZeroGPU quota exceeded", "duration": 10, "visible": True},
+                    "success": False,
+                },
+            )
+        elif reply.kind == "raised":
+            self._put(
+                session,
+                event_id,
+                {
+                    "msg": "process_completed",
+                    "output": {"error": reply.message, "title": reply.title, "duration": 10, "visible": True},
                     "success": False,
                 },
             )
@@ -592,7 +610,13 @@ class _Handler(BaseHTTPRequestHandler):
         space = self.space
         status_path = f"/api/spaces/{space.space_id}"
         try:
-            if path == status_path:
+            if path == "/redirect":
+                # Somewhere else, the way a CDN or a moved file answers.
+                self.send_response(302)
+                self.send_header("Location", query.get("to", [""])[0])
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+            elif path == status_path:
                 self._json(200, space.status_payload())
             elif path.startswith(status_path + "/logs/"):
                 self._sse_start()
@@ -628,7 +652,9 @@ class _Handler(BaseHTTPRequestHandler):
         path, _query = self._record(body)
         if not self._authorised():
             return
-        if path == "/gradio_api/upload":
+        if path == "/gradio_api/upload" and self.space.echo_token_on_upload:
+            self._json(500, {"detail": f"upload refused for {self.headers.get('Authorization')}"})
+        elif path == "/gradio_api/upload":
             code, payload = self.space._upload(self.headers.get("Content-Type", ""), body)
             self._json(code, payload)
         elif path == "/gradio_api/queue/join":
