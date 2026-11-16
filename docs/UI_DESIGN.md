@@ -22,14 +22,25 @@ At 1024 px and wider the page has two columns under a one-line identity bar.
   to three example buttons, then the selected mode's inputs: media first, each with
   its one lever, then the prompt with Enhance. After those come shape, length and
   Upscale, the LoRA row and Advanced.
-- **The rail.** It is sticky at `top: 12px` and scrolls inside itself if it outgrows
-  the viewport. From the top it holds the monitor, the status line, the cost panel,
-  Generate with its reason line, the run report and Recent runs.
+- **The rail.** It is sticky at `top: 12px`. Its height is the viewport less the
+  offset where the columns start (a small script measures it), so at scroll 0 it ends
+  12 px above the bottom of the window at any desktop size. Its content never wraps:
+  Gradio gives every Row child `flex-wrap: wrap`, and a rail that wrapped sent its
+  overflow into a second column off the right edge, so the rail sets `nowrap` and its
+  children never shrink. When the content is taller than the rail, the rail scrolls
+  inside itself with a real scrollbar, drawn in a gutter outside the aligned right
+  edge. Generate is sticky at the rail's bottom, so it never leaves the rail's visible
+  area. From the top the rail holds the monitor, its caption, the cost panel, Generate
+  with its reason line, the "What you got" card with its actions, the run report and
+  Recent runs. A 4 px padding keeps focus rings unclipped; negative margins keep the
+  content edges level with the identity bar.
 
 Below 1024 px the page is one column. The inputs come first, then the cost panel,
-monitor and report. A fixed bottom bar holds one line (the cost, or why Generate is
-off) and the same Generate button, restyled. There is never a second Generate in the
-DOM. Pressing Generate on a narrow screen scrolls the monitor into view.
+monitor and report. A fixed bottom bar holds one short line (the cost, or why
+Generate is off: "Needs a prompt", "Won't run: 2 problems (width, frames)") and the
+same Generate button, restyled. There is never a second Generate in the DOM. Pressing
+Generate on a narrow screen scrolls the monitor into view, and while the monitor
+shows a sample a "See an example output" button under the purpose line jumps to it.
 
 ## The matrix
 
@@ -39,15 +50,20 @@ CSS grid rules generated from the registry place each choice in its cell:
 - the row comes from the inputs the mode requires;
 - the column comes from the tracks it exports;
 - the small corner number comes from registry order. It is an ID for bug reports, not
-  a label.
+  a label, and it is generated content with empty alternative text, so it is not read
+  as part of the cell's name.
 
 A `gr.HTML` frame behind the radio draws the axis headers, the four inert empty cells
-and the two column notes. The cost marker is a tungsten underline on "Sound only", the
+and the two column notes. The headers and empty cells are hidden from assistive tech
+(each cell's own name already says what it starts from and returns); the column notes
+are not, and each cell of a noted column is described by its note
+(`aria-describedby`). The cost marker is a tungsten underline on "Sound only", the
 column that pays for a thrown-away video.
 
 The eleven radios share one `name`, so the matrix is one Tab stop. A small script
-makes the arrow keys move by the grid's geometry. Each radio's accessible name is the
-mode's full registry label.
+makes the arrow keys move by the grid's geometry. A mode has one name everywhere,
+the registry's `label`: the cell, the purpose line, the cost panel's title, the
+monitor caption, the status line and Recent runs.
 
 ## What you see is what runs
 
@@ -58,28 +74,57 @@ One predicate decides what each mode shows and what it requires:
 
 This is the predicate `generate.scope_request_to_mode` scopes with.
 
-When the mode changes, the value of every field the new mode does not use is
-**parked**: it moves into a session `gr.State`, and the widget goes back to its
-default. The value comes back when a mode that uses it is selected (`handlers.mode_switch`).
-So a UI run never submits a hidden value, and the backend never has to say "an image
-was supplied … ignored" about something the user cannot see. API callers still get
-the backend's scoping and its notes.
+**Media order.** The media inputs are built in one order derived from the registry
+(`handlers.media_order`): in every mode the inputs it requires come before the ones it
+may take, so the first media input a mode shows is one it needs (Audio to video asks
+for its audio, then offers an optional first-frame image). DOM order is visual order
+and focus order; no CSS reorders them. A registry no single order could satisfy fails
+at build time.
 
-Some modes pin their values. Their pinned values are never written into the user's
-fields. The sound-only modes show a read-only line, "Renders at 256 × 256 with no
-upscale", in place of the shape controls.
+**Parking.** When the mode changes, the value of every field the new mode does not use
+is parked: it moves into a session `gr.State`, and the widget goes back to its default.
+The value comes back when a mode that uses it is selected (`handlers.mode_switch`).
+This covers the prompt, Enhance, media, the change level, the decoder, and the size
+and length fields a mode hides (width and height in the sound-only modes, the shortest
+and longest seconds where an input sets the length). So a UI run never submits a
+hidden value, and the backend never has to say "an image was supplied … ignored" about
+something the user cannot see. API callers still get the backend's scoping and its
+notes.
+
+**Restore settings** runs the same switch against the mode actually left, then writes
+the restored run's own settings, in one step (a second step chained after it would race
+the radio's own change event). What the restored mode does not take is parked like any
+other switch. Its media are not restored.
+
+**Length.** "Match my clip" writes a clip's frame count into the frame field for the
+run; a mode without a timed input gets the user's own length back, never the clip's.
+In Advanced the frame count shows while the length is set, and the shortest and
+longest seconds while the model picks it; never both. The length slider steps by
+0.1 s.
+
+**Levers.** Every visible control changes what reaches the pipeline (a test flips each
+one, in every mode, with Upscale on and off).
+
+- Video to video is a variation of the user's clip: it shows "How much to change your
+  clip" (A little / Moderately / A lot, default A lot), writing the backend's own
+  levels to `noise_scale`; the prompt steers the result only at A lot. Its length is
+  always its clip's, so it offers no length choice.
+- Audio to sound shows "How much to change your sound" (four choices, the same field).
+- The clip-strength slider shows only where a video condition reads it; with today's
+  registry that is no mode, and its API slot stays.
+- While Upscale ×2 is on, the decoder choice cannot be changed: stage 2 always finishes
+  with the diffusion decoder, and the line under the choice says so.
 
 Some fields keep their API slot but show nothing:
 
 - the negative prompt (guidance is fixed at 1.0);
 - the shot-list `conditions` (a row with text is refused before every run);
-- `noise_scale`, which is written by the four "How much to change your sound" choices
-  in Audio → sound.
+- `noise_scale` itself, which the change choices write.
 
-Strength is shown only for Video → video. "Let the model pick the length" is shown
-only where no input has a length. Where an input does have a length, "Match my clip"
-writes the matched frame count, or for audio inputs turns on the backend's "match my
-audio".
+Some modes pin their values. Their pinned values are never written into the user's
+fields. The sound-only modes show a read-only line, "Renders at 256 × 256 with no
+upscale", in place of the shape controls. A size no preset matches checks no Shape
+chip.
 
 ## The rail
 
@@ -87,11 +132,11 @@ audio".
 exported, so joint modes never show one file twice. Its contents depend on the state:
 
 - **Idle:** the selected mode's sample output from the manifest, captioned "Example
-  output, not your run". If there is no sample, a designed idle frame is shown
-  instead.
+  output, not your run". If there is no sample, a designed idle frame names the mode.
 - **During a run:** the phase-labelled progress (`show_progress_on`).
 - **After a run:** that run's result, captioned with its mode and seed. It stays on
   screen when the mode changes.
+- **Shown from Recent runs:** an earlier run's own file, captioned "Earlier run".
 
 **The cost panel** is the signature element. It is a labelled grid with these rows:
 
@@ -102,14 +147,15 @@ exported, so joint modes never show one file twice. Its contents depend on the s
 - Billed
 - LoRA
 
-Above the grid are cost lamps that light only when they are true. The figures come
-from these sources:
+Above the grid are cost lamps that light only when they are true; a request that would
+be refused lights none. The figures come from these sources:
 
 - **Reserves:** `zerogpu.estimate_duration` for the same request, with each extra
   named with its seconds.
 - **Needs:** the reservation times the quota multiplier.
 - **Renders and Returns:** the size and length come from the request that
-  `generate.prepare_request` scopes.
+  `generate.prepare_request` scopes. A clip mode with no clip loaded yet says "the
+  length of your clip".
 
 A request that would be refused shows "Won't run", lists every size and length problem
 with its nearest legal values, and shows no figure. The lamp words are:
@@ -119,6 +165,11 @@ with its nearest legal values, and shows no figure. The lamp words are:
 - "LoRA +N s"
 - "Video thrown away"
 - "Audio encode"
+
+The cost words at the point of choice come from the same estimator: the Upscale line
+says how many seconds it adds, and the Enhance line says what it reserves and that a
+cold start can take about 2 minutes (it mentions an image only where the mode takes
+one).
 
 **Generate** is disabled whenever the form would be refused. The line under it uses
 the backend's own refusal words, from `generate.prepare_request`. Generate is also
@@ -133,24 +184,35 @@ The final step is wired twice, as `.then` and as `.failure`, because Gradio 6.24
 reaches `generate()`, so its red panel can truthfully say "Nothing ran. No GPU time
 was used."
 
-**The report** is the `/on_generate` Markdown. On success it shows the seed, the
-backend's notes as plain text and a collapsed Diagnostics block, with no cost
-reminder. A "What you got" card above it is built from the request and the wall-clock
-time:
+**The report** is the `/on_generate` Markdown, in `#run-status`. That region is in the
+page from the first paint (empty, visually hidden), with `role="status"`, so its first
+message is announced; it turns assertive on failure. On success it carries a "Done"
+line (read, not shown), the backend's notes as plain text (the UI shows them as they
+come and does not reword them) and a collapsed Diagnostics block with
+`record.diagnostics` (VRAM, partition, run folder) and the mode id. A "What you got"
+card above it is built from the run record:
 
 - mode
 - size and upscale
-- length
+- length, and where it came from
+- the change level, named with its choice (Video to video, Audio to sound)
 - seed
 - LoRA strengths
-- time taken
+- the decoder that ran, by its choice's name (Best quality, Fast)
+- time taken, labelled by the device that ran it; on ZeroGPU, with the quota it drew
+
+Reuse seed and Use this prompt close the card.
 
 A failure has a plain category headline, a quota line, one next step and the verbatim
-detail in a `<details>`. `#run-status` is a live region, and it becomes assertive on
-failure.
+detail in a `<details>`. Categories arrive as strings from `errors.categorise`; each
+has its own card (not enough quota, a run longer than the platform allows, no GPU free
+in time, out of GPU time, out of memory, an input problem, an adapter that does not
+fit, the enhancer unavailable, a bug), and a category the UI has never seen gets a
+generic one. A queue timeout reads as "No GPU was free in time", never as running out
+of GPU time.
 
-**Recent runs** keeps the last six runs of the session, each with "Restore settings"
-and "Reuse seed".
+**Recent runs** keeps the last six runs of the session, each with "Show" (while its
+file is still on disk), "Restore settings" and "Reuse seed".
 
 ## LoRA
 
@@ -163,15 +225,18 @@ adapter" or "LoRA: 2 adapters at 0.8 and 1.0". Inside it are two routes:
 
 Adapters are staged with `lora.staged_entry` at strength 1.0 and de-duplicated by
 content key. The bay pre-builds three rows, each with the adapter's name, a strength
-slider (0.05 to 1.5) and Remove. An accepted adapter gets a roll-edged card. A
-rejected one gets a cut card with a plain headline and the validator's message
-verbatim.
+slider and Remove. A row's slider takes its range from `lora.staging` (more than 0, at
+most its `MAX_WEIGHT`) when the row is shown, so the LoRA package stays lazy until an
+adapter is checked. An accepted adapter gets a roll-edged card. A rejected one gets a
+cut card with a plain headline and the validator's message, with a server path to the
+file shown as its name. At 560 px and below a row stacks: name, strength, Remove.
 
 ## Visual system
 
 The tokens are dark under both OS schemes. Gradio's theme variables are pinned to
 them with `!important` from the identity bar's `head=`, because Gradio's own sheet
-loads later.
+loads after ours. Where a Gradio rule out-ranks a class (its `h1`–`h6` reset is
+`(0,1,1)`), our selectors carry an ID.
 
 | token | hex | role |
 |---|---|---|
@@ -180,7 +245,8 @@ loads later.
 | slate-2 | `#242D37` | raised: selected cell, secondary buttons |
 | well | `#0E1216` | recessed: inputs, drop zones, the monitor |
 | line | `#39434F` | hairlines |
-| paper | `#E9ECEF` | text, the focus ring, neutral accents |
+| line-strong | `#66727F` | control edges: input borders (3.8:1 on the well), a slider's unfilled track (3.2:1 on slate) |
+| paper | `#E9ECEF` | text, the focus ring, neutral accents, a slider's fill and thumb |
 | dust | `#9AA6B2` | secondary and help text |
 | tungsten | `#F2A33C` | cost only: lamps, the reserve and quota figures, the Generate fill |
 | cut | `#E5484D` / text `#FF8A8E` | failure only |
@@ -190,28 +256,39 @@ loads later.
 
 - Chakra Petch 600 for the wordmark (20), matrix headers (14), panel titles (16),
   Generate (16) and lamps (12).
-- Spline Sans for prose (14/21; help text 13/19).
-- Spline Sans Mono 500, with tabular figures, for numerals only.
+- Spline Sans for prose (14/21; help text 13/19, at most 70 characters a line) and for
+  figures inside sentences, with tabular figures.
+- Spline Sans Mono 500, with tabular figures, for number inputs and the two tungsten
+  figures.
 
 **Components:**
 
 - **One button family.** Primary is Generate only. Secondary is a slate-2 fill with a
-  line border. Quiet buttons are underlined text.
+  line border. Quiet buttons are underlined text. All of them use the small size.
+- **Native controls** are drawn from the tokens: the slider's track is paper against
+  line-strong (4.1:1) with a paper thumb in an ink ring; a checked box carries an ink
+  tick, a radio an ink dot; accordions use the same chevron as "How quota works".
 - **One focus ring:** 2 px paper with a 2 px offset.
 - **Radii:** panels 10, controls 6, lamps 3.
 - **Motion:** state changes only, and none under `prefers-reduced-motion`.
+- **Footer:** Gradio's hidden footer controls stay hidden ("Stop Recording" is never
+  shown), and its run-history link, which competes with Recent runs, is hidden.
 
 ## Showcase
 
 `LTX25_EXAMPLES_DIR` (default `examples/`) may hold a `manifest.json` (schema in
 `ui/showcase.py`). Each mode can have examples and one sample output:
 
-- An example has a label, a prompt, media paths and settings. "Try an example" fills
-  the form and runs nothing.
-- A sample output has its file, caption, settings and seed.
+- An example has a label, a prompt, media paths and settings (shape or exact size,
+  seconds, upscale, enhance, `auto_duration`, seed, and `noise` naming a change
+  choice). "Try an example" fills the form and runs nothing.
+- A sample output has its file, caption, settings and seed. Its settings may be free
+  text, or a mapping (size, seconds, upscale, enhance, `auto_duration`) that the
+  caption says in words.
 
 Entries that name a missing file, or a path outside the folder, are skipped. With no
-manifest, there is no example row and the monitor shows its idle frame.
+manifest, there is no example row and the monitor shows its idle frame. A manifest
+with entries for all eleven modes needs no code change.
 
 ## Contracts
 
