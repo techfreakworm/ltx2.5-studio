@@ -251,10 +251,10 @@ def test_an_enhancer_failure_is_enhancer(tmp_path):
         (
             "ZeroGPU illegal duration",
             "The requested GPU duration (900s) is larger than the maximum allowed",
-            errors.Failure(errors.QUOTA, False),
+            errors.Failure(errors.LIMIT, False),
         ),
         ("ZeroGPU worker error", "GPU task aborted", errors.Failure(errors.TIMEOUT, True)),
-        ("ZeroGPU queue timeout", "No GPU was available", errors.Failure(errors.TIMEOUT, False)),
+        ("ZeroGPU queue timeout", "No GPU was available", errors.Failure(errors.QUEUE, False)),
         ("ZeroGPU client error", "Expired ZeroGPU proxy token", errors.Failure(errors.BUG, True)),
     ],
 )
@@ -272,6 +272,101 @@ def test_the_platforms_errors_are_recognised_at_the_ui_boundary(
         generate_module.generate(a_request())
 
     assert categorise(caught.value) == expected
+
+
+@pytest.mark.parametrize(
+    "title,message,expected",
+    [
+        (
+            "ZeroGPU illegal duration",
+            "The requested GPU duration (900s) is larger than the maximum allowed",
+            errors.Failure(errors.LIMIT, False),
+        ),
+        ("ZeroGPU queue timeout", "No GPU was available", errors.Failure(errors.QUEUE, False)),
+    ],
+)
+def test_the_limit_and_the_queue_are_recognised_in_the_spaces_052_wrapped_form(
+    title, message, expected
+):
+    """spaces 0.52 wraps the platform's ``gr.Error`` in a ZeroGPUTaskException."""
+    import gradio as gr
+
+    class ZeroGPUTaskException(Exception):
+        def __init__(self, exception):
+            super().__init__("task failed")
+            self.exception = exception
+
+    assert categorise(ZeroGPUTaskException(gr.Error(message, title=title))) == expected
+
+
+#: (title, message, category): the platform's wordings as seen on this Space.
+PLATFORM_WORDINGS = [
+    (
+        "ZeroGPU quota exceeded",
+        "You have exceeded your Pro ZeroGPU quota (360s requested vs. "
+        "118s left). Try again in 5:41:07.",
+        errors.QUOTA,
+    ),
+    (
+        "ZeroGPU quota exceeded",
+        "You have exceeded your free ZeroGPU quota (120s requested vs. "
+        "30s left). Try again in 0:01:00.",
+        errors.QUOTA,
+    ),
+    ("ZeroGPU quota exceeded", "You have exceeded your ZeroGPU runs limit. ", errors.QUOTA),
+    ("ZeroGPU quota exceeded", "Space app has reached its GPU limit. Retry later", errors.QUOTA),
+    (
+        "ZeroGPU illegal duration",
+        "The requested GPU duration (1020s) is larger than the maximum allowed",
+        errors.LIMIT,
+    ),
+    ("ZeroGPU queue timeout", "No GPU was available after 60s. Retry later", errors.QUEUE),
+]
+
+
+@pytest.mark.parametrize(("title", "message", "category"), PLATFORM_WORDINGS)
+@pytest.mark.parametrize("form", ["title and message", "message only", "title only", "0.52"])
+def test_the_platforms_refusals_are_recognised_by_title_or_message(title, message, category, form):
+    """An API client receives only the MESSAGE; the UI sees the title too. Either is enough.
+
+    Nothing ran on any of these, so no GPU time was used.
+    """
+    import gradio as gr
+
+    class ZeroGPUTaskException(Exception):
+        def __init__(self, exception):
+            super().__init__("task failed")
+            self.exception = exception
+
+    if form == "title and message":
+        raised = gr.Error(message, title=title)
+    elif form == "message only":
+        raised = gr.Error(message)
+    elif form == "title only":
+        raised = gr.Error("", title=title)
+    else:
+        raised = ZeroGPUTaskException(gr.Error(message, title=title))
+
+    assert categorise(raised) == errors.Failure(category, False)
+
+
+@pytest.mark.parametrize(("title", "message", "category"), PLATFORM_WORDINGS)
+def test_the_platforms_words_match_in_any_case(title, message, category):
+    assert categorise(RuntimeError(message.upper())) == errors.Failure(category, False)
+    assert categorise(RuntimeError(title.lower())) == errors.Failure(category, False)
+
+
+def test_the_new_categories_are_appended_so_existing_ones_keep_their_place():
+    assert errors.CATEGORIES[:7] == (
+        errors.QUOTA,
+        errors.TIMEOUT,
+        errors.OOM,
+        errors.INPUT,
+        errors.ADAPTER,
+        errors.ENHANCER,
+        errors.BUG,
+    )
+    assert errors.CATEGORIES[7:] == ("limit", "queue")
 
 
 def test_a_foreign_exception_of_ours_is_a_bug():

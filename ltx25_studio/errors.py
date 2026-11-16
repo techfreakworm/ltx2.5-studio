@@ -40,6 +40,7 @@ from __future__ import annotations
 # silently vary by environment, which is the inert-guard shape this build
 # keeps finding (SPACE_MODE_MATRIX §8). If gradio is absent, this package
 # should fail to import, loudly, right here.
+import re
 from dataclasses import dataclass
 
 from gradio.exceptions import Error as _GradioError
@@ -99,7 +100,7 @@ __all__ = [
 
 #: Not enough ZeroGPU quota to schedule the run.
 QUOTA = "quota"
-#: The run used up its GPU time (the platform aborted it), or waited too long.
+#: The run used up its GPU time (the platform aborted it).
 TIMEOUT = "timeout"
 #: The GPU (or Apple GPU) ran out of memory.
 OOM = "oom"
@@ -111,7 +112,14 @@ ADAPTER = "adapter"
 ENHANCER = "enhancer"
 #: Anything else of ours.
 BUG = "bug"
-CATEGORIES = (QUOTA, TIMEOUT, OOM, INPUT, ADAPTER, ENHANCER, BUG)
+#: The run asks for more GPU time than the platform allows in one call
+#: ("illegal duration"); nothing ran.
+LIMIT = "limit"
+#: No GPU was free in time ("queue timeout"); nothing ran.
+QUEUE = "queue"
+#: Appended, never reordered: the UI renders a card per string and treats an
+#: unknown one as the generic card.
+CATEGORIES = (QUOTA, TIMEOUT, OOM, INPUT, ADAPTER, ENHANCER, BUG, LIMIT, QUEUE)
 
 
 @dataclass(frozen=True)
@@ -124,17 +132,27 @@ class Failure:
 
 #: Message fragments of the out-of-memory errors torch raises (CUDA, MPS).
 _OOM_TEXT = ("out of memory",)
-#: How the ZeroGPU platform words its refusals and aborts (spaces 0.51: a
-#: ``gr.Error`` whose title and message carry these).
-_QUOTA_TEXT = (
-    "quota exceeded",
-    "exceeded your gpu quota",
-    "pending credits exceeded",
-    "illegal duration",
-    "reached its gpu limit",
-    "runs limit",
+#: How the ZeroGPU platform words its refusals (spaces 0.51: a ``gr.Error``
+#: whose TITLE and MESSAGE carry these; an API client receives only the
+#: message). Matched case-insensitively against both. The messages are the
+#: ones seen on this Space (tests/space_fakes.py, tests/test_space_matrix.py).
+#: Limit and queue are their own categories: the next step differs from quota
+#: (ask for less GPU time per run; try again shortly), and nothing ran.
+_LIMIT_PATTERN = re.compile(
+    r"illegal duration|requested gpu duration.*larger than the maximum allowed", re.IGNORECASE
 )
-_QUEUE_TIMEOUT_TEXT = ("queue timeout",)
+_QUOTA_PATTERN = re.compile(
+    r"zerogpu quota exceeded"
+    r"|exceeded your [\w ]*?zerogpu quota"
+    r"|exceeded [\w ]*gpu quota"
+    r"|exceeded your zerogpu runs limit"
+    r"|runs limit"
+    r"|reached its gpu limit"
+    r"|pending credits exceeded"
+    r"|too many zerogpu credits allocated",
+    re.IGNORECASE,
+)
+_QUEUE_PATTERN = re.compile(r"queue timeout|no gpu was available", re.IGNORECASE)
 _ABORT_TEXT = ("gpu task aborted", "timed out", "duration exceeded")
 
 
@@ -162,10 +180,12 @@ def categorise(exc: BaseException) -> Failure:
     words = " ".join(
         str(part) for part in (getattr(exc, "title", ""), getattr(exc, "message", ""), exc)
     ).lower()
-    if any(text in words for text in _QUOTA_TEXT):
+    if _LIMIT_PATTERN.search(words):
+        return Failure(LIMIT, False)
+    if _QUOTA_PATTERN.search(words):
         return Failure(QUOTA, False)
-    if any(text in words for text in _QUEUE_TIMEOUT_TEXT):
-        return Failure(TIMEOUT, False)
+    if _QUEUE_PATTERN.search(words):
+        return Failure(QUEUE, False)
     if any(text in words for text in _ABORT_TEXT):
         return Failure(TIMEOUT, True)
     return Failure(BUG, True)
