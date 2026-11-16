@@ -534,7 +534,12 @@ button:disabled { cursor: not-allowed !important; }
   visibility: hidden; }
 #commission :is(#in-image, #in-video, #in-audio) .wrap:has(> .or) > :first-child { visibility: visible; }
 #commission :is(#in-image, #in-video, #in-audio) .wrap:has(> .or)::after { visibility: visible;
-  font-size: 14px; line-height: 21px; color: var(--mr-dust); text-align: center; max-width: 32ch; }
+  font-size: 14px; line-height: 21px; color: var(--mr-dust); text-align: center; max-width: 32ch;
+  text-wrap: balance; }
+/* the empty audio zone is as tall as the image and video ones (200 px with its source bar):
+   Gradio gives its upload area a 240 px minimum */
+#commission #in-audio .audio-container > button { height: 148px !important; min-height: 0 !important; }
+#commission #in-audio .audio-container > button .wrap { min-height: 0 !important; }
 #commission #in-image .wrap:has(> .or)::after { content: "Drop an image here, or click to choose one"; }
 #commission #in-video .wrap:has(> .or)::after { content: "Drop a video here, or click to choose one"; }
 #commission #in-audio .wrap:has(> .or)::after {
@@ -550,6 +555,9 @@ button:disabled { cursor: not-allowed !important; }
 .mr-chips.mr-words label { font-family: var(--mr-body); font-size: 14px; }
 .mr-chips label.selected, .mr-chips label:has(input:checked) { border-color: var(--mr-paper) !important;
   background: var(--mr-slate-2) !important; }
+/* a choice that cannot be changed now (the decoder under Upscale) is drawn locked */
+.mr-chips label:has(input:disabled) { background: transparent !important; border-style: dashed !important;
+  color: var(--mr-dust) !important; cursor: not-allowed; }
 .mr-chips label input[type="radio"] { width: 12px; height: 12px; margin-right: 8px; }
 .mr-line p { margin: 0; font-size: 13px; color: var(--mr-dust); }
 .mr-line.is-pinned p { color: var(--mr-paper); padding: 10px 12px; border: 1px dashed var(--mr-line);
@@ -759,8 +767,9 @@ button:disabled { cursor: not-allowed !important; }
     height: 44px !important; }
   #monitor button, #monitor a[download] { min-width: 44px !important; min-height: 44px !important;
     display: inline-flex; align-items: center; justify-content: center; }
-  footer :is(button, a):not(.hidden) { display: inline-flex !important; align-items: center;
-    min-height: 44px !important; }
+  /* 44 px targets for the footer's links; Gradio's run history stays hidden here too */
+  footer :is(button, a):not(.hidden):not(.run-history) { display: inline-flex !important;
+    align-items: center; min-height: 44px !important; }
   footer .divider { display: none !important; }
   .mr-chips label { min-height: 44px; }
   /* Gradio drops a slider's minimum and maximum labels at 480 px and below */

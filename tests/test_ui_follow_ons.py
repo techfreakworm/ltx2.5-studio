@@ -57,7 +57,7 @@ def test_match_my_clip_states_what_will_run_for_such_a_webm(tmp_path):
     form.pick_mode("video_to_audio")
     form.user(form.fields["video"], clip)
     seconds = generate_module._video_seconds(clip)
-    said = [form.get(b) for b in form.demo.blocks.values() if isinstance(form.get(b), str)]
+    said = [form.get(b).replace("\u00a0", " ") for b in form.demo.blocks.values() if isinstance(form.get(b), str)]
     assert f"Matches your {seconds:.1f} s clip: 9 frames." in said
     assert form.field("num_frames") == 9
     sent = dict(zip(FIELD_KEYS, form.form_values(), strict=True))

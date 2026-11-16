@@ -309,6 +309,7 @@ def test_the_optional_settings_show_in_the_sample_caption(tmp_path):
     shown = showcase.load_showcase(tmp_path, known_modes=tuple(modes.MODES))
     for mode_id, entry in entries.items():
         caption = blocks._sample_caption(modes.get_mode(mode_id), shown.sample_for(mode_id))
+        caption = caption.replace("\u00a0", " ")  # sizes, units and seeds do not break
         assert caption.startswith("**Example output, not your run.**")
         for key, words in OPTIONAL.items():
             assert (words in caption) == (key in entry["sample"]["settings"]), (

@@ -120,6 +120,7 @@ def test_the_finished_run_and_the_running_one_name_the_device_alike():
             )
         )
         running = render.running(modes.get_mode(MODE), on_zerogpu=False, device=name)
+        took = took.replace("\u00a0", " ")
         assert running.endswith(took.split(" s ", 1)[1] + "."), (name, took, running)
 
 

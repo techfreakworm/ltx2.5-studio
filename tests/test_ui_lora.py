@@ -130,7 +130,7 @@ def test_the_staged_strengths_appear_in_the_cost_panel():
         base=180,
         extras=(("LoRA", 60),),
     )
-    panel = render.cost_panel(facts)
+    panel = render.cost_panel(facts).replace("\u00a0", " ")  # sizes and units carry no-break spaces
     assert "style.safetensors" in panel and ">0.8<" in panel
     assert "LoRA +60 s" in panel and "is-lit" in panel
 

@@ -38,6 +38,7 @@ __all__ = [
     "export_flags",
     "frames_for_seconds",
     "has_result",
+    "legal_size",
     "match_size",
     "media_size",
     "mode_switch",
@@ -323,6 +324,20 @@ def preset_size(name: str) -> tuple[int, int] | None:
         if preset == name:
             return (w, h)
     return None
+
+
+def legal_size(width: Any, height: Any) -> tuple[int, int] | None:
+    """``(width, height)`` when the backend takes this size (its own validators), else None."""
+    w, h = _as_int(width), _as_int(height)
+    if w is None or h is None:
+        return None
+    try:
+        for name, value in (("width", w), ("height", h)):
+            constraints.validate_dimension_limit(value, name=name)
+            constraints.validate_dimension(value, name=name)
+    except constraints.ConstraintError:
+        return None
+    return (w, h)
 
 
 def match_size(source_width: int, source_height: int) -> tuple[int, int]:

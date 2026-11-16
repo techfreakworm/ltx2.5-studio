@@ -87,11 +87,11 @@ def test_the_figure_line_is_the_panels_figure_in_one_line(on_zerogpu):
         on_zerogpu=on_zerogpu,
         device="cpu",
     )
-    figure = render.figure_line(facts)
+    figure = render.figure_line(facts).replace("\u00a0", " ")
     tail = "needs 360 s quota" if on_zerogpu else "on the CPU"
     assert figure == f"704 × 480, 5.0 s, {tail}"
     assert render.commit_line(facts) == "Needs a prompt", "the phone keeps its reason"
-    markup = render.commit_markup(facts)
+    markup = render.commit_markup(facts).replace("\u00a0", " ")
     assert '<span class="mr-commit-phone">Needs a prompt</span>' in markup
     assert f'<span class="mr-commit-desk">{figure}</span>' in markup
     refused = render.CostFacts(mode_name="x", state="refused", problems=("Width 700 won't run",))
@@ -146,5 +146,5 @@ def test_the_mode_names_its_figure_in_every_mode(demo):
     for mode_id in modes.MODES:
         values = {spec.key: spec.default for spec in FIELDS} | inputs_for(mode_id)
         facts = handlers.review(mode_id, values)
-        figure = render.figure_line(facts)
+        figure = render.figure_line(facts).replace("\u00a0", " ")
         assert figure.startswith(f"{facts.render_size[0]} × {facts.render_size[1]}"), mode_id

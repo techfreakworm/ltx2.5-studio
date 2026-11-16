@@ -291,7 +291,8 @@ def test_on_zerogpu_the_panel_still_shows_reserves_needs_and_billed(platform, st
         assert words in panel, words
     lit = re.findall(r"(Upscale|Enhance|LoRA) \+(\d+) s", panel)
     assert [name for name, _s in lit] == ["Upscale", "Enhance", "LoRA"], panel
-    assert render.commit_line(facts).endswith(f"needs {facts.reserve * facts.multiplier} s quota")
+    line = render.commit_line(facts).replace("\u00a0", " ")
+    assert line.endswith(f"needs {facts.reserve * facts.multiplier} s quota")
     demo = build_ui()
     identity = next(b for b in demo.blocks.values() if getattr(b, "elem_id", None) == "identity")
     assert "How quota works" in identity.value

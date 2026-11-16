@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import html
 import os
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -110,20 +111,20 @@ def _figure(value: Any) -> str:
 
 
 def _size(width: Any, height: Any) -> str:
-    return f"{int(width)} × {int(height)}"
+    return f"{int(width)}\u00a0×\u00a0{int(height)}"
 
 
 def _size_html(size: tuple[int, int]) -> str:
     """A size with each figure in the numeral face and a plain multiplication sign."""
-    return f"{_num(int(size[0]))} × {_num(int(size[1]))}"
+    return f"{_num(int(size[0]))}\u00a0×\u00a0{_num(int(size[1]))}"
 
 
 def _secs_html(value: float) -> str:
-    return f"{_num(f'{value:.1f}')} s"
+    return f"{_num(f'{value:.1f}')}\u00a0s"
 
 
 def _seconds(value: float) -> str:
-    return f"{value:.1f} s"
+    return f"{value:.1f}\u00a0s"
 
 
 def _two_places(value: float) -> str:
@@ -164,13 +165,13 @@ COLUMNS: tuple[tuple[frozenset[str], str], ...] = (
 #: Stated once, in words, under the column they belong to (on ZeroGPU).
 COLUMN_NOTES: dict[str, str] = {
     "Video (silent)": "The sound is rendered, then dropped. Same GPU time as with sound.",
-    "Sound only": "Renders a 256 × 256 video that is thrown away; you pay for that GPU time.",
+    "Sound only": "Renders a 256\u00a0×\u00a0256 video that is thrown away; you pay for that GPU time.",
 }
 #: The same notes where no meter runs: what happens, and what it takes.
 LOCAL_COLUMN_NOTES: dict[str, str] = {
     "Video (silent)": "The sound is rendered, then dropped. The run takes as long as with sound.",
     "Sound only": (
-        "Renders a 256 × 256 video that is thrown away, and the run takes the time to render it."
+        "Renders a 256\u00a0×\u00a0256 video that is thrown away, and the run takes the time to render it."
     ),
 }
 #: The column whose runs render a video nobody gets back: marked as a cost on every platform.
@@ -320,6 +321,13 @@ def enhance_info(mode: Any, enhance_seconds: int, *, on_zerogpu: bool = True) ->
 UPSCALE_DOES = "Upsamples and refines after the first pass, for twice the width and height."
 
 
+def upscale_label(size: tuple[int, int] | None) -> str:
+    """The Upscale label, with the size it returns for a size the model takes (``size``);
+    without one for a size that won't run."""
+    base = FIELD_COPY["enable_stage_2"][0]
+    return f"{base}: returns {_size(size[0] * 2, size[1] * 2)}" if size else base
+
+
 def upscale_info(*, upscale_seconds: int, on_zerogpu: bool = True, refused: str | None = None) -> str:
     """The Upscale line: what it does, with what it reserves on ZeroGPU; or, where this
     machine cannot run it for this request, why (the control is then parked)."""
@@ -417,7 +425,7 @@ LENGTH_SET = "Set the length"
 
 
 def pinned_line(mode: Any, size: int) -> str:
-    return f"Renders at {size} × {size} with no upscale, because the picture is thrown away."
+    return f"Renders at {size}\u00a0×\u00a0{size} with no upscale, because the picture is thrown away."
 
 
 def match_clip_line(
@@ -427,11 +435,11 @@ def match_clip_line(
     if audio:
         if clip_seconds is None:
             return f"Matches your audio's length, up to {cap_seconds:g} s."
-        line = f"Matches your {clip_seconds:.1f} s audio: {frames} frames."
+        line = f"Matches your {clip_seconds:.1f}\u00a0s audio: {frames}\u00a0frames."
     else:
         if clip_seconds is None:
             return f"Matches your clip's length, up to {cap_seconds:g} s."
-        line = f"Matches your {clip_seconds:.1f} s clip: {frames} frames."
+        line = f"Matches your {clip_seconds:.1f}\u00a0s clip: {frames}\u00a0frames."
     if clip_seconds is not None and clip_seconds > cap_seconds:
         line += f" Trimmed to the first {frames / fps:.1f} s, the longest this model makes."
     return line
@@ -440,7 +448,7 @@ def match_clip_line(
 def match_input_line(
     *, width: int, height: int, source_width: int, source_height: int, what: str
 ) -> str:
-    return f"Matches your {what} ({source_width} × {source_height}): {width} × {height}."
+    return f"Matches your {what} ({_size(source_width, source_height)}): {_size(width, height)}."
 
 
 # ---------------------------------------------------------------------------
@@ -615,15 +623,15 @@ def _lamps(facts: CostFacts) -> str:
     if facts.stage_2_offered:
         seconds = extras.get("Upscale ×2")
         lamps.append(
-            _lamp(f"Upscale +{seconds} s" if seconds else "Upscale", lit=live and facts.stage_2)
+            _lamp(f"Upscale +{seconds}\u00a0s" if seconds else "Upscale", lit=live and facts.stage_2)
         )
     if facts.enhance_offered:
         seconds = extras.get("Enhance")
         lamps.append(
-            _lamp(f"Enhance +{seconds} s" if seconds else "Enhance", lit=live and facts.enhance)
+            _lamp(f"Enhance +{seconds}\u00a0s" if seconds else "Enhance", lit=live and facts.enhance)
         )
     seconds = extras.get("LoRA")
-    lamps.append(_lamp(f"LoRA +{seconds} s" if seconds else "LoRA", lit=live and bool(facts.loras)))
+    lamps.append(_lamp(f"LoRA +{seconds}\u00a0s" if seconds else "LoRA", lit=live and bool(facts.loras)))
     if facts.discards_video:
         lamps.append(_lamp("Video thrown away", lit=True))
     if facts.encodes_audio:
@@ -636,11 +644,11 @@ def _length_words(facts: CostFacts) -> str:
         return "the length of your clip"
     if facts.auto_seconds is not None:
         low, high = facts.auto_seconds
-        return f"length chosen by the model, {_num(f'{low:g}–{high:g}')} s"
+        return f"length chosen by the model, {_num(f'{low:g}–{high:g}')}\u00a0s"
     if facts.length_from_audio and facts.frames is None:
         return "the length of your audio"
     if facts.frames is not None and facts.seconds is not None:
-        return f"{_secs_html(facts.seconds)} ({_num(facts.frames)} frames)"
+        return f"{_secs_html(facts.seconds)} ({_num(facts.frames)}\u00a0frames)"
     return "length not set"
 
 
@@ -701,18 +709,18 @@ def cost_panel(facts: CostFacts) -> str:
         rows.append(("Runs", f"{_e(where_it_runs(facts.device))}; nothing is metered"))
     else:
         if facts.reserve is not None:
-            reserve = f"{_figure(facts.reserve)} s of GPU time"
+            reserve = f"{_figure(facts.reserve)}\u00a0s of GPU time"
             if facts.extras:
-                parts = [f"{facts.base} s base"] + [f"{s} s for {n}" for n, s in facts.extras]
+                parts = [f"{facts.base}\u00a0s base"] + [f"{s}\u00a0s for {n}" for n, s in facts.extras]
                 reserve += f' <span class="mr-sub">({_e(" + ".join(parts))})</span>'
             rows.append(("Reserves", reserve))
             rows.append(
-                ("Needs", f"{_figure(facts.reserve * facts.multiplier)} s of quota free to start")
+                ("Needs", f"{_figure(facts.reserve * facts.multiplier)}\u00a0s of quota free to start")
             )
         rows.append(
             (
                 "Billed",
-                f"for GPU time used × {facts.multiplier}; runs that fail on the GPU are billed too",
+                f"for GPU time used ×\u00a0{facts.multiplier}; runs that fail on the GPU are billed too",
             )
         )
     rows.append(("LoRA", _lora_words(facts.loras)))
@@ -727,7 +735,7 @@ def cost_panel(facts: CostFacts) -> str:
             else "the run takes the time to render it."
         )
         notes += (
-            f'<p class="mr-cost-note">A 256 × 256 video is rendered and thrown away; {spent}</p>'
+            f'<p class="mr-cost-note">A 256\u00a0×\u00a0256 video is rendered and thrown away; {spent}</p>'
         )
     if facts.encodes_audio:
         notes += (
@@ -780,13 +788,13 @@ def figure_line(facts: CostFacts) -> str:
     if facts.render_size:
         parts.append(_size(*facts.render_size))
     if facts.auto_seconds is not None:
-        parts.append(f"{facts.auto_seconds[0]:g}–{facts.auto_seconds[1]:g} s")
+        parts.append(f"{facts.auto_seconds[0]:g}–{facts.auto_seconds[1]:g}\u00a0s")
     elif facts.seconds is not None:
         parts.append(_seconds(facts.seconds))
     if not facts.on_zerogpu:
         parts.append(where_it_runs(facts.device))
     elif facts.reserve is not None:
-        parts.append(f"needs {facts.reserve * facts.multiplier} s quota")
+        parts.append(f"needs {facts.reserve * facts.multiplier}\u00a0s quota")
     return ", ".join(parts)
 
 
@@ -838,17 +846,35 @@ def monitor_idle(mode: Any) -> str:
     )
 
 
+#: A size, a length in seconds or a seed written with ordinary spaces (manifest text).
+_BREAKABLE_FIGURES = re.compile(r"(\d) ?× ?(\d)|(\d) (s\b)|(seed) (\d)")
+
+
+def _held(text: str) -> str:
+    """``text`` with its sizes, seconds and seeds held together by no-break spaces."""
+
+    def hold(match: re.Match) -> str:
+        if match.group(1):
+            return f"{match.group(1)}\u00a0×\u00a0{match.group(2)}"
+        if match.group(3):
+            return f"{match.group(3)}\u00a0{match.group(4)}"
+        return f"{match.group(5)}\u00a0{match.group(6)}"
+
+    return _BREAKABLE_FIGURES.sub(hold, text)
+
+
 def sample_settings_words(settings: Any) -> str:
-    """A sample's settings in words: free text as given, or a mapping said in words."""
+    """A sample's settings in words: free text as given, or a mapping said in words; its
+    sizes, seconds and seeds do not break across lines."""
     if not isinstance(settings, dict):
-        return str(settings or "")
+        return _held(str(settings or ""))
     words = []
     if settings.get("size"):
-        words.append(str(settings["size"]))
+        words.append(_held(str(settings["size"])))
     elif settings.get("width") and settings.get("height"):
         words.append(_size(settings["width"], settings["height"]))
     if settings.get("seconds"):
-        words.append(f"{float(settings['seconds']):g} s")
+        words.append(f"{float(settings['seconds']):g}\u00a0s")
     if settings.get("upscale"):
         words.append("upscaled ×2")
     if settings.get("enhance"):
@@ -865,15 +891,15 @@ def monitor_caption(
     if kind == "sample":
         extra = f" {caption}" if caption else ""
         said = sample_settings_words(settings)
-        bits = ", ".join(b for b in (said, f"seed {seed}" if seed is not None else "") if b)
+        bits = ", ".join(b for b in (said, f"seed\u00a0{seed}" if seed is not None else "") if b)
         detail = f" {mode.label}" + (f", {bits}" if bits else "") + "."
         return f"**Example output, not your run.**{detail}{extra}"
     if kind == "run":
-        return f"**Your run.** {mode.label}, seed {seed}."
+        return f"**Your run.** {mode.label}, seed\u00a0{seed}."
     if kind == "earlier":
-        return f"**Earlier run.** {mode.label}, seed {seed}."
+        return f"**Earlier run.** {mode.label}, seed\u00a0{seed}."
     if kind == "running":
-        return f"**Running.** {mode.label}. Progress shows on the monitor."
+        return f"**Your run.** {mode.label}."
     if kind == "failed":
         return "**This run failed.** The report below says why."
     if kind == "refused":
@@ -1153,12 +1179,12 @@ def took_words(facts: RunFacts) -> str:
     """ "Took N s", labelled by the device that ran it; on ZeroGPU, with the quota it drew."""
     seconds = round(float(facts.took))
     if not facts.took_is_gpu:
-        return f"{_num(seconds)} s"
+        return f"{_num(seconds)}\u00a0s"
     if facts.on_zerogpu:
         quota = seconds * int(facts.quota_multiplier)
-        return f"{_num(seconds)} s of GPU time, about {_num(quota)} s of your quota"
+        return f"{_num(seconds)}\u00a0s of GPU time, about {_num(quota)}\u00a0s of your quota"
     where = _ON_DEVICE.get(str(facts.device or ""))
-    return f"{_num(seconds)} s {where}" if where else f"{_num(seconds)} s"
+    return f"{_num(seconds)}\u00a0s {where}" if where else f"{_num(seconds)}\u00a0s"
 
 
 def run_summary(facts: RunFacts) -> str:
@@ -1397,7 +1423,7 @@ def recent_run_label(
         bits.append(_size(*size))
     if seconds is not None:
         bits.append(_seconds(seconds))
-    bits.append(f"seed {seed}")
+    bits.append(f"seed\u00a0{seed}")
     return f"**{at}** {', '.join(bits)}"
 
 

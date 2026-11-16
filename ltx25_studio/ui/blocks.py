@@ -920,9 +920,7 @@ def build_ui() -> gr.Blocks:
 
         def _hints(width: Any, height: Any, frames: Any) -> list[Any]:
             dims, frame_text = handlers.on_shape_change(width, height, frames)
-            w, h = handlers._as_int(width), handlers._as_int(height)
-            label = _upscale_label(w, h) if w and h else render.FIELD_COPY["enable_stage_2"][0]
-            return [dims, frame_text, gr.update(label=label)]
+            return [dims, frame_text, gr.update(label=_upscale_label(width, height))]
 
         for control in shape_inputs:
             control.change(
@@ -1682,11 +1680,8 @@ _EXAMPLE_FIELDS = (
 
 
 def _upscale_label(width: Any, height: Any) -> str:
-    base = render.FIELD_COPY["enable_stage_2"][0]
-    try:
-        return f"{base}: returns {int(width) * 2} × {int(height) * 2}"
-    except (TypeError, ValueError):
-        return base
+    """The Upscale label: the returned size only for a size the model takes."""
+    return render.upscale_label(handlers.legal_size(width, height))
 
 
 def _shape_choices(view: handlers.ModeView) -> list[str]:

@@ -137,7 +137,7 @@ def test_pinned_modes_show_a_read_only_line_instead_of_size_controls(mode_id):
     spec = modes.get_mode(mode_id)
     view = handlers.mode_view(mode_id)
     if spec.min_resolution:
-        assert view.pinned_line and "256 × 256" in view.pinned_line
+        assert view.pinned_line and "256\u00a0×\u00a0256" in view.pinned_line
         assert not view.active["width"] and not view.active["height"]
         assert not view.sizes_picture
     else:

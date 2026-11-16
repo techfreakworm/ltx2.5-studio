@@ -32,6 +32,11 @@ from ltx25_studio.ui.fields import FIELDS
 MODE_IDS = tuple(modes.MODES)
 
 
+def words(markup: str) -> str:
+    """The panel's words: sizes, units and seeds carry no-break spaces on the page."""
+    return markup.replace("\u00a0", " ")
+
+
 @pytest.fixture(autouse=True)
 def on_zerogpu(monkeypatch):
     """This process on ZeroGPU: the platform package is imported (``app.py`` does it first)."""
@@ -101,7 +106,7 @@ def test_the_reservation_is_the_estimators_with_each_extra_named(
         "the panel and the live dispatch's estimator disagree"
     )
     assert list(facts.extras) == named
-    panel = render.cost_panel(facts)
+    panel = words(render.cost_panel(facts))
     for label, seconds in named:
         assert f"{seconds} s for {label}" in panel, panel
 
@@ -131,8 +136,8 @@ def test_upscale_states_the_returned_size(base_60):
 def test_every_mode_states_size_length_return_reservation_quota_and_billing(mode_id):
     facts = handlers.review(mode_id, form(mode_id))
     assert facts.state == "ready", facts.reason
-    panel = re.sub(r"<[^>]+>", "", render.cost_panel(facts))
-    for words in (
+    panel = words(re.sub(r"<[^>]+>", "", render.cost_panel(facts)))
+    for phrase in (
         "Renders",
         "Returns",
         "Reserves",
@@ -142,20 +147,20 @@ def test_every_mode_states_size_length_return_reservation_quota_and_billing(mode
         "runs that fail on the GPU are billed too",
         "LoRA",
     ):
-        assert words in panel, f"{mode_id}: {words!r} missing from the cost panel:\n{panel}"
+        assert phrase in panel, f"{mode_id}: {phrase!r} missing from the cost panel:\n{panel}"
     assert f"{facts.reserve * handlers.quota_multiplier()} s of quota free" in panel
 
 
 def test_the_quota_needed_is_the_reservation_times_the_multiplier(base_60):
     facts = handlers.review("text_to_audio_video", form("text_to_audio_video"))
     assert facts.multiplier == handlers.quota_multiplier() == 2
-    assert "120 s of quota free to start" in re.sub(r"<[^>]+>", "", render.cost_panel(facts))
+    assert "120 s of quota free to start" in words(re.sub(r"<[^>]+>", "", render.cost_panel(facts)))
 
 
 @pytest.mark.parametrize("mode_id", ["text_to_audio", "video_to_audio", "audio_to_audio"])
 def test_the_sound_only_modes_say_the_video_is_rendered_and_thrown_away(mode_id):
     facts = handlers.review(mode_id, form(mode_id))
-    panel = render.cost_panel(facts)
+    panel = words(render.cost_panel(facts))
     assert facts.discards_video and facts.render_size == (256, 256)
     assert "256 × 256 video is rendered and thrown away; you pay for" in panel
     assert "sound only" in panel
