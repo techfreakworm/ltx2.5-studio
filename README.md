@@ -71,6 +71,13 @@ with **user-uploadable LoRA at inference time**.
 
 Built on `diffusers`, pinned to an exact commit. Deploys to a private Hugging Face Space
 on ZeroGPU: [`techfreakworm/LTX2.5-Studio`](https://huggingface.co/spaces/techfreakworm/LTX2.5-Studio).
+It also runs on an Apple-silicon Mac with enough memory ([below](#run-it-locally-apple-silicon)).
+
+> **Where things stand, 2026-11-16.** After that day's fixes, ten of the eleven modes are
+> verified on real weights on a Mac; video to video changed how it works that day and is not
+> verified yet. The Space still runs the build of 2026-08-26 and has not been run since the
+> fixes, so nothing in this README about the Space's behaviour after them is verified yet.
+> The record, run by run: [`docs/SPACE_MODE_MATRIX.md`](docs/SPACE_MODE_MATRIX.md) §10.
 
 ---
 
@@ -82,50 +89,59 @@ The pipeline returns `LTX2PipelineOutput(frames=..., audio=...)` — both non-op
 tensors. Every call spends full video compute and produces a video, whichever track you
 asked for. There is no flag that turns the video half off.
 
-That is the most important cost fact in this app, so the UI states it in words on the
-screen where you pick a mode, marks the affected modes with ⚠️ in the selector itself,
-repeats it in the mode briefing, and repeats it again after the run finishes. A user who
-does not know this reads the runtime as a bug.
-
-For the audio-only modes the app applies the mitigations it can — minimum legal
-resolution, stage-2 refinement skipped, only the requested track exported — and it tells
-you it is doing so rather than hiding it. The resolution controls stay on screen for those
-modes, greyed out and showing the size that will actually be used, so you can always see
-what ran rather than being left to guess why one mode is faster than another.
+So the three modes that return only sound still render a video and throw it away, and you
+pay for that GPU time. The app says so on screen where you pick one of them, and applies the
+mitigations it can: it renders at 256 × 256, never runs Upscale ×2, and exports only the
+sound. The other way round, the three silent-video modes render the sound and drop it, at the
+same GPU time as with sound.
 
 ---
 
 ## The 11 modes
 
-Eleven modes, but **not eleven code paths**: they are a presentation layer over four real
-upstream workflows plus the audio-latent input route and single-track export. The UI is
-generated from that registry, so the modes below and the widgets on screen cannot drift
-apart.
+Eleven modes, but **not eleven code paths**: a presentation layer over two upstream
+workflows (`text2video` and `condition`) plus the audio-latent input route and single-track
+export. The UI is generated from the registry in `ltx25_studio/modes.py`, so the modes below
+and the widgets on screen cannot drift apart.
 
-| # | Mode | Workflow | Exports | Cost |
+| # | Mode | Needs | Can also take | Returns |
 |---|---|---|---|---|
-| 1 | Text → Video | `text2video` | video | first-class |
-| 2 | Image → Video | `condition` | video | first-class |
-| 3 | Image + Text → Video | `condition` | video | first-class |
-| 4 | Video → Video | `condition` | video | first-class |
-| 5 | Text → Audio + Video | `text2video` | audio + video | **the model's native shape** |
-| 6 | Image → Audio + Video | `condition` | audio + video | first-class |
-| 7 | Image + Text → Audio + Video | `condition` | audio + video | first-class |
-| 8 | Text → Audio | `text2video` | audio | ⚠️ **still renders video internally** |
-| 9 | Video → Audio | `condition` | audio | ⚠️ same |
-| 10 | Audio → Audio | `condition` | audio | ⚠️ same |
-| 11 | Audio → Video | `condition` | video | ⚠️ pays audio encode on top |
+| 1 | Text to video | text | — | video |
+| 2 | Image to video | image | — | video |
+| 3 | Image + text to video | image, text | — | video |
+| 4 | Video to video | video | text | video: a variation of your clip |
+| 5 | Text to video with sound | text | — | video with sound, and its sound as a `.wav` |
+| 6 | Image to video with sound | image | — | video with sound, and its sound as a `.wav` |
+| 7 | Image + text to video with sound | image, text | — | video with sound, and its sound as a `.wav` |
+| 8 | Text to audio | text | — | sound (`.wav`) ⚠️ still renders video internally |
+| 9 | Video to audio | video | text | sound (`.wav`) ⚠️ same |
+| 10 | Audio to audio | audio | text | sound (`.wav`) ⚠️ same |
+| 11 | Audio to video | audio | text, image (as the first frame) | video carrying **your** audio, and that audio as a `.wav`; pays the audio encode on top |
 
-Audio is not a first-class argument — there is no `audio=` kwarg anywhere in the API.
-Input audio is encoded to `audio_latents` and mixed with `noise_scale`, which behaves like
-img2img strength: `0.0` keeps your audio, `1.0` discards it entirely. The slider says so.
+A run that is missing a required input is refused before a GPU is reserved, and an input a
+mode does not take is dropped with a note rather than used.
+
+<!-- follow-up pass: describe mode 04's lever here once its new mechanism is verified on real weights. -->
+**Video to video** makes a variation of your clip, steered by the prompt if you give one. Its
+mechanism changed on 2026-11-16 and is not verified on real weights yet.
+
+**Audio is not a first-class argument** — there is no `audio=` kwarg anywhere in the API. Your
+audio is encoded to `audio_latents`, and then:
+
+- **Audio to video** holds your audio fixed while the picture is generated to it. The file
+  carries your audio, length-matched to the video.
+- **Audio to audio** changes your audio by one of the model's own levels: 0.42, 0.73 or 0.91
+  (lightly, moderately, strongly), or 1.0, which ignores your audio and makes fresh sound.
+- With automatic length on, these two modes take their length from your audio file: the
+  duration predictor reads only the text, so it cannot hear the upload.
 
 ---
 
 ## LoRA — the headline feature
 
-Bring your own adapter, by **Hub repo id** or **direct upload**. Both routes are offered
-side by side.
+Bring your own adapter, by **Hub repo id** (`org/name`) or **direct upload** of a
+`.safetensors` file. Each adapter you stage has its own strength; adapters are often made for
+0.5 to 1.2.
 
 The reason this gets so much care: upstream's *only* validation is a substring test that
 every LoRA key contains `lora`. An adapter built for a completely different architecture
@@ -142,143 +158,190 @@ rejected one and why, quoting the validator's own message rather than flattening
 | 1 | size bound — refused before any download |
 | 2 | header-only parse — a multi-GB file is **never** materialised just to validate it |
 | 3 | format — safetensors with a parseable header (not-safetensors and bad-header are different messages) |
-| 4 | version — reads `model_version`, `ss_ltx_version`, `modelspec.architecture`, `ss_base_model_version` in priority order |
+| 4 | version — reads `model_version`, `ss_ltx_version`, `modelspec.architecture`, `ss_base_model_version` in priority order; an LTX-**2.3** adapter is warned about, not refused |
 | 5 | key convention — on unknown, the error **names the prefixes actually found** |
 | 5.5 | in-context adapters — an IC-LoRA on the plain pipeline neither errors nor works |
-| 6 | pairing — `lora_A`/`lora_B` (or `lora_down`/`lora_up`) must pair |
-| 6.5 | shape fit and target modules — wrong dimension and wrong module are different diagnoses |
+| 6 | pairing — the two low-rank halves of every layer must pair |
+| 6.5 | shape fit and target modules — wrong dimension and wrong module are different diagnoses. Checked when you validate, against the transformer's layer shapes shipped with the app, with no weights loaded |
 | 7 | **attach assertion** — after loading, assert the adapter attached to more than zero modules |
 
-Stage 7 is the one upstream does not do, and it runs on every load.
+Stage 7 is the one upstream does not do, and it runs on every load. For a Hub repo the file
+is downloaded before stages 2–6.5 run (its size is checked first), so a wrongly-built adapter
+costs one bounded download, kept in a size-limited cache.
 
-The panel shows the detected key convention, rank, alpha and `model_version` when present.
-**"Not declared" is the normal, expected reading** — of three real public LTX LoRAs
-measured for this design, none carried `model_version` and two had no metadata block at
-all. Absence warns; it does not reject, because rejecting on absence would reject the most
-downloaded LTX adapter on the Hub.
+The panel shows the detected key convention, the rank (read from the tensor shapes), and the
+alpha and `model_version` when the file declares them. **"Not declared" is the normal,
+expected reading** — of three real public LTX LoRAs measured for this design, none carried
+`model_version` and two had no metadata block at all. Absence warns; it does not reject,
+because rejecting on absence would reject the most downloaded LTX adapter on the Hub.
 
-When no adapter is applied, the panel says so in words. It never expresses that as a blank
-area — a blank panel and an adapter that loaded but attached to nothing look identical.
+On real weights (locally, on a Mac) two public LTX-2.5 adapters visibly change the output
+when given their trigger words. An adapter that needs trigger words cannot show that effect in
+the two modes that take no prompt (image to video, image to video with sound).
 
 ---
 
-## Constraints the UI enforces for you
+## Limits the app checks before it reserves a GPU
 
-Two hard model constraints, and they fail very differently:
+Two hard model constraints, and upstream handles them very differently:
 
 **`width % 32 == 0` and `height % 32 == 0`** — upstream raises. You lose a run, but you
 find out.
 
 **`num_frames % 8 == 1`** — upstream does **not** raise. It computes
-`(num_frames − 1) // 8 + 1` and **silently floors**. Ask for 120 frames and you get 113,
-with no warning, ever. This app's frame hint is the only warning you will get, so it names
-the number you would have silently received.
+`(num_frames − 1) // 8 + 1` and **silently floors**: ask for 120 frames and you get 113.
 
-Both show live guidance and offer a **Snap to legal values** button. The app snaps when you
-ask it to and shows you the result — it never rewrites what you typed behind your back.
+This app refuses an illegal size or frame count before any GPU time is reserved. The hint
+beside the fields names the nearest legal values, and **Snap to legal values** sets them when
+you press it; nothing you typed is rewritten behind your back. The `8` is
+`vae.temporal_compression_ratio`, used as a documented pre-load default so the UI can validate
+before any VAE exists, with a load-time tripwire that raises if upstream ever changes it.
 
-The `8` is not a magic number: it is `vae.temporal_compression_ratio`, used as a documented
-pre-load default so the UI can validate before any VAE exists, with a load-time tripwire
-that raises if upstream ever changes it.
+The app's own limits, not the model's: at most 1920 pixels a side, 481 frames, 20 seconds.
 
 ### Prompt enhancement
 
-**A real toggle, off by default.** Ticking *Enhance my prompt* rewrites your line into a
-full LTX-2.5 caption with the model's own system prompt — the image-conditioned one when
-you supply a reference frame — and then generates from the rewrite. The prompt actually
-sent is printed in the run report, because an enhancer that silently swaps your prompt is
-worse than none.
+**Off by default.** Ticking *Enhance my prompt* rewrites your line into a full LTX-2.5
+caption with the model's own system prompt — the image-conditioned one when you supply an
+image — and then generates from the rewrite. The prompt actually sent is printed in the run
+report, because an enhancer that silently swaps your prompt is worse than none.
 
-**It costs a second or two of quota.** The enhancer is
-`google/gemma-4-E2B-it-qat-mobile-transformers` (2.49 GB, public, ungated), loaded on the
-**GPU inside the run's own reservation** and then kept there for the life of the worker, so
-only the first enhanced run in a worker pays the load. Point `LTX25_PROMPT_ENHANCER_REPO` at
-`google/gemma-4-E2B-it` for the 10.28 GB bf16 build instead.
+**What it costs.** The enhancer is `google/gemma-4-E2B-it-qat-mobile-transformers` (2.49 GB,
+public, ungated, pinned to one revision). It runs on the GPU inside the run's own
+reservation, so an enhanced run **reserves 180 s more**. The rewrite itself takes a few
+seconds; the enhancer then stays loaded for the life of the GPU worker, and the first enhanced
+run in a fresh worker also pays about 29 s to load it. Point `LTX25_PROMPT_ENHANCER_REPO` at
+`google/gemma-4-E2B-it` for the 10.28 GB bf16 build instead (that repo loads unpinned).
 
-> ⚠️ **It used to be freed after every single rewrite, and that cost +30.78 s a run.**
-> Measured: 46.53 s against a 15.75 s baseline at 256×256×9 — a 2.49 GB reload, every time,
-> to protect VRAM headroom on a partition nobody had measured. When the app was finally made
-> to print `total_memory` it turned out to be running on **47.375 GiB instead of the
-> 94.971 GiB it was entitled to**, because `LTX25_ZEROGPU_SIZE=auto` cannot actually promote
-> a Space to `xlarge`. On the corrected partition the largest peak ever measured here
-> (55.906 GiB) plus a permanently resident 2.49 GB still leaves ~36 GiB spare, so the
-> enhancer stays loaded. See `docs/MIG_ALLOCATOR_SIGHTINGS.md`.
+Why it is placed that way, as measured: on the CPU the rewrite took about nine minutes; freed
+after every rewrite it cost +30.78 s a run (46.53 s against 15.75 s at 256×256×9); kept
+loaded on the full `xlarge` GPU, the largest peak measured so far (55.906 GiB) still leaves
+about 36 GiB spare.
 
-> ⚠️ **It used to cost no quota at all, and that was the problem.** The rewrite first ran on
-> the CPU in the web process, outside the metered window, which made it genuinely free of
-> GPU-seconds — and took **+538 s of wall-clock**, measured, for a 600-token greedy decode at
-> ~0.9 s/token. On the GPU the same decode is ~1-2 s against ~85 s for a real generation:
-> under 5% overhead instead of a nine-minute wait. The full accounting, including why moving
-> it to CUDA does *not* put it back into ZeroGPU's disk budget, is in PLAN §3.5.
-
-The weights are prefetched into the Hub cache at startup on a background thread, so the first
-enhanced run in a container does not pay the 88 s download inside its reservation. It is
-best-effort: if the prefetch fails the Space still starts, un-enhanced runs are unaffected,
-and the first enhanced run is merely slow. Set `LTX25_PREFETCH_ENHANCER=0` to decline the
-~2.5 GB of startup download on a deploy that will never turn enhancement on.
+The weights are fetched into the Hub cache at startup, in the background, so that the first
+enhanced run does not pay the ~88 s download inside its reservation
+(`LTX25_PREFETCH_ENHANCER=0` declines the ~2.5 GB). On the build the Space runs now, that fetch
+fails at startup (seen in the log of 2026-11-13, for a reason that applies to every boot), so
+the first enhanced run in each container pays the download too. The cause is fixed in the
+code; this is not verified on the Space yet. The pinned transformers
+(5.23.0) refuses one per-layer scale table of the enhancer's checkpoint, so the app reads that
+one weight back from the cached checkpoint and refuses any other mismatch; enhancement on real
+weights has not been re-checked since that fix.
 
 There is deliberately **no seed control** for it. LTX-2.5 enhancement decodes greedily, so
 `prompt_enhancement_seed` changes nothing — an advertised lever attached to nothing is a
 defect this project has already found seven of.
 
-### Multishot
+### Several shots in one clip
 
-Offered as a shot list — a prompt segment, an anchor and a strength per shot — and labelled
-honestly: **there is no multishot or scene API in LTX-2.5.** It is prompt-structure driven
-and unverified, and the 2.5 prompt enhancer's system prompts explicitly instruct the model
-*not* to describe scene cuts — so leave prompt enhancement **off** for a multishot run, or
-the enhancer will flatten your cuts back into one continuous take. It is a documented
-technique here, not a button implying support that does not exist.
-
-The anchor is a **latent** index, not a pixel frame number — the conversion is
-`pixel ≈ max((latent − 1) × 8 + 1, 0)`, so typing a pixel frame number there is an off-by-8
-every time. The UI labels it; `conditioning.py` does the conversion.
+**There is no multishot or scene API in LTX-2.5.** To ask for several shots, write them one
+after another in the prompt. The UI does not offer a shot list: the one it had fed prompt text
+to the model as if it were frames and never worked. Leave prompt enhancement **off** for such
+a prompt: the 2.5 enhancer's system prompts tell the model *not* to describe scene cuts, so it
+would flatten your shots into one continuous take. Prompt-structured shots are not verified.
 
 ---
 
-## Running it locally
+## Run the tests
 
 ```bash
 python3.12 -m venv .venv                       # 3.12 is required, not preferred
 .venv/bin/python -m pip install -r requirements.txt
 .venv/bin/python -m pip install -e ".[dev]"    # pytest + ruff
-.venv/bin/python app.py
-```
-
-Tests — no GPU, no weights, no network — in **this** venv, with `requirements.txt`
-installed. A venv without torch passes too, but it skips the checks that compare our
-fakes and layouts with real torch, torchaudio, diffusers and safetensors, so it cannot
-vouch for them. `scripts/gate.sh` runs pytest, then ruff if it is installed, and prints
-the interpreter and the torch version so a result says which environment it came from:
-
-```bash
 .venv/bin/python -m pytest -q
 PYTHON=.venv/bin/python scripts/gate.sh
 ```
 
-You need a `HF_TOKEN` with access to `Lightricks/LTX-2.5-Diffusers`; the repo is gated.
+No GPU, no weights, no network. A venv without torch passes too, but it skips the checks that
+compare our fakes and layouts with real torch, torchaudio, diffusers and safetensors, so it
+cannot vouch for them. `scripts/gate.sh` runs pytest, then ruff if it is installed, and prints
+the interpreter and the torch version, so a result says which environment it came from.
 
-Two honest caveats:
+`.venv/bin/python app.py` starts the UI. On a machine without an NVIDIA GPU it starts with no
+generation device: Generate explains how to opt in (next section).
 
-- **Python 3.12 is a hard requirement.** numpy 2.5.2 needs ≥ 3.12 and `av` 18 needs ≥ 3.11.
-  The default 3.10 image resolves both *downward* rather than failing, which is worse.
-- **The 22B model does not run on macOS.** Apple Silicon / MPS is a genuinely different
-  regime — no ZeroGPU packer, different memory arithmetic — and the local path is expected
-  to be capability-limited rather than identical. Real generations happen on the Space.
+- **Python 3.12 is a hard requirement.** numpy 2.5.5 needs Python 3.12 or newer and `av`
+  18.1.0 needs 3.11 or newer. Every requirement is pinned to one version, so an older Python
+  fails the install rather than resolving older packages.
+- `spaces` is deliberately **absent** from `requirements.txt`. The Spaces platform installs
+  its own version and a conflicting pin breaks resolution at build time; the import is guarded
+  in `app.py`, so local runs work without it.
+- You need an `HF_TOKEN` with access to `Lightricks/LTX-2.5-Diffusers` to download the
+  weights; the repo is gated.
 
-> **Corrected 2026-08-25.** "Real generations happen on the Space" was **false for
-> the whole of this project's history until today.** Every Space sha up to and
-> including `ff142d9` quantised the transformer to int8 *including its
-> conditioning path*, and produced correctly-shaped colour static in every mode.
-> Fixed at `eb1aa9f` (`llm_int8_skip_modules`), deployed as Space sha `e3b5333`,
-> and verified by looking at a frame: the same seed and prompt that gave static
-> now give a photograph. The eleven-mode re-verification at a shippable config is
-> in flight — `docs/SPACE_MODE_MATRIX.md` §10. Until it lands, treat the Space as
-> **fixed but not yet re-verified across modes**.
+---
 
-`spaces` is deliberately **absent** from `requirements.txt`. The platform pins its own
-version and a conflicting pin breaks resolution at build time; the import is guarded in
-code so local dev works without it.
+## Run it locally (Apple silicon)
+
+The app's own code — the same `generate()` the Space runs — can generate on an Apple-silicon
+Mac's GPU (MPS), with the distilled transformer as a Q8_0 GGUF file and every other component
+from the pinned snapshot. This is how ten of the eleven modes were verified on 2026-11-16, on a
+Mac with **128 GB** of unified memory. Smaller machines are not verified.
+
+**What you need.**
+
+- **A separate Python 3.12 environment** with PyTorch 2.15.0, torchvision 0.29.2 and
+  torchaudio 2.11.1 in place of the trio `requirements.txt` pins, plus `gguf` (0.19.0 was
+  used), and every other pin from `requirements.txt` except `bitsandbytes` and `kernels`,
+  which are CUDA-only. PyTorch 2.15.0 is what was verified; 2.14.1 measured the same in the
+  numerics checks. **PyTorch 2.11, the Space's pin, computes attention wrongly on MPS**, and the
+  app's own numerics self-test refuses to generate on it.
+- **The weights, about 55 GB**, in the Hugging Face cache:
+  - from `Lightricks/LTX-2.5-Diffusers` at revision `871165de`, everything except the
+    transformer shards, the latent upsamplers and the diffusion decoder (those three are
+    CUDA-only here) — text encoder, connectors, VAE, audio VAE, vocoder, tokenizer, duration
+    head, scheduler and configs: 32.1 GB;
+  - `distilled/ltx-2.5-22b-distilled-Q8_0.gguf` from `unsloth/LTX-2.5-GGUF` (revision
+    `ac3c540c` was used): 22.8 GB.
+
+  Nothing is downloaded for you on a Mac: a missing file is reported with the exact
+  `hf download` command that fetches it.
+
+**Settings** (environment variables, read at startup):
+
+| variable | value | what it does |
+|---|---|---|
+| `LTX25_DEVICE` | `mps` | generate on the Mac's GPU. The default, `auto`, uses an NVIDIA GPU where there is one and otherwise starts with no generation device |
+| `LTX25_TRANSFORMER_GGUF` | path to the `.gguf` file | load the transformer from it, instead of the snapshot's 38 GB of bf16 shards |
+| `LTX25_RESIDENCY` | `staged` (the default on macOS) | the text encoder and the transformer are never in memory together: per run, encode the prompt, release the encoder, then load the transformer. `resident` keeps both (not verified) |
+| `LTX25_MODEL_SNAPSHOT_DIR` | leave unset | unset, the app finds the pinned snapshot in the Hugging Face cache. Set, it loads **every** component from that directory, all in memory at once, for another checkpoint |
+| `PYTORCH_MPS_HIGH_WATERMARK_RATIO`, `PYTORCH_MPS_LOW_WATERMARK_RATIO` | optional; the runs used `0.5` and `0.4` | caps on PyTorch's MPS allocator. **If you set them, the low one must not exceed the high one**: setting only the high one below 1.4 leaves the low one at PyTorch's default of 1.4, and then every GPU operation fails. The app refuses such a pair before it loads anything |
+| `LTX25_MEMORY_LIMIT_GB` | 90 on macOS by default | before each big load and before the denoise, the app checks that committed memory plus what that step adds stays under this, and refuses with the numbers if not |
+| `LTX25_MPS_SELF_TEST` | `enforce` (default) or `warn` | what to do when PyTorch fails the MPS numerics self-test |
+
+**One worked run** (the verified 704×480, 5-second text to video, through
+`scripts/local_generate.py`, which drives the app's own `generate()`):
+
+```bash
+SNAP=~/.cache/huggingface/hub/models--Lightricks--LTX-2.5-Diffusers/snapshots/871165de037793df7d75c23a02dd7f45fd364c97
+GGUF=~/.cache/huggingface/hub/models--unsloth--LTX-2.5-GGUF/snapshots/ac3c540c6025903784336e99b2dc179385c4c3b7/distilled/ltx-2.5-22b-distilled-Q8_0.gguf
+
+PYTORCH_MPS_HIGH_WATERMARK_RATIO=0.5 PYTORCH_MPS_LOW_WATERMARK_RATIO=0.4 HF_HUB_OFFLINE=1 \
+  .venv-mps/bin/python scripts/local_generate.py \
+    --mode text_to_video --device mps \
+    --prompt "A red vintage tram climbs a steep cobbled street at golden hour, slow push-in. The tram bell rings twice and steel wheels grind on the rails." \
+    --width 704 --height 480 --num-frames 121 --seed 7 \
+    --snapshot-dir "$SNAP" --transformer-gguf "$GGUF" --json run.json
+```
+
+`.venv-mps` is the separate environment above. The script takes its paths as flags; add
+`--dry-run` to print the plan and the memory arithmetic without loading anything. To use the
+UI instead, start `app.py` from that environment with `LTX25_DEVICE=mps` and
+`LTX25_TRANSFORMER_GGUF="$GGUF"`; a real-weights run through the UI on a Mac is **not
+verified yet**.
+
+**What it costs in memory, as measured** (the whole machine's committed memory — active,
+wired and compressed pages — on the 128 GB Mac): 57–61 GB at 704×480 with 49–121 frames,
+and 70 GB at 193 frames (8 s); runs made while other heavy jobs shared the machine read up to
+75 GB. Up to 121 frames the peak comes from loading the text encoder or the transformer, not
+from the denoise.
+
+**How long it takes.** At 704×480×121 (5 s of video), the denoise and decode took 142 s on a
+quiet machine and 333 s with other work running, plus about a minute of loading; 193 frames
+(8 s) took 563 s.
+
+**What does not run locally.** Upscale ×2, the model's diffusion decoder (every local run
+decodes with the conv VAE) and bitsandbytes int8 need an NVIDIA GPU (CUDA).
 
 ---
 
@@ -289,79 +352,81 @@ This is metered, and the meter is the resource you will actually run out of.
 
 | | |
 |---|---|
-| Hardware | NVIDIA RTX PRO 6000 Blackwell Server Edition (sm_120), not the A10G the id string implies |
-| Tier | **`xlarge`** — set explicitly via `LTX25_ZEROGPU_SIZE`. ⛔ Not "forced" by the packing threshold; see the 2026-08-27 note below |
-| Multiplier | **2×**. A 75-second run costs ~150 GPU-seconds |
-| PRO quota | 2400 GPU-seconds/day → **~16 runs/day** |
+| Hardware | NVIDIA RTX PRO 6000 Blackwell Server Edition (sm_120), not the A10G the id string `zero-a10g` implies |
+| GPU size | **`xlarge`**, 94.971 GiB measured. The app asks for it explicitly: `LTX25_ZEROGPU_SIZE` defaults to `xlarge`. With `auto` the platform hands out `large`, 47.375 GiB measured, which is where this Space ran until 2026-08-26 ([`docs/MIG_ALLOCATOR_SIGHTINGS.md`](docs/MIG_ALLOCATOR_SIGHTINGS.md)) |
+| Multiplier | **× 2 on `xlarge`** (× 1 on `large`): Hugging Face's documented rate. Billed seconds cannot be read back, so it has not been measured here |
+| PRO quota | 2400 GPU-seconds a day, as Hugging Face documents it. When it resets has not been verified |
 
-> **Updated 2026-08-25:** the tier is unchanged; its basis is not. The live
-> Space quantises the transformer and text encoder to **int8** at load
-> (bitsandbytes), so it packs **~51.1 GB** — still over the 42.00 GiB
-> threshold, so `xlarge` still applies. The 67.23 GiB figure above was the
-> bf16 packing, which no longer ships.
->
-> **Updated again, 2026-08-25 (evening) — this note was the only mention of int8
-> anywhere, and it treated a correctness change as a packing footnote.** That
-> quantisation was *blanket*: it named no `llm_int8_skip_modules`, so every
-> `nn.Linear` in the transformer was replaced, the eight `LTX2AdaLayerNormSingle`
-> modulation heads and the in/out projections included. Quantising the
-> shift/scale/gate that every block is conditioned on does not degrade an image —
-> it stops the denoiser being steered at all, and the Space returned colour static
-> in every mode. Fixed at `eb1aa9f`: 316 of 1660 Linears spared, names read off
-> the real checkpoint, `llm_int8_threshold` untouched at its 6.0 default. The
-> packing arithmetic above is unaffected — ~51.1 GB and `xlarge` still hold.
->
-> **⛔ Updated 2026-08-27 — the tier held, the mechanism did not, and the Space
-> had been running on half a GPU the whole time.** Both notes above reason that
-> packing past the 42.00 GiB threshold makes `xlarge` automatic. It does not.
-> The promotion sets a variable that only the *duration* estimator reads; the
-> `gpuSize` the scheduler actually allocates on is sent only when the size is
-> passed **explicitly**, and `LTX25_ZEROGPU_SIZE=auto` passes nothing. Measured
-> from inside the worker: **47.375 GiB before, 94.971 GiB after** setting
-> `xlarge`. Everything this project has ever measured on the Space — including
-> the stage-2 failure at 704×480×49, which needed 55.906 GiB — happened on the
-> smaller partition. Full trace in `docs/MIG_ALLOCATOR_SIGHTINGS.md`.
+**What one run reserves** (`zerogpu.estimate_duration`): the base reservation,
+`LTX25_GPU_DURATION_SECONDS` (180 s by default, and on the Space); × 1.5 with Upscale ×2;
+then + 60 s with any LoRA and + 180 s with prompt enhancement. To start, a run needs its
+reservation × 2 of quota free; it is then billed for the GPU time it actually uses, × 2.
 
-Two consequences worth knowing as a user:
+| run | reserves | quota it needs free to start |
+|---|---:|---:|
+| plain | 180 s | 360 s |
+| Upscale ×2 | 270 s | 540 s |
+| with a LoRA | 240 s | 480 s |
+| with prompt enhancement | 360 s | 720 s |
+| Upscale ×2 + LoRA + enhancement | 510 s | 1020 s |
 
-- **A failed run still costs quota.** So does a timeout.
-- **Timeouts are never retried automatically.** The captured request's `X-IP-Token` ages
-  past its TTL during the first attempt, so a retry always fails with "Expired ZeroGPU proxy
-  token" — masquerading as the root cause and burning a second reservation to tell you
-  something false. The app surfaces the original timeout instead.
+How much GPU time a run uses after the 2026-11-16 fixes has not been measured on the Space
+yet, and neither has the longest reservation the platform accepts.
 
-Stage-2 upscale-and-refine — the 2.5 quality path: a latent upsample plus three more
-denoise steps — is opt-in rather than default, because it is a real quota cost and not a
-free quality win. On the three audio-only modes the registry overrides it regardless, so
-the checkbox is shown pinned off and disabled rather than hidden: you can always see what
-will actually run.
+Things worth knowing as a user:
 
-**Stage 2 has a measured ceiling on this hardware** (2026-08-25): it works at
-**704×480 input up to 25 frames** (output 1408×960) and fails in the diffusion
-decoder at 49 frames — the exact limit between those is unmeasured. Larger
-stage-2 requests will error rather than silently degrade; the UI already warns
-that stage 2 doubles the output geometry.
+- **A run that fails on the GPU still costs quota**, and so does a timeout. Most input
+  problems — a missing input, an illegal size or length, audio shorter than the video you
+  asked for, a file that cannot be read — are refused before a GPU is reserved and cost
+  nothing.
+- **A timeout is never retried automatically.** A retry would reuse the request's ZeroGPU
+  proxy token (`X-IP-Token`), which has expired by then, so it would fail with "Expired
+  ZeroGPU proxy token" and report the wrong cause, and spend a second reservation doing it.
+  Press Generate again for a fresh request.
 
-> **Scope, added 2026-08-25 (evening):** "it works at" means *it runs and returns
-> 1408×960* — the ceiling and the geometry are real measurements and stand. That
-> run was made on the pre-`eb1aa9f` build, so it says nothing about stage-2
-> *output quality*; that is part of the re-verification in
-> `docs/SPACE_MODE_MATRIX.md` §10.
+**Precision on the Space.** `LTX25_QUANTIZATION` defaults to `auto`: bitsandbytes int8 for
+the transformer and the text encoder on ZeroGPU, where bf16 does not fit the disk cap, and
+bf16 everywhere else. 316 of the transformer's 1660 linear layers — its conditioning path —
+stay in bf16: quantising them is what turned every Space output into colour static until
+2026-08-25.
+
+**The decoder.** On CUDA the default, `LTX25_DECODER=auto`, decodes with the model's own
+diffusion decoder wherever it can run (its kernel available, the video large enough) and with
+the conv VAE otherwise, and the run says which. Before 2026-11-16 the diffusion decoder ran only
+with Upscale ×2. Not verified on the Space yet.
+
+### Upscale ×2 (stage 2)
+
+A latent upsample plus three more denoise steps, doubling width and height. **Off by
+default**, because it is a real quota cost (× 1.5 on the reservation). It needs CUDA, so it
+runs only on the Space. The three sound-only modes never run it, and the app says so for them.
+
+What is known: 704×480 with 49 frames passes on `xlarge` (55.906 GiB reserved, measured
+2026-08-26); the frames of that run were not looked at. The largest size that fits, and the
+picture quality, are not measured. Until 2026-11-16 it failed in the six modes that take an
+image, a clip or audio; it is now wired for all eight modes that offer it, which is verified
+on a tiny test checkpoint, not yet on real weights.
 
 ---
 
 ## Design documents
 
-The design is written down, with the evidence, before the code:
+- [`docs/PLAN.md`](docs/PLAN.md) — the build contract: the integration path and the pinned
+  diffusers commit, the disk/RAM budget, the mode registry, the LoRA validator, the
+  resilience doctrine (including the exact pins), the architecture, and the ZeroGPU execution
+  model. Decisions that later measurements overtook carry dated corrections.
+- [`docs/SPACE_MODE_MATRIX.md`](docs/SPACE_MODE_MATRIX.md) — what has been verified, and how:
+  §10 for the state after 2026-11-16; §1–§9 for the August runs on the Space.
+- The August 2026 records — [`docs/OPERATOR_HANDOFF.md`](docs/OPERATOR_HANDOFF.md),
+  [`docs/TEST_PLAN.md`](docs/TEST_PLAN.md) (a quota-bounded GPU plan whose Space half was never
+  run as designed), [`docs/SPACE_SESSION_2026-08-25.md`](docs/SPACE_SESSION_2026-08-25.md),
+  [`docs/SPACE_GENERATION_FINDING.md`](docs/SPACE_GENERATION_FINDING.md),
+  [`docs/ZEROGPU_DISK.md`](docs/ZEROGPU_DISK.md),
+  [`docs/MIG_ALLOCATOR_SIGHTINGS.md`](docs/MIG_ALLOCATOR_SIGHTINGS.md),
+  [`docs/HINODE_HOST_SETUP.md`](docs/HINODE_HOST_SETUP.md) — each opens with what has been
+  superseded since.
 
-- [`docs/PLAN.md`](docs/PLAN.md) — the build contract. Integration path and the exact
-  pinned SHA (§1), the disk/RAM budget and its two traps (§2), the mode registry (§3),
-  the LoRA validator (§4), the resilience doctrine (§5), architecture and layering (§7),
-  and the ZeroGPU execution model, which inverts several habits from normal GPU boxes (§8).
-- [`docs/TEST_PLAN.md`](docs/TEST_PLAN.md) — the quota-bounded GPU matrix. Seven runs cover
-  every distinct code path; everything else is a unit test. Budget, stop line and run log.
-
-The governing rule behind both, and behind this app's noisier error messages: the
+The governing rule behind all of them, and behind this app's noisier error messages: the
 predecessor's worst outage was not a model failure. A generation failed, four layers each
 turned that failure into a falsy value, and the UI rendered an empty path as what looked
 like a form quietly resetting itself. No error, no log, no signal. **It hid for a week.**
