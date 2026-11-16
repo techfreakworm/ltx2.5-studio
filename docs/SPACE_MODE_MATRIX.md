@@ -974,7 +974,7 @@ evidence directory, outside this repo.
   says otherwise. **The app's own UI was not part of these runs.**
 - The lead opened every output: six native-resolution frames per video; per soundtrack the
   loudness, a spectrogram and a transcript; for conditioned modes, frame 0 against the
-  supplied image (SSIM, PSNR). Inputs were files prepared for the test (photos, synthetic
+  supplied image (SSIM, PSNR). Inputs were files prepared for the test (generated images, synthetic
   clips, recorded speech, the operator's own recording); the video-to-sound clips were two
   outputs of earlier runs.
 
@@ -983,12 +983,12 @@ evidence directory, outside this repo.
 | # | mode | run id(s) and code | what was seen and heard | measured | verdict |
 |---|---|---|---|---|---|
 | 01 | Text to video | `G3_704x480x121` at `75d0c53`; repeated as `G3r_rope64` at `5e4829a` | a red tram climbs a cobbled street and passes the camera, coherent over the 5 s | luma p1–p99 1–248, contrast 64.5; the repeat: same scene, statistics within 1 % | works |
-| 02 | Image to video | `M02_i2v` at `75d0c53` | frame 0 is the supplied tram photo; the tram then rolls past the camera | frame 0 vs the photo: SSIM 0.75, PSNR 21.8 dB | works |
-| 03 | Image + text to video | `M03_it2v` at `75d0c53` | starts on the supplied photo, slow push-in as prompted | frame 0 vs the photo: SSIM 0.74 | works |
+| 02 | Image to video | `M02_i2v` at `75d0c53` | frame 0 is the supplied tram image; the tram then rolls past the camera | frame 0 vs the image: SSIM 0.75, PSNR 21.8 dB | works |
+| 03 | Image + text to video | `M03_it2v` at `75d0c53` | starts on the supplied image, slow push-in as prompted | frame 0 vs the image: SSIM 0.74 | works |
 | 04 | Video to video | `M04_v2v`, `M04b_v2v_s05` … `M04e_v2v_s00` at `75d0c53`/`5e4829a`; prototype `V2V_LEVEL_*` at `5e4829a` | with the earlier mechanism the source clip came back nearly unchanged, or the prompt replaced it entirely; nothing useful in between | SSIM to the source 0.72–0.83 at three settings, 0.50 and 0.27 at the two lowest | **pending**: the mechanism was replaced after these runs (`85405e9`), chosen from the prototype runs; not yet run on real weights through the app |
 | 05 | Text to video with sound | `M05_t2av` at `75d0c53`; duration head `X1_duration_head` at `5e4829a` | a ship in a storm, a figure in yellow on deck, the prompt's line shouted; with the duration head, a lighthouse keeper climbs to the lamp | AAC 48 kHz stereo, 5.01 s, −11.5 LUFS, transcript = the quoted line word for word; the duration head "chose 121 frames (5.04 s)" of the 5–10 s allowed, transcript exact | works |
-| 06 | Image to video with sound | `M06_i2av` at `75d0c53` | the supplied cabin photo comes alive (smoke, drifting aurora, slow camera move); a low ambient drone | frame 0 vs the photo: SSIM 0.85, PSNR 27.7 dB; −14.6 LUFS | works |
-| 07 | Image + text to video with sound | `M07_it2av` at `75d0c53`, 480×704 portrait | the supplied portrait, upright; his mouth opens on the shouted words | frame 0 vs the photo: SSIM 0.87, PSNR 31.8 dB; transcript exact | works |
+| 06 | Image to video with sound | `M06_i2av` at `75d0c53` | the supplied cabin image comes alive (smoke, drifting aurora, slow camera move); a low ambient drone | frame 0 vs the image: SSIM 0.85, PSNR 27.7 dB; −14.6 LUFS | works |
+| 07 | Image + text to video with sound | `M07_it2av` at `75d0c53`, 480×704 portrait | the supplied portrait, upright; his mouth opens on the shouted words | frame 0 vs the image: SSIM 0.87, PSNR 31.8 dB; transcript exact | works |
 | 08 | Text to audio | `M08_t2a` at `75d0c53` | a male voice reads the announcement | wav only, 48 kHz stereo, 5.01 s, −15.1 LUFS; transcript exact | works |
 | 09 | Video to audio | `M09c_v2a_captain_noprompt`, `M09d_v2a_captain_prompt`, `M09e_v2a_tram_prompt`, `M09f_v2a_tram_noprompt` at `b12415f` | on a clip of a man shouting (only the picture reaches the model), a voice in time with his mouth, in different words; on the tram clip, machine hum and a low rumble | loudness envelope vs the clip's own soundtrack: correlation 0.92 (lag −40 ms); waveform correlation 0.03, so generated rather than copied; −18.0 / −13.5 LUFS (man), −31.3 / −26.7 LUFS (tram) | works, with and without a prompt |
 | 10 | Audio to audio | `M10_a2a_l042`, `M10_a2a_l073`, `M10_a2a_l091`, `M10_a2a_l073_noprompt`; speech `M10s_speech_l042` / `_l073` / `_l091`; at `b12415f` | the ocean recording's two swells stay in place at levels 0.42 and 0.73 and are gone at 0.91, where the prompt's rain takes over; speech keeps its words at "a little" and mostly at "moderately" | same events at the same times (mel-modulation correlation) 0.90 / 0.85 / 0.59; unrelated-sound controls 0.00 and 0.33; before the fix (`M10_a2a_before_ns05`): clipped and unrelated (−0.04) | works as designed. **Open defect, being investigated:** every result is 7–9 dB quieter and duller than the input, at every level, for speech and the ocean alike; the app's own audio encode → decode round trip, with no generation at all, loses about 9 dB too |
