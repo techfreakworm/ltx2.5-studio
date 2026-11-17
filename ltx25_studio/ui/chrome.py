@@ -713,6 +713,9 @@ button:disabled { cursor: not-allowed !important; }
 #report-actions { gap: 8px !important; }
 #run-summary:has(+ #report-actions button:not(.hidden)) .mr-done {
   border-bottom: 0; border-bottom-left-radius: 0; border-bottom-right-radius: 0; padding-bottom: 4px; }
+/* an empty actions row or an empty Recent runs takes no room: each was a 12 px gap in the
+   rail, and on a short window a scrollbar over nothing */
+#rail > :is(#report-actions, #recent):not(:has(button:not(.hidden))) { display: none !important; }
 #report-actions:has(button:not(.hidden)) { margin-top: -12px !important; padding: 2px 8px 8px !important;
   border: 1px solid var(--mr-line); border-top: 0; border-left: 4px solid var(--mr-roll);
   border-radius: 0 0 10px 10px; background: var(--mr-slate); }

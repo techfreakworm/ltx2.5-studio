@@ -92,3 +92,11 @@ def test_restore_brings_the_cost_into_view_on_desktop():
     demo = blocks.build_ui()
     labels = [b.value for b in demo.blocks.values() if isinstance(b, gr.Button)]
     assert "Restore settings" in labels, "the script finds the button by its words"
+
+
+def test_an_empty_actions_row_or_recent_runs_takes_no_room_in_the_rail():
+    """Minor 4: at idle the empty Reuse-seed row and the empty Recent runs were two flex children
+    of the rail, two 12 px gaps: a 22-24 px scroll over nothing at 1366, 1280 and 1440 x 790."""
+    css = chrome._css()
+    rule = "#rail > :is(#report-actions, #recent):not(:has(button:not(.hidden))) { display: none !important; }"
+    assert rule in css
