@@ -2138,15 +2138,33 @@ class ProgressReporter:
         self.phase("upscaling ×2")
 
     def decoding(self) -> None:
-        """The stage-2 diffusion decode. See :meth:`upscaling` for the shape."""
+        """The frames' decode: the diffusion decoder's own step, or the end of a pass
+        that decodes inside the pipeline call (see :meth:`sampling`). See
+        :meth:`upscaling` for the shape."""
         self.phase("decoding the frames")
 
-    def sampling(self, *, index: int = 1, passes: int = 1) -> Callable | None:
+    def loading(self) -> None:
+        """A load that starts after the bar has passed its band: the local runner's
+        staged pair, loaded inside the denoise stage.
+
+        Its own label at the bar's current position: a bar that retreats reads as
+        a restart. See :meth:`upscaling` for the shape.
+        """
+        self._emit(self._position, "loading the model")
+
+    def sampling(
+        self, *, index: int = 1, passes: int = 1, decodes: bool = False
+    ) -> Callable | None:
         """A ``callback_on_step_end`` for one denoise pass, or None when idle.
 
         ``index``/``passes`` name the pass rather than counting it internally,
         because ``StageRunner`` is the only layer that knows whether this run has
         one sampling pass or two -- and the label has to say so.
+
+        ``decodes`` says the pipeline decodes the frames inside this same call
+        (the conv decoder), so "decoding the frames" follows the last step. Only
+        the pipeline's own ``num_timesteps`` says which step is last; the
+        declared fallback is no proof that the loop has ended.
 
         The returned callable matches upstream's signature exactly:
         ``callback_on_step_end(pipeline, i, t, callback_kwargs)`` returning a
@@ -2162,7 +2180,8 @@ class ProgressReporter:
         declared = _DECLARED_STEPS.get(index)
 
         def callback_on_step_end(pipeline, step: int, timestep, callback_kwargs):
-            total = getattr(pipeline, "num_timesteps", None) or declared
+            counted = getattr(pipeline, "num_timesteps", None)
+            total = counted or declared
             done = int(step) + 1
             if total:
                 self._emit(start + (end - start) * min(done / total, 1.0), label)
@@ -2171,6 +2190,8 @@ class ProgressReporter:
                 # nothing about how many there are. Gradio renders an unknown
                 # total; a guessed one would render a lie.
                 self._emit((done, None), label)
+            if decodes and counted and done == counted:
+                self.decoding()
             return {}
 
         return callback_on_step_end

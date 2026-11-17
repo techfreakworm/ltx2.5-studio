@@ -832,6 +832,8 @@ class _LocalWeights:
         self._embeddings: OrderedDict = OrderedDict()
         #: The stage-2 parts and the diffusion decoder, built on first use.
         self.parts: dict = {}
+        #: Called before the next load of the staged pair starts (see :meth:`loads_reported`).
+        self._on_load = None
         sizes = weight_sizes(self.snapshot_dir, self.transformer_gguf)
         self._gb = {name: size / memory.GB for name, (size, _) in sizes.items()}
 
@@ -853,6 +855,24 @@ class _LocalWeights:
                     f"driver {stats['driver_gb']:.2f} GB"
                 )
             self.log(line)
+
+    @contextmanager
+    def loads_reported(self, progress):
+        """Within: the first load of the text encoder or the transformer is announced.
+
+        On ``progress`` (a ``generate.ProgressReporter``), as "loading the model";
+        nothing is announced when nothing loads.
+        """
+        self._on_load = None if progress is None else progress.loading
+        try:
+            yield
+        finally:
+            self._on_load = None
+
+    def _announce_load(self) -> None:
+        announce, self._on_load = self._on_load, None
+        if announce is not None:
+            announce()
 
     def _preflight(self, phase: str, need_gb: float) -> None:
         global _freed_since_reading
@@ -1036,6 +1056,7 @@ class _LocalWeights:
     def ensure_text_encoder(self):
         if self.text_encoder is not None:
             return self.text_encoder
+        self._announce_load()
         if self.residency == STAGED:
             self.release_transformer()
         need = _load_need_gb(
@@ -1065,6 +1086,7 @@ class _LocalWeights:
     def ensure_transformer(self):
         if self.transformer is not None:
             return self.transformer
+        self._announce_load()
         if self.residency == STAGED:
             self.release_text_encoder()
         source = "gguf" if self.transformer_gguf is not None else "safetensors"
@@ -1266,6 +1288,16 @@ class LocalStageRunner(pipelines.StageRunner):
                 ),
             ),
         )
+        #: The running call's progress reporter, for the loads the seam makes.
+        self._progress = None
+
+    def __call__(self, *, progress=None, **kwargs):
+        """The stage graph, with this call's reporter at hand for the loads it makes."""
+        self._progress = progress
+        try:
+            return super().__call__(progress=progress, **kwargs)
+        finally:
+            self._progress = None
 
     @property
     def residency(self) -> str:
@@ -1302,8 +1334,9 @@ class LocalStageRunner(pipelines.StageRunner):
         A denoise, in this order: the CRF on every condition lacking one;
         staged, the embedding swap (a cache hit for stage 2, so the text encoder
         is not reloaded and ``prompt`` never comes back) and the transformer made
-        resident; the memory preflight; then the call, under ``inference_mode``.
-        A stage-2 part (the upsampler, the decoder) runs under the same guards.
+        resident, a load among them announced as "loading the model"; the
+        memory preflight; then the call, under ``inference_mode``. A stage-2 part
+        (the upsampler, the decoder) runs under the same guards.
         """
         import torch
 
@@ -1314,8 +1347,9 @@ class LocalStageRunner(pipelines.StageRunner):
             return
         call = weights.with_explicit_crf(call)
         if weights.residency == STAGED:
-            call = weights.prompt_embeddings(pipeline, call)
-            weights.ensure_transformer()
+            with weights.loads_reported(self._progress):
+                call = weights.prompt_embeddings(pipeline, call)
+                weights.ensure_transformer()
         weights.preflight_denoise(pipeline, call)
         label = "denoise and decode" if stage == "single" else f"denoise ({stage})"
         with weights.phase(label), weights.freed_on_failure(), torch.inference_mode():

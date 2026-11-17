@@ -381,6 +381,83 @@ def test_progress_sees_the_same_steps_staged_and_resident(tmp_path):
 
 
 # --------------------------------------------------------------------------
+# what the bar says while a staged run loads (F65)
+#
+# Measured on real weights: "sampling - 12%" for the first 60 s of a staged run,
+# while the text encoder and the transformer loaded inside the denoise stage, and
+# "sampling - 82%" while the frames decoded. The bar's labels and the runner's own
+# phase lines go on one timeline (an entry repeated in a row is kept once).
+# --------------------------------------------------------------------------
+
+
+def _labelled_run(residency, tmp_path, name):
+    from ltx25_studio import generate as generate_module
+
+    timeline, positions = [], []
+
+    def mark(entry):
+        if not timeline or timeline[-1] != entry:
+            timeline.append(entry)
+
+    def handle(position, desc=None):
+        positions.append((position, desc))
+        mark(desc)
+
+    def log(line):
+        if line.startswith("phase["):
+            mark(line.split(":", 1)[0])
+
+    generate_module.generate(
+        mode="text_to_video",
+        prompt=PROMPT,
+        seed=SEED,
+        width=SIZE,
+        height=SIZE,
+        num_frames=FRAMES,
+        pipeline_factory=_factory(residency, log=log),
+        encoder=RecordingEncoder(),
+        output_root=tmp_path / name,
+        retention_bytes=10**12,
+        progress=handle,
+    )
+    return timeline, positions
+
+
+def test_a_staged_run_says_loading_while_it_loads_and_sampling_once_the_denoise_starts(tmp_path):
+    first, positions = _labelled_run("staged", tmp_path, "first")
+
+    assert first == [
+        "loading the model",
+        "phase[load small set]",
+        "preparing the inputs",
+        "loading the model",
+        "phase[load text encoder]",
+        "phase[encode prompt]",
+        "phase[load transformer]",
+        "sampling",
+        "decoding the frames",
+        "phase[denoise and decode]",
+        "writing the file",
+    ]
+    fractions = [p for p, _ in positions if isinstance(p, (int, float))]
+    assert fractions == sorted(fractions), positions
+    # Named at the bar's current position: the load's own band is behind it by then.
+    preparing = next(p for p, d in positions if d == "preparing the inputs")
+    assert [p for p, d in positions if d == "loading the model"][1:] == [preparing], positions
+
+    again, _ = _labelled_run("staged", tmp_path, "again")  # the same prompt: nothing loads
+
+    assert again == [
+        "loading the model",
+        "preparing the inputs",
+        "sampling",
+        "decoding the frames",
+        "phase[denoise and decode]",
+        "writing the file",
+    ]
+
+
+# --------------------------------------------------------------------------
 # the residency rule itself
 # --------------------------------------------------------------------------
 
@@ -395,7 +472,10 @@ class _Watch:
     def phase(self, label):
         self.phases.append(label)
 
-    def sampling(self, *, index=1, passes=1):
+    def loading(self):
+        self.phases.append("loading the model")
+
+    def sampling(self, *, index=1, passes=1, decodes=False):
         def callback(pipeline, step, timestep, callback_kwargs):
             self.text_encoder_present_during_steps.append(pipeline.text_encoder is not None)
             return callback_kwargs

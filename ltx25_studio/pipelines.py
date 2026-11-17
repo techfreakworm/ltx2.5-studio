@@ -1569,8 +1569,8 @@ class StageRunner:
             kwargs["audio_noise_level"] = audio_noise_level
         level = audio_noise_level if derives else None
 
-        def call(stage, *parts):
-            return self._call(stage, _merged(*parts), level)
+        def call(stage, *parts, **sampling):
+            return self._call(stage, _merged(*parts), level, progress, **sampling)
 
         self.last_run = None
         # A clip variation replaces the first denoise's start: the clip's latents
@@ -1594,8 +1594,8 @@ class StageRunner:
                 # The distilled recipe applies here too. It used to apply ONLY
                 # on the stage-2 path, which is how eleven of twelve host runs
                 # were generated with a linear schedule and SFT guidance.
-                return call("single", kwargs, distilled_kwargs(), _sampling_kwargs(progress), first)
-            single = call("single", kwargs, stage_1_kwargs(), _sampling_kwargs(progress), first)
+                return call("single", kwargs, distilled_kwargs(), first, decodes=True)
+            single = call("single", kwargs, stage_1_kwargs(), first)
             return self._diffusion_decoded(single, kwargs, progress)
         from . import device as device_module
 
@@ -1612,13 +1612,7 @@ class StageRunner:
             stage_2=True,
         )
 
-        stage_1 = call(
-            "stage 1",
-            kwargs,
-            stage_1_kwargs(),
-            _sampling_kwargs(progress, index=1, passes=2),
-            first,
-        )
+        stage_1 = call("stage 1", kwargs, stage_1_kwargs(), first, index=1, passes=2)
         if progress is not None:
             progress.upscaling()
         upsampled = _latents_of(
@@ -1636,7 +1630,8 @@ class StageRunner:
                 temporal_ratio=self._ratio("temporal"),
             ),
             stage_2_kwargs(upsampled, audio_latents=_audio_of(stage_1)),
-            _sampling_kwargs(progress, index=2, passes=2),
+            index=2,
+            passes=2,
         )
         self.last_run = run_facts(
             stage_2=True,
@@ -1686,10 +1681,15 @@ class StageRunner:
         """
         yield call
 
-    def _call(self, stage: str, call: dict, audio_noise_level):
-        """One denoise through :meth:`_around_call`."""
+    def _call(self, stage: str, call: dict, audio_noise_level, progress=None, **sampling):
+        """One denoise through :meth:`_around_call`, its pass announced as the pipeline starts.
+
+        The callback is built inside the seam, after what the seam does first
+        (the local runner's loads), so that is never reported as sampling.
+        """
         with self._around_call(self.pipeline, call, stage=stage) as prepared:
-            return self._pipeline_for(audio_noise_level)(**prepared)
+            pipeline = self._pipeline_for(audio_noise_level)
+            return pipeline(**_merged(prepared, _sampling_kwargs(progress, **sampling)))
 
     def _call_part(self, stage: str, part, call: dict):
         """One stage-2 part (the upsampler, the decoder) through :meth:`_around_call`."""
@@ -1855,8 +1855,11 @@ def _for_the_cpu_decoder(latents, generator):
     return latents.to("cpu"), generator
 
 
-def _sampling_kwargs(progress, *, index: int = 1, passes: int = 1) -> dict:
+def _sampling_kwargs(progress, *, index: int = 1, passes: int = 1, decodes: bool = False) -> dict:
     """``callback_on_step_end`` for one denoise pass, or nothing at all.
+
+    ``decodes``: the pipeline decodes the frames inside this call (the conv
+    decoder), so the reporter names the decode after the last step.
 
     A dict rather than a value so the kwarg is **absent** when there is nobody
     to report to, rather than present and ``None``. Upstream defaults it to
@@ -1873,7 +1876,7 @@ def _sampling_kwargs(progress, *, index: int = 1, passes: int = 1) -> dict:
     """
     if progress is None:
         return {}
-    callback = progress.sampling(index=index, passes=passes)
+    callback = progress.sampling(index=index, passes=passes, decodes=decodes)
     return {"callback_on_step_end": callback} if callback is not None else {}
 
 

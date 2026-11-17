@@ -589,3 +589,169 @@ def test_an_unknown_step_total_reports_the_step_and_claims_nothing_else():
         generate_module._DECLARED_STEPS.update(declared)
 
     assert recorder.calls[-1] == ((4, None), "sampling"), recorder.calls
+
+
+# --------------------------------------------------------------------------
+# the label names what is happening while it happens (F65)
+#
+# Measured on real weights: "sampling - 82%" for the last 34 s of a run while the
+# pipeline decoded the frames inside its own call (the conv decoder, "Fast" on
+# the Space). One timeline holds the labels and what the fakes did, so WHEN a
+# label appears is asserted, not inferred from its position in a list.
+# --------------------------------------------------------------------------
+
+
+class Timeline(Recorder):
+    """The progress handle and the fakes write to one list; a label repeated in a row
+    is kept once."""
+
+    def __init__(self):
+        super().__init__()
+        self.events: list[str] = []
+
+    def __call__(self, position, desc=None):
+        super().__call__(position, desc)
+        if not self.events or self.events[-1] != desc:
+            self.events.append(desc)
+
+
+def _space_stage_fakes(timeline):
+    """A denoise that steps and ends in latents (with audio latents), and a decoder."""
+    from test_stage_graph_contract import AudioPipeline, FakeTensor, Staged
+    from test_stage_graph_contract import Recorder as Part
+
+    class Frames(FakeTensor):
+        """Frames with a length, as ``generate._decoded`` asks of a real output."""
+
+        def __len__(self):
+            return 1
+
+    class SteppingStage(AudioPipeline):
+        num_timesteps = 5
+
+        def __init__(self):
+            super().__init__()
+            self._output = Staged(Frames("video-latents"), audio=FakeTensor("audio-latents"))
+
+        def __call__(self, **kwargs):
+            callback = kwargs.get("callback_on_step_end")
+            for step in range(self.num_timesteps):
+                if callback is not None:
+                    callback(self, step, 0.5, {})
+            timeline.events.append("the pipeline returned")
+            return super().__call__(**kwargs)
+
+    class Decoder(Part):
+        def __call__(self, **kwargs):
+            timeline.events.append("the decoder ran")
+            return super().__call__(**kwargs)
+
+    return SteppingStage(), Decoder("decoder", output=Staged(Frames("decoded")))
+
+
+def space_run(tmp_path, **overrides):
+    """One ``generate()`` on the Space's runner (CUDA) over the stepping fakes."""
+    timeline = Timeline()
+    pipe, decoder = _space_stage_fakes(timeline)
+    runner = pipelines.StageRunner(pipe, kind="text2video", device="cuda", decoder=decoder)
+    generate_module.generate(
+        mode="text_to_video",
+        seed=7,
+        prompt="a lighthouse in fog",
+        pipeline_factory=lambda **_kwargs: runner,
+        encoder=one_muxed_file_encoder,
+        output_root=tmp_path,
+        retention_bytes=10**9,
+        progress=timeline,
+        **overrides,
+    )
+    return timeline, runner
+
+
+def test_a_fast_decode_inside_the_pipeline_call_is_named_after_the_last_step(tmp_path):
+    """The conv decoder ("Fast") decodes inside the pipeline's own call, after its last step."""
+    timeline, runner = space_run(tmp_path, decoder="conv")
+
+    assert runner.last_run["decoder"] == "conv"
+    assert timeline.events == [
+        "loading the model",
+        "preparing the inputs",
+        "sampling",
+        "decoding the frames",
+        "the pipeline returned",
+        "writing the file",
+    ]
+    assert timeline.labels.count("sampling") == 1 + 5, "one announcement plus one per step"
+    assert timeline.fractions == sorted(timeline.fractions), timeline.calls
+
+
+def test_the_diffusion_decoder_is_named_at_its_own_step(tmp_path):
+    """The Space's default: the decode is a step of its own, after the pipeline returns."""
+    timeline, runner = space_run(tmp_path)
+
+    assert runner.last_run["decoder"] == "diffusion"
+    assert timeline.events == [
+        "loading the model",
+        "preparing the inputs",
+        "sampling",
+        "the pipeline returned",
+        "decoding the frames",
+        "the decoder ran",
+        "writing the file",
+    ]
+    assert timeline.fractions == sorted(timeline.fractions), timeline.calls
+
+
+def test_a_two_pass_run_keeps_its_labels():
+    """Two passes: neither denoise decodes inside its call, so nothing changes here."""
+    from test_stage_graph_contract import Recorder as Part
+    from test_stage_graph_contract import Staged
+
+    timeline = Timeline()
+    pipe, decoder = _space_stage_fakes(timeline)
+    runner = pipelines.StageRunner(
+        pipe,
+        kind="text2video",
+        device="cuda",
+        upsampler=Part("upsampler", output=Staged("upsampled")),
+        decoder=decoder,
+    )
+
+    runner(
+        prompt="a lighthouse",
+        enable_stage_2=True,
+        progress=generate_module.ProgressReporter(timeline),
+    )
+
+    assert timeline.events == [
+        "sampling — pass 1 of 2",
+        "the pipeline returned",
+        "upscaling ×2",
+        "sampling — pass 2 of 2",
+        "the pipeline returned",
+        "decoding the frames",
+        "the decoder ran",
+    ]
+    assert timeline.fractions == sorted(timeline.fractions), timeline.calls
+
+
+def test_a_pass_that_decodes_inside_its_call_names_the_decode_after_its_last_step_only():
+    """The pipeline's own step count says which step is last; the fallback count is no proof."""
+
+    class Counted:
+        num_timesteps = 3
+
+    class Countless:
+        num_timesteps = None
+
+    counted = Recorder()
+    callback = generate_module.ProgressReporter(counted).sampling(decodes=True)
+    for step in range(3):
+        callback(Counted(), step, 0.5, {})
+    countless = Recorder()
+    callback = generate_module.ProgressReporter(countless).sampling(decodes=True)
+    for step in range(9):
+        callback(Countless(), step, 0.5, {})
+
+    assert counted.labels == ["sampling"] * 4 + ["decoding the frames"], counted.labels
+    assert "decoding the frames" not in countless.labels, countless.labels
