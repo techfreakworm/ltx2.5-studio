@@ -371,7 +371,8 @@ with **128 GB** of unified memory. Smaller machines are not verified.
   which are CUDA-only. PyTorch 2.14 or newer: 2.15.0 is what was verified on real weights, and
   2.14.1 measured the same in the numerics checks. **PyTorch 2.11, the Space's pin, computes
   attention wrongly on MPS**, and the app's own numerics self-test, run at startup, refuses to
-  generate on it.
+  generate on it; `scripts/local_generate.py` runs the same self-test and exits refused before
+  loading anything.
 - **The weights, about 55 GB**, in the Hugging Face cache:
   - from `Lightricks/LTX-2.5-Diffusers` at revision `871165de`, everything except the
     transformer shards, the latent upsamplers and the diffusion decoder (those three are
