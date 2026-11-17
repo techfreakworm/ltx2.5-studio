@@ -70,7 +70,11 @@ def test_the_column_notes_are_outside_every_hidden_subtree_and_describe_their_ce
     assert "setAttribute('aria-describedby', note.id)" in chrome.head_html()
 
 
-def test_the_sample_jump_shows_only_while_the_monitor_shows_a_sample(tmp_path, monkeypatch):
+def test_with_no_run_the_sample_jump_shows_only_while_the_monitor_shows_a_sample(
+    tmp_path, monkeypatch
+):
+    """Over a run of another mode it shows too, with ``mr-over-run``
+    (``test_ui_sample_over_run.py``)."""
     import json
 
     from test_ui_form import Form
@@ -90,8 +94,13 @@ def test_the_sample_jump_shows_only_while_the_monitor_shows_a_sample(tmp_path, m
     assert not form.visible(jump)
     form.pick_mode("text_to_audio_video")
     assert form.visible(jump)
+    assert "mr-over-run" not in (form.props[jump._id].get("elem_classes") or ())
+    # At 1024 px and wider the monitor is in view: the jump hides, except over a run.
+    css = chrome._css()
+    assert "@media (min-width: 1024px) { #sample-jump { display: none !important; } }" in css
     assert (
-        "@media (min-width: 1024px) { #sample-jump { display: none !important; } }" in chrome._css()
+        "@media (min-width: 1024px) { #sample-jump.mr-over-run { display: flex !important; } }"
+        in css
     )
 
 
