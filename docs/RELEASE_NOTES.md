@@ -7,10 +7,9 @@ seconds.
 
 ## Deploy 2 — 2026-11-17 (in preparation)
 
-**Not deployed yet.** The code is the branch `fix/studio-2026-11`. The commits named below are on
-it; the UI's second round-4 package and these docs land next, and their commits are named once
-they are in. What the Space shows after the deploy goes under "On the Space", at the end of this
-section.
+**Not deployed yet.** The code is the branch `fix/studio-2026-11`, at `7cef5fb` with both UI
+packages of round 4, plus these docs. Every commit named below is on it. What the Space shows
+after the deploy goes under "On the Space", at the end of this section.
 
 ### Landed after deploy 1's push, before the deploy-2 work (`1e9fd20..a40a311`)
 
@@ -71,17 +70,42 @@ section.
   head and the monitor fit in the rail together; the idle rail no longer scrolls over nothing;
   Generate in flight is drawn busy; 44 px targets on a phone. `93a7f52`, `f8393c1`, `3b92225`,
   `5a6543d`, `0cf63ed`, `81032ed`, `700b8bc`, `07beaa9`, `9e59de0`, `fe49110`
+- **#20** UI round 4, its second package: after a run every mode's sample can still be seen, the
+  button under the purpose line reading "See an example of" the selected mode and then "Back to
+  your run"; the line beside Generate names what the run returns; the Done card says "chosen by
+  the model" only strictly inside the range allowed, and no "legal" is left on the page; a run
+  of under half a second took "under 1 s"; a LoRA rejection gives one next step for its kind;
+  Restore settings says what it did; "Use this prompt" turns Enhance off and says so; arrow keys on
+  a LoRA strength reach the run; off CUDA a parked Upscale promises no size; a cost lamp's state is
+  not in colour alone; a failure card no longer outlives Show, a Restore or its own remedy; the
+  sample captions name their example and their real lengths and promise no repeat. `78036d2`,
+  `05737f6`, `a8bf7a4`, `74d0925`, `1583c93`, `6150e0e`, `8183336`, `d468ab6`, `44c216d`,
+  `44edefb`, `7896071`, `9ab0812`, `b46dfc2`, with `e6f95d8`, `e48ebc3`, `67478d3` (UI_DESIGN),
+  `f16d35d` (layout only) and `e4fc218` (a test)
+- **#5** A request Gradio refuses before any handler runs no longer leaves the page on
+  "Generating…": typed number fields declare no range, and a last failure listener brings
+  Generate back with a card. `bfd58d1`
+- **#6** A video with sound offers its sound track as "Download the sound (WAV)" in the Done
+  card's action row. `99f710e`
+- **#27** The decoder choices are named by what they do: "Auto", "Steadier (diffusion decoder)"
+  and "Sharper (standard decoder)", in the choice, its line, the Upscale lock line, the Done card
+  and the backend's refusals; the values sent stay `auto`, `diffusion` and `conv`. `1c8a58d`
+- **#28** Mode 11's first-frame line: "With a speech recording and no first-frame picture, some
+  seeds come out as a black-and-white period film: add “in colour” to the prompt, or give a
+  first-frame picture." `9dcc63c`, `9887158`
+- **#21** UI_DESIGN gives the figure line and the Upscale line as the reservation now sizes
+  them. `7cef5fb`
 
-### Landing next
+### The docs
 
-- UI round 4, its second package: **#20** "See an example of" another mode over a run and "Back
-  to your run", the line beside Generate naming what the run returns, the Done card's length
-  words, "under 1 s", an adapter rejection's next step, Restore's note; **#5** a request Gradio
-  refuses before any handler runs no longer leaves the page on "Generating…"; **#6** "Download the
-  sound (WAV)"; **#27** the decoder choices "Auto", "Steadier (diffusion decoder)" and "Sharper
-  (standard decoder)"; **#28** mode 11's black-and-white sentence.
-- These docs: **#25**, **#29**, **#24**, **#28**, **#27**, and for the code above **#21**, **#23**,
-  **#17**, **#20**, **#14**, **#15**, **#16**, **#18**, **#10**, **#11**, **#12**.
+README, `docs/SPACE_MODE_MATRIX.md`, `docs/UI_DESIGN.md`, `docs/PLAN.md`,
+`docs/OPERATOR_HANDOFF.md`, `docs/ZEROGPU_DISK.md` and these notes, by issue: **#25** deploy 1's
+Space record (§10.1) and this file `0646770`, `c8c5965`; **#29** `da5f47d`, `0eb8e93`, `70ddbf2`;
+**#24** `7dbfae6`; **#28** `d527b6d`, `8d0b074`, `1cda206`; **#27** `360edcc`; **#21** the
+reservation and §10.3 `ca1f2a8`; **#23** `38e36e9`; **#17** `d8bbbdb`; **#20** `4d60faf`,
+`e7caf99`; **#14** `3498ce9`; **#15** `a0b76da`; **#16** `c511137`, `58732a9`; **#18** `f9bde99`;
+**#10** `ed8912d`; **#11** `71e35bc`; **#12** `974496c`; **#32** this section, `85c4433`,
+`8f43118` and the commit that names these hashes.
 
 ### Not in deploy 2
 
