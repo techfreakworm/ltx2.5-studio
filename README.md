@@ -460,7 +460,9 @@ Up to 8 s ran at a peak of 84.5 GB with a base load of about 46 GB; the model ch
 
 **How long it takes.** At 704×480×121 (5 s of video), the denoise and decode took 142 s on a
 quiet machine and 333 s with other work running, plus about a minute of loading; 193 frames
-(8 s) took 563 s.
+(8 s) took 563 s. The progress bar names what is happening: "loading the model" while the text
+encoder and the transformer load, and "decoding the frames" once the last step is done, with
+either decoder (on the Space too).
 
 **What does not run locally.** Upscale ×2, the model's diffusion decoder and bitsandbytes int8
 need an NVIDIA GPU (CUDA). On a Mac the default decoder setting decodes with the conv VAE and
