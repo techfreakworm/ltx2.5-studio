@@ -1244,15 +1244,29 @@ def build_ui() -> gr.Blocks:
                 **_PRIVATE,
             )
             _after_lora_change(removed)
-            weighted = row["weight"].release(
-                fn=lambda staged, weight, i=index: handlers.on_lora_weight(staged, i, weight),
-                inputs=[pool["loras"], row["weight"]],
-                outputs=[pool["loras"]],
-                **_PRIVATE,
-            )
-            weighted.then(
-                fn=_lora_label, inputs=[pool["loras"]], outputs=[lora_accordion], **_PRIVATE
-            ).then(fn=_review, inputs=review_inputs, outputs=review_outputs, **_PRIVATE)
+
+            def _weigh(staged: list, weight: Any, i: int = index) -> list:
+                return handlers.on_lora_weight(staged, i, weight)
+
+            # The pointer sends `release` (pointer-up, or leaving the number box); the
+            # keyboard's arrow keys send only `input`, held to the slider's own range.
+            for event, extra in (
+                (row["weight"].release, {}),
+                (
+                    row["weight"].input,
+                    {"js": _held_to_range(index), "trigger_mode": "always_last"},
+                ),
+            ):
+                weighted = event(
+                    fn=_weigh,
+                    inputs=[pool["loras"], row["weight"]],
+                    outputs=[pool["loras"]],
+                    **extra,
+                    **_PRIVATE,
+                )
+                weighted.then(
+                    fn=_lora_label, inputs=[pool["loras"]], outputs=[lora_accordion], **_PRIVATE
+                ).then(fn=_review, inputs=review_inputs, outputs=review_outputs, **_PRIVATE)
 
         # =================================================================
         # Generate: start, /on_generate, finish
@@ -1738,6 +1752,21 @@ _SCROLL_TO_MONITOR = """
   return args;
 }
 """
+
+def _held_to_range(index: int) -> str:
+    """The strength sent on ``input`` for row ``index``, held to its slider's own range as the
+    page holds it: a value typed into the number box passes through numbers outside it ("0" on
+    the way to "0.7"), which Gradio would refuse before any handler, with an error on screen.
+    The range is read off the page because the LoRA package sets it, lazily."""
+    return f"""
+(staged, weight) => {{
+  const range = document.querySelector('#lora-strength-{index} input[type="range"]');
+  const value = Number(weight);
+  if (!range || Number.isNaN(value)) return [staged, weight];
+  return [staged, Math.min(Math.max(value, Number(range.min)), Number(range.max))];
+}}
+"""
+
 
 #: Restore settings rewrites the matrix and the form, far above its row on a phone: the
 #: purpose line, which names the restored mode, comes into view.

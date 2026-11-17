@@ -91,6 +91,18 @@ class Form:
             for f in self.listeners(component, "change"):
                 self.run(f)
 
+    def key(self, component, value: Any) -> None:
+        """The user moves a control from the keyboard (an arrow key on a range): ``input``
+        listeners, then ``change`` if the value changed. Gradio's slider sends ``release`` only
+        on pointer-up or on leaving its number box, so not here."""
+        old = self.values.get(component._id)
+        self.values[component._id] = value
+        for f in self.listeners(component, "input"):
+            self.run(f)
+        if not _same(old, value):
+            for f in self.listeners(component, "change"):
+                self.run(f)
+
     def copy(self) -> Form:
         """An independent page in the same state (values replaced, never mutated in place)."""
         twin = copy.copy(self)

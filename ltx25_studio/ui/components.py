@@ -166,6 +166,7 @@ def lora_bay(*, rows: int, cap: str, step: float, on_zerogpu: bool = True) -> di
                 visible=False,
                 scale=3,
                 min_width=160,
+                elem_id=f"lora-strength-{index}",
             )
             remove = gr.Button(
                 "Remove",

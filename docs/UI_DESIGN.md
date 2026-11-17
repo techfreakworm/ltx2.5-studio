@@ -305,7 +305,10 @@ Adapters are staged with `lora.staged_entry` at strength 1.0 and de-duplicated b
 content key. The bay pre-builds three rows, each with the adapter's name, a strength
 slider and Remove. A row's slider takes its range from `lora.staging` (more than 0, at
 most its `MAX_WEIGHT`) when the row is shown, so the LoRA package stays lazy until an
-adapter is checked. An accepted adapter gets a roll-edged card. A rejected one gets a
+adapter is checked. The strength reaches the run from the pointer (the slider's
+`release`) and from the keyboard (its `input`: arrow keys send nothing else); the value
+`input` sends is held to the slider's range as the page holds it, because a number typed
+into its box passes through values outside it. An accepted adapter gets a roll-edged card. A rejected one gets a
 cut card with a plain headline and the validator's message, with a server path to the
 file shown as its name. At 560 px and below a row stacks: name, strength, Remove.
 
