@@ -296,7 +296,12 @@ prompt; Enhance is off". In a mode that takes no prompt it writes nothing hidden
 prompt and Enhance are parked and come back with the prompt box.
 
 A failure has a plain category headline, a quota line, one next step and the verbatim
-detail in a `<details>`. Categories arrive as strings from `errors.categorise`; each
+detail in a `<details>`. The card belongs to its run: a switch to another mode, Show, a
+Restore, or a change to a control its step names (Enhance for the enhancer card,
+Upscale, Enhance or LoRA for the quota card, size, length or Upscale for a timeout or
+memory card, any field for a refused input) turns it into one line, "Last run: Text to
+video, 08:05. The prompt enhancer is unavailable."; a card whose step is to press
+Generate again stays until the next run. Categories arrive as strings from `errors.categorise`; each
 has its own card (not enough quota, a run longer than the platform allows, no GPU free
 in time, out of GPU time, out of memory, an input problem, an adapter that does not
 fit, the enhancer unavailable, a bug), and a category the UI has never seen gets a

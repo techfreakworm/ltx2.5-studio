@@ -90,6 +90,7 @@ __all__ = [
     "running",
     "sample_of",
     "shot_anchor_readout",
+    "step_names",
     "success",
     "upscale_info",
     "upscale_needs_cuda",
@@ -1463,6 +1464,36 @@ _GENERIC_CARD = (
     "The run did not finish",
     "Press Generate again. If it happens again, report it with the detail below.",
 )
+#: The fields each card's step names: changing one acts on the step, and the card becomes
+#: its one-line record (:func:`last_run_line`). ``"*"`` is any field (a refusal's detail
+#: names the field). A card not listed names no control (press Generate again): it stays
+#: until the next run.
+_STEP_FIELDS: dict[str, tuple[str, ...]] = {
+    "quota": ("enable_stage_2", "enhance_prompt", "loras"),
+    "limit": ("enhance_prompt", "enable_stage_2"),
+    "timeout": ("num_frames", "width", "height", "enable_stage_2"),
+    "oom": ("width", "height", "num_frames", "enable_stage_2"),
+    "input": ("*",),
+    "adapter": ("loras",),
+    "enhancer": ("enhance_prompt",),
+    "memory": ("width", "height", "num_frames", "enable_stage_2"),
+}
+#: Cards whose headline is not a ``_CARDS`` one.
+_HEADLINE_STEP_FIELDS: dict[str, tuple[str, ...]] = {
+    "Refused before running: fix the input": ("*",),
+    "Your inputs could not be read": ("image", "video", "audio"),
+}
+
+
+def step_names(headline: str | None, key: str) -> bool:
+    """Whether the step of the failure card headed ``headline`` names the field ``key``."""
+    fields = _HEADLINE_STEP_FIELDS.get(headline or "")
+    if fields is None:
+        category = next((c for c, (title, _step) in _CARDS.items() if title == headline), "")
+        fields = _STEP_FIELDS.get(category, ())
+    return "*" in fields or key in fields
+
+
 #: Cards about the platform's meter. Off ZeroGPU there is none, so such a failure (it
 #: cannot come from a local run) gets the generic card.
 _METER_CARDS = ("quota", "limit")

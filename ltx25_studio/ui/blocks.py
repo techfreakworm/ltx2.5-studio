@@ -880,12 +880,9 @@ def build_ui() -> gr.Blocks:
                 updates.append(gr.update(**kwargs))
             example_updates = _example_updates(show, mode_id, len(example_buttons), example_note)
             monitor_updates, monitor_next = _monitor_for_mode(show, mode, monitor)
-            if failure and failure.get("mode") != mode_id:
-                status_update = render.last_run_line(
-                    mode=modes.get_mode(failure["mode"]),
-                    at=failure["at"],
-                    headline=failure["headline"],
-                )
+            # A card from another mode's run, or one a Restore writes over, becomes its line.
+            if failure and (failure.get("mode") != mode_id or restored is not None):
+                status_update = _last_run(failure)
                 failure = None
             else:
                 status_update = gr.update()
@@ -1625,6 +1622,25 @@ def build_ui() -> gr.Blocks:
         )
 
         # =================================================================
+        # a failure card acted on: a control its step names changed
+        # =================================================================
+        def _acted_on(key: str):
+            def _card_acted_on(failure: dict | None) -> list[Any]:
+                if not failure or not render.step_names(failure.get("headline"), key):
+                    return [gr.update(), failure]
+                return [_last_run(failure), None]
+
+            return _card_acted_on
+
+        for key in FIELD_KEYS:
+            pool[key].change(
+                fn=_acted_on(key),
+                inputs=[last_failure],
+                outputs=[status, last_failure],
+                **_PRIVATE,
+            )
+
+        # =================================================================
         # recent runs: restore settings, reuse seed
         # =================================================================
         # Restore runs the real mode switch against the mode actually left (so
@@ -1663,7 +1679,9 @@ def build_ui() -> gr.Blocks:
 
         show_outputs = [monitor_idle, video_out, audio_out, monitor_caption, monitor_state]
 
-        def _show(index: int, entries: list, monitor: dict, mode_id: str) -> list[Any]:
+        def _show(
+            index: int, entries: list, monitor: dict, mode_id: str, failure: dict | None
+        ) -> list[Any]:
             entries = list(entries or [])
             entry = entries[index] if index < len(entries) else None
             path = entry and (entry.get("video") or entry.get("audio"))
@@ -1677,6 +1695,8 @@ def build_ui() -> gr.Blocks:
                     monitor,
                     gr.update(visible=False),
                     gr.update(),
+                    gr.update(),
+                    failure,
                 ]
             state = _run_state(
                 entry["mode"], entry["seed"], entry.get("video"), entry.get("audio"), earlier=True
@@ -1686,14 +1706,19 @@ def build_ui() -> gr.Blocks:
                 state,
                 gr.update(),
                 _jump_update(show, mode_id, state),
+                # Another run is on the monitor: a failure card becomes its line.
+                _last_run(failure) if failure else gr.update(),
+                None,
             ]
 
         for index, row in enumerate(recent_rows):
             show_run = row[1]
             show_run.click(
-                fn=lambda entries, monitor, mode_id, i=index: _show(i, entries, monitor, mode_id),
-                inputs=[recent, monitor_state, mode_selector],
-                outputs=[*show_outputs, show_run, sample_jump],
+                fn=lambda entries, monitor, mode_id, failure, i=index: _show(
+                    i, entries, monitor, mode_id, failure
+                ),
+                inputs=[recent, monitor_state, mode_selector, last_failure],
+                outputs=[*show_outputs, show_run, sample_jump, status, last_failure],
                 js=_SCROLL_TO_MONITOR,
                 **_PRIVATE,
             )
@@ -1959,6 +1984,13 @@ def _sample_on_monitor(show: showcase.Showcase, mode: Any) -> tuple[list, dict]:
 #: shows it at every width (``chrome.py``), not only where the monitor sits under the form.
 _QUIET = "mr-quiet"
 _OVER_RUN = "mr-over-run"
+
+
+def _last_run(failure: dict) -> str:
+    """A failure card as its one line: whose run it was, when, and its headline."""
+    return render.last_run_line(
+        mode=modes.get_mode(failure["mode"]), at=failure["at"], headline=failure["headline"]
+    )
 
 
 def _run_state(mode_id: str, seed: Any, video: Any, audio: Any, *, earlier: bool = False) -> dict:
