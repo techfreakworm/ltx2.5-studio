@@ -83,8 +83,8 @@
 >   13 min 59 s, about 11.5 min of it the 72.19 GB download.
 >
 > Where the current truth is: [`SPACE_MODE_MATRIX.md`](SPACE_MODE_MATRIX.md) §10 and
-> [`../README.md`](../README.md). The Space has not been redeployed since 2026-08-26, so nothing
-> about the Space after the 2026-11-16 fixes is known yet.
+> [`../README.md`](../README.md). The Space runs deploy 1 since 2026-11-16; what it showed is in
+> §10.1 there, and where the weights come from now is in the deploy-2 block above.
 
 > ## ⏸️ This is not an active workstream.
 >

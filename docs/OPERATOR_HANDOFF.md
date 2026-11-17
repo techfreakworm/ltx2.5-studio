@@ -43,10 +43,10 @@
 >   `README.md`).
 >
 > Where the project stands: [`../README.md`](../README.md) (what the app does, how to run it,
-> what it costs) and [`SPACE_MODE_MATRIX.md`](SPACE_MODE_MATRIX.md) §10 (what has been
-> verified, and how). The Space has not been redeployed since 2026-08-26 (sha `f809472`, the
-> tree of `445abcb`) and has run no generation since, so nothing about the Space after the
-> 2026-11-16 fixes is known yet.
+> what it costs), [`SPACE_MODE_MATRIX.md`](SPACE_MODE_MATRIX.md) §10 (what has been
+> verified, and how) and [`RELEASE_NOTES.md`](RELEASE_NOTES.md) (what each deploy contains).
+> The Space runs deploy 1 (Space commit `0cd54f2`, the tree of `1e9fd20`, 2026-11-16), on which
+> all eleven modes ran and were looked at (`SPACE_MODE_MATRIX.md` §10.1).
 
 > **What you have, what you do not have, and what to do next.** Written for
 > someone who was not here. [`PLAN.md`](PLAN.md) records how things were
