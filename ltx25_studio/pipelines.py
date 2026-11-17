@@ -1953,7 +1953,8 @@ def _audio_of(output):
 #: it arrives as an eviction rather than as ``ENOSPC``.
 ZEROGPU_DISK_CAP_GB = 150.0
 
-#: The container image itself — torch, CUDA, the wheels. ⚠️ **Not measurable
+#: The container image itself — torch, CUDA, the wheels; the preloaded weights
+#: are in the image too, but the snapshot term counts them. ⚠️ **Not measurable
 #: from inside**, so it is carried as a constant and shown as such. It is also
 #: the term that pushes bf16 over: 72.2 + 72.2 alone is 144.4 and fits.
 IMAGE_FOOTPRINT_GB = 10.0
@@ -2033,7 +2034,7 @@ def disk_footprint(*, phase: str = "at startup, before launch") -> str:
     return (
         f"[{phase}] {measured:.1f} GB measured of {ZEROGPU_DISK_CAP_GB:.0f} GB cap "
         f"[{verdict}] = snapshot {snapshot:.1f} + {packed_text}; "
-        f"{remaining:.1f} GB left for the image (~{IMAGE_FOOTPRINT_GB:.0f} GB, "
+        f"{remaining:.1f} GB left for the rest of the image (~{IMAGE_FOOTPRINT_GB:.0f} GB, "
         f"NOT measurable from inside) and anything else. "
         f"**Measured is a FLOOR, not the total.**"
     )

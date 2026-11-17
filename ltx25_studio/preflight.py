@@ -65,25 +65,24 @@ def ensure_weights(
     hub_cache=None,
     progress=None,
 ) -> tuple[Path, ...]:
-    """Download every allow-listed file **at runtime, as the runtime user**.
+    """Check every allow-listed file is in the Hub cache; download only what is not.
 
-    This replaces ``preload_from_hub``, which cannot work for a **private**
-    Space: the preload runs as a separate platform-managed init step that does
-    not see Space secrets, so a gated repo returns ``401 Unauthenticated`` even
-    with a valid token configured. (401, not 403 -- the request arrives with no
-    credentials at all, which is why the same URL fetches fine by hand.)
+    On the Space the files come from the image: ``preload_from_hub`` in the
+    README front matter fetches this same set
+    (``model_files.preload_from_hub_entries()``) before the app starts. With
+    every file present nothing is downloaded and no network call is made; one
+    line says the weights came from the image.
 
-    Downloading here costs a cold start per restart, and buys two things:
-
-    * **The token is available.** This process has the Space secrets.
-    * **It removes the permission bug class entirely** (PLAN §6.2). Preloaded
-      files are owned by the *build* user and read-only to runtime uid 1000, so
-      any later lazy fetch fails with ``Permission denied (os error 13)`` -- the
-      2.3 failure. When the runtime user downloads its own cache, it owns it.
+    Any file the cache lacks -- a preload that failed, stopped short or names a
+    different set -- is downloaded here, at its pinned revision, with the
+    Space's token, after one warning that says how many files and how many GB.
+    A broken preload makes the start slower, as in the first deploy, not broken.
+    On the Space the runtime user is root (``/root/.cache`` in its logs), so it
+    can add files to a cache the preload wrote.
 
     Fails loudly per file, naming the file and its URL, on the same contract as
     :func:`require_cache_complete`. A partial download must not become a
-    confusing error three layers later.
+    confusing error three layers later. Returns the local path of every file.
     """
     import logging
 
@@ -95,8 +94,6 @@ def ensure_weights(
         log.info("LTX25_MODEL_SNAPSHOT_DIR is set: weights load from %s; nothing fetched", override)
         return ()
 
-    from huggingface_hub import hf_hub_download
-
     # Each path at the revision its component is pinned to (model_files.REVISION
     # for all but the diffusion decoder): download_plan groups them.
     plan = [
@@ -104,41 +101,56 @@ def ensure_weights(
         for revision, group in model_files.download_plan(components)
         for path in group
     ]
-    paths = model_files.download_allow_list(components)
+    repo_cache = cache_repo_dir(hub_cache)
+    local = [model_files.local_path(path, repo_cache=repo_cache) for _revision, path in plan]
+    missing = [
+        (rev, path) for (rev, path), there in zip(plan, local, strict=True) if not there.exists()
+    ]
     total_gb = model_files.total_size_gb(components)
-    log.info(
-        "fetching %d files (%.2f GB) at revisions %s",
-        len(paths),
-        total_gb,
-        ", ".join(model_files.revisions(components)),
+    if not missing:
+        log.info(
+            "weights: all %d files (%.2f GB) are already in %s -- from the image "
+            "(preload_from_hub); nothing downloaded",
+            len(plan),
+            total_gb,
+            repo_cache,
+        )
+        return tuple(local)
+
+    missing_gb = sum(model_files.file_size(path, components) for _rev, path in missing) / 1e9
+    log.warning(
+        "weights: %d of %d files (%.2f GB) are not in %s, which the image's preload should "
+        "have filled; downloading them now, so this start is slower. Missing: %s",
+        len(missing),
+        len(plan),
+        missing_gb,
+        repo_cache,
+        ", ".join(path for _rev, path in missing[:5]) + (" ..." if len(missing) > 5 else ""),
     )
-    fetched: list[Path] = []
-    for index, (revision, path) in enumerate(plan, 1):
-        # Progress is not decoration. This is a 72 GB cold start on every restart,
-        # and a log that goes quiet for forty minutes is indistinguishable from a
-        # log that has stopped.
-        log.info("  [%2d/%d] %s @ %s", index, len(plan), path, revision[:8])
+    from huggingface_hub import hf_hub_download
+
+    for index, (revision, path) in enumerate(missing, 1):
+        # Progress is not decoration. A full set is a 72 GB download, and a log
+        # that goes quiet for fifteen minutes is indistinguishable from a log
+        # that has stopped.
+        log.info("  [%2d/%d] %s @ %s", index, len(missing), path, revision[:8])
         if progress is not None:
-            progress(index / len(plan), f"fetching {path}")
+            progress(index / len(missing), f"fetching {path}")
         try:
-            fetched.append(
-                Path(
-                    hf_hub_download(
-                        repo_id=model_files.REPO_ID,
-                        filename=path,
-                        revision=revision,
-                        token=token,
-                        cache_dir=str(hub_cache) if hub_cache else None,
-                    )
-                )
+            hf_hub_download(
+                repo_id=model_files.REPO_ID,
+                filename=path,
+                revision=revision,
+                token=token,
+                cache_dir=str(hub_cache) if hub_cache else None,
             )
         except Exception as exc:
             raise MissingModelFileError(
-                filename=f"{path} ({index} of {len(plan)}; {exc.__class__.__name__})",
+                filename=f"{path} ({index} of {len(missing)} missing; {exc.__class__.__name__})",
                 url=f"{model_files.HUB_BASE_URL}/{model_files.REPO_ID}/blob/{revision}/{path}",
             ) from exc
-    log.info("fetched %d/%d files", len(fetched), len(paths))
-    return tuple(fetched)
+    log.info("fetched the %d missing files; all %d are in the cache", len(missing), len(plan))
+    return tuple(local)
 
 
 def run(runtime_config, *, strict: bool = False, spaces_module=None, resolution=None) -> str:

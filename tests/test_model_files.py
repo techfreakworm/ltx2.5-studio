@@ -14,7 +14,8 @@ The contract:
 * ``COMPONENTS: Mapping[str, ComponentSpec]`` — data only, no I/O, no logic.
   Each spec carries ``name``, ``subfolder``, ``repo_id``, ``revision``,
   ``size_gb``, ``default`` and a resolvable ``url``.
-* ``DEFAULT_COMPONENTS`` — the §2.3 shipped subset, summing to ~72.19 GB.
+* ``DEFAULT_COMPONENTS`` — the files the Space loads, summing to 71.92 GB, each
+  file with its exact size (``file_size``).
 * ``get_component(name)`` raises ``UnknownComponentError``; ``file_url(...)`` and
   ``require_file(...)`` name **both the filename and its URL** on failure.
 """
@@ -30,7 +31,8 @@ from ltx25_studio import model_files
 from ltx25_studio.errors import MissingModelFileError, UnknownComponentError
 
 #: PLAN §2.3 — the shipped subset, plus ``scheduler`` (config-only, 0 GB, needed
-#: by every pipeline constructor but absent from the §2.3 size table).
+#: by every pipeline constructor but absent from the §2.3 size table). Without
+#: ``temporal_latent_upsampler``: nothing on any path loads it (#23).
 EXPECTED_DEFAULT_COMPONENTS = {
     "transformer",
     "text_encoder",
@@ -40,11 +42,54 @@ EXPECTED_DEFAULT_COMPONENTS = {
     "audio_vae",
     "vocoder",
     "latent_upsampler",
-    "temporal_latent_upsampler",
     "diffusion_decoder",
     "duration_head",
     "scheduler",
 }
+
+#: Every file the Space loads, with its size in bytes, from the Hub's own listing
+#: of ``Lightricks/LTX-2.5-Diffusers`` at the pinned revisions (2026-11-17): the
+#: decoder's two files at ``aba1b702``, everything else at ``871165de``.
+EXPECTED_FILE_BYTES = {
+    "audio_vae/config.json": 505,
+    "audio_vae/diffusion_pytorch_model.safetensors": 106_507_972,
+    "connectors/config.json": 817,
+    "connectors/diffusion_pytorch_model-00001-of-00002.safetensors": 4_999_998_520,
+    "connectors/diffusion_pytorch_model-00002-of-00002.safetensors": 1_344_490_576,
+    "connectors/diffusion_pytorch_model.safetensors.index.json": 30_629,
+    "diffusion_decoder/config.json": 1_089,
+    "diffusion_decoder/diffusion_pytorch_model.safetensors": 834_313_392,
+    "duration_head/config.json": 251,
+    "duration_head/diffusion_pytorch_model.safetensors": 3_808_466,
+    "latent_upsampler/config.json": 301,
+    "latent_upsampler/diffusion_pytorch_model.safetensors": 995_743_320,
+    "model_index.json": 859,
+    "scheduler/scheduler_config.json": 489,
+    "text_encoder/config.json": 4_594,
+    "text_encoder/generation_config.json": 255,
+    "text_encoder/model-00001-of-00005.safetensors": 4_961_189_118,
+    "text_encoder/model-00002-of-00005.safetensors": 4_966_688_198,
+    "text_encoder/model-00003-of-00005.safetensors": 4_884_113_678,
+    "text_encoder/model-00004-of-00005.safetensors": 4_986_341_908,
+    "text_encoder/model-00005-of-00005.safetensors": 4_121_215_522,
+    "text_encoder/model.safetensors.index.json": 66_306,
+    "tokenizer/chat_template.jinja": 18_683,
+    "tokenizer/tokenizer.json": 32_169_626,
+    "tokenizer/tokenizer_config.json": 3_735,
+    "transformer/config.json": 1_440,
+    "transformer/diffusion_pytorch_model-00001-of-00004.safetensors": 9_932_336_016,
+    "transformer/diffusion_pytorch_model-00002-of-00004.safetensors": 9_919_463_480,
+    "transformer/diffusion_pytorch_model-00003-of-00004.safetensors": 9_986_144_288,
+    "transformer/diffusion_pytorch_model-00004-of-00004.safetensors": 8_138_277_304,
+    "transformer/diffusion_pytorch_model.safetensors.index.json": 446_505,
+    "vae/config.json": 1_480,
+    "vae/diffusion_pytorch_model.safetensors": 1_452_233_194,
+    "vocoder/config.json": 1_478,
+    "vocoder/diffusion_pytorch_model.safetensors": 258_305_056,
+}
+
+#: The sum of the table above: 35 files, 71.92 GB (66.98 GiB).
+EXPECTED_TOTAL_BYTES = 71_923_919_050
 
 #: PLAN §2.3 sizes in GB, verified against the repo listing.
 EXPECTED_SIZES_GB = {
@@ -120,10 +165,60 @@ def test_component_size_matches_the_plan(name, size_gb):
 
 
 def test_shipped_subset_sums_to_the_stated_total():
-    """PLAN §2.3: 72.185 GB. If this drifts, the 150 GB cap arithmetic in §2.4/§2.5
-    no longer closes and the deploy discovers it 72 GB into a download."""
+    """71.924 GB (PLAN §2.3's 72.185 less the unloaded temporal upsampler). If this
+    drifts, the 150 GB cap arithmetic no longer closes and the deploy discovers it
+    72 GB into a download."""
     total = sum(model_files.get_component(n).size_gb for n in model_files.DEFAULT_COMPONENTS)
-    assert total == pytest.approx(72.185, abs=0.01)
+    assert total == pytest.approx(71.924, abs=0.001)
+
+
+# --------------------------------------------------------------------------
+# the download set, file by file (#23): one source for the list AND the sizes
+# --------------------------------------------------------------------------
+
+
+def test_the_download_set_is_exactly_the_files_the_space_loads():
+    assert set(model_files.download_allow_list()) == set(EXPECTED_FILE_BYTES)
+
+
+@pytest.mark.parametrize("path,size", sorted(EXPECTED_FILE_BYTES.items()))
+def test_every_file_in_the_set_carries_its_exact_size(path, size):
+    """The start-up names how much it must download when the image lacks files;
+    the size of each file therefore lives beside its name, not in a second table."""
+    assert model_files.file_size(path) == size
+
+
+def test_the_set_totals_the_hubs_listing_to_the_byte():
+    assert model_files.total_size_bytes() == EXPECTED_TOTAL_BYTES
+    assert sum(map(model_files.file_size, model_files.download_allow_list())) == (
+        EXPECTED_TOTAL_BYTES
+    )
+    assert model_files.total_size_gb() == EXPECTED_TOTAL_BYTES / 1e9
+
+
+@pytest.mark.parametrize("name", sorted(EXPECTED_DEFAULT_COMPONENTS))
+def test_a_components_size_is_the_sum_of_its_files(name):
+    spec = model_files.get_component(name)
+    assert spec.size_gb == sum(EXPECTED_FILE_BYTES[path] for path in spec.paths) / 1e9
+
+
+def test_a_path_outside_the_set_has_no_size():
+    with pytest.raises(MissingModelFileError) as caught:
+        model_files.file_size("temporal_latent_upsampler/diffusion_pytorch_model.safetensors")
+    assert "temporal_latent_upsampler" in str(caught.value)
+
+
+def test_the_temporal_upsampler_is_declared_but_never_fetched():
+    """It is the spatial upsampler's class on the other axis, and nothing loads it:
+    ``StageRunner`` wires only ``latent_upsampler``. Fetching it put 0.26 GB on
+    every start for nothing."""
+    spec = model_files.get_component("temporal_latent_upsampler")
+    assert spec.default is False
+    assert "never loaded" in spec.excluded_because
+    assert not any(
+        path.startswith("temporal_latent_upsampler/")
+        for path in model_files.download_allow_list()
+    )
 
 
 def test_shipped_subset_fits_the_persistent_storage_cap_with_headroom():
@@ -326,7 +421,7 @@ def test_the_download_plan_fetches_the_decoder_at_its_own_revision():
     assert sum(len(paths) for paths in plan.values()) == len(model_files.download_allow_list())
 
 
-def test_the_startup_download_asks_for_each_file_at_its_revision(monkeypatch):
+def test_the_startup_download_asks_for_each_file_at_its_revision(monkeypatch, tmp_path):
     import sys
     import types
 
@@ -337,6 +432,9 @@ def test_the_startup_download_asks_for_each_file_at_its_revision(monkeypatch):
     hub.hf_hub_download = lambda **kwargs: asked.append(kwargs) or f"/x/{kwargs['filename']}"
     monkeypatch.setitem(sys.modules, "huggingface_hub", hub)
     monkeypatch.delenv("LTX25_MODEL_SNAPSHOT_DIR", raising=False)
+    # An empty cache of the test's own: the start-up fetches only what is missing,
+    # so whatever this machine's own cache holds must not decide what is asked for.
+    monkeypatch.setenv("HF_HUB_CACHE", str(tmp_path))
 
     preflight.ensure_weights()
 

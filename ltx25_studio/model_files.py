@@ -11,11 +11,16 @@ architecture test ``test_no_hardcoded_hub_strings_outside_model_files`` is what
 keeps that true after everyone forgets this paragraph.
 
 **Two loading mechanisms, deliberately modelled.** Most components are listed in
-``model_index.json`` and arrive with the pipeline. ``latent_upsampler`` and
-``temporal_latent_upsampler`` are **not** in the index -- they load by subfolder
-through their own ``from_pretrained`` calls. A resolver that assumes one
-mechanism silently misses exactly the two components the stage-2 quality path
-needs, so :class:`ComponentSpec` records which is which.
+``model_index.json`` and arrive with the pipeline. ``latent_upsampler`` is
+**not** in the index -- it loads by subfolder through its own
+``from_pretrained`` call (as would ``temporal_latent_upsampler``, which nothing
+loads and which is therefore not fetched). A resolver that assumes one mechanism
+silently misses the component the stage-2 quality path needs, so
+:class:`ComponentSpec` records which is which.
+
+**Every file carries its size in bytes**, from the Hub's own listing at the
+pinned revision: the download set, the Space's ``preload_from_hub`` list and the
+start-up's "how much is missing" all read this one table.
 
 **The duplicate-shard trap (PLAN §2.1).** ``transformer/`` ships a 4-shard set
 AND an 8-shard set of the same weights; ``connectors/`` ships a 2-shard set AND
@@ -54,6 +59,7 @@ __all__ = [
     "config_filename",
     "download_allow_list",
     "download_plan",
+    "file_size",
     "file_url",
     "get_component",
     "local_path",
@@ -63,6 +69,7 @@ __all__ = [
     "require_file",
     "revision_of_path",
     "revisions",
+    "total_size_bytes",
     "total_size_gb",
 ]
 
@@ -98,8 +105,11 @@ TINY_REVISION = "3f43040b4719f6dad170a6d07b30921ee1a8f405"
 #: (``LTX25_QUANTIZATION``), not a different download.
 DEFAULT_DTYPE = "bfloat16"
 
+#: Repo-root files needed alongside the components, with their sizes in bytes.
+_ROOT_FILE_BYTES = MappingProxyType({"model_index.json": 859})
+
 #: Repo-root files needed alongside the components.
-ROOT_FILES = ("model_index.json",)
+ROOT_FILES = tuple(_ROOT_FILE_BYTES)
 
 
 @dataclass(frozen=True)
@@ -108,10 +118,10 @@ class ComponentSpec:
 
     name: str
     subfolder: str
-    size_gb: float
     default: bool
-    #: Every file we must fetch for this component -- and ONLY the live shards.
-    files: tuple[str, ...] = ()
+    #: Every file we must fetch for this component -- and ONLY the live shards --
+    #: each with its size in bytes at ``revision``, from the Hub's listing.
+    sized_files: tuple[tuple[str, int], ...] = ()
     #: True when ``model_index.json`` lists this component, i.e. it loads as
     #: part of the pipeline. False when it loads via its own subfolder call.
     in_model_index: bool = True
@@ -120,6 +130,20 @@ class ComponentSpec:
     repo_id: str = REPO_ID
     revision: str = REVISION
     aliases: tuple[str, ...] = field(default_factory=tuple)
+
+    @property
+    def files(self) -> tuple[str, ...]:
+        """The file names, without their sizes."""
+        return tuple(name for name, _size in self.sized_files)
+
+    @property
+    def size_bytes(self) -> int:
+        """The component's download size: the sum of its files."""
+        return sum(size for _name, size in self.sized_files)
+
+    @property
+    def size_gb(self) -> float:
+        return self.size_bytes / 1e9
 
     @property
     def url(self) -> str:
@@ -133,133 +157,128 @@ class ComponentSpec:
 
 
 _SPECS = (
-    # -- the shipped subset (PLAN §2.3) ---------------------------------------
+    # -- what the Space loads (PLAN §2.3, less the temporal upsampler) --------
     ComponentSpec(
         name="transformer",
         subfolder="transformer",
-        size_gb=37.9762,
         default=True,
-        files=(
-            "config.json",
-            "diffusion_pytorch_model.safetensors.index.json",
-            "diffusion_pytorch_model-00001-of-00004.safetensors",
-            "diffusion_pytorch_model-00002-of-00004.safetensors",
-            "diffusion_pytorch_model-00003-of-00004.safetensors",
-            "diffusion_pytorch_model-00004-of-00004.safetensors",
+        sized_files=(
+            ("config.json", 1_440),
+            ("diffusion_pytorch_model.safetensors.index.json", 446_505),
+            ("diffusion_pytorch_model-00001-of-00004.safetensors", 9_932_336_016),
+            ("diffusion_pytorch_model-00002-of-00004.safetensors", 9_919_463_480),
+            ("diffusion_pytorch_model-00003-of-00004.safetensors", 9_986_144_288),
+            ("diffusion_pytorch_model-00004-of-00004.safetensors", 8_138_277_304),
         ),
     ),
     ComponentSpec(
         name="text_encoder",
         subfolder="text_encoder",
-        size_gb=23.9195,
         default=True,
-        files=(
-            "config.json",
-            "generation_config.json",
-            "model.safetensors.index.json",
-            "model-00001-of-00005.safetensors",
-            "model-00002-of-00005.safetensors",
-            "model-00003-of-00005.safetensors",
-            "model-00004-of-00005.safetensors",
-            "model-00005-of-00005.safetensors",
+        sized_files=(
+            ("config.json", 4_594),
+            ("generation_config.json", 255),
+            ("model.safetensors.index.json", 66_306),
+            ("model-00001-of-00005.safetensors", 4_961_189_118),
+            ("model-00002-of-00005.safetensors", 4_966_688_198),
+            ("model-00003-of-00005.safetensors", 4_884_113_678),
+            ("model-00004-of-00005.safetensors", 4_986_341_908),
+            ("model-00005-of-00005.safetensors", 4_121_215_522),
         ),
     ),
     ComponentSpec(
         name="connectors",
         subfolder="connectors",
-        size_gb=6.3445,
         default=True,
-        files=(
-            "config.json",
-            "diffusion_pytorch_model.safetensors.index.json",
-            "diffusion_pytorch_model-00001-of-00002.safetensors",
-            "diffusion_pytorch_model-00002-of-00002.safetensors",
+        sized_files=(
+            ("config.json", 817),
+            ("diffusion_pytorch_model.safetensors.index.json", 30_629),
+            ("diffusion_pytorch_model-00001-of-00002.safetensors", 4_999_998_520),
+            ("diffusion_pytorch_model-00002-of-00002.safetensors", 1_344_490_576),
         ),
     ),
     ComponentSpec(
         name="vae",
         subfolder="vae",
-        size_gb=1.4522,
         default=True,
-        files=("config.json", "diffusion_pytorch_model.safetensors"),
+        sized_files=(("config.json", 1_480), ("diffusion_pytorch_model.safetensors", 1_452_233_194)),
     ),
     ComponentSpec(
         name="latent_upsampler",
         subfolder="latent_upsampler",
-        size_gb=0.9957,
         default=True,
         in_model_index=False,
-        files=("config.json", "diffusion_pytorch_model.safetensors"),
+        sized_files=(("config.json", 301), ("diffusion_pytorch_model.safetensors", 995_743_320)),
     ),
     ComponentSpec(
         name="diffusion_decoder",
         subfolder="diffusion_decoder",
-        size_gb=0.8343,
         default=True,
-        files=("config.json", "diffusion_pytorch_model.safetensors"),
+        sized_files=(("config.json", 1_089), ("diffusion_pytorch_model.safetensors", 834_313_392)),
         revision=DIFFUSION_DECODER_REVISION,
-    ),
-    ComponentSpec(
-        name="temporal_latent_upsampler",
-        subfolder="temporal_latent_upsampler",
-        size_gb=0.2619,
-        default=True,
-        in_model_index=False,
-        files=("config.json", "diffusion_pytorch_model.safetensors"),
     ),
     ComponentSpec(
         name="vocoder",
         subfolder="vocoder",
-        size_gb=0.2583,
         default=True,
-        files=("config.json", "diffusion_pytorch_model.safetensors"),
+        sized_files=(("config.json", 1_478), ("diffusion_pytorch_model.safetensors", 258_305_056)),
     ),
     ComponentSpec(
         name="audio_vae",
         subfolder="audio_vae",
-        size_gb=0.1065,
         default=True,
-        files=("config.json", "diffusion_pytorch_model.safetensors"),
+        sized_files=(("config.json", 505), ("diffusion_pytorch_model.safetensors", 106_507_972)),
     ),
     ComponentSpec(
         name="tokenizer",
         subfolder="tokenizer",
-        size_gb=0.0322,
         default=True,
-        files=("tokenizer.json", "tokenizer_config.json", "chat_template.jinja"),
+        sized_files=(
+            ("tokenizer.json", 32_169_626),
+            ("tokenizer_config.json", 3_735),
+            ("chat_template.jinja", 18_683),
+        ),
     ),
     ComponentSpec(
         name="duration_head",
         subfolder="duration_head",
-        size_gb=0.0038,
         default=True,
-        files=("config.json", "diffusion_pytorch_model.safetensors"),
+        sized_files=(("config.json", 251), ("diffusion_pytorch_model.safetensors", 3_808_466)),
     ),
     ComponentSpec(
         name="scheduler",
         subfolder="scheduler",
-        size_gb=0.0,
         default=True,
-        files=("scheduler_config.json",),
+        sized_files=(("scheduler_config.json", 489),),
     ),
     # -- declared, deliberately NOT shipped (PLAN §2.4) -----------------------
     ComponentSpec(
+        name="temporal_latent_upsampler",
+        subfolder="temporal_latent_upsampler",
+        default=False,
+        in_model_index=False,
+        excluded_because=(
+            "never loaded: StageRunner wires only the spatial latent_upsampler, and neither "
+            "documented recipe uses the temporal one. Fetching it cost 0.26 GB on every start."
+        ),
+        sized_files=(("config.json", 299), ("diffusion_pytorch_model.safetensors", 261_943_760)),
+    ),
+    ComponentSpec(
         name="transformer_full",
         subfolder="transformer_full",
-        size_gb=37.9766,
         default=False,
         excluded_because=(
             "the DEV (non-distilled) transformer. The distilled 8-step path does not need it. "
             "It fits the remaining headroom, so it is an opt-in rather than an impossibility -- "
             "but enabling it leaves ~40 GB and makes output eviction urgent."
         ),
-        files=(
-            "config.json",
-            "diffusion_pytorch_model.safetensors.index.json",
-            "diffusion_pytorch_model-00001-of-00004.safetensors",
-            "diffusion_pytorch_model-00002-of-00004.safetensors",
-            "diffusion_pytorch_model-00003-of-00004.safetensors",
-            "diffusion_pytorch_model-00004-of-00004.safetensors",
+        sized_files=(
+            ("config.json", 1_440),
+            ("diffusion_pytorch_model.safetensors.index.json", 446_505),
+            ("diffusion_pytorch_model-00001-of-00004.safetensors", 9_932_336_016),
+            ("diffusion_pytorch_model-00002-of-00004.safetensors", 9_919_463_480),
+            ("diffusion_pytorch_model-00003-of-00004.safetensors", 9_986_144_288),
+            ("diffusion_pytorch_model-00004-of-00004.safetensors", 8_138_277_304),
         ),
     ),
 )
@@ -267,8 +286,8 @@ _SPECS = (
 #: Every declared component, shipped or not. Read-only by construction.
 COMPONENTS = MappingProxyType({spec.name: spec for spec in _SPECS})
 
-#: The shipped subset (PLAN §2.3). Ordered largest-first so a preflight or a
-#: progress display surfaces the expensive downloads first.
+#: The components the Space loads, and so fetches. Ordered largest-first so a
+#: preflight or a progress display surfaces the expensive downloads first.
 DEFAULT_COMPONENTS = tuple(spec.name for spec in _SPECS if spec.default)
 
 
@@ -299,10 +318,33 @@ def require_file(component: str, filename: str) -> str:
     return url
 
 
-def total_size_gb(components: tuple[str, ...] | None = None) -> float:
-    """Total download size for a component set, defaulting to the shipped subset."""
+def file_size(path: str, components: tuple[str, ...] | None = None) -> int:
+    """Bytes of one repo-relative path in a component set's download, at its revision.
+
+    Raises naming the path and its folder's URL when the path is not in the set.
+    """
+    if path in _ROOT_FILE_BYTES:
+        return _ROOT_FILE_BYTES[path]
     names = DEFAULT_COMPONENTS if components is None else components
-    return sum(get_component(name).size_gb for name in names)
+    for name in names:
+        spec = get_component(name)
+        for filename, size in spec.sized_files:
+            if f"{spec.subfolder}/{filename}" == path:
+                return size
+    raise MissingModelFileError(
+        filename=f"{path} (not in the download set)",
+        url=f"{HUB_BASE_URL}/{REPO_ID}/tree/{REVISION}/{path.split('/', 1)[0]}",
+    )
+
+
+def total_size_bytes(components: tuple[str, ...] | None = None) -> int:
+    """Bytes of a component set's whole download, root files included."""
+    return sum(file_size(path, components) for path in download_allow_list(components))
+
+
+def total_size_gb(components: tuple[str, ...] | None = None) -> float:
+    """Total download size for a component set, defaulting to what the Space loads."""
+    return total_size_bytes(components) / 1e9
 
 
 def component_dir(name: str, *, repo_cache, override=None) -> Path:

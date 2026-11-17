@@ -64,11 +64,10 @@ _log.info(
     DEVICE.describe(),
 )
 
-# Weights are fetched HERE, at runtime, not by `preload_from_hub`. On a PRIVATE
-# Space the preload init step runs unauthenticated and a gated repo answers 401,
-# so it cannot work however valid the token is. This process has the secrets.
-# It also removes the read-only-cache class (PLAN §6.2): the runtime user owns
-# the cache it downloaded.
+# The weights come from the image: README's `preload_from_hub` fetches the same
+# set (`model_files`) before this runs. `ensure_weights` checks every file is in
+# the cache, with no network call when it is, and downloads only what the image
+# lacks, saying how much: a broken preload makes the start slower, not broken.
 if WILL_USE_GPU:
     preflight.ensure_weights(token=os.environ.get("HF_TOKEN"))
 
@@ -78,7 +77,7 @@ if WILL_USE_GPU:
 # cache completeness are enforced rather than reported, because a host about to
 # generate must fail loudly on a missing file, not quietly render something
 # wrong. A UI-only machine gets the report only. On CUDA this verifies the
-# download ensure_weights just performed; on an MPS/CPU opt-in it verifies the
+# cache ensure_weights just checked or filled; on an MPS/CPU opt-in it verifies the
 # snapshot (or LTX25_MODEL_SNAPSHOT_DIR) is complete. MPS also runs its
 # numerics self-test here, once, and the report carries the result.
 preflight.run(CONFIG, strict=DEVICE.generation_enabled, spaces_module=spaces, resolution=DEVICE)

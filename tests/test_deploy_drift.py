@@ -121,81 +121,96 @@ def test_the_gradio_pin_equals_the_readme_sdk_version():
 # --------------------------------------------------------------------------
 
 
-def test_the_readme_declares_no_preload_block():
-    """A PRIVATE Space cannot preload a gated repo.
-
-    The preload runs as a separate platform-managed init step that does not see
-    Space secrets, so the request arrives unauthenticated and the repo answers
-    **401** — not 403 — however valid the configured token is. Verified: the
-    same URL at the same revision fetches 200 by hand, and the public 2.3 Space
-    preloads a *more* restrictive `gated=manual` repo successfully. Privacy is
-    the differentiating variable.
-
-    So the block must stay absent, and this test exists to stop someone
-    reinstating it from the plan and getting a RUNTIME_ERROR that says nothing
-    about privacy.
-    """
-    assert not frontmatter_list("preload_from_hub"), (
-        "README declares preload_from_hub, which cannot work for a private Space: "
-        "the preload init step runs unauthenticated and a gated repo returns 401. "
-        "Weights are fetched at runtime by preflight.ensure_weights()."
+def frontmatter_comments():
+    """The front matter's comment lines, without the ``#``: the README body is not read."""
+    return "\n".join(
+        line.lstrip()[1:].strip() for line in frontmatter_lines() if line.lstrip().startswith("#")
     )
 
 
-def test_the_commented_preload_block_has_not_drifted():
-    """The disabled block must still equal what ``model_files`` generates.
+def test_the_readme_preloads_exactly_what_model_files_generates():
+    """The Space is public now, so the image brings the weights (#23).
 
-    **A commented-out block drifts more readily than a live one.** Nothing
-    exercises it, so no failure ever points at it — and it will be trusted on the
-    day someone re-enables it, which is precisely when a stale file list is most
-    expensive. That is the same drift class that produced the short_description
-    rejection, aimed at a target that cannot fail loudly by itself.
-
-    So this test is the only thing standing between the block and rot.
+    The live block must equal ``model_files.preload_from_hub_entries()``, one entry
+    per revision, the revision included: a list that fetches ``main`` while the app
+    loads a pinned SHA fills a different cache key, and the start-up then downloads
+    the whole set again on top of the copy already on disk.
     """
-    commented = [
-        line.lstrip("#").strip()
-        for line in README.read_text().splitlines()
-        if line.lstrip().startswith("#") and model_files.REPO_ID in line
-    ]
-    entries = [line.lstrip("- ").strip() for line in commented if line.startswith("- ")]
-    assert entries, (
-        "the commented preload_from_hub block is gone from README.md. It is kept "
-        "deliberately so the Space can flip back to preloading when it goes public; "
-        "regenerate it from model_files.preload_from_hub_entries()."
-    )
+    entries = frontmatter_list("preload_from_hub")
     expected = list(model_files.preload_from_hub_entries())
     assert entries == expected, (
-        "the COMMENTED preload block has drifted from model_files.py (one entry per "
-        "revision). Nothing exercises it, so this test is the only thing that would notice.\n"
+        "README's preload_from_hub block is not what model_files generates (one entry per "
+        "revision). Regenerate it from model_files.preload_from_hub_entries().\n"
         + "\n".join(f"  README   : {entry[:70]}… {entry[-8:]}" for entry in entries)
         + "\n"
         + "\n".join(f"  generated: {entry[:70]}… {entry[-8:]}" for entry in expected)
     )
 
 
-def test_the_commented_block_says_why_it_is_disabled_and_when_to_re_enable():
-    """A disabled mechanism with no stated re-enable condition is a trap.
+def test_no_commented_copy_of_the_preload_list_remains():
+    """A commented copy beside the live block is the copy that rots unnoticed."""
+    stale = [
+        line
+        for line in README.read_text().splitlines()
+        if line.lstrip().startswith("#") and model_files.REPO_ID in line and ".json" in line
+    ]
+    assert not stale, f"a commented preload list is still in README.md: {stale[0][:90]}…"
 
-    Someone will eventually find it, see no reason attached, and either turn it
-    on into the same 401 or delete it as dead weight.
-    """
-    text = README.read_text()
-    assert "401" in text, "the commented block must say WHY it is disabled"
-    assert "public" in text and "persistent storage" in text, (
-        "the commented block must state the conditions under which it is re-enabled"
+
+def test_the_preload_comment_says_what_it_does_its_history_and_the_fallback():
+    """Whoever next reads the block must learn, from the block: what it does, why it
+    was once off (the private Space's 401) and what happens when the list and the
+    code disagree (start-up downloads whatever the image lacks)."""
+    comments = frontmatter_comments()
+    assert "401" in comments and "private" in comments, (
+        "the preload comment no longer records why it was off while the Space was private"
+    )
+    assert "image" in comments and "ensure_weights" in comments, (
+        "the preload comment does not say that the image brings the weights and that "
+        "start-up (preflight.ensure_weights) fetches whatever the image lacks"
+    )
+    assert "preload_from_hub_entries" in comments and "test_deploy_drift" in comments, (
+        "the preload comment does not say where the list comes from and what keeps it so"
     )
 
 
-def test_the_runtime_download_still_comes_from_model_files():
-    """The single-source property survives the move off `preload_from_hub`.
+def test_the_start_up_still_checks_what_the_preload_brought():
+    """``app.py`` keeps calling ``preflight.ensure_weights()``: it is what turns a
+    broken or partial preload into a slower start instead of a broken Space."""
+    import ast
 
-    The guard is repointed, not deleted: whatever fetches the weights must take
-    its file list from `model_files.download_allow_list()`, so an upstream
-    re-shard is still a regenerate rather than a hand-patch (PLAN §5.2, §2.1).
+    tree = ast.parse((REPO_ROOT / "app.py").read_text())
+    calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "ensure_weights"
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "preflight"
+    ]
+    assert calls, "app.py no longer calls preflight.ensure_weights() at start-up"
+
+
+def test_the_startup_timeout_still_outlasts_a_full_download():
+    """The platform's default is 30 minutes. With the preload a start takes minutes;
+    without it (the fallback) the measured start was 17 min 24 s, so the field stays."""
+    value = frontmatter_scalars().get("startup_duration_timeout", "")
+    match = re.fullmatch(r"(\d+)([mh])", value)
+    assert match, f"startup_duration_timeout is {value!r}; it must stay (the default is 30m)"
+    minutes = int(match[1]) * (60 if match[2] == "h" else 1)
+    assert minutes >= 60, f"startup_duration_timeout is {value}; the fallback start needs 1h"
+
+
+def test_the_runtime_download_still_comes_from_model_files():
+    """The start-up fetch of whatever the image lacks reads the same single source.
+
+    Whatever fetches the weights must take its file list from
+    `model_files.download_allow_list()`, so an upstream re-shard is still a
+    regenerate rather than a hand-patch (PLAN §5.2, §2.1).
     """
     allow_list = model_files.download_allow_list()
-    assert len(allow_list) == 37, f"the allow-list is {len(allow_list)} paths, expected 37"
+    assert len(allow_list) == 35, f"the allow-list is {len(allow_list)} paths, expected 35"
     assert not any("-of-00008" in path for path in allow_list), (
         "a dead transformer shard is in the download list (PLAN §2.1, Trap A)"
     )
@@ -358,12 +373,12 @@ def test_the_card_colours_are_ones_the_platform_accepts(field):
 def test_the_preload_block_stays_within_the_ten_entry_cap():
     """PLAN §6.2: the platform caps preload_from_hub at 10 entries.
 
-    We use exactly one, so this has enormous headroom — it exists to fail if
+    We use two (one per revision), so this has headroom — it exists to fail if
     anyone ever splits the block per component, which is the shape that would
     quietly exceed it.
     """
     entries = frontmatter_list("preload_from_hub")
-    assert len(entries) <= 10, f"preload_from_hub has {len(entries)} entries; the cap is 10"
+    assert 1 <= len(entries) <= 10, f"preload_from_hub has {len(entries)} entries; the cap is 10"
 
 
 # --------------------------------------------------------------------------
