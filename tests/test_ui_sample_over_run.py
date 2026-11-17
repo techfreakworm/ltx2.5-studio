@@ -181,8 +181,11 @@ def test_a_run_finished_while_another_mode_is_selected_keeps_its_own_mode(form, 
     form.run(form.fn("_finish"), request=Request())
     label = modes.get_mode("text_to_audio_video").label
     assert caption(form).startswith(f"**Your run.** {label}, ")
-    recent = next(c for c in form.fn("_finish").outputs if isinstance(c, gr.State)
-                  and isinstance(form.get(c), list) and form.get(c))
+    recent = next(
+        c
+        for c in form.fn("_finish").outputs
+        if isinstance(c, gr.State) and isinstance(form.get(c), list) and form.get(c)
+    )
     assert form.get(recent)[0]["mode"] == "text_to_audio_video"
     assert jump_reads(form) == ("See an example of Audio to audio", True, True)
 

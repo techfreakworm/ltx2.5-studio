@@ -105,16 +105,24 @@ def press_generate(demo, values: dict, session: str):
             )["data"]
         except Exception as exc:  # noqa: BLE001 -- the page runs the failure listeners alone
             log.append((name, type(exc).__name__))
-            queue += [f for f in demo.fns.values() if f.trigger_after == step._id and f.trigger_only_on_failure]
+            queue += [
+                f
+                for f in demo.fns.values()
+                if f.trigger_after == step._id and f.trigger_only_on_failure
+            ]
             continue
         log.append((name, "ok"))
         for component, value in zip(step.outputs, data, strict=True):
             sent = value if isinstance(value, dict) and value.get("__type__") == "update" else None
             now = dict(applied.get(component._id) or {})
-            now.update({k: v for k, v in sent.items() if k != "__type__"} if sent else {"value": value})
+            now.update(
+                {k: v for k, v in sent.items() if k != "__type__"} if sent else {"value": value}
+            )
             applied[component._id] = now
         queue += [
-            f for f in demo.fns.values() if f.trigger_after == step._id and not f.trigger_only_on_failure
+            f
+            for f in demo.fns.values()
+            if f.trigger_after == step._id and not f.trigger_only_on_failure
         ]
     return applied, log, state
 

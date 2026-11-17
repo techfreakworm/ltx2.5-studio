@@ -883,6 +883,7 @@ def ready_line(*, on_zerogpu: bool = True) -> str:
     """The idle monitor's line with no sample to show, in this platform's words."""
     return READY if on_zerogpu else READY_LOCAL
 
+
 #: Below 1024 px the monitor sits under the inputs: a jump to the mode's sample.
 SAMPLE_JUMP = "See an example output"
 #: While the monitor holds a run from another mode, at every width: the selected mode's sample.
@@ -1034,7 +1035,10 @@ _LORA_STEPS: tuple[tuple[type, str], ...] = (
     (LoRAVersionError, "Use an adapter made for LTX-2.5."),
     (LoRAConventionError, "Use an adapter made for LTX-2.5."),
     (LoRAInContextError, "Use a standard LoRA: this app does not apply IC LoRAs."),
-    (LoRAPairingError, "Download the file again; if it is refused again, the adapter is incomplete."),
+    (
+        LoRAPairingError,
+        "Download the file again; if it is refused again, the adapter is incomplete.",
+    ),
     (LoRADimensionError, "Use an adapter made for LTX-2.5."),
     (LoRAModuleNotFoundError, "Use an adapter made for LTX-2.5."),
     (LoRANotAttachedError, "Use an adapter made for LTX-2.5."),
@@ -1052,8 +1056,10 @@ def lora_step(exc: BaseException) -> str:
             return "Report it with the words below; your file may be fine."
         if isinstance(exc, LoRAWeightError):
             return "Set a strength within the slider's range."
-    return next((step for error_type, step in _LORA_STEPS if isinstance(exc, error_type)),
-                _LORA_UNKNOWN_STEP)
+    return next(
+        (step for error_type, step in _LORA_STEPS if isinstance(exc, error_type)),
+        _LORA_UNKNOWN_STEP,
+    )
 
 
 def lora_stage_of(exc: BaseException) -> tuple[str, str] | None:

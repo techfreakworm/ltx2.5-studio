@@ -70,9 +70,7 @@ def test_every_length_a_caption_states_is_the_samples_own(mode_id):
     stated = float(re.search(r"(\d+(?:\.\d+)?) s\b", settings).group(1))
     assert abs(stated - seconds_of(sample)) < 0.1, (mode_id, settings, seconds_of(sample))
     for found in re.finditer(r"the (\d+(?:\.\d+)?) s recording", settings):
-        recording = next(
-            EXAMPLES / e["audio"] for e in entry["examples"] if e.get("audio")
-        )
+        recording = next(EXAMPLES / e["audio"] for e in entry["examples"] if e.get("audio"))
         assert abs(float(found.group(1)) - seconds_of(recording)) < 0.05, (mode_id, settings)
     assert "the recording's length" not in settings, (mode_id, settings)
 

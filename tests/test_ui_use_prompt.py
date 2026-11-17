@@ -1,4 +1,4 @@
-""""Use this prompt" turns Enhance off and says so (review round 4, minor 9).
+""" "Use this prompt" turns Enhance off and says so (review round 4, minor 9).
 
 After a run with Enhance on, the Done card shows the prompt the model was sent and offers "Use
 this prompt". It wrote that prompt into the prompt box and left Enhance on, so the next run

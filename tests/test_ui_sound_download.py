@@ -83,7 +83,9 @@ def test_a_video_with_sound_offers_its_wav_beside_reuse_seed(form, tmp_path, mon
 
 
 @pytest.mark.parametrize("mode_id", ["text_to_audio", "text_to_video"])
-def test_a_sound_only_or_a_silent_run_offers_no_separate_sound(form, tmp_path, monkeypatch, mode_id):
+def test_a_sound_only_or_a_silent_run_offers_no_separate_sound(
+    form, tmp_path, monkeypatch, mode_id
+):
     wire(monkeypatch, tmp_path / "runs")
     finished(form, "text_to_audio_video")
     assert offered(form)

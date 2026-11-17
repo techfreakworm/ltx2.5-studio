@@ -34,7 +34,10 @@ def test_the_choices_are_named_by_what_they_do_and_send_the_same_values():
     assert lines["conv"] == "Sharper frame by frame, with a little more shimmer; faster."
     # Auto never takes the diffusion decoder off an NVIDIA (CUDA) GPU, and on one only where
     # it can run (loaded, and the video at least its minimum size).
-    assert lines["auto"] == "Diffusion decoder on an NVIDIA GPU that can run it, standard decoder elsewhere."
+    assert (
+        lines["auto"]
+        == "Diffusion decoder on an NVIDIA GPU that can run it, standard decoder elsewhere."
+    )
     assert render.UPSCALE_DECODER_LINE == (
         "Upscale ×2 always finishes with the diffusion decoder, whichever you pick here."
     )
@@ -68,8 +71,12 @@ def test_the_backends_refusals_use_the_same_names():
             output=(192, 128, 9), minimum=(224, 224, 17), smallest=(128, 128, 17), stage_2=True
         )
     )
-    assert upscale.startswith("Upscale ×2 cannot finish") and upscale.endswith("turn Upscale ×2 off.")
-    unavailable = str(errors.DecoderUnavailableError(reason="it needs an NVIDIA (CUDA) GPU at this size"))
+    assert upscale.startswith("Upscale ×2 cannot finish") and upscale.endswith(
+        "turn Upscale ×2 off."
+    )
+    unavailable = str(
+        errors.DecoderUnavailableError(reason="it needs an NVIDIA (CUDA) GPU at this size")
+    )
     assert unavailable == (
         "Steadier (diffusion decoder) was chosen but cannot run here: it needs an NVIDIA (CUDA) "
         "GPU at this size. Choose Sharper (standard decoder), or Auto, which picks the decoder "

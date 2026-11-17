@@ -84,7 +84,9 @@ def test_restore_of_a_fixed_seed_names_it_and_the_media_that_stay(form):
     run_in(form, "audio_to_video", seed=42)
     form.click(row_buttons(form, "Restore settings")[0])
     said = note(form)
-    assert said.endswith("restored, with that run's seed, 42. Your current audio and image stay as they are.")
+    assert said.endswith(
+        "restored, with that run's seed, 42. Your current audio and image stay as they are."
+    )
     assert form.field("seed") == 42
 
 
@@ -93,7 +95,9 @@ def test_the_next_run_takes_the_line_away(form):
     form.click(row_buttons(form, "Restore settings")[0])
     assert note(form)
     start = form.fn("_start")
-    out = dict(zip(start.outputs, start.fn("text_to_audio_video", False, "a tram", None), strict=True))
+    out = dict(
+        zip(start.outputs, start.fn("text_to_audio_video", False, "a tram", None), strict=True)
+    )
     assert out[form.by_id("recent-note")]["visible"] is False
 
 

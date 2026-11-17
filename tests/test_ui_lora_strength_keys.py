@@ -74,7 +74,7 @@ def test_the_keyboards_event_is_wired_last_wins_and_held_to_the_sliders_own_rang
         assert listener.api_visibility == "private"
         assert slider.elem_id == f"lora-strength-{index}"
         js = listener.js
-        assert f"#lora-strength-{index} input[type=\"range\"]" in js
+        assert f'#lora-strength-{index} input[type="range"]' in js
         assert "Math.min(Math.max(" in js and "range.min" in js and "range.max" in js
         (released,) = form.listeners(slider, "release")
         assert released.fn.__name__ == listener.fn.__name__, "the pointer still works"

@@ -20,7 +20,9 @@ from ltx25_studio.ui.fields import FIELDS
 def lamps(panel: str) -> list[tuple[str, bool, bool]]:
     """``(words, lit, hidden from assistive tech)`` per cost lamp."""
     found = re.findall(r'<span class="mr-lamp mr-lamp-cost (is-lit|is-off)"([^>]*)>([^<]*)<', panel)
-    return [(words, state == "is-lit", 'aria-hidden="true"' in rest) for state, rest, words in found]
+    return [
+        (words, state == "is-lit", 'aria-hidden="true"' in rest) for state, rest, words in found
+    ]
 
 
 def test_only_the_costs_that_apply_are_read_and_the_row_is_a_named_group():

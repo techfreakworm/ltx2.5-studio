@@ -1411,7 +1411,9 @@ def build_ui() -> gr.Blocks:
                 seed_value = int(result.seed)
                 sent = facts.prompt_sent
                 differs = bool(sent) and sent.strip() != str(params.get("prompt") or "").strip()
-                prompt_button = gr.update(value=render.USE_PROMPT, visible=differs, interactive=True)
+                prompt_button = gr.update(
+                    value=render.USE_PROMPT, visible=differs, interactive=True
+                )
                 prompt_value = sent if differs else None
                 monitor_next = _run_state(shown.mode_id, result.seed, shown.video, shown.audio)
                 failure = None
@@ -1811,6 +1813,7 @@ _SCROLL_TO_MONITOR = """
   return args;
 }
 """
+
 
 def _held_to_range(index: int) -> str:
     """The strength sent on ``input`` for row ``index``, held to its slider's own range as the

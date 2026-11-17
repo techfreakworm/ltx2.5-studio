@@ -58,12 +58,16 @@ def test_the_other_kinds_name_their_own_remedy():
 
 @pytest.mark.parametrize("on_zerogpu", [True, False])
 def test_nothing_was_spent_is_the_spaces_sentence_alone(on_zerogpu):
-    card = render.lora_rejected("style.safetensors", made(errors.LoRADimensionError), on_zerogpu=on_zerogpu)
+    card = render.lora_rejected(
+        "style.safetensors", made(errors.LoRADimensionError), on_zerogpu=on_zerogpu
+    )
     assert ("Nothing was spent." in card) is on_zerogpu
 
 
 def test_the_handler_words_the_card_for_this_platform(tmp_path):
-    verdict, staged, _summary = handlers.on_validate_lora("", str(wrong_dimension_adapter(tmp_path)), [])
+    verdict, staged, _summary = handlers.on_validate_lora(
+        "", str(wrong_dimension_adapter(tmp_path)), []
+    )
     assert staged == [] and verdict.startswith("### Rejected: ")
     assert ("Nothing was spent." in verdict) is handlers.run_platform()[1]
     assert "Use an adapter made for LTX-2.5." in verdict
