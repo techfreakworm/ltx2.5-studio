@@ -100,3 +100,19 @@ def test_an_empty_actions_row_or_recent_runs_takes_no_room_in_the_rail():
     css = chrome._css()
     rule = "#rail > :is(#report-actions, #recent):not(:has(button:not(.hidden))) { display: none !important; }"
     assert rule in css
+
+
+def test_after_a_run_the_head_of_its_report_fits_with_the_monitor_at_rail_scroll_0():
+    """Minor 6: the rail followed the report's head by scrolling, which slid the monitor's top
+    51 px out of view at 1366 and 1280; the monitor now gives up that height instead."""
+    script = chrome.head_html()
+    target = _function(script, "const reportTarget = () => {")
+    assert "summary.querySelector('.mr-done-head') || summary" in target
+    assert "return step && step.tagName === 'P' ? step : head;" in target
+    fit = _function(script, "const fit = () => {")
+    assert "const reportH = target ? reportBelow(commit, target, gap) : 0;" in fit
+    assert "+ commitH + reportH;" in fit
+    follow = _function(script, "const follow = () => {")
+    assert "const target = reportTarget();" in follow, "the same head follow() brings into view"
+    below = _function(script, "const reportBelow = (commit, target, gap) => {")
+    assert "target.getBoundingClientRect().bottom - next.getBoundingClientRect().top + 12" in below

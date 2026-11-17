@@ -850,7 +850,8 @@ _SCRIPT = """
     document.documentElement.style.setProperty(
       '--mr-rail-offset', (now + window.innerHeight - end) + 'px');
   };
-  // At rail scroll 0 the rail holds the monitor, its caption, the cost panel and Generate.
+  // At rail scroll 0 the rail holds the monitor, its caption, the cost panel and Generate,
+  // and after a run the head of its report.
   // Taller than the rail (a short window): the monitor gives up height first, down to
   // 180 px, letterboxed; whatever of the panel still runs under Generate fades into it, and
   // the figure line (figureLine, below) stands above the button if that hides the figure.
@@ -858,6 +859,27 @@ _SCRIPT = """
   // stays put from mode to mode.
   const MONITOR_FLOOR = 180;
   const CAPTION_LINES = 4;
+  // The head of a run's report: the Done card's head, or a failure's next step (its headline
+  // just above it). follow() brings it into view when a run ends; fit() makes room for it.
+  const reportTarget = () => {
+    const summary = byId('run-summary'), status = byId('run-status');
+    if (summary && summary.offsetHeight > 0 && summary.textContent.trim()) {
+      return summary.querySelector('.mr-done-head') || summary;
+    }
+    const head = status ? status.querySelector('h3') : null;
+    if (!head) return null;
+    const step = head.nextElementSibling;
+    return step && step.tagName === 'P' ? step : head;
+  };
+  // From Generate's foot in the rail's flow to the bottom of `target`, with its scroll
+  // margin: the first row after Generate that takes room starts one gap below its foot.
+  const reportBelow = (commit, target, gap) => {
+    let next = commit.nextElementSibling;
+    while (next && (next.offsetHeight < 2 || getComputedStyle(next).position === 'absolute')) {
+      next = next.nextElementSibling;
+    }
+    return next ? gap + target.getBoundingClientRect().bottom - next.getBoundingClientRect().top + 12 : 0;
+  };
   const fit = () => {
     const rail = byId('rail'), monitor = byId('monitor'), caption = byId('monitor-caption');
     const cost = byId('cost'), commit = byId('commit'), line = byId('commit-line');
@@ -882,7 +904,11 @@ _SCRIPT = """
       .reduce((sum, note) => sum + note.offsetHeight + px(getComputedStyle(note).marginTop), 0);
     const lineShown = rail.classList.contains('mr-figure-under') && !!line && line.offsetHeight > 0;
     const commitH = commit.offsetHeight - (lineShown ? line.offsetHeight + px(ks.rowGap) : 0);
-    const above = (m, c) => m + gap + c + gap + cost.offsetHeight + gap + px(ks.marginTop) + commitH;
+    // after a run its report's head fits too, so following it never slides the monitor's top
+    // out of view: the monitor gives up the height instead (down to its floor)
+    const target = reportTarget();
+    const reportH = target ? reportBelow(commit, target, gap) : 0;
+    const above = (m, c) => m + gap + c + gap + cost.offsetHeight + gap + px(ks.marginTop) + commitH + reportH;
     let monitorH = natural, captionMin = captionH;
     const over = above(natural, captionH) - avail;
     if (over > 0) monitorH = Math.max(MONITOR_FLOOR, natural - over);
@@ -953,16 +979,10 @@ _SCRIPT = """
   let lastReport = '';
   const follow = () => {
     const summary = byId('run-summary'), status = byId('run-status');
-    const head = status ? status.querySelector('h3') : null;
-    let key = '', target = null;
-    if (summary && summary.offsetHeight > 0 && summary.textContent.trim()) {
-      key = 'done:' + summary.textContent.trim().slice(0, 300);
-      target = summary.querySelector('.mr-done-head') || summary;
-    } else if (head) {
-      key = 'failed:' + status.textContent.trim().slice(0, 300);
-      const step = head.nextElementSibling;
-      target = step && step.tagName === 'P' ? step : head;
-    }
+    const target = reportTarget();
+    let key = '';
+    if (target && summary && summary.contains(target)) key = 'done:' + summary.textContent.trim().slice(0, 300);
+    else if (target) key = 'failed:' + status.textContent.trim().slice(0, 300);
     if (key === lastReport) return;
     lastReport = key;
     if (target && wide()) target.scrollIntoView({ block: 'nearest', behavior: still() ? 'auto' : 'smooth' });
