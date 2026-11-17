@@ -686,6 +686,117 @@ def test_the_entrypoint_annotates_what_it_returns():
     assert {"annotate", "require_generation", "assert_returnable"} <= calls, calls
 
 
+# --------------------------------------------------------------------------
+# F61: a bad MPS watermark pair is refused in its own words, before the self-test
+#
+# With PYTORCH_MPS_HIGH_WATERMARK_RATIO below 1.4 and the low ratio unset, every
+# GPU operation fails from the first allocation on (measured on torch 2.11 and
+# 2.15), the self-test's own first one too. The self-test then reports attention
+# computed wrongly and the refusal advised a newer PyTorch; the pair is the fault.
+# --------------------------------------------------------------------------
+
+
+def _bad_watermark_pair(monkeypatch):
+    from ltx25_studio import memory
+
+    monkeypatch.setenv(memory.HIGH_WATERMARK_ENV, "0.5")
+    monkeypatch.delenv(memory.LOW_WATERMARK_ENV, raising=False)
+    return memory
+
+
+@pytest.mark.parametrize("mode", ["enforce", "warn"])
+def test_mps_generation_checks_the_watermark_pair_before_the_self_test(monkeypatch, mode):
+    """Every gate, the one the local runner shares too; ``warn`` does not let the pair through."""
+    memory = _bad_watermark_pair(monkeypatch)
+    monkeypatch.setenv(config.ENV_MPS_SELF_TEST, mode)
+    monkeypatch.setattr(
+        device, "mps_self_test", lambda **k: pytest.fail("self-tested under a pair that fails")
+    )
+
+    with pytest.raises(memory.MpsWatermarkError) as caught:
+        _mps(monkeypatch).require_generation()
+    assert memory.LOW_WATERMARK_ENV in str(caught.value)
+    with pytest.raises(memory.MpsWatermarkError):
+        device.require_mps_numerics()
+
+
+def test_start_up_on_mps_does_not_self_test_under_a_bad_watermark_pair(monkeypatch, caplog):
+    import logging
+
+    from ltx25_studio import preflight
+
+    memory = _bad_watermark_pair(monkeypatch)
+    resolution = _mps(monkeypatch)
+    monkeypatch.setattr(
+        device, "mps_self_test", lambda **k: pytest.fail("self-tested under a pair that fails")
+    )
+
+    with caplog.at_level(logging.WARNING, logger="ltx25_studio"):
+        preflight.run(config.load_config(), strict=False, resolution=resolution)
+
+    said = [record.getMessage() for record in caplog.records]
+    assert any(memory.LOW_WATERMARK_ENV in line for line in said), said
+
+
+def test_the_app_on_mps_refuses_a_bad_watermark_pair_at_start_in_its_own_words(
+    monkeypatch, no_cuda
+):
+    """``LTX25_DEVICE=mps python app.py`` with HIGH=0.5 and LOW unset stops by name.
+
+    Like any setting that cannot work on this machine: before the self-test,
+    which fails under this pair for the pair's reason and not the PyTorch's,
+    and before anything loads.
+    """
+    pytest.importorskip("gradio")
+    from ltx25_studio import preflight
+
+    memory = _bad_watermark_pair(monkeypatch)
+    monkeypatch.setenv(config.ENV_DEVICE, "mps")
+    monkeypatch.delenv(config.ENV_MODEL_SNAPSHOT_DIR, raising=False)
+    monkeypatch.setattr(device, "host_has_mps", lambda: True)
+    monkeypatch.setattr(device, "_MPS_SELF_TEST", None)
+    self_tests = []
+
+    def self_test(**_kwargs):
+        # What PyTorch gives under this pair: neither blocking check can run.
+        self_tests.append("ran")
+        return _self_test(sdpa=False, linear=False)
+
+    monkeypatch.setattr(device, "mps_self_test", self_test)
+    # Whether the real weights are on this disk is not what this test is about.
+    monkeypatch.setattr(preflight, "local_missing_files", lambda runtime_config: [])
+    monkeypatch.setattr(pipelines, "get_pipeline", lambda **k: pytest.fail("a pipeline was built"))
+    previous = generate_module.gpu_dispatch()
+    sys.modules.pop("app", None)
+    try:
+        with pytest.raises(LTXStudioError) as caught:
+            importlib.import_module("app")
+    finally:
+        generate_module.set_gpu_dispatch(previous)
+        sys.modules.pop("app", None)
+
+    assert isinstance(caught.value, memory.MpsWatermarkError), caught.value
+    message = str(caught.value)
+    assert memory.LOW_WATERMARK_ENV in message and memory.HIGH_WATERMARK_ENV in message, message
+    assert self_tests == [], "the self-test ran under a pair that fails every GPU operation"
+
+
+def test_a_bad_watermark_pair_does_not_stop_a_start_that_never_uses_mps(monkeypatch, no_cuda):
+    """The pair matters to MPS alone: a UI-only start is not refused for it."""
+    pytest.importorskip("gradio")
+    _bad_watermark_pair(monkeypatch)
+    for name in (config.ENV_DEVICE, config.ENV_MODEL_SNAPSHOT_DIR):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(device, "mps_self_test", lambda **k: pytest.fail("self-tested"))
+    previous = generate_module.gpu_dispatch()
+    sys.modules.pop("app", None)
+    try:
+        assert importlib.import_module("app").DEVICE.device is None
+    finally:
+        generate_module.set_gpu_dispatch(previous)
+        sys.modules.pop("app", None)
+
+
 def test_mps_generation_checks_numerics_before_any_load(monkeypatch):
     monkeypatch.setattr(device, "_MPS_SELF_TEST", _self_test(sdpa=False))
     monkeypatch.setattr(pipelines, "_snapshot_path", lambda: pytest.fail("loaded first"))

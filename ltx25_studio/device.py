@@ -183,7 +183,8 @@ class DeviceResolution:
         """The device to build on, or raise when generation must not happen.
 
         ``injected`` is true when the caller supplies its own pipeline (the
-        offline gate's fakes): nothing is built, so nothing is refused.
+        offline gate's fakes): nothing is built, so nothing is refused. On MPS
+        the watermark pair and then the numerics (:func:`require_mps_numerics`).
         """
         if injected:
             return None
@@ -566,9 +567,17 @@ def unverified_note() -> str | None:
 
 
 def require_mps_numerics() -> MpsSelfTest:
-    """The self-test result, or :class:`MpsNumericsError` under ``enforce``."""
+    """The self-test result, or :class:`MpsNumericsError` under ``enforce``.
+
+    The MPS allocator's watermark pair is checked first, whatever
+    ``LTX25_MPS_SELF_TEST`` says: under a pair PyTorch refuses every GPU
+    operation fails, the self-test's too, so it raises
+    ``memory.MpsWatermarkError`` instead of blaming this PyTorch.
+    """
+    from . import memory
     from .config import load_config
 
+    memory.mps_watermarks().require()
     result = mps_self_test()
     if result.ok:
         return result

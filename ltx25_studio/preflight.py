@@ -150,7 +150,10 @@ def run(runtime_config, *, strict: bool = False, spaces_module=None, resolution=
     instead of one 70 GB into a download.
 
     ``resolution`` is the ``device.DeviceResolution`` app.py resolved; the MPS
-    self-test result is reported when that device is ``mps``.
+    self-test result is reported when that device is ``mps``. Before it, the
+    MPS allocator's watermark pair: under a pair PyTorch refuses every GPU
+    operation fails, the self-test's too, so the self-test is not run and the
+    pair is named instead (``strict``: refused with ``memory.MpsWatermarkError``).
     """
     import logging
 
@@ -163,11 +166,15 @@ def run(runtime_config, *, strict: bool = False, spaces_module=None, resolution=
         missing = tuple(str(path) for path, _command in absent)
     else:
         missing = missing_cached_files()
-    self_test = None
+    self_test = watermarks = None
     if resolution is not None and resolution.device == "mps":
-        from . import device
+        from . import device, memory
 
-        self_test = device.mps_self_test()
+        watermarks = memory.mps_watermarks()
+        if watermarks.problem is None:
+            self_test = device.mps_self_test()
+        elif not strict:
+            log.warning("MPS self-test not run: %s", watermarks.problem)
     log.info(
         "%s",
         pipelines.startup_report(
@@ -181,6 +188,8 @@ def run(runtime_config, *, strict: bool = False, spaces_module=None, resolution=
     if not strict:
         return "reported"
 
+    if watermarks is not None:
+        watermarks.require()
     import diffusers
 
     check_diffusers_version(diffusers.__version__)
