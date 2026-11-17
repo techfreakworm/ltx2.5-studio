@@ -524,6 +524,17 @@ idle monitor instead of a sample.
 
 ---
 
+## Known issues
+
+- **A warning in the log on page loads.** Gradio 6.24.0 logs `RuntimeWarning: coroutine
+  'App.create_app.<locals>.get_current_user' was never awaited` when a page loads. It comes
+  from Gradio's own route, not from the Studio, and it is fixed upstream in Gradio 6.25.0. The
+  Studio stays on 6.24.0 for now: Gradio is pinned in three places (`requirements.txt`,
+  `pyproject.toml` and the Space's `sdk_version`), and a bump touches the whole UI, so it gets
+  a change of its own.
+
+---
+
 ## Design documents
 
 - [`docs/PLAN.md`](docs/PLAN.md) — the build contract: the integration path and the pinned
