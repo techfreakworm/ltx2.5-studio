@@ -855,8 +855,8 @@ _SCRIPT = """
   // Taller than the rail (a short window): the monitor gives up height first, down to
   // 180 px, letterboxed; whatever of the panel still runs under Generate fades into it, and
   // the figure line (figureLine, below) stands above the button if that hides the figure.
-  // With room to spare, the caption keeps four lines less the panel's notes, so Generate
-  // stays put from mode to mode.
+  // With room to spare and no run's report, the caption keeps four lines less the panel's
+  // notes, so Generate stays put from mode to mode.
   const MONITOR_FLOOR = 180;
   const CAPTION_LINES = 4;
   // The head of a run's report: the Done card's head, or a failure's next step (its headline
@@ -912,7 +912,9 @@ _SCRIPT = """
     let monitorH = natural, captionMin = captionH;
     const over = above(natural, captionH) - avail;
     if (over > 0) monitorH = Math.max(MONITOR_FLOOR, natural - over);
-    else captionMin = captionH + Math.min(-over, Math.max(0, CAPTION_LINES * lineH - notesH - captionH));
+    // the caption's reserve keeps Generate level while modes are browsed; under a run's report
+    // it was a blank band that pushed the report's head down
+    else if (!target) captionMin = captionH + Math.min(-over, Math.max(0, CAPTION_LINES * lineH - notesH - captionH));
     rail.classList.toggle('mr-monitor-fit', monitorH < natural - 0.5);
     rail.style.setProperty('--mr-monitor-h', Math.round(monitorH) + 'px');
     rail.style.setProperty('--mr-caption-min', Math.round(captionMin) + 'px');

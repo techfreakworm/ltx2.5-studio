@@ -116,3 +116,10 @@ def test_after_a_run_the_head_of_its_report_fits_with_the_monitor_at_rail_scroll
     assert "const target = reportTarget();" in follow, "the same head follow() brings into view"
     below = _function(script, "const reportBelow = (commit, target, gap) => {")
     assert "target.getBoundingClientRect().bottom - next.getBoundingClientRect().top + 12" in below
+
+
+def test_the_caption_keeps_its_reserve_only_while_no_runs_report_is_shown():
+    """Minor 5: the caption's four-line reserve (which keeps Generate level while modes are
+    browsed) left a 57-69 px blank band under a one-line run caption."""
+    fit = _function(chrome.head_html(), "const fit = () => {")
+    assert "else if (!target) captionMin = captionH + Math.min(" in fit
