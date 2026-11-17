@@ -969,6 +969,10 @@ class _LocalWeights:
         pipelines.assert_compression_ratios(base.vae)
         pipelines.configure_vae_tiling(base.vae)
         pipelines.assert_frame_rate_default(base)
+        # As the Space pipeline: the model's own sound reaches the writer unclamped.
+        from . import audio
+
+        audio.unclamp_vocoder(getattr(base, "vocoder", None))
         self.pipelines[pipelines.BASE_KIND] = base
         self._guard_adapter_loading(base)
         self.crf = self._image_crf()

@@ -73,6 +73,9 @@ __all__ = [
     "deinterleaved",
     "match_channel_count",
     "export_sampling_rate_from",
+    "PINNED_VOCODER_FORWARD_SHA256",
+    "forward_without_final_clamp",
+    "unclamp_vocoder",
     "mel_front_end_for",
     "build_mel_front_end",
     "encoder_layout",
@@ -256,6 +259,98 @@ def export_sampling_rate_from(vocoder) -> int:
     """
     config = _config_of(vocoder, name="vocoder")
     return int(_read(config, EXPORT_SAMPLING_RATE_FIELD, owner="vocoder.config"))
+
+
+# ---------------------------------------------------------------------------
+# the vocoder's final clamp
+# ---------------------------------------------------------------------------
+
+#: sha256 of ``inspect.getsource(LTX2VocoderWithBWE.forward)`` at the pinned
+#: diffusers (0.40.0.dev0 @ ac56fa2f): the forward :func:`forward_without_final_clamp`
+#: copies. Any other forward is left alone.
+PINNED_VOCODER_FORWARD_SHA256 = "3d727ed7c9d2b2c808725fa3f4b50bb1e0b5feed98656019f716922724656a67"
+
+#: The vocoder class whose forward ends in the clamp (LTX-2.5's ``vocoder/config.json``).
+_CLAMPING_VOCODER = "LTX2VocoderWithBWE"
+
+
+def forward_without_final_clamp(self, mel_spec):
+    """``LTX2VocoderWithBWE.forward`` at the pinned diffusers, minus its last clamp.
+
+    The vendor forward ends ``waveform = torch.clamp(residual + skip, -1, 1)``,
+    so the model clips its own sound before the writer can turn it down.
+    Every other step, and the trim, is the vendor's, line for line.
+    """
+    import torch.nn.functional as F
+
+    # 1. Run stage 1 vocoder to get low sampling rate waveform
+    x = self.vocoder(mel_spec)
+    batch_size, num_channels, num_samples = x.shape
+
+    # Pad to exact multiple of hop_length for exact mel frame count
+    remainder = num_samples % self.config.hop_length
+    if remainder != 0:
+        x = F.pad(x, (0, self.hop_length - remainder))
+
+    # 2. Compute mel spectrogram on vocoder output
+    mel, _, _, _ = self.mel_stft(x.flatten(0, 1))
+    mel = mel.unflatten(0, (-1, num_channels))
+
+    # 3. Run bandwidth extender (BWE) on new mel spectrogram
+    mel_for_bwe = mel.transpose(2, 3)  # [B, C, mel bins, frames] -> [B, C, frames, mel bins]
+    residual = self.bwe_generator(mel_for_bwe)
+
+    # 4. Residual connection with resampler; the vendor clamps this sum to [-1, 1]
+    skip = self.resampler(x)
+    waveform = residual + skip
+    output_samples = num_samples * self.config.output_sampling_rate // self.config.input_sampling_rate
+    waveform = waveform[..., :output_samples]
+    return waveform
+
+
+def _source_sha256(function) -> str | None:
+    import hashlib
+    import inspect
+
+    try:
+        return hashlib.sha256(inspect.getsource(function).encode()).hexdigest()
+    except (OSError, TypeError):
+        return None
+
+
+def unclamp_vocoder(vocoder) -> bool:
+    """Give LTX-2.5's vocoder a forward without its final clamp; True when it has one.
+
+    Applied where each runner builds its components, so the model's own sound
+    reaches the writer as it was made and ``outputs`` turns a track over full
+    scale down as a whole instead. Only the pinned vendor forward is replaced
+    (:data:`PINNED_VOCODER_FORWARD_SHA256`); another forward of that class (a
+    different diffusers, or a wrapper already installed) is left alone, with one
+    warning. Anything that is not that class is not touched.
+    """
+    import types
+
+    if vocoder is None or not any(
+        cls.__name__ == _CLAMPING_VOCODER for cls in type(vocoder).__mro__
+    ):
+        return False
+    installed = vars(vocoder).get("forward")
+    if getattr(installed, "__func__", None) is forward_without_final_clamp:
+        return True
+    pinned = _source_sha256(type(vocoder).forward) == PINNED_VOCODER_FORWARD_SHA256
+    if installed is None and pinned:
+        vocoder.forward = types.MethodType(forward_without_final_clamp, vocoder)
+        logger.info(
+            "vocoder: its final clamp to [-1, 1] is lifted; sound over full scale is turned "
+            "down by the writer instead of clipped"
+        )
+        return True
+    logger.warning(
+        "vocoder: %s.forward is not the one this app was written for (diffusers ac56fa2f), "
+        "so its final clamp to [-1, 1] stays: sound over full scale is clipped by the model",
+        type(vocoder).__name__,
+    )
+    return False
 
 
 # ---------------------------------------------------------------------------

@@ -848,6 +848,10 @@ def _base_pipeline(*, dtype=None, device: str | None = None, quantization: str |
         assert_compression_ratios(vae)
         configure_vae_tiling(vae)
     assert_frame_rate_default(built)
+    # The model's own sound reaches the writer unclamped; the writer turns it down.
+    from . import audio as audio_module
+
+    audio_module.unclamp_vocoder(getattr(built, "vocoder", None))
 
     _CACHE[_BASE_CACHE_KEY] = built
     return built
