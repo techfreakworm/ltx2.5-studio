@@ -29,6 +29,7 @@ __all__ = [
     "DEVICE_CHOICES",
     "ENV_CPU_DTYPE",
     "ENV_DEVICE",
+    "ENV_GPU_DURATION_FLOOR_SECONDS",
     "ENV_GPU_DURATION_SECONDS",
     "ENV_LORA_MAX_GB",
     "ENV_MODEL_SNAPSHOT_DIR",
@@ -53,7 +54,12 @@ __all__ = [
 
 # --- variable names, in one place so the deploy request can quote them -------
 ENV_ZEROGPU_SIZE = "LTX25_ZEROGPU_SIZE"
+#: No longer read for the reservation, which follows each run's size and length
+#: (``zerogpu.estimate_duration``); when set, startup says it is ignored.
 ENV_GPU_DURATION_SECONDS = "LTX25_GPU_DURATION_SECONDS"
+#: Optional, unset by default: every reservation is at least this many seconds. The
+#: operator's lever if an estimate ever proves short.
+ENV_GPU_DURATION_FLOOR_SECONDS = "LTX25_GPU_DURATION_FLOOR_SECONDS"
 ENV_OUTPUT_RETENTION_GB = "LTX25_OUTPUT_RETENTION_GB"
 ENV_OUTPUT_DIR = "LTX25_OUTPUT_DIR"
 ENV_LORA_MAX_GB = "LTX25_LORA_MAX_GB"
@@ -75,7 +81,6 @@ ENV_DECODER = "LTX25_DECODER"
 ZEROGPU_SIZES = ("auto", "large", "xlarge")
 
 DEFAULT_ZEROGPU_SIZE = "xlarge"
-DEFAULT_GPU_DURATION_SECONDS = 180
 DEFAULT_OUTPUT_RETENTION_GB = 20.0
 DEFAULT_OUTPUT_DIR = "outputs"
 DEFAULT_LORA_MAX_GB = 12.0
@@ -239,6 +244,27 @@ def _gguf_file(name: str) -> str | None:
     return path
 
 
+def _set_value(name: str) -> str | None:
+    """The variable as set, stripped, or None when it is unset or empty."""
+    return (os.environ.get(name) or "").strip() or None
+
+
+def _optional_seconds(name: str) -> int | None:
+    """A whole number of seconds, at least 1, or None when the variable is unset."""
+    raw = _set_value(name)
+    if raw is None:
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        value = 0
+    if value < 1:
+        raise ConfigError(
+            variable=name, value=raw, legal=("a whole number of seconds >= 1", "unset")
+        )
+    return value
+
+
 def _number(name: str, default: float, *, minimum: float, integer: bool = False):
     raw = os.environ.get(name)
     if raw is None or raw == "":
@@ -261,7 +287,6 @@ class RuntimeConfig:
     """Everything tunable without a code change."""
 
     zerogpu_size: str
-    gpu_duration_seconds: int
     output_retention_gb: float
     output_dir: str
     lora_max_gb: float
@@ -275,6 +300,10 @@ class RuntimeConfig:
     transformer_gguf: str | None = None
     residency: str = DEFAULT_RESIDENCY
     decoder: str = DEFAULT_DECODER
+    #: ``LTX25_GPU_DURATION_FLOOR_SECONDS``: every reservation is at least this; None unset.
+    gpu_duration_floor_seconds: int | None = None
+    #: ``LTX25_GPU_DURATION_SECONDS`` as set, which nothing reads any more; None unset.
+    ignored_gpu_duration_seconds: str | None = None
 
     @property
     def lora_max_bytes(self) -> int:
@@ -292,9 +321,10 @@ class RuntimeConfig:
     def describe(self) -> str:
         """One-line startup summary of the levers as configured (not resolved)."""
         snapshot = self.model_snapshot_dir or "pinned"
+        floor = self.gpu_duration_floor_seconds
         return (
             f"zerogpu_size={self.zerogpu_size} "
-            f"duration={self.gpu_duration_seconds}s "
+            f"reservation=estimated{f',floor={floor}s' if floor else ''} "
             f"quantization={self.quantization} "
             f"device={self.device} "
             f"snapshot={snapshot} "
@@ -306,9 +336,6 @@ def load_config() -> RuntimeConfig:
     """Resolve the runtime configuration, raising on anything unrecognised."""
     return RuntimeConfig(
         zerogpu_size=_choice(ENV_ZEROGPU_SIZE, DEFAULT_ZEROGPU_SIZE, ZEROGPU_SIZES),
-        gpu_duration_seconds=_number(
-            ENV_GPU_DURATION_SECONDS, DEFAULT_GPU_DURATION_SECONDS, minimum=1, integer=True
-        ),
         output_retention_gb=_number(
             ENV_OUTPUT_RETENTION_GB, DEFAULT_OUTPUT_RETENTION_GB, minimum=1.0
         ),
@@ -330,4 +357,7 @@ def load_config() -> RuntimeConfig:
         transformer_gguf=_gguf_file(ENV_TRANSFORMER_GGUF),
         residency=_choice(ENV_RESIDENCY, DEFAULT_RESIDENCY, RESIDENCY_CHOICES),
         decoder=_choice(ENV_DECODER, DEFAULT_DECODER, DECODER_CHOICES),
+        gpu_duration_floor_seconds=_optional_seconds(ENV_GPU_DURATION_FLOOR_SECONDS),
+        # Not validated: it is read only to say, once at startup, that it is ignored.
+        ignored_gpu_duration_seconds=_set_value(ENV_GPU_DURATION_SECONDS),
     )

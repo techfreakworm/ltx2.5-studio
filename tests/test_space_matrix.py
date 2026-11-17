@@ -199,6 +199,13 @@ def t2v(label="t2v", **values):
             "num_frames": 9, "seed": 7, **values}
 
 
+#: What a ``t2v()`` call (64 x 64, 9 frames) reserves: the app's smallest reservation.
+T2V_RESERVED = 45
+#: The budget tests price every call at 180 s (360 GPU-s at x2), the floor the Space's
+#: LTX25_GPU_DURATION_FLOOR_SECONDS would set, so their arithmetic reads in round numbers.
+FLOOR_180 = ("--reservation-floor-seconds", "180")
+
+
 def run(argv, *, fake=None):
     lines: list[str] = []
     if fake is not None:
@@ -704,6 +711,10 @@ def test_the_dry_run_is_the_default_and_contacts_nothing(tmp_path, space):
 
 
 def test_the_dry_run_prices_each_call_with_the_apps_estimator(tmp_path):
+    """Each call at its own size and length, as the app's gate runs it (a sound-only mode at
+    its pinned size and without Upscale), with the app's own seconds for each extra."""
+    from ltx25_studio.generate import GenerationRequest
+
     plan = tmp_path / "plan.json"
     plan.write_text(json.dumps([
         t2v("base"),
@@ -711,26 +722,65 @@ def test_the_dry_run_prices_each_call_with_the_apps_estimator(tmp_path):
         t2v("lora", loras=[{"source": "org/x"}]),
         t2v("enh", enhance_prompt=True),
         {"label": "t2a", "mode": "text_to_audio", "prompt": "p", "enable_stage_2": True},
+        t2v("m4", width=1280, height=704, num_frames=241),
+        t2v("m6", width=960, height=544, num_frames=241, enable_stage_2=True),
     ]))
     calls = space_matrix.load_plan(plan)
+
+    def app(**fields):
+        return zerogpu.estimate_duration(request=GenerationRequest(**fields))
+
+    small = {"mode": "text_to_video", "width": SIZE, "height": SIZE, "num_frames": 9}
     expected = {
-        "base": zerogpu.estimate_duration(gpu_duration_seconds=180),
-        "s2": zerogpu.estimate_duration(gpu_duration_seconds=180, enable_stage_2=True),
-        "lora": zerogpu.estimate_duration(gpu_duration_seconds=180, loras=["x"]),
-        "enh": zerogpu.estimate_duration(gpu_duration_seconds=180, enhance_prompt=True),
-        "t2a": zerogpu.estimate_duration(gpu_duration_seconds=180),
+        "base": app(**small),
+        "s2": app(**small, enable_stage_2=True),
+        "lora": app(**small, loras=({"source": "org/x"},)),
+        "enh": app(**small, prompt="a tram", enhance_prompt=True),
+        "t2a": app(mode="text_to_audio"),
+        "m4": app(mode="text_to_video", width=1280, height=704, num_frames=241),
+        "m6": app(mode="text_to_video", width=960, height=544, num_frames=241, enable_stage_2=True),
     }
     for call in calls:
-        assert space_matrix.reservation_seconds(call, base_seconds=180) == expected[call.label]
-    assert expected["s2"] == 270 and expected["lora"] == 240 and expected["enh"] == 360
+        assert space_matrix.reservation_seconds(call) == expected[call.label], call.label
+    assert expected == {"base": T2V_RESERVED, "s2": 55, "lora": 85, "enh": 125, "t2a": 45, "m4": 145,
+                        "m6": 240}
     code, lines = run(["--plan", str(plan)])
     text = "\n".join(lines)
-    assert "reserve   270 s (base 180, x1.5 stage 2) -> worst case <= 540 GPU-s" in text
-    assert "reserve   360 s (base 180, +180 enhancer) -> worst case <= 720 GPU-s" in text
+    assert code == space_matrix.EXIT_OK
+    assert "reservation from each call's size and length (the app's estimator) · multiplier x2" in text
+    assert "reserve   45 s (45 for 64x64x9) -> worst case <= 90 GPU-s" in text
+    assert "reserve   55 s (45 for 64x64x9, +10 Upscale) -> worst case <= 110 GPU-s" in text
+    assert "reserve   125 s (45 for 64x64x9, +80 enhancer) -> worst case <= 250 GPU-s" in text
+    assert "reserve   85 s (45 for 64x64x9, +40 LoRA) -> worst case <= 170 GPU-s" in text
+    assert "reserve   45 s (45 for 256x256x121) -> worst case <= 90 GPU-s" in text
+    assert "reserve   240 s (95 for 960x544x241, +145 Upscale) -> worst case <= 480 GPU-s" in text
 
-    assert zerogpu.estimate_duration(
-        gpu_duration_seconds=180, enable_stage_2=True, loras=["x"], enhance_prompt=True
-    ) == 510
+
+def test_the_dry_run_refuses_a_call_past_the_spaces_measured_envelope(tmp_path):
+    """The app's own gate, run as on the Space: a call too large to finish is never priced."""
+    plan = tmp_path / "plan.json"
+    plan.write_text(json.dumps([t2v("big", width=1920, height=1088, num_frames=481)]))
+    code, lines = run(["--plan", str(plan)])
+    text = "\n".join(lines)
+    assert code == space_matrix.EXIT_ILLEGAL
+    assert "more than this Space has been measured to finish" in text
+    assert "At 1920 × 1088, up to 10.0 s fits" in text
+
+
+def test_the_floor_option_raises_every_reservation_like_the_spaces_floor(tmp_path):
+    plan = tmp_path / "plan.json"
+    plan.write_text(json.dumps([t2v("base"), t2v("m4", width=1280, height=704, num_frames=241)]))
+    base, m4 = space_matrix.load_plan(plan)
+
+    assert space_matrix.reservation_seconds(base, floor_seconds=100) == 100
+    assert space_matrix.reservation_seconds(m4, floor_seconds=100) == 145
+    text = "\n".join(run(["--plan", str(plan), "--reservation-floor-seconds", "100"])[1])
+    assert "at least 100 s (the Space's LTX25_GPU_DURATION_FLOOR_SECONDS)" in text
+    assert "reserve   100 s (45 for 64x64x9, at least 100) -> worst case <= 200 GPU-s" in text
+    code, lines = run(["--plan", str(plan), "--reservation-floor-seconds", "0"])
+    assert code == space_matrix.EXIT_ILLEGAL and any("--reservation-floor-seconds" in line for line in lines)
+    with pytest.raises(SystemExit):
+        run(["--plan", str(plan), "--reservation-seconds", "180"])  # the old base: removed
 
 
 def test_the_multiplier_is_the_apps_own_for_the_spaces_size(tmp_path, monkeypatch):
@@ -738,7 +788,7 @@ def test_the_multiplier_is_the_apps_own_for_the_spaces_size(tmp_path, monkeypatc
     plan = tmp_path / "plan.json"
     plan.write_text(json.dumps([t2v()]))
     text = "\n".join(run(["--plan", str(plan), "--zerogpu-size", "large"])[1])
-    assert "multiplier x1" in text and "worst case <= 180 GPU-s" in text
+    assert "multiplier x1" in text and f"worst case <= {T2V_RESERVED} GPU-s" in text
     original = zerogpu.quota_multiplier
     monkeypatch.setattr(zerogpu, "quota_multiplier", lambda size=None: 3)
     assert "multiplier x3" in "\n".join(run(["--plan", str(plan)])[1])
@@ -750,7 +800,7 @@ def test_the_multiplier_is_the_apps_own_for_the_spaces_size(tmp_path, monkeypatc
 def test_the_dry_run_says_where_the_ceiling_binds(tmp_path):
     plan = tmp_path / "plan.json"
     plan.write_text(json.dumps([t2v("a"), t2v("b"), t2v("c")]))
-    code, lines = run(["--plan", str(plan), "--quota-ceiling", "800"])
+    code, lines = run(["--plan", str(plan), "--quota-ceiling", "800", *FLOOR_180])
     text = "\n".join(lines)
     assert code == space_matrix.EXIT_OK
     assert "DOES NOT FIT: call #3 (c)" in text and "2026-11-17T00:00:00Z" in text
@@ -762,19 +812,19 @@ def test_the_dry_run_schedules_the_days_and_says_how_to_resume(tmp_path):
     plan = tmp_path / "plan.json"
     plan.write_text(json.dumps([t2v(f"c{i}") for i in range(1, 8)]))
     ledger, out = tmp_path / "ledger.jsonl", tmp_path / "runs"
-    code, lines = run(["--plan", str(plan), "--quota-ledger", str(ledger), "--out", str(out)])
+    code, lines = run(["--plan", str(plan), "--quota-ledger", str(ledger), "--out", str(out), *FLOOR_180])
     text = "\n".join(lines)
     assert code == space_matrix.EXIT_OK
     assert "2 UTC day(s) at worst case" in text
     assert "day 1  UTC 2026-11-16 (today)" in text and "<= 1800 GPU-s  calls #1-5    c1 .. c5" in text
     assert "day 2  UTC 2026-11-17" in text and "<=  720 GPU-s  calls #6-7    c6 .. c7" in text
     assert "DOES NOT FIT: call #6 (c6)" in text
-    assert (f"python scripts/space_matrix.py --plan {plan} --quota-ledger {ledger} --out {out} --live --resume"
-            in text)
+    assert (f"python scripts/space_matrix.py --plan {plan} --quota-ledger {ledger} --out {out} "
+            f"--reservation-floor-seconds 180 --live --resume" in text), "the resumed plan is priced alike"
     assert not out.exists() and not ledger.exists(), "a dry run writes nothing"
 
     seed_ledger(ledger, billed=1700.0)
-    text = "\n".join(run(["--plan", str(plan), "--quota-ledger", str(ledger)])[1])
+    text = "\n".join(run(["--plan", str(plan), "--quota-ledger", str(ledger), *FLOOR_180])[1])
     assert "day 1  UTC 2026-11-16 (today)  nothing fits in what is left today" in text
     assert "3 UTC day(s)" in text and "DOES NOT FIT: call #1 (c1)" in text and "--out <DIR>" in text
     assert space_matrix.schedule_days([360.0] * 3, spent=0.0, ceiling=700.0) == [[0], [1], [2]]
@@ -815,7 +865,7 @@ def test_a_call_whose_reservation_would_pass_the_ceiling_is_never_sent(tmp_path,
     fake = space()
     ledger = tmp_path / "ledger.jsonl"
     seed_ledger(ledger, billed=1600.0)
-    code, lines, _out, _ = live(tmp_path, fake, [t2v()], ledger=ledger)
+    code, lines, _out, _ = live(tmp_path, fake, [t2v()], *FLOOR_180, ledger=ledger)
     text = "\n".join(lines)
     assert code == space_matrix.EXIT_CEILING, text
     assert fake.joins == []
@@ -827,7 +877,7 @@ def test_a_reservation_that_exactly_meets_the_ceiling_runs(tmp_path, space):
     fake = space().reply(Reply(video=write_video(tmp_path / "v.mp4")))
     ledger = tmp_path / "ledger.jsonl"
     seed_ledger(ledger, billed=1560.0)
-    code, lines, _out, _ = live(tmp_path, fake, [t2v()], ledger=ledger)
+    code, lines, _out, _ = live(tmp_path, fake, [t2v()], *FLOOR_180, ledger=ledger)
     assert code == space_matrix.EXIT_OK, "\n".join(lines)
     assert len(fake.joins_for("/on_generate")) == 1
 
@@ -838,7 +888,7 @@ def test_the_ceiling_counts_this_invocations_spend_and_the_next_call_is_refused(
     fake = space(step_delay=0.005).reply(Reply(video=video), Reply(video=video))
     ledger = tmp_path / "ledger.jsonl"
     seed_ledger(ledger, billed=1559.99)
-    code, lines, _out, _ = live(tmp_path, fake, [t2v("a"), t2v("b")], ledger=ledger)
+    code, lines, _out, _ = live(tmp_path, fake, [t2v("a"), t2v("b")], *FLOOR_180, ledger=ledger)
     assert code == space_matrix.EXIT_CEILING, "\n".join(lines)
     assert len(fake.joins_for("/on_generate")) == 1
     assert [r["label"] for r in call_records(ledger)] == ["earlier", "a"]
@@ -848,9 +898,9 @@ def test_the_ledger_survives_invocations_and_is_append_only(tmp_path, space):
     video = write_video(tmp_path / "v.mp4")
     ledger = tmp_path / "ledger.jsonl"
     fake = space().reply(Reply(video=video), Reply(video=video))
-    assert live(tmp_path, fake, [t2v("a")], ledger=ledger)[0] == 0
+    assert live(tmp_path, fake, [t2v("a")], *FLOOR_180, ledger=ledger)[0] == 0
     first = ledger.read_text()
-    assert live(tmp_path, fake, [t2v("b")], ledger=ledger)[0] == 0
+    assert live(tmp_path, fake, [t2v("b")], *FLOOR_180, ledger=ledger)[0] == 0
     assert ledger.read_text().startswith(first), "records are appended, never rewritten"
     records = ledger_lines(ledger)
     assert [r["kind"] for r in records] == ["invocation", "call_start", "call"] * 2, (
@@ -862,7 +912,7 @@ def test_the_ledger_survives_invocations_and_is_append_only(tmp_path, space):
     assert spent == pytest.approx(sum(r["billed_conservative"] for r in call_records(ledger)))
 
     seed_ledger(ledger, billed=1600.0)
-    code, lines, _out, _ = live(tmp_path, fake, [t2v("c")], ledger=ledger)
+    code, lines, _out, _ = live(tmp_path, fake, [t2v("c")], *FLOOR_180, ledger=ledger)
     assert code == space_matrix.EXIT_CEILING, "a second invocation is judged on the first's spend"
 
 
@@ -894,7 +944,7 @@ def test_a_call_that_was_sent_and_never_settled_counts_at_its_full_reservation(t
     killed = tmp_path / "killed.jsonl"
     seed_ledger(killed, billed=1400.0)
     space_matrix.Ledger(killed).append(start)
-    code, lines, _out, _ = live(tmp_path, fake, [t2v()], ledger=killed)
+    code, lines, _out, _ = live(tmp_path, fake, [t2v()], *FLOOR_180, ledger=killed)
     assert code == space_matrix.EXIT_CEILING and fake.joins == [], "1400 + 360 unsettled + 360 > 1920"
     assert any("1 call(s) sent and never settled (killed)" in line for line in lines)
 
@@ -911,7 +961,7 @@ def test_an_interrupted_call_is_charged_and_recorded(tmp_path, space, monkeypatc
     monkeypatch.setattr(space_matrix, "_run_events", interrupted)
     fake = space()
     with pytest.raises(KeyboardInterrupt):
-        live(tmp_path, fake, [t2v("a"), t2v("b")], out=tmp_path / "out")
+        live(tmp_path, fake, [t2v("a"), t2v("b")], *FLOOR_180, out=tmp_path / "out")
     records = ledger_lines(tmp_path / "ledger.jsonl")
     assert [r["kind"] for r in records] == ["invocation", "call_start", "call"]
     assert records[2]["outcome"] == "interrupted" and records[2]["billed_conservative"] >= 360.0
@@ -942,7 +992,7 @@ def test_a_plan_stopped_at_the_ceiling_resumes_the_next_day_without_rerunning(tm
     seed_ledger(ledger, billed=1559.99)
     calls = [t2v("a"), {"label": "b", "mode": "image_to_video", "width": SIZE, "height": SIZE, "num_frames": 9,
                          "image": {"from_call": "a", "frame": 0}}, t2v("c")]
-    code, lines, _out, _ = live(tmp_path, fake, calls, ledger=ledger, out=out)
+    code, lines, _out, _ = live(tmp_path, fake, calls, *FLOOR_180, ledger=ledger, out=out)
     text = "\n".join(lines)
     assert code == space_matrix.EXIT_CEILING, text
     assert "--live --resume" in text and len(fake.joins_for("/on_generate")) == 1
@@ -952,7 +1002,7 @@ def test_a_plan_stopped_at_the_ceiling_resumes_the_next_day_without_rerunning(tm
     dry = "\n".join(run(["--plan", str(next(tmp_path.glob("plan-*.json"))), "--out", str(out), "--resume"])[1])
     assert "resume       1 call(s) already have an outcome in --out" in dry and "a (ok)" in dry
     assert "1. b" in dry and "2. c" in dry
-    code, lines, _out, _ = live(tmp_path, fake, calls, "--resume", ledger=ledger, out=out)
+    code, lines, _out, _ = live(tmp_path, fake, calls, "--resume", *FLOOR_180, ledger=ledger, out=out)
     assert code == space_matrix.EXIT_OK, "\n".join(lines)
     assert [c["mode"] for c in fake.generate_calls] == ["text_to_video", "image_to_video", "text_to_video"]
     assert (out / "a" / "result.json").read_text() == first, "a finished call is never re-run"
@@ -1116,7 +1166,7 @@ def test_the_ledger_holds_reservation_conservative_and_worker_figures(tmp_path, 
     assert code == space_matrix.EXIT_OK, "\n".join(lines)
     record = call_records(ledger)[-1]
     timing = json.loads((out / "t2v" / "timing.json").read_text())
-    assert record["reserved_seconds"] == 180 and record["multiplier"] == 2.0
+    assert record["reserved_seconds"] == T2V_RESERVED and record["multiplier"] == 2.0
     assert record["billed_worker"] == pytest.approx(25.0)
     assert timing["window_seconds"] > 0
     assert record["billed_conservative"] == pytest.approx(timing["window_seconds"] * 2, abs=1e-3)
@@ -1153,7 +1203,8 @@ def test_a_timeout_is_recorded_charged_its_reservation_and_never_retried(tmp_pat
     assert code == space_matrix.EXIT_CALL_FAILED, "\n".join(lines)
     assert len(fake.joins_for("/on_generate")) == 1
     record = call_records(ledger)[-1]
-    assert record["outcome"] == "timeout" and record["billed_conservative"] == pytest.approx(360.0)
+    assert record["outcome"] == "timeout"
+    assert record["billed_conservative"] == pytest.approx(T2V_RESERVED * 2.0), "its full reservation"
     assert json.loads((out / "a" / "result.json").read_text())["outcome"] == "timeout"
 
 
@@ -1228,7 +1279,7 @@ def test_loras_are_validated_and_staged_in_the_generate_session(tmp_path, space)
     request = json.loads((out / "t2v" / "request.json").read_text())
     assert [v["staged"] for v in request["loras"]] == [True, True]
     assert request["loras"][0]["verdict"].startswith("#### Accepted")
-    assert call_records(ledger)[-1]["reserved_seconds"] == 240
+    assert call_records(ledger)[-1]["reserved_seconds"] == T2V_RESERVED + zerogpu.LORA_DURATION_SECONDS
     assert fake.protocol_errors == []
 
 

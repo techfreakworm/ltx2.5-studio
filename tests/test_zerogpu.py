@@ -257,15 +257,17 @@ def test_an_unknown_size_is_refused_by_name():
 
 
 def test_the_estimator_takes_the_cost_panel_kwargs_at_top_level(monkeypatch):
-    """The UI calls it with these three keywords and no request object."""
+    """The page's Upscale and Enhance cards call it with these keywords and no request object:
+    the default run (704 x 480, 121 frames) is what they describe."""
     from ltx25_studio import config
 
-    monkeypatch.delenv(config.ENV_GPU_DURATION_SECONDS, raising=False)
+    monkeypatch.delenv(config.ENV_GPU_DURATION_FLOOR_SECONDS, raising=False)
     base = zerogpu.estimate_duration()
+    upscaled = zerogpu.estimate_duration(enable_stage_2=True)
     full = zerogpu.estimate_duration(enable_stage_2=True, loras=("a",), enhance_prompt=True)
 
-    assert base == 180
-    assert full == int(180 * 1.5) + zerogpu.LORA_DURATION_SECONDS + zerogpu.ENHANCE_DURATION_SECONDS
+    assert (base, upscaled) == (60, 105)
+    assert full == upscaled + zerogpu.LORA_DURATION_SECONDS + zerogpu.ENHANCE_DURATION_SECONDS
 
 
 def test_an_unknown_kwarg_is_dropped_rather_than_exploding():
@@ -542,15 +544,20 @@ def _fake_request(**fields):
 BASE_SECONDS = zerogpu.estimate_duration()
 
 
-def test_stage_2_scales_the_reservation_through_the_request_object():
+#: What Upscale adds at the default size and length (704 x 480, 121 frames).
+UPSCALE_SECONDS = zerogpu.estimate_duration(enable_stage_2=True) - BASE_SECONDS
+
+
+def test_stage_2_raises_the_reservation_through_the_request_object():
     """The live-path shape. A top-level-only read makes stage 2 reserve the
     base duration and die at the reservation kill, having proven nothing."""
     got = zerogpu.estimate_duration(request=_fake_request(enable_stage_2=True))
-    assert got == int(BASE_SECONDS * 1.5)
+    assert UPSCALE_SECONDS == 45
+    assert got == BASE_SECONDS + UPSCALE_SECONDS
 
 
-def test_stage_2_still_scales_for_a_direct_top_level_caller():
-    assert zerogpu.estimate_duration(enable_stage_2=True) == int(BASE_SECONDS * 1.5)
+def test_stage_2_still_raises_it_for_a_direct_top_level_caller():
+    assert zerogpu.estimate_duration(enable_stage_2=True) == BASE_SECONDS + UPSCALE_SECONDS
 
 
 def test_a_lora_run_reserves_extra_time_through_the_request_object():
@@ -573,22 +580,21 @@ def test_no_staged_loras_means_no_lora_headroom():
     assert zerogpu.estimate_duration(loras=()) == BASE_SECONDS
 
 
-def test_lora_headroom_is_additive_after_the_stage_2_multiplier():
+def test_lora_headroom_is_additive_and_does_not_grow_with_stage_2():
     """The payload read and injection walk happen once, before any denoising:
     their cost does not scale with the refinement chain, so the increment is
-    added after the multiplier, not multiplied by it."""
+    the same flat seconds with or without it."""
     got = zerogpu.estimate_duration(
         request=_fake_request(enable_stage_2=True, loras=({"source": "a"},))
     )
-    assert got == int(BASE_SECONDS * 1.5) + zerogpu.LORA_DURATION_SECONDS
+    assert got == BASE_SECONDS + UPSCALE_SECONDS + zerogpu.LORA_DURATION_SECONDS
 
 
-def test_an_explicit_duration_is_still_scaled_and_padded():
-    got = zerogpu.estimate_duration(
-        gpu_duration_seconds=100,
-        request=_fake_request(enable_stage_2=True, loras=({"source": "a"},)),
-    )
-    assert got == 150 + zerogpu.LORA_DURATION_SECONDS
+def test_the_old_base_duration_keyword_changes_nothing():
+    """``gpu_duration_seconds`` set the base before the reservation followed size and length."""
+    request = _fake_request(enable_stage_2=True, loras=({"source": "a"},))
+    got = zerogpu.estimate_duration(gpu_duration_seconds=100, request=request)
+    assert got == zerogpu.estimate_duration(request=request)
 
 
 # --------------------------------------------------------------------------

@@ -126,7 +126,7 @@ def test_a_default_run_never_sends_the_stage_2_flag_to_the_pipeline(mode_id, tmp
 def test_the_default_run_is_not_billed_for_stage_2():
     """The quota consequence, stated as the number the platform reserves on.
 
-    ``estimate_duration`` inflates the reservation by half when stage 2 is on.
+    ``estimate_duration`` adds the Upscale pass's time when stage 2 is on.
     Forcing the chain on would inflate every reservation, which is the part a
     user actually feels.
     """

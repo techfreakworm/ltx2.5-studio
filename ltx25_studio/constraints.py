@@ -39,16 +39,21 @@ __all__ = [
     "DEFAULT_TEMPORAL_COMPRESSION_RATIO",
     "DIMENSION_MULTIPLE",
     "DISTILLED_SIGMA_VALUES",
+    "ENVELOPE_MAX_PIXEL_FRAMES",
+    "ENVELOPE_MAX_TOKENS",
     "LTX2_5_IMAGE_CRF",
     "MAX_DIMENSION",
     "MAX_NUM_FRAMES",
     "MAX_SECONDS",
     "STAGE_2_DISTILLED_SIGMA_VALUES",
     "LTX2_5_TEXT_ENCODER_TYPES",
+    "BeyondEnvelopeError",
     "duration_head_frame_range",
     "image_crf_for",
     "is_valid_num_frames",
     "largest_num_frames_within",
+    "latent_tokens",
+    "longest_num_frames_within_envelope",
     "nearest_valid_num_frames",
     "snap_dimension",
     "snap_dimensions",
@@ -57,9 +62,11 @@ __all__ = [
     "validate_dimension",
     "validate_dimension_limit",
     "validate_dimensions",
+    "validate_envelope",
     "validate_num_frames",
     "validate_num_frames_limit",
     "validate_seconds_limit",
+    "within_envelope",
 ]
 
 #: Fallback for ``vae.temporal_compression_ratio``, used only before a VAE is
@@ -115,7 +122,7 @@ DEFAULT_LENGTH_TOLERANCE_SECONDS = 0.05
 MIN_NUM_FRAMES = 1
 
 #: Upper bounds on one run. Not model limits: the most this app will attempt.
-#: No stage-2 or pixel-count ceiling yet -- those wait for measurements.
+#: On the ZeroGPU Space the measured envelope (:func:`validate_envelope`) applies too.
 MAX_DIMENSION = 1920
 #: 20 s at 24 fps, the vendor duration head's own default maximum.
 MAX_NUM_FRAMES = 481
@@ -349,6 +356,138 @@ def snap_dimensions(
     return (
         snap_dimension(width, multiple=multiple),
         snap_dimension(height, multiple=multiple),
+    )
+
+
+# ---------------------------------------------------------------------------
+# the measured envelope on the ZeroGPU Space
+# ---------------------------------------------------------------------------
+
+#: The most tokens one denoise pass may hold on the Space, in either pass. The largest
+#: pass measured to finish held 63,240: the Upscale pass of 960 x 544 x 241, which
+#: returned 1920 x 1088 x 241 in a 154 s window (xlarge, int8, 2026-11-17).
+ENVELOPE_MAX_TOKENS = 64_000
+
+#: The most pixel-frames (width x height x frames) the returned video may have; the
+#: largest measured was 503,439,360 (1920 x 1088 x 241). Up to 481 frames the token
+#: limit always binds first (pixel-frames per token, 1024 x (8L - 7) / L for L latent
+#: frames, stay under 520,000,000 / 64,000 while L <= 106); this guards a longer maximum.
+ENVELOPE_MAX_PIXEL_FRAMES = 520_000_000
+
+
+class BeyondEnvelopeError(ConstraintError):
+    """A run larger than the ZeroGPU Space has been measured to finish.
+
+    ``longest`` is the longest legal length, in frames, that fits at this size (with
+    Upscale when ``longest_without_upscale`` is given, which is the same without it).
+    """
+
+    def __init__(self, *, width, height, frame_rate, longest, longest_without_upscale=None):
+        self.width = int(width)
+        self.height = int(height)
+        self.frame_rate = float(frame_rate)
+        self.longest = int(longest)
+        self.longest_without_upscale = (
+            None if longest_without_upscale is None else int(longest_without_upscale)
+        )
+        fits = f"up to {self.longest / self.frame_rate:.1f} s fits"
+        if self.longest_without_upscale is None:
+            where = f"At {self.width} × {self.height}, {fits}"
+        else:
+            without = self.longest_without_upscale / self.frame_rate
+            where = (
+                f"At {self.width} × {self.height} with Upscale ×2, {fits} ({without:.1f} s "
+                f"without Upscale ×2)"
+            )
+        super().__init__(
+            "This size and length is more than this Space has been measured to finish. "
+            f"{where}. Make it smaller or shorter."
+        )
+
+
+def latent_tokens(
+    width: int,
+    height: int,
+    num_frames: int,
+    *,
+    spatial_compression_ratio: int = DEFAULT_SPATIAL_COMPRESSION_RATIO,
+    temporal_compression_ratio: int = DEFAULT_TEMPORAL_COMPRESSION_RATIO,
+) -> int:
+    """Tokens one denoise pass holds: ``(W/32) x (H/32) x ((F - 1)/8 + 1)``."""
+    ratio = _check_ratio(temporal_compression_ratio)
+    return (
+        (int(width) // spatial_compression_ratio)
+        * (int(height) // spatial_compression_ratio)
+        * ((int(num_frames) - 1) // ratio + 1)
+    )
+
+
+def within_envelope(*, tokens: int, pixel_frames: int) -> bool:
+    """Whether the largest pass's ``tokens`` and the returned ``pixel_frames`` were measured
+    to finish. Both limits are inclusive."""
+    return int(tokens) <= ENVELOPE_MAX_TOKENS and int(pixel_frames) <= ENVELOPE_MAX_PIXEL_FRAMES
+
+
+def _envelope_passes(width: int, height: int, stage_2_scale: int | None) -> list[tuple[int, int]]:
+    """``(width, height)`` of each denoise pass; the last one is the returned size."""
+    passes = [(int(width), int(height))]
+    if stage_2_scale:
+        passes.append((int(width) * int(stage_2_scale), int(height) * int(stage_2_scale)))
+    return passes
+
+
+def longest_num_frames_within_envelope(
+    width: int,
+    height: int,
+    *,
+    stage_2_scale: int | None = None,
+    temporal_compression_ratio: int = DEFAULT_TEMPORAL_COMPRESSION_RATIO,
+    maximum: int = MAX_NUM_FRAMES,
+) -> int:
+    """The longest legal frame count that stays inside the envelope at this size.
+
+    ``stage_2_scale`` is how much the Upscale pass enlarges each axis; None for one pass.
+    """
+    ratio = _check_ratio(temporal_compression_ratio)
+    passes = _envelope_passes(width, height, stage_2_scale)
+    per_latent_frame = max(1, *(latent_tokens(w, h, 1) for w, h in passes))
+    by_tokens = (ENVELOPE_MAX_TOKENS // per_latent_frame - 1) * ratio + 1
+    out_width, out_height = passes[-1]
+    by_pixels = ENVELOPE_MAX_PIXEL_FRAMES // max(1, out_width * out_height)
+    longest = min(
+        by_tokens,
+        ((by_pixels - 1) // ratio) * ratio + 1,
+        ((int(maximum) - 1) // ratio) * ratio + 1,
+    )
+    return max(MIN_NUM_FRAMES, longest)
+
+
+def validate_envelope(
+    width: int,
+    height: int,
+    num_frames: int,
+    *,
+    stage_2_scale: int | None = None,
+    frame_rate: float = DEFAULT_FRAME_RATE,
+) -> None:
+    """Raise :class:`BeyondEnvelopeError` for a run past what the Space was measured to finish.
+
+    ``stage_2_scale`` is how much the Upscale pass enlarges each axis; None for one pass.
+    Applied on the ZeroGPU Space only (``generate.prepare_request``).
+    """
+    passes = _envelope_passes(width, height, stage_2_scale)
+    tokens = max(latent_tokens(w, h, num_frames) for w, h in passes)
+    out_width, out_height = passes[-1]
+    if within_envelope(tokens=tokens, pixel_frames=out_width * out_height * int(num_frames)):
+        return
+    raise BeyondEnvelopeError(
+        width=width,
+        height=height,
+        frame_rate=frame_rate,
+        longest=longest_num_frames_within_envelope(width, height, stage_2_scale=stage_2_scale),
+        longest_without_upscale=(
+            longest_num_frames_within_envelope(width, height) if stage_2_scale else None
+        ),
     )
 
 

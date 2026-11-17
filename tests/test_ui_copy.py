@@ -185,7 +185,7 @@ def test_the_copy_the_verdict_required_is_in_place():
         "Used as the first frame."
     )
     enhance = next(spec for spec in FIELDS if spec.key == "enhance_prompt")
-    assert "Reserves 180 s more" in enhance.info and "GPU" in enhance.info
+    assert "Reserves 80 s more" in enhance.info and "GPU" in enhance.info
     assert "frames" in render.frame_hint(120, ratio=8, lower=113, upper=121, valid=False)
     assert "113" in render.frame_hint(120, ratio=8, lower=113, upper=121, valid=False)
 

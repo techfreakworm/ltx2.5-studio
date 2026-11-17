@@ -2206,8 +2206,7 @@ def startup_report(
 
         missing_files = preflight.missing_cached_files()
 
-    from . import preflight
-    from .zerogpu import ENHANCE_DURATION_SECONDS, LORA_DURATION_SECONDS
+    from . import preflight, zerogpu
 
     override = preflight.snapshot_override()
     if override is None:
@@ -2231,9 +2230,8 @@ def startup_report(
     else:
         size = f"requested {runtime_config.zerogpu_size}"
     reservation = (
-        f"reservation {runtime_config.gpu_duration_seconds} s per run (x1.5 with stage 2, "
-        f"+{LORA_DURATION_SECONDS} s with LoRAs, +{ENHANCE_DURATION_SECONDS} s with prompt "
-        f"enhancement); the granted slice is measured by the worker on each run"
+        f"{zerogpu.describe_reservation(runtime_config)}; the granted slice is measured by "
+        f"the worker on each run"
     )
 
     lines = [
@@ -2251,6 +2249,9 @@ def startup_report(
         f"  zerogpu size    : {size}; {reservation}",
         f"  spaces          : {spaces_version or 'not installed'}",
     ]
+    ignored = zerogpu.ignored_duration_note(runtime_config)
+    if ignored:
+        lines.append(f"  duration        : {ignored}")
     if mps_self_test is not None:
         lines.append(f"  mps self-test   : {mps_self_test.describe()}")
     lines.append(f"  model revision  : {model_files.REVISION}")

@@ -177,7 +177,9 @@ def test_the_enhance_label_follows_the_mode(tmp_path, monkeypatch, space):
 def test_the_upscale_label_says_how_many_seconds_it_adds():
     info = next(spec for spec in FIELDS if spec.key == "enable_stage_2").info
     extra = zerogpu.estimate_duration(enable_stage_2=True) - zerogpu.estimate_duration()
-    assert f"Reserves {extra} s more." in info
+    # Upscale's seconds grow with size and length: the figure is the default run's.
+    assert f"Reserves {extra} s more at the default size and length" in info
+    assert info == render.upscale_info(upscale_seconds=extra)
     assert "1.5 times" not in info
 
 

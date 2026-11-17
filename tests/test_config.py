@@ -38,9 +38,19 @@ def test_every_size_stays_selectable(monkeypatch, value):
     assert config.load_config().zerogpu_size == value
 
 
-def test_the_default_reservation_is_the_working_one():
-    """The Space has run 180 s by variable since August; 60 under-reserves."""
-    assert config.load_config().gpu_duration_seconds == 180
+def test_the_reservation_has_no_fixed_base_any_more(monkeypatch):
+    """The Space ran 180 s by variable from August; the reservation now follows each run's
+    size and length (``zerogpu.estimate_duration``), so the variable is read only to say at
+    startup that it is ignored, and the one lever left is an optional floor, unset."""
+    monkeypatch.delenv(config.ENV_GPU_DURATION_FLOOR_SECONDS, raising=False)
+    monkeypatch.setenv(config.ENV_GPU_DURATION_SECONDS, "180")
+
+    settings = config.load_config()
+
+    assert not hasattr(settings, "gpu_duration_seconds")
+    assert settings.ignored_gpu_duration_seconds == "180"
+    assert settings.gpu_duration_floor_seconds is None
+    assert "reservation=estimated" in settings.describe()
 
 
 # --------------------------------------------------------------------------

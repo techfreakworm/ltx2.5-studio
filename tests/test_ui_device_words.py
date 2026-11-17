@@ -197,8 +197,9 @@ def test_off_zerogpu_the_cost_panel_says_where_it_runs_with_each_lever(
         ]
         assert meter_words(texts) == [], (lever, meter_words(texts))
         panel = visible(render.cost_panel(facts))
-        for gone in ("Reserves", "Needs", "Billed", "+60 s", "+90 s", "+180 s"):
+        for gone in ("Reserves", "Needs", "Billed"):
             assert gone not in panel, (lever, gone, panel)
+        assert not re.search(r"\+\d+ s\b", panel), (lever, "a lamp names reserved seconds", panel)
         if facts.state != "refused":
             assert f"Runs {where}" in panel and "nothing is metered" in panel, (lever, panel)
             assert render.commit_line(facts).endswith(where) or facts.state == "incomplete"
@@ -301,7 +302,8 @@ def test_on_zerogpu_the_panel_still_shows_reserves_needs_and_billed(platform, st
         assert note in frame.value
     enhance = next(b for b in demo.blocks.values() if getattr(b, "elem_id", None) == "enhance")
     upscale = next(b for b in demo.blocks.values() if getattr(b, "elem_id", None) == "upscale")
-    assert "Reserves 180 s more" in enhance.info and "Reserves" in upscale.info
+    assert f"Reserves {zerogpu.ENHANCE_DURATION_SECONDS} s more" in enhance.info
+    assert "Reserves" in upscale.info
     exc = errors.DecodeError(mode="text_to_video", reason="x")
     assert "Any GPU time this run used is billed." in render.failure(exc)
 

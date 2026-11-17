@@ -56,8 +56,9 @@ def form(mode_id: str, **overrides) -> dict:
 
 @pytest.fixture
 def base_60(monkeypatch):
-    """The verdict's arithmetic is at a 60 s base; pin the config to it."""
-    monkeypatch.setenv("LTX25_GPU_DURATION_SECONDS", "60")
+    """The arithmetic below is at the form's default size and length (704 x 480, 121 frames),
+    which reserves 60 s with no floor set."""
+    monkeypatch.delenv("LTX25_GPU_DURATION_FLOOR_SECONDS", raising=False)
     assert zerogpu.estimate_duration() == 60
 
 
@@ -80,10 +81,10 @@ def staged_lora(tmp_path):
     ("upscale", "enhance", "lora", "expected", "named"),
     [
         (False, False, False, 60, []),
-        (True, False, False, 90, [("Upscale ×2", 30)]),
-        (True, True, False, 270, [("Upscale ×2", 30), ("Enhance", 180)]),
-        (True, True, True, 330, [("Upscale ×2", 30), ("LoRA", 60), ("Enhance", 180)]),
-        (False, False, True, 120, [("LoRA", 60)]),
+        (True, False, False, 105, [("Upscale ×2", 45)]),
+        (True, True, False, 185, [("Upscale ×2", 45), ("Enhance", 80)]),
+        (True, True, True, 225, [("Upscale ×2", 45), ("LoRA", 40), ("Enhance", 80)]),
+        (False, False, True, 100, [("LoRA", 40)]),
     ],
 )
 def test_the_reservation_is_the_estimators_with_each_extra_named(

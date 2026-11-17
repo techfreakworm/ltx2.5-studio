@@ -846,11 +846,21 @@ def prepare_request(request: GenerationRequest):
         if modes.condition_kind(entry) == "video" and isinstance(source, (str, Path)):
             _video_seconds(source)
     request = _validated(request)
+    _checked_envelope(request)
     _checked_conditions(request, spec)
     request = _checked_lora_files(request)
     _checked_stage_2_size(request, spec)
     _checked_decoder(request, spec)
     return request, spec, scope_notes + length_notes
+
+
+def _checked_envelope(request: GenerationRequest) -> None:
+    """On the ZeroGPU Space, a run past what it was measured to finish is refused now."""
+    from . import device as device_module
+    from . import zerogpu
+
+    if device_module.current().on_zerogpu:
+        zerogpu.check_envelope(request=request)
 
 
 def _checked_decoder(request: GenerationRequest, spec) -> None:

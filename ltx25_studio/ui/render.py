@@ -244,7 +244,8 @@ FIELD_COPY: dict[str, tuple[str, str]] = {
     "enable_stage_2": (
         "Upscale ×2",
         "Upsamples and refines after the first pass, for twice the width and height. "
-        "Reserves {upscale_seconds} s more.",
+        "Reserves {upscale_seconds} s more at the default size and length; when it is on, "
+        "the cost panel shows what it adds.",
     ),
     "seed": ("Seed", "-1 picks a new seed each run. The seed used is in the run report."),
     "strength": ("Stick to the source clip", "Higher keeps more of your clip. 0.99 at most."),
@@ -333,7 +334,12 @@ def upscale_info(*, upscale_seconds: int, on_zerogpu: bool = True, refused: str 
     machine cannot run it for this request, why (the control is then parked)."""
     if refused:
         return refused
-    return f"{UPSCALE_DOES} Reserves {upscale_seconds} s more." if on_zerogpu else UPSCALE_DOES
+    if not on_zerogpu:
+        return UPSCALE_DOES
+    return (
+        f"{UPSCALE_DOES} Reserves {upscale_seconds} s more at the default size and length; "
+        f"when it is on, the cost panel shows what it adds."
+    )
 
 
 def upscale_needs_cuda(device: str | None) -> str:

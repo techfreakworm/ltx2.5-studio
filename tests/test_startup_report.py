@@ -86,10 +86,15 @@ def test_no_line_claims_a_post_pack_measurement(int8_xlarge_report):
     )
 
 
+#: How the reservation is described: it follows each run's size and length.
+DEFAULT_RUN = f"{zerogpu.estimate_duration()} s for the default 704x480x121 run"
+
+
 def test_the_report_names_the_requested_size_and_the_reservation(int8_xlarge_report):
     size = [line for line in int8_xlarge_report.splitlines() if "zerogpu size" in line]
     assert size, int8_xlarge_report
-    assert "xlarge" in size[0] and "180" in size[0], size[0]
+    assert "xlarge" in size[0] and "size and length" in size[0] and DEFAULT_RUN in size[0], size[0]
+    assert f"+{zerogpu.ENHANCE_DURATION_SECONDS} s with prompt enhancement" in size[0]
 
 
 def test_the_report_names_the_device(int8_xlarge_report):
@@ -167,7 +172,8 @@ def test_the_gpu_kwargs_line_names_the_size_value_and_the_seconds():
 
     line = zerogpu.describe_gpu_kwargs(kwargs, config.load_config())
 
-    assert "size=xlarge" in line and "180 s" in line, line
+    assert "size=xlarge" in line and "duration=estimate_duration" in line, line
+    assert DEFAULT_RUN in line and f"+{zerogpu.LORA_DURATION_SECONDS} s with LoRAs" in line, line
 
 
 def test_a_dropped_size_is_said_out_loud(monkeypatch):
@@ -200,7 +206,7 @@ def test_the_app_logs_the_requested_size_value(monkeypatch, caplog):
         sys.modules.pop("app", None)
 
     lines = [r.getMessage() for r in caplog.records if "spaces.GPU" in r.getMessage()]
-    assert lines and "size=xlarge" in lines[0] and "180 s" in lines[0], lines
+    assert lines and "size=xlarge" in lines[0] and DEFAULT_RUN in lines[0], lines
 
 
 # --------------------------------------------------------------------------

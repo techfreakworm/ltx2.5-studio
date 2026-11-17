@@ -1840,9 +1840,13 @@ def test_an_enhanced_run_reserves_more_than_an_unenhanced_one():
     plain = zerogpu.estimate_duration(request=a_request())
     enhanced = zerogpu.estimate_duration(request=a_request(enhance_prompt=True))
     assert enhanced == plain + zerogpu.ENHANCE_DURATION_SECONDS
-    assert zerogpu.ENHANCE_DURATION_SECONDS >= 88, (
-        "the increment does not cover the measured 88 s Hub fetch. The prefetch is "
-        "best-effort by contract, so the estimator may not assume it succeeded"
+    # Enhance added 27 s of window on the Space with the weights prefetched at start-up; the
+    # allowance is 60 s of window, reserved with the margin (the 88 s Hub fetch of a container
+    # whose prefetch has not finished is not covered: LTX25_GPU_DURATION_FLOOR_SECONDS is).
+    assert zerogpu.ENHANCE_WINDOW_SECONDS >= 2 * 27
+    assert (
+        zerogpu.ENHANCE_DURATION_SECONDS
+        >= zerogpu.RESERVATION_MARGIN * zerogpu.ENHANCE_WINDOW_SECONDS
     )
 
 

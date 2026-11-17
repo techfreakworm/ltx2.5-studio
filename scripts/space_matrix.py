@@ -71,7 +71,6 @@ __all__ = [
     "API_FIELD_KEYS",
     "DEFAULT_MODE_ORDER",
     "DEFAULT_QUOTA_CEILING_SECONDS",
-    "DEFAULT_RESERVATION_SECONDS",
     "ENDPOINT",
     "EXIT_CALL_FAILED",
     "EXIT_CEILING",
@@ -138,8 +137,6 @@ _COMPONENT_FOR_KIND = {"text": "textbox"}
 
 DAILY_QUOTA_SECONDS = 2400.0
 DEFAULT_QUOTA_CEILING_SECONDS = 1920.0
-#: The Space's ``LTX25_GPU_DURATION_SECONDS``; the local config default is not what it runs.
-DEFAULT_RESERVATION_SECONDS = 180
 #: The Space's ``LTX25_ZEROGPU_SIZE``; ``zerogpu.quota_multiplier`` turns it into the quota factor.
 DEFAULT_ZEROGPU_SIZE = "xlarge"
 DEFAULT_CALL_TIMEOUT_SECONDS = 1800.0
@@ -1126,16 +1123,59 @@ def quota_multiplier(size: str = DEFAULT_ZEROGPU_SIZE) -> float:
     return float(zerogpu.quota_multiplier(size))
 
 
-def reservation_seconds(call: Call, *, base_seconds: int) -> int:
-    """The app's own estimator, at the Space's base duration, for the request as the app runs it."""
+def _priced_request(call: Call):
+    """The request the Space's estimator sees for this call: its fields as the app runs them,
+    with the length the app's gate set (a recording's or a clip's) once the gate has run."""
+    from ltx25_studio import generate
+
+    width, height = call.render_size
+    fields = {
+        "mode": call.mode,
+        "width": width,
+        "height": height,
+        "num_frames": int(call.runs("num_frames")),
+        "auto_duration": bool(call.runs("auto_duration")),
+        "min_seconds": float(call.runs("min_seconds")),
+        "max_seconds": float(call.runs("max_seconds")),
+        "noise_scale": call.app_level if call.app_level is not None else call.runs("noise_scale"),
+    }
+    if call.app_frames is not None:
+        fields.update(num_frames=int(call.app_frames), auto_duration=False)
+        if _varies_clip(call.spec):
+            fields["extras"] = {"length_source": generate.LENGTH_FROM_VIDEO}
+    return generate.GenerationRequest(**fields)
+
+
+def reservation_seconds(call: Call, *, floor_seconds: int | None = None) -> int:
+    """The app's own estimator for the request as the app runs it: its size and length, with
+    the Space's ``LTX25_GPU_DURATION_FLOOR_SECONDS`` as ``floor_seconds`` (unset by default)."""
     return int(
         zerogpu.estimate_duration(
-            gpu_duration_seconds=int(base_seconds),
+            request=_priced_request(call),
             enable_stage_2=call.stage_2 and bool(call.runs("enable_stage_2")),
             loras=[lora.describe() for lora in call.loras] or None,
             enhance_prompt=bool(call.runs("enhance_prompt")),
+            gpu_duration_floor_seconds=floor_seconds,
         )
     )
+
+
+def _reservation_parts(call: Call, *, floor_seconds: int | None) -> list[str]:
+    """What the reservation is made of, in the estimator's own terms."""
+    request = _priced_request(call)
+    shape = zerogpu.run_shape(request=request)
+    plain = {"request": request, "loras": None, "enhance_prompt": False, "gpu_duration_floor_seconds": None}
+    run = zerogpu.estimate_duration(enable_stage_2=False, **plain)
+    parts = [f"{run} for {shape.width}x{shape.height}x{shape.frames}"]
+    if call.stage_2 and call.runs("enable_stage_2"):
+        parts.append(f"+{zerogpu.estimate_duration(enable_stage_2=True, **plain) - run} Upscale")
+    if call.loras:
+        parts.append(f"+{zerogpu.LORA_DURATION_SECONDS} LoRA")
+    if call.runs("enhance_prompt"):
+        parts.append(f"+{zerogpu.ENHANCE_DURATION_SECONDS} enhancer")
+    if floor_seconds:
+        parts.append(f"at least {floor_seconds}")
+    return parts
 
 
 def platform_refusal(*texts: Any) -> tuple[str, str] | None:
@@ -2021,7 +2061,7 @@ class Session:
     log: Any
     invocation: str
     ceiling: float
-    base_seconds: int
+    floor_seconds: int | None
     multiplier: float
     call_timeout: float
     read_timeout: float
@@ -2231,7 +2271,7 @@ def _resolve_media(ctx: Session, call: Call, evidence: Evidence) -> dict[str, di
 
 def run_call(ctx: Session, call: Call) -> Outcome:
     day = utc_day()
-    reserved = reservation_seconds(call, base_seconds=ctx.base_seconds)
+    reserved = reservation_seconds(call, floor_seconds=ctx.floor_seconds)
     worst = reserved * ctx.multiplier
     spent = ctx.ledger.spent(day)
     if spent + worst > ctx.ceiling:
@@ -2491,12 +2531,15 @@ def _gate_line(call: Call) -> str | None:
     return None
 
 
-def render_plan(calls: list[Call], *, base_seconds: int, multiplier: float, spent: float, ceiling: float,
-                live: bool, ledger_note: str, resume_command: str = "", skipped=(), offset: int = 0) -> list[str]:
+def render_plan(calls: list[Call], *, floor_seconds: int | None, multiplier: float, spent: float,
+                ceiling: float, live: bool, ledger_note: str, resume_command: str = "", skipped=(),
+                offset: int = 0) -> list[str]:
+    floor = (f", at least {floor_seconds} s (the Space's LTX25_GPU_DURATION_FLOOR_SECONDS)"
+             if floor_seconds else "")
     lines = [
         "=== PLAN — LIVE: this WILL spend GPU-seconds ===" if live
         else "=== PLAN — DRY RUN: nothing is contacted and nothing is spent ===",
-        f"  reservation base {base_seconds} s (the Space's LTX25_GPU_DURATION_SECONDS) · "
+        f"  reservation from each call's size and length (the app's estimator){floor} · "
         f"multiplier x{multiplier:g} · ceiling {ceiling:.0f} GPU-s/UTC day",
         f"  {ledger_note}",
     ]
@@ -2506,17 +2549,11 @@ def render_plan(calls: list[Call], *, base_seconds: int, multiplier: float, spen
     costs: list[float] = []
     running = spent
     for number, call in enumerate(calls, start=1 + offset):
-        reserved = reservation_seconds(call, base_seconds=base_seconds)
+        reserved = reservation_seconds(call, floor_seconds=floor_seconds)
         worst = reserved * multiplier
         costs.append(worst)
         running += worst
-        parts = [f"base {base_seconds}"]
-        if call.stage_2:
-            parts.append("x1.5 stage 2")
-        if call.loras:
-            parts.append(f"+{zerogpu.LORA_DURATION_SECONDS} LoRA")
-        if call.runs("enhance_prompt"):
-            parts.append(f"+{zerogpu.ENHANCE_DURATION_SECONDS} enhancer")
+        parts = _reservation_parts(call, floor_seconds=floor_seconds)
         lines.append("")
         lines.append(f"  {number:>2}. {call.label}  [{call.mode}]")
         lines.append(f"      request   {json.dumps(resolved_request(call), sort_keys=False, default=str)}")
@@ -2681,9 +2718,10 @@ def _run_parser() -> argparse.ArgumentParser:
                      "UTC day). Required with --live; read, never written, by a dry run.")
     run.add_argument("--quota-ceiling", type=float, default=DEFAULT_QUOTA_CEILING_SECONDS,
                      help=f"GPU-seconds per UTC day never to pass (default {DEFAULT_QUOTA_CEILING_SECONDS:.0f})")
-    run.add_argument("--reservation-seconds", type=int, default=DEFAULT_RESERVATION_SECONDS,
-                     help=f"the Space's LTX25_GPU_DURATION_SECONDS, the base the reservation is computed "
-                     f"from (default {DEFAULT_RESERVATION_SECONDS})")
+    run.add_argument("--reservation-floor-seconds", type=int, default=None,
+                     help="the Space's LTX25_GPU_DURATION_FLOOR_SECONDS, if it sets one: every call's "
+                     "reservation is at least this (default: unset, as on the Space). The reservation "
+                     "itself is the app's estimate from each call's size and length")
     run.add_argument("--zerogpu-size", default=DEFAULT_ZEROGPU_SIZE,
                      help=f"the Space's LTX25_ZEROGPU_SIZE; zerogpu.quota_multiplier turns it into the quota "
                      f"factor (default {DEFAULT_ZEROGPU_SIZE}, which counts double)")
@@ -2896,6 +2934,9 @@ def main(argv=None, *, log=print) -> int:
     except Exception as exc:  # noqa: BLE001 -- the app's ConfigError names the legal sizes
         out(f"--zerogpu-size: {exc}")
         return EXIT_ILLEGAL
+    if args.reservation_floor_seconds is not None and args.reservation_floor_seconds < 1:
+        out("--reservation-floor-seconds must be a whole number of seconds >= 1, as on the Space.")
+        return EXIT_ILLEGAL
 
     ledger = Ledger(args.quota_ledger) if args.quota_ledger else None
     if live and ledger is None:
@@ -2932,7 +2973,7 @@ def main(argv=None, *, log=print) -> int:
         out(f"nothing left to run: every call of the plan has an outcome in {args.out}"
             if skipped else "nothing to run")
         return EXIT_OK
-    for line in render_plan(calls, base_seconds=args.reservation_seconds, multiplier=multiplier, spent=spent,
+    for line in render_plan(calls, floor_seconds=args.reservation_floor_seconds, multiplier=multiplier, spent=spent,
                             ceiling=args.quota_ceiling, live=live, ledger_note=note,
                             resume_command=_resume_command(argv), skipped=skipped):
         out(line)
@@ -3012,7 +3053,7 @@ def _live(args, calls: list[Call], ledger: Ledger, multiplier: float, out, *, sk
                    "space": args.space, "space_sha": sha, "calls": [c.label for c in calls],
                    "skipped": [label for label, _state in skipped], "out": str(out_dir)})
     ctx = Session(app=app, generate=generate, lora=route, ledger=ledger, out=out_dir, log=out,
-                  invocation=invocation, ceiling=args.quota_ceiling, base_seconds=args.reservation_seconds,
+                  invocation=invocation, ceiling=args.quota_ceiling, floor_seconds=args.reservation_floor_seconds,
                   multiplier=multiplier, call_timeout=args.call_timeout, read_timeout=args.read_timeout,
                   sampling_rate=args.sampling_rate, space_sha=sha, produced=dict(produced or {}))
     for label, state in skipped:

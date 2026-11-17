@@ -776,8 +776,13 @@ def review(
         ("LoRA", {"loras": tuple(prepared.loras or ())}),
         ("Enhance", {"enhance_prompt": enhance}),
     ]
-    base = zerogpu.estimate_duration()
-    so_far: dict[str, Any] = {}
+    so_far: dict[str, Any] = {
+        "request": prepared,
+        "enable_stage_2": False,
+        "loras": (),
+        "enhance_prompt": False,
+    }
+    base = zerogpu.estimate_duration(**so_far)
     previous = base
     extras = []
     for label, lever in steps:
@@ -787,7 +792,10 @@ def review(
             extras.append((label, total - previous))
         previous = total
     reserve = zerogpu.estimate_duration(
-        enable_stage_2=stage_2, loras=tuple(prepared.loras or ()), enhance_prompt=enhance
+        request=prepared,
+        enable_stage_2=stage_2,
+        loras=tuple(prepared.loras or ()),
+        enhance_prompt=enhance,
     )
 
     exports = set(mode.exports)
