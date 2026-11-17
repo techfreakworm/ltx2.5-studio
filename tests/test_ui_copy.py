@@ -247,9 +247,10 @@ def test_the_lip_sync_line_is_under_the_audio_in_audio_to_video_and_nowhere_else
 
 
 #: Mode 11 with a recording and no picture sometimes renders a black-and-white period film (#28).
+#: Whether it does depends on the seed, not on how old the recording sounds (round-4 verdict).
 PERIOD_FILM = (
-    "An old-sounding recording can come out as a period film: say “in colour” in the prompt, "
-    "or give a first-frame picture."
+    "With a speech recording and no first-frame picture, some seeds come out as a "
+    "black-and-white period film: add “in colour” to the prompt, or give a first-frame picture."
 )
 
 
@@ -282,7 +283,9 @@ def test_the_period_film_sentence_is_in_mode_11s_help_and_nowhere_else(tmp_path,
             assert form.get(caption) == render.media_caption(modes.get_mode(mode_id), "image")
         else:
             assert holders() == [], mode_id
-    assert render.media_caption(modes.get_mode("audio_to_video"), "image").endswith(PERIOD_FILM)
+    line = render.media_caption(modes.get_mode("audio_to_video"), "image")
+    assert line == f"Optional. Used as the first frame. {PERIOD_FILM}"
+    assert "old-sounding" not in line, "the seed decides it, not how old the recording sounds"
 
 
 def test_mode_11_states_its_limit_in_its_purpose_line_and_the_remedy_under_its_audio():

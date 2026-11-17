@@ -364,8 +364,9 @@ _CAPTIONS: dict[tuple[str, str], str] = {
     ),
     # Under the first-frame picture, above the prompt: the two remedies it names.
     ("audio_to_video", "image"): (
-        "Optional. Used as the first frame. An old-sounding recording can come out as a period "
-        "film: say “in colour” in the prompt, or give a first-frame picture."
+        "Optional. Used as the first frame. With a speech recording and no first-frame picture, "
+        "some seeds come out as a black-and-white period film: add “in colour” to the prompt, "
+        "or give a first-frame picture."
     ),
 }
 

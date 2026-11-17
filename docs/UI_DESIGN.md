@@ -104,9 +104,10 @@ at build time.
 
 **Mode 11's help.** Under Audio to video's audio, the line says speech is not
 lip-synced and where a speaking face is made. Under its optional first-frame image,
-above the prompt, the line says an old-sounding recording can come out as a period
-film, and the two ways to get colour: "in colour" in the prompt, or a first-frame
-picture. No other mode says either.
+above the prompt, the line says that with a speech recording and no first-frame
+picture some seeds come out as a black-and-white period film (the seed decides it,
+not how old the recording sounds), and the two ways to get colour: "in colour" in the
+prompt, or a first-frame picture. No other mode says either.
 
 **Parking.** When the mode changes, the value of every field the new mode does not use
 is parked: it moves into a session `gr.State`, and the widget goes back to its default.
