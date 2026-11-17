@@ -163,6 +163,7 @@ import gc
 import logging
 from pathlib import Path
 
+from . import model_files
 from .errors import PromptEnhancementError
 
 logger = logging.getLogger(__name__)
@@ -186,7 +187,8 @@ __all__ = [
 #: on 2026-08-27 and still on 2026-11-16. The repo's chat template, which the
 #: rewrite is built from, changed twice in July 2026. Applies to the default
 #: repo only; a repo set through ``LTX25_PROMPT_ENHANCER_REPO`` loads at its head.
-ENHANCER_REVISION = "dd693ff40353f057ca5f07e945ad867f4afbf2ec"
+#: Held in ``model_files`` with the files the Space preloads at it.
+ENHANCER_REVISION = model_files.ENHANCER_REVISION
 
 #: The one weight the default checkpoint stores block-wise: [262144, 35], one
 #: scale per 256-wide per-layer slice. transformers' ``QuantizedEmbedding`` builds

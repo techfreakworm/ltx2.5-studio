@@ -148,7 +148,7 @@ DECODER_CHOICES = ("auto", "diffusion", "conv")
 #:
 #: A repo other than this default loads at its Hub head, unpinned; the default
 #: is pinned by ``enhance.ENHANCER_REVISION``.
-DEFAULT_PROMPT_ENHANCER_REPO = "google/gemma-4-E2B-it-qat-mobile-transformers"
+DEFAULT_PROMPT_ENHANCER_REPO = model_files.ENHANCER_REPO_ID
 
 #: Fetch the enhancer's weights into the HF cache **at startup**, so the first
 #: enhanced generation in a container does not pay the download.
@@ -167,7 +167,8 @@ DEFAULT_PROMPT_ENHANCER_REPO = "google/gemma-4-E2B-it-qat-mobile-transformers"
 #: (``pipelines._quantization_config``; never measured). An operator who knows
 #: this deploy will never enable enhancement can decline to spend that headroom,
 #: and gets the un-prefetched behaviour back: still working, just slower on
-#: first use.
+#: first use. On the Space the README preloads these files into the image, so
+#: there the lever only switches this fallback fetch off.
 DEFAULT_PREFETCH_ENHANCER = True
 
 

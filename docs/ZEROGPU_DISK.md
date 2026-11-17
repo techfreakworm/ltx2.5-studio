@@ -9,7 +9,12 @@
 > **The set.** ✅ 35 files, **71,923,919,050 B = 71.92 GB (66.98 GiB)**, every size from the
 > Hub's own listing at the pinned commits and recorded per file in `model_files.py`. It is the
 > 37-file set of the first deploy less `temporal_latent_upsampler/` (0.26 GB), which nothing loads:
-> `StageRunner` wires only the spatial `latent_upsampler`.
+> `StageRunner` wires only the spatial `latent_upsampler`. A third entry preloads the prompt
+> enhancer, `google/gemma-4-E2B-it-qat-mobile-transformers` at its own pin `dd693ff4…` (not
+> gated): ✅ the 8 files its loader reads, **2,490,311,736 B = 2.49 GB**. Its start-up prefetch
+> thread stays as the fallback and finds them cached, so a first enhanced call in a fresh container
+> no longer risks paying the ~88 s fetch inside its GPU reservation. (The first deploy put the same
+> 2.49 GB on disk at runtime through that prefetch, so the disk carried it either way.)
 >
 > **Where the preloaded files live.** ⚠️ In the runtime's default Hugging Face cache,
 > `/root/.cache/huggingface/hub/models--Lightricks--LTX-2.5-Diffusers/`: `snapshots/871165de…/`
@@ -27,15 +32,15 @@
 > | term | GB |
 > |---|---:|
 > | the image apart from the weights — torch, CUDA, the wheels (❓ not measurable from inside) | 8–12 |
-> | the preloaded snapshot, in the image | 71.92 |
+> | the preloaded files, in the image: the model's 71.92 and the prompt enhancer's 2.49 | 74.41 |
 > | ZeroGPU's packed copy in `~/.zerogpu/tensors`: 40.6 measured on the 2026-11-13 boot (41.24 derived), plus 0.83 for the diffusion decoder, now built and packed at start-up (#17) | 41.4–42.1 |
-> | **total** | **121.4–126.0 of 150 ✅ fits** |
+> | **total** | **123.8–128.5 of 150 ✅ fits** |
 >
 > ✅ Preloaded files count against the 150 GB: the LTX-2.3 Space was evicted with
 > `storage limit exceeded (150G)` while its preload was ~234 GB. ⚠️ The prune unlinks the blobs
 > behind the packed tensors (65.25 GB freed on 2026-11-13); if the preloaded blobs sit in a
 > read-only image layer, an unlink only hides them and frees nothing (Option D's argument, §3) —
-> hence the worst case above. Either way the total fits with 24.0–28.6 GB to spare.
+> hence the worst case above. Either way the total fits with 21.5–26.2 GB to spare.
 >
 > **When the preload and the code disagree.** `preflight.ensure_weights()` checks all 35 files at
 > start-up. Complete: one line, `weights: all 35 files (71.92 GB) are already in … nothing
@@ -47,15 +52,17 @@
 > container, where the prune frees them once packed). If not, start-up stops before writing a
 > byte, with one message naming the directory, the count and GB, the free GB and the remedy. That
 > is the case of a preload that lands in the Hub cache but not where start-up looks: a second
-> 71.92 GB on top of it would be **193.3–197.9 GB** at the pre-prune peak, so it is refused rather
+> 71.92 GB on top of it would be **195.8–200.4 GB** at the pre-prune peak, so it is refused rather
 > than evicted. The remedy is to delete the `preload_from_hub` block, which is the first deploy's
-> shape: 124.0 GB needed against 140 GB of room, so it starts, peaks at the same 121.4–126.0 GB,
-> and the prune then frees the download. A preload that fails outright (a 401) stops the Space
+> shape: 124.0 GB needed against 140 GB of room, so it starts (the enhancer's 2.49 GB, fetched by
+> the prefetch after this check, fits in the margin), peaks at the same 123.8–128.5 GB, and the
+> prune then frees the download. A preload that fails outright (a 401) stops the Space
 > before any app code runs; same remedy.
 >
-> **The start-up report's disk line** stays a true floor: its snapshot term is the preloaded
-> weights, measured; its ~10 GB constant is now "the rest of the image"; both readings are taken
-> before launch, so the packed copy is reported as not written yet.
+> **The start-up report's disk line** stays a true floor: its snapshot term is the preloaded model
+> weights, measured; its ~10 GB constant is now "the rest of the image", and the enhancer's 2.49 GB
+> falls under the line's "anything else"; both readings are taken before launch, so the packed copy
+> is reported as not written yet.
 
 > ## Status on 2026-11-16
 >

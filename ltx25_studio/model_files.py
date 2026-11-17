@@ -47,6 +47,10 @@ __all__ = [
     "DEFAULT_COMPONENTS",
     "DEFAULT_DTYPE",
     "DIFFUSION_DECODER_REVISION",
+    "ENHANCER_FILES",
+    "ENHANCER_REPO_ID",
+    "ENHANCER_REVISION",
+    "ENHANCER_SIZED_FILES",
     "HUB_BASE_URL",
     "REPO_ID",
     "REVISION",
@@ -104,6 +108,29 @@ TINY_REVISION = "3f43040b4719f6dad170a6d07b30921ee1a8f405"
 #: The checkpoint's on-disk dtype. Quantisation is a load-time choice
 #: (``LTX25_QUANTIZATION``), not a different download.
 DEFAULT_DTYPE = "bfloat16"
+
+#: The prompt enhancer (``enhance.py``) is a repo of its own, pinned on its own;
+#: not gated. ``config.DEFAULT_PROMPT_ENHANCER_REPO`` and
+#: ``enhance.ENHANCER_REVISION`` are these values.
+ENHANCER_REPO_ID = "google/gemma-4-E2B-it-qat-mobile-transformers"
+ENHANCER_REVISION = "dd693ff40353f057ca5f07e945ad867f4afbf2ec"
+
+#: The files the enhancer's loader reads at :data:`ENHANCER_REVISION`, with their
+#: sizes in bytes: ``AutoProcessor`` (processor, image-processor and tokenizer
+#: configs, the tokenizer, the chat template) and ``Gemma4ForConditionalGeneration``
+#: (config, generation config, the single-file checkpoint). The repo's README and
+#: .gitattributes are not read, so not preloaded.
+ENHANCER_SIZED_FILES = (
+    ("chat_template.jinja", 18_569),
+    ("config.json", 6_204),
+    ("generation_config.json", 209),
+    ("model.safetensors", 2_458_111_846),
+    ("preprocessor_config.json", 511),
+    ("processor_config.json", 1_689),
+    ("tokenizer.json", 32_169_626),
+    ("tokenizer_config.json", 3_082),
+)
+ENHANCER_FILES = tuple(name for name, _size in ENHANCER_SIZED_FILES)
 
 #: Repo-root files needed alongside the components, with their sizes in bytes.
 _ROOT_FILE_BYTES = MappingProxyType({"model_index.json": 859})
@@ -465,10 +492,13 @@ def missing_config_files(components: tuple[str, ...] | None = None) -> tuple[str
 
 
 def preload_from_hub_entries(components: tuple[str, ...] | None = None) -> tuple[str, ...]:
-    """The ``preload_from_hub:`` entries for the Space README, one per revision."""
-    return tuple(
+    """The ``preload_from_hub:`` entries for the Space README: one per revision of
+    :data:`REPO_ID`, then the prompt enhancer's files at its own pin."""
+    model = tuple(
         f"{REPO_ID} {','.join(paths)} {revision}" for revision, paths in download_plan(components)
     )
+    enhancer = f"{ENHANCER_REPO_ID} {','.join(sorted(ENHANCER_FILES))} {ENHANCER_REVISION}"
+    return (*model, enhancer)
 
 
 def preload_from_hub_entry(components: tuple[str, ...] | None = None) -> str:

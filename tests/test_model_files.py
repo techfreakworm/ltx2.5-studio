@@ -451,14 +451,90 @@ def test_the_startup_download_asks_for_each_file_at_its_revision(monkeypatch, tm
     assert len(asked) == len(model_files.download_allow_list())
 
 
-def test_the_preload_entries_are_one_per_revision():
+def test_the_preload_entries_are_one_per_revision_then_the_enhancers():
     entries = model_files.preload_from_hub_entries()
 
     assert [entry.rsplit(" ", 1)[1] for entry in entries] == [
         model_files.REVISION,
         DECODER_REVISION,
+        ENHANCER_REVISION,
     ]
     assert model_files.preload_from_hub_entry() == entries[0]
+
+
+# --------------------------------------------------------------------------
+# the prompt enhancer is preloaded too (#23): its own repo, at its own pin
+#
+# A first enhanced call in a fresh container whose start-up prefetch has not
+# finished would pay the ~88 s fetch inside its GPU reservation. Its files come
+# from the image instead; the prefetch thread stays as the fallback.
+# --------------------------------------------------------------------------
+
+ENHANCER_REPO = "google/gemma-4-E2B-it-qat-mobile-transformers"
+ENHANCER_REVISION = "dd693ff40353f057ca5f07e945ad867f4afbf2ec"
+
+#: What the loader reads from that repo at that pin (AutoProcessor: the processor,
+#: image-processor and tokenizer configs, the tokenizer, the chat template;
+#: Gemma4ForConditionalGeneration: the config, the generation config, the
+#: single-file checkpoint), with sizes. The repo's README and .gitattributes are
+#: not read.
+EXPECTED_ENHANCER_FILE_BYTES = {
+    "chat_template.jinja": 18_569,
+    "config.json": 6_204,
+    "generation_config.json": 209,
+    "model.safetensors": 2_458_111_846,
+    "preprocessor_config.json": 511,
+    "processor_config.json": 1_689,
+    "tokenizer.json": 32_169_626,
+    "tokenizer_config.json": 3_082,
+}
+
+
+def test_the_enhancers_entry_names_exactly_its_files_at_its_pin():
+    from ltx25_studio import config, enhance
+
+    repo, files, revision = model_files.preload_from_hub_entries()[-1].split(" ")
+
+    assert repo == ENHANCER_REPO == config.DEFAULT_PROMPT_ENHANCER_REPO
+    assert revision == ENHANCER_REVISION == enhance.ENHANCER_REVISION
+    assert files.split(",") == sorted(EXPECTED_ENHANCER_FILE_BYTES)
+
+
+def test_the_enhancers_files_carry_their_sizes():
+    assert dict(model_files.ENHANCER_SIZED_FILES) == EXPECTED_ENHANCER_FILE_BYTES
+    assert sum(size for _name, size in model_files.ENHANCER_SIZED_FILES) == 2_490_311_736
+
+
+def test_the_enhancers_list_is_the_files_its_loader_reads():
+    """Tied to the loader by its own library's names, so a loader that starts reading
+    another file shows up here, not as a download inside a GPU reservation."""
+    utils = pytest.importorskip("transformers.utils")
+    tokenization = pytest.importorskip("transformers.tokenization_utils_base")
+
+    read = {
+        utils.CONFIG_NAME,
+        utils.GENERATION_CONFIG_NAME,
+        utils.SAFE_WEIGHTS_NAME,
+        utils.PROCESSOR_NAME,
+        utils.IMAGE_PROCESSOR_NAME,
+        utils.CHAT_TEMPLATE_FILE,
+        tokenization.TOKENIZER_CONFIG_FILE,
+        tokenization.FULL_TOKENIZER_FILE,
+    }
+    assert set(model_files.ENHANCER_FILES) == read
+
+
+@pytest.mark.parametrize(
+    "path", SOURCE_FILES_TO_SWEEP, ids=lambda p: str(p.relative_to(REPO_ROOT))
+)
+def test_the_enhancers_repo_and_pin_are_written_in_model_files_only(path):
+    """One source for what the preload fetches and what the loader asks for."""
+    offenders = [
+        (lineno, value)
+        for lineno, value in code_string_constants(path)
+        if ENHANCER_REPO in value or ENHANCER_REVISION in value
+    ]
+    assert not offenders, f"{path.relative_to(REPO_ROOT)}: {offenders}"
 
 
 def test_the_decoder_directory_is_its_own_revisions_snapshot(monkeypatch, tmp_path):

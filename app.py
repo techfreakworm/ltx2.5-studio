@@ -107,7 +107,9 @@ if DEVICE.device == "cuda":
     # logs one line and each run builds its own, as before.
     pipelines.build_decoder_at_startup(device="cuda")
 
-# The prompt enhancer's WEIGHTS, into the HF cache, on a daemon thread.
+# The prompt enhancer's WEIGHTS, into the HF cache, on a daemon thread. On the
+# Space the image already holds them (README's last `preload_from_hub` entry), so
+# this is the fallback for a preload that missed them, and finds them cached.
 #
 # Enhancement runs inside the `@spaces.GPU` worker now (see enhance.py for the
 # measurement that moved it there), which means the 88 s Hub fetch would be
@@ -129,7 +131,8 @@ if DEVICE.device == "cuda":
 # itself. Degraded, not broken.
 #
 # CONFIG.prefetch_enhancer exists for the deploy that will never turn
-# enhancement on and would rather keep the ~2.5 GB of disk; see config.py.
+# enhancement on and would rather keep the ~2.5 GB of disk; see config.py. On
+# the Space the preloaded image carries them either way.
 if WILL_USE_GPU and CONFIG.prefetch_enhancer:
     enhance_module.start_prefetch(token=os.environ.get("HF_TOKEN"))
 

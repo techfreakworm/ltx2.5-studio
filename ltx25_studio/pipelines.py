@@ -2008,8 +2008,8 @@ def _audio_of(output):
 #: it arrives as an eviction rather than as ``ENOSPC``.
 ZEROGPU_DISK_CAP_GB = 150.0
 
-#: The container image itself — torch, CUDA, the wheels; the preloaded weights
-#: are in the image too, but the snapshot term counts them. ⚠️ **Not measurable
+#: The container image itself — torch, CUDA, the wheels; the preloaded model
+#: weights are in the image too, but the snapshot term counts them. ⚠️ **Not measurable
 #: from inside**, so it is carried as a constant and shown as such. It is also
 #: the term that pushes bf16 over: 72.2 + 72.2 alone is 144.4 and fits.
 IMAGE_FOOTPRINT_GB = 10.0
