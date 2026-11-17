@@ -40,7 +40,9 @@ def first_paint(form: Form) -> None:
 
 
 def lamps(form: Form) -> list[str]:
-    return re.findall(r'class="mr-lamp mr-lamp-cost[^"]*">([^<]*)<', form.get(form.by_id("cost")))
+    return re.findall(
+        r'class="mr-lamp mr-lamp-cost[^"]*"[^>]*>([^<]*)<', form.get(form.by_id("cost"))
+    )
 
 
 def test_the_parked_upscale_names_no_size_and_the_panel_drops_its_lamp(on_the_cpu):

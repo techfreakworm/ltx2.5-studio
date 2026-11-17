@@ -183,7 +183,8 @@ exported, so joint modes never show one file twice. Its contents depend on the s
 - LoRA
 
 Above the grid are cost lamps that light only when they are true; a request that would
-be refused lights none. The figures come from these sources:
+be refused lights none. The row is a named group ("Costs that apply") and an unlit lamp
+is hidden from assistive tech, so a lamp's state is not in colour alone. The figures come from these sources:
 
 - **Reserves:** `zerogpu.estimate_duration` for the same request, with each extra
   named with its seconds.

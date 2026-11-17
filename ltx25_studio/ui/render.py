@@ -638,8 +638,11 @@ def _returns_words(facts: CostFacts) -> str:
 
 
 def _lamp(text: str, *, lit: bool, kind: str = "cost") -> str:
+    """A lamp; an unlit one is a cost that does not apply, so it is not read out (its state
+    is not in colour alone)."""
     state = "is-lit" if lit else "is-off"
-    return f'<span class="mr-lamp mr-lamp-{kind} {state}">{_e(text)}</span>'
+    hidden = "" if lit else ' aria-hidden="true"'
+    return f'<span class="mr-lamp mr-lamp-{kind} {state}"{hidden}>{_e(text)}</span>'
 
 
 def _lamps(facts: CostFacts) -> str:
@@ -666,7 +669,11 @@ def _lamps(facts: CostFacts) -> str:
         lamps.append(_lamp("Video thrown away", lit=True))
     if facts.encodes_audio:
         lamps.append(_lamp("Audio encode", lit=True))
-    return '<div class="mr-lamps" aria-label="Costs that apply">' + "".join(lamps) + "</div>"
+    return (
+        '<div class="mr-lamps" role="group" aria-label="Costs that apply">'
+        + "".join(lamps)
+        + "</div>"
+    )
 
 
 def _length_words(facts: CostFacts) -> str:
