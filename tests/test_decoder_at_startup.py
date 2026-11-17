@@ -78,7 +78,7 @@ def space(tmp_path, monkeypatch):
         snapshot.mkdir(parents=True)
         (repo / model_files.DIFFUSION_DECODER_REVISION / "diffusion_decoder").mkdir(parents=True)
         model = FakeModel()
-        decode = DecodePipelineRecorder()
+        decode = classes.pop("LTX2VideoDiffusionDecodePipeline", None) or DecodePipelineRecorder()
         base = FakeModel()
         base.components = {}  # what `derive_pipeline` shares into the text2video runner
         recorders = install_fake_stack(
@@ -159,6 +159,35 @@ def test_a_failed_startup_build_logs_one_line_and_the_run_builds_its_own(space, 
 
     assert (decoder, why_conv) == ("diffusion", None), "the per-run build is gone"
     assert len(recorders[DECODER].calls) == 2 and len(decode.built) == 1
+
+
+class WrapperOnce(DecodePipelineRecorder):
+    """``LTX2VideoDiffusionDecodePipeline`` whose first construction fails."""
+
+    def __call__(self, **kwargs):
+        if not getattr(self, "failed", False):
+            self.failed = True
+            raise TypeError("LTX2VideoDiffusionDecodePipeline got an unexpected component")
+        return super().__call__(**kwargs)
+
+
+def test_a_failure_after_the_load_leaves_the_decoder_unmoved_and_the_run_builds_it(space):
+    """ZeroGPU packs whatever is moved at start-up and then prunes the file it came from.
+    A decoder moved but never cached would leave the per-run build a pruned file, so the
+    move comes last: a build that fails at any step after the load has moved nothing."""
+    wrapper = WrapperOnce()
+    model, _decode, recorders, runners = space(LTX2VideoDiffusionDecodePipeline=wrapper)
+
+    assert pipelines.build_decoder_at_startup(device="cuda") is False
+
+    assert model.moved_to is None, "the decoder was moved to cuda by a build that then failed"
+    assert "__decoder__" not in pipelines._CACHE
+
+    decoder, why_conv = runners["condition"]._single_stage_decoder("auto", {})
+
+    assert (decoder, why_conv) == ("diffusion", None)
+    assert runners["condition"].decoder is wrapper.built[0]
+    assert model.moved_to == "cuda" and len(recorders[DECODER].calls) == 2
 
 
 def test_a_failed_startup_build_never_raises(space, monkeypatch):

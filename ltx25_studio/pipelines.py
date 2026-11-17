@@ -1021,14 +1021,17 @@ def _decoder_part(base, *, dtype=None, device: str | None = None, cache=None, re
         checked, message = zerogpu.check_mmap_backed(decoder_model, name="diffusion_decoder")
         offending = checked and "not mmap'd" in message
         (_log().warning if offending else _log().info)("%s%s", "" if checked else "⚠️ ", message)
-    if device:
-        # Off CUDA the decoder stays on the CPU (FlexAttention refuses MPS).
-        decoder_model.to(device if on_cuda else "cpu")
     # `vae` is deliberately omitted: it is optional here and consulted only to
     # denormalize, which `DIFFUSION_DECODE_DENORMALIZE` never asks for.
     decoder = LTX2VideoDiffusionDecodePipeline(
         diffusion_decoder=decoder_model, scheduler=base.scheduler
     )
+    if device:
+        # Last, once nothing else can fail: at start-up ZeroGPU packs what is
+        # moved here and prunes its file, so a decoder moved but not cached
+        # would leave the per-run build nothing to load.
+        # Off CUDA the decoder stays on the CPU (FlexAttention refuses MPS).
+        decoder_model.to(device if on_cuda else "cpu")
     cache[_DECODER_CACHE_KEY] = decoder
     return decoder
 
