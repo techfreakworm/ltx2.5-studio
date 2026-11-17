@@ -101,6 +101,10 @@ except Exception as _exc:  # noqa: BLE001 - a bad sweep must not stop startup
 if DEVICE.device == "cuda":
     pipelines.get_pipeline(pipeline="condition", device="cuda")
     pipelines.get_pipeline(pipeline="text2video", device="cuda")
+    # The diffusion decoder too, so it is packed with the rest and every run's
+    # worker uses it instead of loading it again. Never raises: on a failure it
+    # logs one line and each run builds its own, as before.
+    pipelines.build_decoder_at_startup(device="cuda")
 
 # The prompt enhancer's WEIGHTS, into the HF cache, on a daemon thread.
 #

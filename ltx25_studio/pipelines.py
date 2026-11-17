@@ -66,6 +66,7 @@ __all__ = [
     "BASE_KIND",
     "assert_compression_ratios",
     "assert_frame_rate_default",
+    "build_decoder_at_startup",
     "check_cpu_decoder_size",
     "check_decoder_minimum",
     "check_decoder_size",
@@ -953,13 +954,14 @@ def _require_exact_load(component: str, info: dict) -> None:
         _log().info("%s: ignored the expected extra key(s) %s", component, ", ".join(ignored))
 
 
-def _decoder_part(base, *, dtype=None, device: str | None = None, cache=None):
+def _decoder_part(base, *, dtype=None, device: str | None = None, cache=None, report=False):
     """The diffusion decoder pipeline, built once and shared by every decode.
 
     Off CUDA the decoder keeps its default FlexAttention processor and stays on
     the CPU: NATTEN has no macOS build and FlexAttention refuses MPS tensors.
     That path is dense, so its size is bounded (``device.check_stage_2_size``,
-    and the single-stage decode policy).
+    and the single-stage decode policy). ``report`` logs its mmap backing before
+    the move, as the start-up does for the pipeline's components.
     """
     cache = _CACHE if cache is None else cache
     if _DECODER_CACHE_KEY in cache:
@@ -1000,7 +1002,8 @@ def _decoder_part(base, *, dtype=None, device: str | None = None, cache=None):
     #     everything else, and the version->ref lookup goes over the network even
     #     when the kernel files are already cached.
     #   * `DIFFUSERS_DISABLE_REMOTE_CODE` set in the environment makes this raise.
-    # Constructing it lazily is what keeps both of those out of app startup.
+    # On CUDA `build_decoder_at_startup` meets both once, at start-up, where a
+    # failure is one log line; this lazy, per-run construction is the fallback.
     if on_cuda:
         try:
             decoder_model.set_attn_processor(LTX2VideoVaeNeighborhoodNattenProcessor())
@@ -1011,6 +1014,13 @@ def _decoder_part(base, *, dtype=None, device: str | None = None, cache=None):
             ) from exc
     # Tiling bounds peak memory by the tile size rather than by the video size.
     decoder_model.enable_tiling()
+    if report and callable(getattr(decoder_model, "named_parameters", None)):
+        # Before the move: on ZeroGPU the moved parameters are the platform's fakes.
+        from . import zerogpu
+
+        checked, message = zerogpu.check_mmap_backed(decoder_model, name="diffusion_decoder")
+        offending = checked and "not mmap'd" in message
+        (_log().warning if offending else _log().info)("%s%s", "" if checked else "⚠️ ", message)
     if device:
         # Off CUDA the decoder stays on the CPU (FlexAttention refuses MPS).
         decoder_model.to(device if on_cuda else "cpu")
@@ -1021,6 +1031,46 @@ def _decoder_part(base, *, dtype=None, device: str | None = None, cache=None):
     )
     cache[_DECODER_CACHE_KEY] = decoder
     return decoder
+
+
+def build_decoder_at_startup(*, device: str, dtype=None) -> bool:
+    """Build the diffusion decoder once, beside the pipeline, before launch.
+
+    ``app.py`` calls this on CUDA after building the runners. The decoder's
+    ``.to(device)`` then runs at module scope, so on ZeroGPU it is registered and
+    packed with the other components, and every GPU worker's runner gets this
+    instance from its decoder factory instead of loading 0.83 GB and resolving
+    the NATTEN kernel inside each billed run. No GPU is needed here: the NATTEN
+    fetch's architecture check asks ``torch.cuda``, which ``spaces`` answers in
+    the main process from the slice's configured capability.
+
+    Never raises. Any failure is logged on one line and nothing is cached, so
+    each run builds its own decoder, as before. Returns whether it was built.
+    """
+    if _DECODER_CACHE_KEY in _CACHE:
+        return True
+    try:
+        before = peak_rss_gib()
+        _decoder_part(
+            _base_pipeline(dtype=dtype, device=device), dtype=dtype, device=device, report=True
+        )
+        after = peak_rss_gib()
+        _log().info(
+            "diffusion decoder built at start-up: %.2f GB, moved to %s with the pipeline, "
+            "so every run uses this instance | peak RSS %.2f -> %.2f GiB",
+            model_files.get_component("diffusion_decoder").size_gb,
+            device,
+            before if before is not None else float("nan"),
+            after if after is not None else float("nan"),
+        )
+        return True
+    except Exception as exc:  # noqa: BLE001 - a start-up build must never stop start-up
+        reason = " ".join(f"{type(exc).__name__}: {exc}".split())[:300]
+        _log().warning(
+            "diffusion decoder NOT built at start-up (%s); each run builds its own, as before",
+            reason,
+        )
+        return False
 
 
 def get_pipeline(*, pipeline: str = BASE_KIND, dtype=None, device: str | None = None):
@@ -1068,10 +1118,11 @@ def get_pipeline(*, pipeline: str = BASE_KIND, dtype=None, device: str | None = 
         built = derive_pipeline(base, LTX2Pipeline)
 
     # NOT built here. The weights are already guaranteed by
-    # `preflight.require_cache_complete()` -- all three components are in the
-    # allow-list -- so the startup loudness is not lost. What cannot be checked
-    # at startup is the NATTEN kernel, which resolves over the network, and
-    # checking it would reimpose the very network dependency this defers.
+    # `preflight.require_cache_complete()` -- both stage-2 components are in the
+    # allow-list -- so the startup loudness is not lost. The NATTEN kernel
+    # resolves over the network, so a failure here would stop every mode; the
+    # decoder is built at start-up separately (`build_decoder_at_startup`, on
+    # CUDA), where a failure is one log line and the factory below takes over.
     runner = StageRunner(
         built,
         kind=pipeline,
@@ -1463,7 +1514,8 @@ class StageRunner:
         #: dependency of one branch into a hard requirement for every mode --
         #: when NATTEN could not resolve, nothing loaded at all.
         self._stage_2_factory = stage_2_factory
-        #: The diffusion decoder alone, for a single-stage diffusion decode.
+        #: The diffusion decoder alone, for a single-stage diffusion decode. On
+        #: CUDA it returns the instance `build_decoder_at_startup` made, if any.
         self._decoder_factory = decoder_factory
         #: Why the decoder could not be built, once that has been found out.
         self._decoder_unavailable: str | None = None
@@ -2078,7 +2130,10 @@ def runner_summary(resolution, runtime_config) -> str:
     if resolution.device is None:
         return "none (UI only)"
     if resolution.device == "cuda":
-        return "StageRunner, the pipeline built at startup and resident on CUDA"
+        return (
+            "StageRunner, the pipeline and the diffusion decoder built at startup and resident "
+            "on CUDA (if the decoder fails to build there, each run builds its own)"
+        )
     if not _uses_local_runner():
         return (
             f"StageRunner, resident on {resolution.device}; every component from "

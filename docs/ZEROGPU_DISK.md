@@ -28,24 +28,24 @@
 > |---|---:|
 > | the image apart from the weights — torch, CUDA, the wheels (❓ not measurable from inside) | 8–12 |
 > | the preloaded snapshot, in the image | 71.92 |
-> | ZeroGPU's packed copy in `~/.zerogpu/tensors`: 40.6 measured on the 2026-11-13 boot, 41.24 derived | 40.6–41.2 |
-> | **total** | **120.5–125.2 of 150 ✅ fits** |
+> | ZeroGPU's packed copy in `~/.zerogpu/tensors`: 40.6 measured on the 2026-11-13 boot (41.24 derived), plus 0.83 for the diffusion decoder, now built and packed at start-up (#17) | 41.4–42.1 |
+> | **total** | **121.4–126.0 of 150 ✅ fits** |
 >
 > ✅ Preloaded files count against the 150 GB: the LTX-2.3 Space was evicted with
 > `storage limit exceeded (150G)` while its preload was ~234 GB. ⚠️ The prune unlinks the blobs
 > behind the packed tensors (65.25 GB freed on 2026-11-13); if the preloaded blobs sit in a
 > read-only image layer, an unlink only hides them and frees nothing (Option D's argument, §3) —
-> hence the worst case above. Either way the total fits with 24.8–29.5 GB to spare.
+> hence the worst case above. Either way the total fits with 24.0–28.6 GB to spare.
 >
 > **When the preload and the code disagree.** `preflight.ensure_weights()` checks all 35 files at
 > start-up. Complete: one line, `weights: all 35 files (71.92 GB) are already in … nothing
 > downloaded`. Files missing: one warning naming how many and how many GB, then it downloads only
 > those (into the container, where the prune frees them once packed). ⚠️ The one case that does
 > not fit: a preload that lands somewhere start-up does not look. Start-up then downloads all
-> 71.92 GB a second time, and image + both copies + the packed copy is **192.5–197.1 GB** at the
+> 71.92 GB a second time, and image + both copies + the packed copy is **193.3–197.9 GB** at the
 > pre-prune peak. The warning names the directory it checked; the remedy is to delete the
 > `preload_from_hub` block, which is the first deploy's shape: everything downloaded at start-up,
-> the same 120.5–125.2 GB peak, and the prune then frees the download. A preload that fails
+> the same 121.4–126.0 GB peak, and the prune then frees the download. A preload that fails
 > outright (a 401) stops the Space before any app code runs; same remedy.
 >
 > **The start-up report's disk line** stays a true floor: its snapshot term is the preloaded
