@@ -849,9 +849,10 @@ _SCRIPT = """
   };
   // At rail scroll 0 the rail holds the monitor, its caption, the cost panel and Generate.
   // Taller than the rail (a short window): the monitor gives up height first, down to
-  // 180 px, letterboxed; if the panel still runs under Generate, the panel's figure line
-  // stands above the button. With room to spare, the caption keeps four lines less the
-  // panel's notes, so Generate stays put from mode to mode.
+  // 180 px, letterboxed; whatever of the panel still runs under Generate fades into it, and
+  // the figure line (figureLine, below) stands above the button if that hides the figure.
+  // With room to spare, the caption keeps four lines less the panel's notes, so Generate
+  // stays put from mode to mode.
   const MONITOR_FLOOR = 180;
   const CAPTION_LINES = 4;
   const fit = () => {
@@ -883,13 +884,47 @@ _SCRIPT = """
     const over = above(natural, captionH) - avail;
     if (over > 0) monitorH = Math.max(MONITOR_FLOOR, natural - over);
     else captionMin = captionH + Math.min(-over, Math.max(0, CAPTION_LINES * lineH - notesH - captionH));
-    const under = above(monitorH, captionMin) - avail > 0.5;
-    const figure = !!line && (line.querySelector('.mr-commit-desk')?.textContent || '').trim() !== '';
     rail.classList.toggle('mr-monitor-fit', monitorH < natural - 0.5);
     rail.style.setProperty('--mr-monitor-h', Math.round(monitorH) + 'px');
     rail.style.setProperty('--mr-caption-min', Math.round(captionMin) + 'px');
-    rail.classList.toggle('mr-figure-under', under && figure);
     rail.style.setProperty('--mr-commit-h', commit.offsetHeight + 'px');
+  };
+  // The figure line stands above Generate whenever the panel's figure row (Needs on ZeroGPU,
+  // Runs elsewhere: render.cost_panel's labels) is not wholly in view clear of Generate:
+  // scrolled above the rail's visible top, under Generate, or below the rail. Judged from
+  // Generate's box without the line, and a shown line goes only once the row is clear by a few
+  // px, so neither the line's own height nor a small scroll makes it flicker. shade() runs it
+  // on every rail and page scroll and after every fit().
+  const FIGURE_ROWS = ['Needs', 'Runs'];
+  const FIGURE_SLACK = 6;
+  const figureLine = (rail, commit, cost) => {
+    const line = byId('commit-line');
+    const shown = rail.classList.contains('mr-figure-under');
+    const figure = !!line && (line.querySelector('.mr-commit-desk')?.textContent || '').trim() !== '';
+    const label = [...cost.querySelectorAll('.mr-cost-grid dt')]
+      .find((dt) => FIGURE_ROWS.includes(dt.textContent.trim()));
+    if (!figure || !label) { rail.classList.remove('mr-figure-under'); return; }
+    const value = label.nextElementSibling || label;
+    const a = label.getBoundingClientRect(), b = value.getBoundingClientRect();
+    const top = Math.min(a.top, b.top), bottom = Math.max(a.bottom, b.bottom);
+    const r = rail.getBoundingClientRect(), k = commit.getBoundingClientRect();
+    const lineH = shown && line.offsetHeight > 0 ? line.offsetHeight + px(getComputedStyle(commit).rowGap) : 0;
+    // stuck at the rail's foot, Generate grows upward by the line; anywhere else, downward
+    const footed = k.bottom >= r.bottom - 6;
+    const kTop = footed ? k.top + lineH : k.top, kBottom = footed ? k.bottom : k.bottom - lineH;
+    const slack = shown ? FIGURE_SLACK : 0;
+    const clear = top >= r.top + slack && bottom <= r.bottom - slack
+      && (bottom <= kTop - slack || top >= kBottom + slack);
+    const want = !clear;
+    if (want === shown) return;
+    const button = byId('generate-btn');
+    const before = button ? button.getBoundingClientRect().top : 0;
+    rail.classList.toggle('mr-figure-under', want);
+    // Off the rail's foot an arriving line grows Generate downward, pushing what follows it: the
+    // rail scrolls by as much, so the button and the report under it stay where they were and a
+    // rail scrolled to its end stays at its end. (A leaving line gets no scroll: that would cut
+    // short a smooth scroll back up to the panel or the monitor.)
+    if (want && !footed && button) rail.scrollTop += button.getBoundingClientRect().top - before;
   };
   // A row under Generate's top edge (the panel, at a short window) or under its bottom
   // edge (the report, with Generate stuck at the top) fades into it.
@@ -900,6 +935,7 @@ _SCRIPT = """
       rail.classList.remove('mr-under-commit', 'mr-over-commit');
       return;
     }
+    figureLine(rail, commit, cost);
     const edge = commit.getBoundingClientRect();
     rail.classList.toggle('mr-under-commit', cost.getBoundingClientRect().bottom > edge.top + 0.5);
     // the next row in the rail's flow (not the visually hidden live region)
@@ -979,6 +1015,16 @@ _SCRIPT = """
   };
   document.addEventListener('keydown', playerKeys, true);
   document.addEventListener('keypress', playerKeys, true);
+
+  // Restore settings rewrites the form, and so the cost: on desktop the cost panel comes into
+  // view in the rail (the button's own script brings in the purpose line, already in view
+  // there). The button is found by the words blocks.py gives it.
+  const RESTORE = 'Restore settings';
+  document.addEventListener('click', (event) => {
+    const button = event.target instanceof Element ? event.target.closest('#recent button') : null;
+    if (!button || !wide() || button.textContent.trim() !== RESTORE) return;
+    byId('cost')?.scrollIntoView({ block: 'nearest', behavior: still() ? 'auto' : 'smooth' });
+  });
 
   let queued = false;
   const settle = () => {
