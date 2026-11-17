@@ -197,7 +197,11 @@ content, its length — and does not lip-sync. The measurements are in
 
 Through the API, pass `noise_scale` yourself for video to video and audio to audio: the
 endpoint's published default, 0.5, is snapped to the nearest level, 0.42 (*A little*), in both.
-The page always sends the level you chose.
+The page always sends the level you chose. The status Markdown an API call gets back carries the
+run's diagnostics, which name each attached adapter ("adapter bts at 0.8: attached to 1632
+layers") and give the run's time split into the progress bar's own phases ("took 23.4 s on cuda:
+loading the model 1.2 s, preparing the inputs 0.3 s, sampling 14.0 s, decoding the frames 4.3 s,
+writing the file 1.1 s").
 
 ---
 
