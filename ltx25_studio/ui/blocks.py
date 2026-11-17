@@ -666,6 +666,9 @@ def build_ui() -> gr.Blocks:
         # The failure card on screen, as {"mode", "at", "headline"}; None when the status
         # holds anything else. A switch to another mode collapses the card to one line.
         last_failure = gr.State(None)
+        # The staged adapters as the adapter events last left them (_adapter_marks): their own
+        # events tell from it whether they changed the list (see "a failure card acted on").
+        adapters_seen = gr.State([])
 
         field_inputs = [pool[key] for key in FIELD_KEYS]
         parked_keys = [spec.key for spec in PARKED_FIELDS]
@@ -1194,7 +1197,12 @@ def build_ui() -> gr.Blocks:
         def _lora_label(staged: list) -> Any:
             return gr.update(label=render.lora_summary_label(list(staged or [])))
 
+        # Every event that writes the adapter list; a failure card naming the adapters
+        # collapses from these (below), not from a change listener on the list.
+        adapter_events: list[Any] = []
+
         def _after_lora_change(dependency: Any) -> None:
+            adapter_events.append(dependency)
             (
                 dependency.then(
                     fn=_lora_rows, inputs=[pool["loras"]], outputs=row_outputs, **_PRIVATE
@@ -1274,6 +1282,7 @@ def build_ui() -> gr.Blocks:
                     **extra,
                     **_PRIVATE,
                 )
+                adapter_events.append(weighted)
                 weighted.then(
                     fn=_lora_label, inputs=[pool["loras"]], outputs=[lora_accordion], **_PRIVATE
                 ).then(fn=_review, inputs=review_inputs, outputs=review_outputs, **_PRIVATE)
@@ -1641,10 +1650,31 @@ def build_ui() -> gr.Blocks:
             return _card_acted_on
 
         for key in FIELD_KEYS:
+            if pool[key].stateful:
+                continue  # the adapter list: from its own events, below
             pool[key].change(
                 fn=_acted_on(key),
                 inputs=[last_failure],
                 outputs=[status, last_failure],
+                **_PRIVATE,
+            )
+
+        # The adapter list is a gr.State, and Gradio hashes a State that has a change listener
+        # before and after every event that writes it: a staged adapter's report cannot be
+        # hashed, so that failed every such event once an adapter passed its check. The events
+        # that write the list act for it instead, when they changed it (as a change listener
+        # would fire): a rejected or duplicate adapter leaves the card as it is.
+        def _adapters_acted_on(failure: dict | None, staged: list, seen: list) -> list[Any]:
+            marks = _adapter_marks(staged)
+            if marks == list(seen or []):
+                return [gr.update(), failure, seen]
+            return [*_acted_on("loras")(failure), marks]
+
+        for event in adapter_events:
+            event.then(
+                fn=_adapters_acted_on,
+                inputs=[last_failure, pool["loras"], adapters_seen],
+                outputs=[status, last_failure, adapters_seen],
                 **_PRIVATE,
             )
 
@@ -2006,6 +2036,18 @@ def _last_run(failure: dict) -> str:
     return render.last_run_line(
         mode=modes.get_mode(failure["mode"]), at=failure["at"], headline=failure["headline"]
     )
+
+
+def _adapter_marks(staged: list | None) -> list:
+    """A staged adapter list in plain values, for telling whether an event changed it: each
+    adapter's content key and strength (an entry also holds the validator's report)."""
+    return [
+        [
+            str(entry.get("content_key") or entry.get("source") or ""),
+            float(entry.get("weight", 1.0)),
+        ]
+        for entry in staged or []
+    ]
 
 
 def _run_state(mode_id: str, seed: Any, video: Any, audio: Any, *, earlier: bool = False) -> dict:
