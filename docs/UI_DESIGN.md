@@ -56,7 +56,9 @@ At 1024 px and wider the page has two columns under a one-line identity bar.
 Below 1024 px the page is one column. The inputs come first, then the cost panel,
 monitor and report. A fixed bottom bar holds one short line (the figure line above, or
 why Generate is off: "Needs a prompt", "Won't run: 2 problems (width, frames)") and the
-same Generate button, restyled. There is never a second Generate in the DOM. Pressing
+same Generate button, restyled. There is never a second Generate in the DOM. A control
+reached by Tab stops above the bar, never under it: the page holds back the bar's
+height when it scrolls. Pressing
 Generate or Show on a narrow screen scrolls the monitor into view; Restore settings
 brings the purpose line, which names the restored mode, into view; and while the
 monitor shows a sample a "See an example output" button under the purpose line jumps

@@ -779,6 +779,9 @@ button:disabled { cursor: not-allowed !important; }
   #generate-reason { display: none !important; }
   .mr-cost-pending { display: block; }
   .gradio-container { padding-bottom: calc(var(--mr-bar-h) + env(safe-area-inset-bottom) + 16px) !important; }
+  /* a control reached by Tab is scrolled only to the window's bottom edge, under the bar: the
+     same room held back stops it above the bar (WCAG 2.4.11) */
+  html { scroll-padding-bottom: calc(var(--mr-bar-h) + env(safe-area-inset-bottom) + 16px); }
   .mr-id { justify-content: space-between; }
   #commission button, #rail button, #commission button.secondary, #rail button.secondary,
   #commission .mr-secondary { min-height: 44px !important; }

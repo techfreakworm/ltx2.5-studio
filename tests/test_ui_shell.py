@@ -159,3 +159,17 @@ def test_on_a_phone_a_media_zones_own_buttons_and_the_checkboxes_are_44_px_targe
         "the toolbar, the source buttons and a loaded audio's controls (20-40 px wide in F5 at 390)"
     )
     assert "#commission .checkbox-container { min-height: 44px; }" in narrow
+
+
+def test_below_1024_px_a_control_reached_by_tab_stops_above_the_commit_bar():
+    """Round 4's N5 (WCAG 2.2 SC 2.4.11): below 1024 px the commit bar is fixed to the window's
+    bottom, and a browser scrolls a control reached by Tab only to the window's bottom edge, under
+    the bar: at 390 the monitor's Play came to rest entirely under Generate. The page's scroll
+    padding holds back the same room as its bottom padding, so the control stops above the bar."""
+    start = chrome._css().index("@media (max-width: 1023px) {")
+    narrow = chrome._css()[start : chrome._css().index("\n}\n", start)]
+    reserve = "calc(var(--mr-bar-h) + env(safe-area-inset-bottom) + 16px)"
+    assert "#commit { position: fixed;" in narrow
+    assert f".gradio-container {{ padding-bottom: {reserve} !important; }}" in narrow
+    assert f"html {{ scroll-padding-bottom: {reserve}; }}" in narrow
+    assert "scroll-padding" not in chrome._css()[:start], "the room is held back below 1024 px only"
