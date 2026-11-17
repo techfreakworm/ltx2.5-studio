@@ -17,8 +17,8 @@ same. ``--dry-run`` prints the plan and the preflight arithmetic and loads
 nothing. Nothing is ever downloaded: a missing file is reported with the exact
 ``hf download`` command.
 
-Exit codes: 0 ok, 2 refused (memory preflight, validation, missing files),
-3 generation error.
+Exit codes: 0 ok, 2 refused (memory preflight, validation, missing files, an
+MPS PyTorch that fails the numerics self-test), 3 generation error.
 """
 
 from __future__ import annotations
@@ -37,7 +37,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from ltx25_studio import local_runtime, memory, modes  # noqa: E402
+from ltx25_studio import device, local_runtime, memory, modes  # noqa: E402
 from ltx25_studio.errors import ConfigError, ConstraintError, LoRAError  # noqa: E402
 
 EXIT_OK, EXIT_REFUSED, EXIT_ERROR = 0, 2, 3
@@ -47,6 +47,7 @@ EXIT_OK, EXIT_REFUSED, EXIT_ERROR = 0, 2, 3
 REFUSALS = (
     memory.MemoryPreflightError,
     memory.MpsWatermarkError,
+    device.MpsNumericsError,
     ConstraintError,
     ConfigError,
     LoRAError,

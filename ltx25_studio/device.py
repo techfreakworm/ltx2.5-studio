@@ -123,9 +123,10 @@ _PLAIN_CHECK_NAMES = {
     "bf16_linear": "bf16 matrix multiplication (the bf16_linear check)",
 }
 
-#: The first PyTorch measured clean on this project's Apple-silicon Mac: the
-#: SDPA scale-reuse error is 8.8e-7 on 2.15.0 against 5.19 on 2.11.0.
-MPS_CLEAN_TORCH = "2.15"
+#: The README's floor for local runs on Apple silicon: the SDPA scale-reuse
+#: error is 8.8e-7 on 2.15.0 against 5.19 on 2.11.0, and 2.14.1 measured the
+#: same as 2.15.0 in the numerics checks.
+MPS_CLEAN_TORCH = "2.14"
 
 
 # ---------------------------------------------------------------------------

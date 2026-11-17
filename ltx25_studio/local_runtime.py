@@ -1417,6 +1417,11 @@ def build_local_runner(
         raise UnsupportedLocalDeviceError(
             device=device, reason="MPS is not available on this machine."
         )
+    if device_type == "mps":
+        # The app's numerics gate, here as well: some entries build through this alone.
+        from . import device as device_module
+
+        device_module.require_mps_numerics()
     torch_dtype = resolve_dtype(dtype)
     snapshot = Path(snapshot_dir).expanduser()
     gguf = Path(transformer_gguf).expanduser() if transformer_gguf is not None else None

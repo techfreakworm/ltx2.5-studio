@@ -116,6 +116,46 @@ def test_the_json_carries_the_run_record_beside_the_artifacts(tmp_path, monkeypa
     assert artifacts["output"].endswith(".mp4") and artifacts["warnings"]
 
 
+def test_an_mps_run_on_a_torch_that_fails_the_self_test_exits_refused_and_loads_nothing(
+    tmp_path, monkeypatch
+):
+    """F62: the README's worked run builds through local_runtime alone, so the gate is there."""
+    torch = pytest.importorskip("torch")
+    from ltx25_studio import device
+
+    cli = _local_generate_module()
+    monkeypatch.setattr(torch.backends.mps, "is_available", lambda: True)
+    monkeypatch.setattr(
+        device,
+        "_MPS_SELF_TEST",
+        device.MpsSelfTest(
+            torch_version="2.11.0",
+            checks=(device.SelfTestCheck("sdpa_scale", False, "relative error 5.19"),),
+        ),
+    )
+    monkeypatch.setenv("LTX25_MPS_SELF_TEST", "enforce")
+    for name in (cli.memory.HIGH_WATERMARK_ENV, cli.memory.LOW_WATERMARK_ENV):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(
+        cli.local_runtime, "_LocalWeights", lambda **k: pytest.fail("weights were loaded")
+    )
+    report = tmp_path / "run.json"
+
+    code = cli.main(
+        [
+            *("--mode", "text_to_video", "--prompt", "a red tram"),
+            *("--width", "64", "--height", "64", "--num-frames", "9", "--device", "mps"),
+            *("--snapshot-dir", str(tiny_snapshot()), "--out", str(tmp_path / "out")),
+            *("--json", str(report)),
+        ]
+    )
+
+    data = json.loads(report.read_text())
+    assert code == cli.EXIT_REFUSED, data.get("error")
+    assert data["error"]["type"] == "MpsNumericsError", data["error"]
+    assert not data.get("phases") and "artifacts" not in data
+
+
 @pytest.mark.parametrize("record", [None, "not a dataclass"])
 def test_a_result_without_a_record_writes_none(record):
     from types import SimpleNamespace

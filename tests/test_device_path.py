@@ -589,7 +589,8 @@ def test_a_failed_check_refuses_generation_naming_it_and_the_remedy(monkeypatch)
     with pytest.raises(device.MpsNumericsError) as excinfo:
         device.require_mps_numerics()
     message = str(excinfo.value)
-    assert "attention" in message.lower() and "2.15 or newer" in message, message
+    # The README's floor for local runs: PyTorch 2.14 or newer.
+    assert "attention" in message.lower() and "2.14 or newer" in message, message
     assert "2.11.0" in message and "LTX25_MPS_SELF_TEST=warn" in message, message
 
 
@@ -642,7 +643,7 @@ def test_warn_mode_marks_every_result_with_the_failed_check(monkeypatch):
 
     assert annotated.warnings[0] == "an earlier note"
     assert len(annotated.warnings) == 2 and "sdpa_scale" in annotated.warnings[1]
-    assert "Unverified" in annotated.warnings[1] and "2.15" in annotated.warnings[1]
+    assert "Unverified" in annotated.warnings[1] and "2.14 or newer" in annotated.warnings[1]
 
 
 @pytest.mark.parametrize(

@@ -190,6 +190,37 @@ def test_an_mps_runner_refuses_a_watermark_setting_that_breaks_freeing_memory(
         )
 
 
+@pytest.mark.parametrize("mode", ["enforce", "warn"])
+def test_an_mps_runner_is_gated_on_the_numerics_self_test(tmp_path, monkeypatch, mode):
+    """The app's gate on the runner itself, so every entry that builds one is covered.
+
+    ``scripts/local_generate.py --device mps`` builds through here alone.
+    """
+    torch = _torch()
+    from ltx25_studio import device
+
+    class Built(Exception):
+        """The build got past the gate to its weights."""
+
+    def weights(**_kwargs):
+        raise Built
+
+    for name in (memory.HIGH_WATERMARK_ENV, memory.LOW_WATERMARK_ENV):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(torch.backends.mps, "is_available", lambda: True)
+    failed = device.SelfTestCheck("sdpa_scale", False, "relative error 5.19")
+    monkeypatch.setattr(device, "_MPS_SELF_TEST", device.MpsSelfTest("2.11.0", (failed,)))
+    monkeypatch.setenv("LTX25_MPS_SELF_TEST", mode)
+    monkeypatch.setattr(local_runtime, "missing_files", lambda *a, **k: [])
+    monkeypatch.setattr(local_runtime, "_LocalWeights", weights)
+
+    # warn: the operator's own choice to run unverified.
+    with pytest.raises(device.MpsNumericsError if mode == "enforce" else Built):
+        local_runtime.build_local_runner(
+            kind="text2video", device="mps", dtype="bfloat16", snapshot_dir=tmp_path
+        )
+
+
 def test_an_unknown_residency_is_refused(tmp_path):
     with pytest.raises(ConstraintError, match="residency"):
         local_runtime.build_local_runner(
@@ -727,8 +758,19 @@ def _mps_available():
     return bool(getattr(torch.backends, "mps", None) and torch.backends.mps.is_available())
 
 
+def _past_a_failing_self_test(monkeypatch):
+    """These tests are about the runner, not the numerics: on a PyTorch that fails the
+    MPS self-test (2.11 does), they run unverified, as ``LTX25_MPS_SELF_TEST=warn``
+    lets an operator. On one that passes, the default gate applies."""
+    from ltx25_studio import device
+
+    if not device.mps_self_test().ok:
+        monkeypatch.setenv("LTX25_MPS_SELF_TEST", "warn")
+
+
 @pytest.mark.skipif("not _mps_available()", reason="MPS is not available on this host")
-def test_mps_keeps_float64_rope_by_computing_all_six_modules_on_the_cpu():
+def test_mps_keeps_float64_rope_by_computing_all_six_modules_on_the_cpu(monkeypatch):
+    _past_a_failing_self_test(monkeypatch)
     runner = _runner("text2video", "resident", device="mps", dtype="bfloat16")
     flags = local_runtime.rope_flags(runner.pipeline)
     assert set(flags) == SIX_ROPE_MODULES
@@ -737,11 +779,12 @@ def test_mps_keeps_float64_rope_by_computing_all_six_modules_on_the_cpu():
 
 
 @pytest.mark.skipif("not _mps_available()", reason="MPS is not available on this host")
-def test_after_a_staged_reload_the_transformer_still_computes_rope_on_the_cpu():
+def test_after_a_staged_reload_the_transformer_still_computes_rope_on_the_cpu(monkeypatch):
     """The staged runner reloads the transformer between prompts; the CPU-RoPE
     hooks live on module instances, so the fresh instance must get them again —
     and a forward on MPS must then match the CPU."""
     torch = _torch()
+    _past_a_failing_self_test(monkeypatch)
     runner = _runner("text2video", "staged", device="mps", dtype="float32")
     loaded = []
     for prompt in (PROMPT, "a second, different prompt"):
@@ -766,9 +809,10 @@ def test_after_a_staged_reload_the_transformer_still_computes_rope_on_the_cpu():
 
 
 @pytest.mark.skipif("not _mps_available()", reason="MPS is not available on this host")
-def test_a_staged_tiny_text_to_video_completes_on_mps_in_bf16(tmp_path):
+def test_a_staged_tiny_text_to_video_completes_on_mps_in_bf16(tmp_path, monkeypatch):
     from ltx25_studio import generate as generate_module
 
+    _past_a_failing_self_test(monkeypatch)
     result = generate_module.generate(
         mode="text_to_video",
         prompt=PROMPT,
