@@ -20,9 +20,9 @@
 > - **"The post-fix matrix … goes in `SPACE_MODE_MATRIX.md` §10"**: it ran that evening but was
 >   never written up, and its video and audio files are gone.
 >
-> Where the current truth is: [`SPACE_MODE_MATRIX.md`](SPACE_MODE_MATRIX.md) §10. The Space has
-> not been redeployed since 2026-08-26, so nothing about the Space after the 2026-11-16 fixes is
-> known yet.
+> Where the current truth is: [`SPACE_MODE_MATRIX.md`](SPACE_MODE_MATRIX.md) §10. Deploy 1
+> (2026-11-16) ran all eleven modes on the Space (§10.1 there); deploy 2's own check on the Space
+> is reported on [issue #32](https://github.com/techfreakworm/ltx2.5-studio/issues/32).
 
 > # ⛔ INVALIDATED (2026-08-25) — every generation result in this document was produced by a BROKEN TRANSFORMER
 >

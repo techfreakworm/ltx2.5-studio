@@ -27,8 +27,9 @@
 > - **Part A** ran on hinode, which is retired; its scripts were removed on 2026-11-16.
 >
 > Where the current truth is: [`SPACE_MODE_MATRIX.md`](SPACE_MODE_MATRIX.md) §10 (what has been
-> verified since, and how) and [`../README.md`](../README.md). The Space has not been redeployed
-> since 2026-08-26, so nothing about the Space after the 2026-11-16 fixes is known yet.
+> verified since, and how) and [`../README.md`](../README.md). Deploy 1 (2026-11-16) ran all
+> eleven modes on the Space (`SPACE_MODE_MATRIX.md` §10.1); deploy 2's own check on the Space is
+> reported on [issue #32](https://github.com/techfreakworm/ltx2.5-studio/issues/32).
 
 Two matrices, for two different questions. **Neither answers the other's.**
 

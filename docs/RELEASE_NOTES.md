@@ -5,11 +5,12 @@ and what was known to be open when it shipped. Newest first. ZeroGPU's billed se
 read back, so every GPU figure here is an upper bound, the run's wall clock × 2, never billed
 seconds.
 
-## Deploy 2 — 2026-11-17 (in preparation)
+## Deploy 2 — 2026-11-17
 
-**Not deployed yet.** The code is the branch `fix/studio-2026-11`, at `7cef5fb` with both UI
-packages of round 4, plus these docs. Every commit named below is on it. What the Space shows
-after the deploy goes under "On the Space", at the end of this section.
+**What it is.** The code of this commit's tree, on the branch `fix/studio-2026-11`: deploy 1's
+code, the deploy-2 work, both packages of the UI's round 4 and these docs. Every commit named
+below is in its history. What the Space showed after the deploy is reported on the tracking
+issue, [#32](https://github.com/techfreakworm/ltx2.5-studio/issues/32).
 
 ### Landed after deploy 1's push, before the deploy-2 work (`1e9fd20..a40a311`)
 
@@ -105,7 +106,7 @@ Space record (§10.1) and this file `0646770`, `c8c5965`; **#29** `da5f47d`, `0e
 reservation and §10.3 `ca1f2a8`; **#23** `38e36e9`; **#17** `d8bbbdb`; **#20** `4d60faf`,
 `e7caf99`; **#14** `3498ce9`; **#15** `a0b76da`; **#16** `c511137`, `58732a9`; **#18** `f9bde99`;
 **#10** `ed8912d`; **#11** `71e35bc`; **#12** `974496c`; **#32** this section, `85c4433`,
-`8f43118` and the commit that names these hashes.
+`8f43118`, `b5a4494`, and the commit that keeps these notes true after the deploy.
 
 ### Not in deploy 2
 
@@ -115,14 +116,14 @@ reservation and §10.3 `ca1f2a8`; **#23** `38e36e9`; **#17** `d8bbbdb`; **#20** 
 
 ### On the Space
 
-*Not deployed yet.*
+What the Space showed after this deploy is reported on the tracking issue, [#32](https://github.com/techfreakworm/ltx2.5-studio/issues/32).
 
 ## Deploy 1 — 2026-11-16
 
 **What it is.** Commit `1e9fd20` of the branch `fix/studio-2026-11`, pushed to GitHub on
-2026-11-16. The Space, `techfreakworm/LTX2.5-Studio`, runs it as commit `0cd54f2`, whose tree is
-that of `1e9fd20`; `main` points at `1e9fd20` too. The Space was private while deploy 1 was
-verified on it, and is public since.
+2026-11-16. The Space, `techfreakworm/LTX2.5-Studio`, ran it as commit `0cd54f2`, whose tree is
+that of `1e9fd20`, until deploy 2; `main` was fast-forwarded to `1e9fd20` the same day. The
+Space was private while deploy 1 was verified on it, and was made public that day.
 
 **This section is PR #1's corrected text.** PR #1 (`soma/ltx25-studio` at `445abcb`, the code
 the Space ran from 2026-08-26 until deploy 1) is merged, and its body and its comment of
@@ -244,8 +245,8 @@ and the temp dir, and the file the browser downloaded from there is byte-identic
 folder's and identical to the command-line run's (SSIM 1.000, transcript exact). That session's
 audio to video was refused by the memory check (`65.5 + 27.5 = 93.0 GB` against the 90 GB
 limit, with other heavy jobs on the machine), and its third run was stopped from outside the
-app, by the test machine's memory watchdog, while the transformer loaded. Those two have not
-been run through the page on the fixed build.
+app, by the test machine's memory watchdog, while the transformer loaded. Those two did not
+finish in that session.
 
 ### The UI at deploy 1
 
@@ -415,8 +416,8 @@ at **~1622 GPU-s, about 84 % of the 1920 stop line**. The evening's manual calls
 5. Ledger — deploy 1's 24 calls are in the run's quota ledger: at most 1241.3 GPU-s for UTC
    2026-11-16.
 6. First container's SIGKILL — closed-unexplained by operator ruling; stands.
-7. ~~`space/main` is one docs-only commit behind origin~~ Stale: the Space runs `0cd54f2`, the
-   tree of `1e9fd20`.
+7. ~~`space/main` is one docs-only commit behind origin~~ Stale: deploy 1 put `0cd54f2`, the
+   tree of `1e9fd20`, on the Space.
 
 ### Reproducibility — resolved, and verified
 

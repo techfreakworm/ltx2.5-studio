@@ -4,7 +4,8 @@
 > made with builds whose output was colour static (the block below); they are corrected in
 > place where later measurements overtook them. **§10 is the current state:** what has been
 > verified since the 2026-11-16 fixes, on the Space after deploy 1 (§10.1, and the size and
-> length it finishes, §10.3) and on real weights on a Mac (§10.2).
+> length it finishes, §10.3) and on real weights on a Mac (§10.2). Deploy 2's own check on the
+> Space is reported on the tracking issue, [#32](https://github.com/techfreakworm/ltx2.5-studio/issues/32).
 
 > # ⛔ INVALIDATED (2026-08-25) — every generation result in this document was produced by a BROKEN TRANSFORMER
 >
@@ -928,9 +929,9 @@ says it is the last one, and three of these four were invisible to a green gate.
 
 ## 10. Verification after the 2026-11-16 fixes
 
-Nothing in §1–§9 describes the code after the 2026-11-16 fixes. This section does: 10.1 is the
-Space, running deploy 1, 10.2 is what has been verified on real weights on a Mac, and 10.3 is
-the size and length the Space was measured to finish.
+Nothing in §1–§9 describes the code after the 2026-11-16 fixes. This section does: 10.1 is
+deploy 1 on the Space, 10.2 is what has been verified on real weights on a Mac, and 10.3 is the
+size and length the Space was measured to finish.
 
 ### 10.1 On the Space, deploy 1 (2026-11-16)
 
@@ -1282,7 +1283,8 @@ Then two sessions:
 | 2, `8cfe2f2` | audio to video, its shipped example | refused by the memory check after it had waited and read again: `65.5 + 27.5 = 93.0 GB > 90`, while the machine's other load stood at 42–53 GB |
 | 2, `8cfe2f2` | text to video with the adapter | passed the memory check (`61.3 + 25.1 = 86.3`); while the 22.8 GB transformer file was read, the machine's committed memory rose to 93.3 GB and the test machine's watchdog stopped the session |
 
-The second session's audio to video and adapter runs have not been repeated through the page.
+The second session's audio to video and adapter runs were not repeated through the page that
+day.
 
 Not run locally, by design: Upscale ×2, the diffusion decoder and bitsandbytes int8 need CUDA.
 Their state is in 10.1.
@@ -1330,6 +1332,6 @@ least 1.3 × its window (`tests/test_reservation.py`).
 completes, through Upscale ×2 from 960 × 544 (M6), in 154 s of GPU time (at most 307.9 GPU-s,
 about 5 minutes of `xlarge` quota). In one pass, 1280 × 704 at 10 s took 88 s (M4); through
 Upscale ×2 from 704 × 480, 1408 × 960 at 10 s took 100 s (M5). 1920 × 1088 in one pass was not
-run. On the Space the app now refuses, before any GPU time, a run whose pass would hold more than
+among these six calls. On the Space the app now refuses, before any GPU time, a run whose pass would hold more than
 64,000 tokens (M6's Upscale pass held 63,240) or whose returned video would pass 520 million
 pixel-frames (M6 returned 503,439,360): `constraints.validate_envelope`.

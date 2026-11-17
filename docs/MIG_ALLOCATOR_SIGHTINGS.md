@@ -12,12 +12,14 @@
 >   `api.py:112-113`), so `auto` still sends no size there.
 > - **§2/§3 "sighting 3 … pending the residency change in this commit"**: the residency change is
 >   `52a0f56`, the commit before this file's last edit, and it was deployed on 2026-08-26 (Space
->   `2495a6b`). No enhanced run has been recorded since, so sighting 3 is still open.
+>   `2495a6b`). Since then one enhanced run on the Space finished, on deploy 1 (`SPACE_MODE_MATRIX.md` §10.1,
+>   row 10: peak 61.426 GiB reserved); sighting 3 has not been ruled retired.
 >
 > Still standing: the R4b retirement (704×480×49 passes on `xlarge`, 55.906 GiB reserved) and
 > the R3 verdict. Where the current truth is: [`SPACE_MODE_MATRIX.md`](SPACE_MODE_MATRIX.md) §10
-> and [`../README.md`](../README.md). The Space has not been redeployed since 2026-08-26, so
-> nothing about the Space after the 2026-11-16 fixes is known yet.
+> and [`../README.md`](../README.md). Deploy 1 (2026-11-16) ran all eleven modes on the Space
+> ([`SPACE_MODE_MATRIX.md`](SPACE_MODE_MATRIX.md) §10.1); deploy 2's own check on the Space is
+> reported on [issue #32](https://github.com/techfreakworm/ltx2.5-studio/issues/32).
 
 > ## ✅ THE ROOT CAUSE IS FOUND. THE ACCOUNT IS **SUPPORTED, NOT PROVEN.**
 >

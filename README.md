@@ -81,16 +81,13 @@ Built on `diffusers`, pinned to an exact commit. Deploys to a public Hugging Fac
 ZeroGPU: [`techfreakworm/LTX2.5-Studio`](https://huggingface.co/spaces/techfreakworm/LTX2.5-Studio).
 It also runs on an Apple-silicon Mac with enough memory ([below](#run-it-locally-apple-silicon)).
 
-> **Where things stand, 2026-11-16.** The Space runs the build deployed that day, deploy 1,
-> with that day's fixes. On it all eleven modes ran, with Upscale ×2, both decoders, an adapter
-> from the Hub, prompt enhancement and the model-chosen length, and every result was looked at
-> and measured; on a Mac all eleven modes are verified on real weights too. The record, run by
-> run: [`docs/SPACE_MODE_MATRIX.md`](docs/SPACE_MODE_MATRIX.md) §10.1 (the Space) and §10.2
-> (the Mac); what deploy 1 contains, and what was open at it:
-> [`docs/RELEASE_NOTES.md`](docs/RELEASE_NOTES.md). This README describes the code on its
-> branch, which has changed since deploy 1 (the reservation, the preloaded weights, the decoder
-> built at start-up, the page after its last review: the release notes' Deploy 2 section). The
-> Space still runs deploy 1, so those changes are not on the Space yet.
+> **Where things stand, 2026-11-17.** This README describes the code of deploy 2 (2026-11-17),
+> which replaces deploy 1 (2026-11-16) on the Space. Deploy 1's record, all eleven modes run and
+> each result looked at and measured, on the Space and on a Mac:
+> [`docs/SPACE_MODE_MATRIX.md`](docs/SPACE_MODE_MATRIX.md) §10.1 and §10.2; the Space's
+> size-and-length measurements: §10.3; what each deploy contains:
+> [`docs/RELEASE_NOTES.md`](docs/RELEASE_NOTES.md). Deploy 2's own check on the Space is reported
+> on the tracking issue, [#32](https://github.com/techfreakworm/ltx2.5-studio/issues/32).
 
 ---
 
@@ -437,8 +434,7 @@ check fixed (above) it then finished through the page, and the file the browser 
 identical to the command-line run's. In that second session, with other heavy jobs on the
 machine, audio to video was refused by the memory check (`65.5 + 27.5 = 93.0 GB` against its
 90 GB limit), and the test machine's own memory watchdog stopped the session while the adapter
-run loaded the transformer, so those two have not been run through the page on the fixed
-build.
+run loaded the transformer, so those two did not finish in that session.
 
 Started this way on a Mac, the page names where the run happens and shows no meter: its cost
 panel reads "Runs on this Mac's GPU; nothing is metered" where the Space's shows what a run
@@ -485,7 +481,7 @@ This is metered, and the meter is the resource you will actually run out of.
 | GPU size | **`xlarge`**, 94.971 GiB measured. The app asks for it explicitly: `LTX25_ZEROGPU_SIZE` defaults to `xlarge`. With `auto` the platform hands out `large`, 47.375 GiB measured, which is where this Space ran until 2026-08-26 ([`docs/MIG_ALLOCATOR_SIGHTINGS.md`](docs/MIG_ALLOCATOR_SIGHTINGS.md)) |
 | Multiplier | **× 2 on `xlarge`** (× 1 on `large`): Hugging Face's documented rate. Billed seconds cannot be read back, so it has not been measured here |
 | PRO quota | 2400 GPU-seconds a day, as Hugging Face documents it. When it resets has not been verified |
-| Weights | from the image: before the app starts, `preload_from_hub` (the README's front matter) fetches the 35 model files the Space loads (71.92 GB; the temporal upsampler, which nothing loads, is no longer fetched) and the prompt enhancer's 8 files (2.49 GB). Start-up checks the cache and downloads only what is missing, saying how many files and GB, and refuses a download the 150 GB disk could not hold before writing a byte. How long a cold start takes with the preload has not been measured |
+| Weights | from the image: before the app starts, `preload_from_hub` (the README's front matter) fetches the 35 model files the Space loads (71.92 GB; the temporal upsampler, which nothing loads, is no longer fetched) and the prompt enhancer's 8 files (2.49 GB). Start-up checks the cache and downloads only what is missing, saying how many files and GB, and refuses a download the 150 GB disk could not hold before writing a byte. How long a cold start takes with the preload: deploy 2's check on the Space, on [issue #32](https://github.com/techfreakworm/ltx2.5-studio/issues/32) |
 
 **What one run reserves** (`zerogpu.estimate_duration`) follows its size and length. It is a
 fit of the Space's own measurements ([`docs/SPACE_MODE_MATRIX.md`](docs/SPACE_MODE_MATRIX.md)
@@ -516,8 +512,8 @@ prove short.
 What runs drew on the Space: on 2026-11-16, under deploy 1's flat 180 s, 24 runs in all
 eleven modes had GPU windows of 10.5–51.6 s, so a plain run at 704×480 with 121 frames drew
 at most 34–65 GPU-s (its window × 2) while it needed 360 s of quota free to start. Six larger
-runs on 2026-11-17, up to 1920×1088 at 10 s, took 52–154 s (§10.3). The longest reservation
-the platform accepts has not been measured.
+runs on 2026-11-17, up to 1920×1088 at 10 s, took 52–154 s (§10.3). None of these runs
+measured the longest reservation the platform accepts.
 
 Things worth knowing as a user:
 

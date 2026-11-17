@@ -25,7 +25,7 @@
 > `preflight.cache_repo_dir()` looks, so start-up finds them and downloads nothing. ❓ Whether the
 > platform fetches them once per build or at every container start is not known here: the private
 > Space's 401 surfaced as `Initialization step 'preload' failed` after a successful build (PLAN
-> §6.2). The cold start measured after deploy 2 answers it.
+> §6.2). The cold start measured after deploy 2 answers it ([issue #32](https://github.com/techfreakworm/ltx2.5-studio/issues/32)).
 >
 > **The disk, worst case** (the prune frees nothing):
 >
@@ -83,8 +83,9 @@
 >   13 min 59 s, about 11.5 min of it the 72.19 GB download.
 >
 > Where the current truth is: [`SPACE_MODE_MATRIX.md`](SPACE_MODE_MATRIX.md) §10 and
-> [`../README.md`](../README.md). The Space runs deploy 1 since 2026-11-16; what it showed is in
-> §10.1 there, and where the weights come from now is in the deploy-2 block above.
+> [`../README.md`](../README.md). Deploy 1 ran on the Space from 2026-11-16 (what it showed:
+> §10.1 there); deploy 2 replaced it on 2026-11-17, and where its weights come from is in the
+> deploy-2 block above.
 
 > ## ⏸️ This is not an active workstream.
 >

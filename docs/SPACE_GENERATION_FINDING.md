@@ -9,9 +9,10 @@
 >   read on 2026-11-16, no longer include it (nor `LTX25_TEXT_ENCODER_PRECISION`).
 > - **§2 "`spaces` 0.51.1"**: the Space reports `spaces` 0.51.3.
 > - **§5's startup report** (`zerogpu_size=auto duration=60s`, `dtype : bf16 (fixed; no
->   precision switch)`, `82.2 GB … + image ~10`) is that day's format. The Space now sets
->   `xlarge` and 180 s through its variables, and the report was rewritten on 2026-11-16; the
->   new one has not run on the Space yet.
+>   precision switch)`, `82.2 GB … + image ~10`) is that day's format. The Space set `xlarge`
+>   and 180 s through its variables, and the report was rewritten on 2026-11-16; the new one ran
+>   on deploy 1 (`SPACE_MODE_MATRIX.md` §10.1). Since deploy 2's code the reservation follows
+>   each run's size and length, and `LTX25_GPU_DURATION_SECONDS` is ignored.
 > - **§11 #4 "packed 51.1 GB … `xlarge` bills at 2×"**: on the 2026-11-13 boot the platform's own
 >   progress bar read `40.6G` packed, and the run in this file was on `large`, not `xlarge`.
 > - **§11 #1 "our error text tells users to read a traceback that does not exist"**: that sentence
@@ -19,8 +20,9 @@
 >
 > Still true: no steady-state RSS has been measured (§11 #6), and billed seconds cannot be read
 > back (§11 #4). Where the current truth is: [`SPACE_MODE_MATRIX.md`](SPACE_MODE_MATRIX.md) §10
-> and [`../README.md`](../README.md). The Space has not been redeployed since 2026-08-26, so
-> nothing about the Space after the 2026-11-16 fixes is known yet.
+> and [`../README.md`](../README.md). Deploy 1 (2026-11-16) ran all eleven modes on the Space
+> ([`SPACE_MODE_MATRIX.md`](SPACE_MODE_MATRIX.md) §10.1); deploy 2's own check on the Space is
+> reported on [issue #32](https://github.com/techfreakworm/ltx2.5-studio/issues/32).
 
 > ## ⛔ INVALIDATED (2026-08-25, evening) — "a real video" was COLOUR STATIC
 >

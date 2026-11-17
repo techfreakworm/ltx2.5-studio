@@ -1018,6 +1018,10 @@ did not keep: **no `spaces` line in `requirements.txt`**. `app.py` guards the im
 > have no real-weights evidence under these pins until the Space runs. In particular the
 > bitsandbytes int8 load of the transformer and the text encoder under transformers 5.23.0 has
 > not run yet.
+>
+> ⛔ **Corrected 2026-11-17:** they ran on the Space with deploy 1 (2026-11-16): the pins
+> installed exactly, and the int8 load of the transformer and the text encoder under
+> transformers 5.23.0 ran (`SPACE_MODE_MATRIX.md` §10.1).
 
 The full pin set, as `requirements.txt` has it:
 
@@ -1256,7 +1260,9 @@ LTX-2.5 Studio starting
 > writes it at launch after this report`; and `zerogpu size : requested xlarge; reservation
 > 180 s per run (x1.5 with stage 2, +60 s with LoRAs, +180 s with prompt enhancement)`. The old
 > `zerogpu size : not yet known (reported after packing)` was never followed by a report. The
-> new report has not run on the Space yet.
+> new report has not run on the Space yet. *(Corrected 2026-11-17: it ran on deploy 1,
+> `SPACE_MODE_MATRIX.md` §10.1, "What ran". Since deploy 2's code its reservation line names
+> the size-and-length rule.)*
 
 The **cache count is the load-bearing line**: `36/37`, with the first missing file named, makes
 "preload worked" and "preload silently did nothing" two different sentences. When a GPU run fails
@@ -1345,7 +1351,8 @@ Naming precedent: `techfreakworm/LTX2.3-Studio`, `wan-studio` (private), `SAM3-c
 > ZeroGPU's packed copy still to be written and a 10 GB margin must fit under the 150 GB cap,
 > or start-up stops before writing a byte, naming the remedy (remove the preload block, so
 > start-up downloads everything into an empty disk, as the first deploy did). How long a cold
-> start takes with the preload has not been measured. The disk arithmetic:
+> start takes with the preload: deploy 2's check on the Space, on [issue #32](https://github.com/techfreakworm/ltx2.5-studio/issues/32). The disk
+> arithmetic:
 > [`ZEROGPU_DISK.md`](ZEROGPU_DISK.md), its deploy-2 block. The body of this section is the
 > record of the private Space.
 

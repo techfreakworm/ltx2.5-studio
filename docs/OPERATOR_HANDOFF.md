@@ -32,8 +32,8 @@
 >   model files the int8 Space loads (71.92 GB; the temporal upsampler is no longer fetched) and
 >   the prompt enhancer's 8 files (2.49 GB) before the app starts. `preflight.ensure_weights()`
 >   then checks the cache, downloads only what is missing, and refuses before writing a byte a
->   download the 150 GB disk could not hold. How long a cold start takes this way has not been
->   measured.
+>   download the 150 GB disk could not hold. How long a cold start takes this way: deploy 2's
+>   check on the Space, on [issue #32](https://github.com/techfreakworm/ltx2.5-studio/issues/32).
 > - **§5 "On hinode"**: hinode is retired. `scripts/sync_to_hinode.sh`, `scripts/hinode_run.sh`
 >   and every `scripts/host_*.py` were removed on 2026-11-16 (`git show 2f356b5:scripts/<name>`
 >   restores one).
@@ -45,8 +45,9 @@
 > Where the project stands: [`../README.md`](../README.md) (what the app does, how to run it,
 > what it costs), [`SPACE_MODE_MATRIX.md`](SPACE_MODE_MATRIX.md) §10 (what has been
 > verified, and how) and [`RELEASE_NOTES.md`](RELEASE_NOTES.md) (what each deploy contains).
-> The Space runs deploy 1 (Space commit `0cd54f2`, the tree of `1e9fd20`, 2026-11-16), on which
-> all eleven modes ran and were looked at (`SPACE_MODE_MATRIX.md` §10.1).
+> Deploy 1 (Space commit `0cd54f2`, the tree of `1e9fd20`, 2026-11-16) ran all eleven modes on
+> the Space, each looked at (`SPACE_MODE_MATRIX.md` §10.1); deploy 2 (2026-11-17) replaced it,
+> and its own check on the Space is reported on [issue #32](https://github.com/techfreakworm/ltx2.5-studio/issues/32).
 
 > **What you have, what you do not have, and what to do next.** Written for
 > someone who was not here. [`PLAN.md`](PLAN.md) records how things were
