@@ -87,7 +87,10 @@ It also runs on an Apple-silicon Mac with enough memory ([below](#run-it-locally
 > and measured; on a Mac all eleven modes are verified on real weights too. The record, run by
 > run: [`docs/SPACE_MODE_MATRIX.md`](docs/SPACE_MODE_MATRIX.md) §10.1 (the Space) and §10.2
 > (the Mac); what deploy 1 contains, and what was open at it:
-> [`docs/RELEASE_NOTES.md`](docs/RELEASE_NOTES.md).
+> [`docs/RELEASE_NOTES.md`](docs/RELEASE_NOTES.md). This README describes the code on its
+> branch, which has changed since deploy 1 (the reservation, the preloaded weights, the decoder
+> built at start-up, the page after its last review: the release notes' Deploy 2 section). The
+> Space still runs deploy 1, so those changes are not on the Space yet.
 
 ---
 
