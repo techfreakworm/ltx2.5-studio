@@ -595,7 +595,7 @@ def build_ui() -> gr.Blocks:
                         min_width=120,
                     )
                     use_prompt = gr.Button(
-                        "Use this prompt",
+                        render.USE_PROMPT,
                         visible=False,
                         elem_classes=["mr-quiet"],
                         size="sm",
@@ -1408,7 +1408,7 @@ def build_ui() -> gr.Blocks:
                 seed_value = int(result.seed)
                 sent = facts.prompt_sent
                 differs = bool(sent) and sent.strip() != str(params.get("prompt") or "").strip()
-                prompt_button = gr.update(visible=differs)
+                prompt_button = gr.update(value=render.USE_PROMPT, visible=differs, interactive=True)
                 prompt_value = sent if differs else None
                 monitor_next = _run_state(shown.mode_id, result.seed, shown.video, shown.audio)
                 failure = None
@@ -1598,10 +1598,23 @@ def build_ui() -> gr.Blocks:
             failed.failure(fn=_finish_bare, inputs=None, outputs=bare_outputs, **_PRIVATE)
         _keep_failures(demo, (generation, finished))
 
+        def _use_prompt(sent: Any, mode_id: str, parked_now: dict) -> list[Any]:
+            """The prompt the run sent goes into the prompt box with Enhance off: it is
+            already enhanced, and enhancing it again would change it again (and reserve its
+            seconds again). In a mode that takes no prompt nothing hidden is written: both
+            are parked, and come back with the prompt box. The button says what it did."""
+            if not sent:
+                return [gr.update(), gr.update(), gr.update(), parked_now]
+            done = gr.update(value=render.PROMPT_USED, interactive=False)
+            if modes.accepts(modes.get_mode(mode_id), "text"):
+                return [sent, False, done, parked_now]
+            parked_next = dict(parked_now or {}) | {"prompt": sent, "enhance_prompt": False}
+            return [gr.update(), gr.update(), done, parked_next]
+
         use_prompt.click(
-            fn=lambda sent: sent if sent else gr.update(),
-            inputs=[last_prompt],
-            outputs=[pool["prompt"]],
+            fn=_use_prompt,
+            inputs=[last_prompt, mode_selector, parked],
+            outputs=[pool["prompt"], pool["enhance_prompt"], use_prompt, parked],
             **_PRIVATE,
         )
         reuse_seed.click(

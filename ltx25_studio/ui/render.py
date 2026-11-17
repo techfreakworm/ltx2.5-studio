@@ -1238,6 +1238,11 @@ def took_words(facts: RunFacts) -> str:
 
 #: Beside Reuse seed when a run returned its picture and its sound as two files.
 SOUND_DOWNLOAD = "Download the sound (WAV)"
+#: Beside Reuse seed when the prompt sent differs from the one typed (it was enhanced); once
+#: pressed, what it did: the prompt is in the box and Enhance is off, so the next run sends
+#: it as it is.
+USE_PROMPT = "Use this prompt"
+PROMPT_USED = "Copied to your prompt; Enhance is off"
 
 
 def run_summary(facts: RunFacts) -> str:

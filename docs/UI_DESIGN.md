@@ -283,6 +283,12 @@ sound): the sound track alone, for a voice or ambience to use elsewhere. A sound
 or silent run, or one file carrying both tracks, offers none; the player's own
 download is the video, with its sound.
 
+Use this prompt shows when the prompt the model was sent differs from the one typed
+(it was enhanced). It writes that prompt into the prompt box and turns Enhance off in
+the same step, so the next run sends it as it is, and then reads "Copied to your
+prompt; Enhance is off". In a mode that takes no prompt it writes nothing hidden: the
+prompt and Enhance are parked and come back with the prompt box.
+
 A failure has a plain category headline, a quota line, one next step and the verbatim
 detail in a `<details>`. Categories arrive as strings from `errors.categorise`; each
 has its own card (not enough quota, a run longer than the platform allows, no GPU free
