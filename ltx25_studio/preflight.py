@@ -34,10 +34,11 @@ is wrong has already lost.
 from __future__ import annotations
 
 import os
+import shutil
 from pathlib import Path
 
 from . import model_files
-from .errors import LTXStudioError, MissingModelFileError
+from .errors import LTXStudioError, MissingModelFileError, ModelFileError
 
 __all__ = [
     "EXPECTED_DIFFUSERS_VERSION",
@@ -57,6 +58,13 @@ __all__ = [
 #: ``LTX2Pipeline`` successfully and fail much later and more expensively.
 EXPECTED_DIFFUSERS_VERSION = "0.40.0.dev0"
 
+#: ZeroGPU's packed copy, written at launch after the weights are in: 40.6 GB
+#: measured on the 2026-11-13 boot (41.24 derived), plus the 0.83 GB decoder.
+ZEROGPU_PACKED_COPY_GB = 42.1
+
+#: Room a fallback download must leave on the disk.
+DOWNLOAD_MARGIN_GB = 10.0
+
 
 def ensure_weights(
     *,
@@ -64,6 +72,7 @@ def ensure_weights(
     components: tuple[str, ...] | None = None,
     hub_cache=None,
     progress=None,
+    on_zerogpu: bool = False,
 ) -> tuple[Path, ...]:
     """Check every allow-listed file is in the Hub cache; download only what is not.
 
@@ -76,7 +85,9 @@ def ensure_weights(
     Any file the cache lacks -- a preload that failed, stopped short or names a
     different set -- is downloaded here, at its pinned revision, with the
     Space's token, after one warning that says how many files and how many GB.
-    A broken preload makes the start slower, as in the first deploy, not broken.
+    A broken preload makes the start slower, as in the first deploy, not broken
+    -- unless the disk cannot hold the download (:func:`_require_room`): then
+    start-up stops before a byte is written, saying why and what to do.
     On the Space the runtime user is root (``/root/.cache`` in its logs), so it
     can add files to a cache the preload wrote.
 
@@ -117,7 +128,9 @@ def ensure_weights(
         )
         return tuple(local)
 
-    missing_gb = sum(model_files.file_size(path, components) for _rev, path in missing) / 1e9
+    missing_bytes = sum(model_files.file_size(path, components) for _rev, path in missing)
+    _require_room(missing_bytes, len(missing), repo_cache, on_zerogpu=on_zerogpu)
+    missing_gb = missing_bytes / 1e9
     log.warning(
         "weights: %d of %d files (%.2f GB) are not in %s, which the image's preload should "
         "have filled; downloading them now, so this start is slower. Missing: %s",
@@ -151,6 +164,46 @@ def ensure_weights(
             ) from exc
     log.info("fetched the %d missing files; all %d are in the cache", len(missing), len(plan))
     return tuple(local)
+
+
+def _require_room(missing_bytes: int, count: int, repo_cache: Path, *, on_zerogpu: bool) -> None:
+    """Refuse a fallback download the disk cannot hold, before any of it is written.
+
+    A download that fills the disk part-way is the worst failure a public Space
+    can have; a refusal that names the cause and the remedy is better. Needed:
+    the missing bytes, the margin and, on ZeroGPU, the packed copy still to be
+    written. Free: the filesystem's free space and, on ZeroGPU, the room left
+    under its cap after the image and everything already in the Hub cache --
+    there the filesystem is the host's (terabytes), so it alone never refuses.
+    """
+    probe = Path(repo_cache)
+    while not probe.exists() and probe != probe.parent:
+        probe = probe.parent
+    free = shutil.disk_usage(probe).free
+    where = "free"
+    need = missing_bytes + DOWNLOAD_MARGIN_GB * 1e9
+    extras = f"a {DOWNLOAD_MARGIN_GB:.0f} GB margin"
+    if on_zerogpu:
+        from . import pipelines
+
+        need += ZEROGPU_PACKED_COPY_GB * 1e9
+        extras = f"ZeroGPU's {ZEROGPU_PACKED_COPY_GB} GB packed copy and {extras}"
+        cap = pipelines.ZEROGPU_DISK_CAP_GB
+        room = (cap - pipelines.IMAGE_FOOTPRINT_GB) * 1e9 - pipelines._directory_bytes(
+            Path(repo_cache).parent
+        )
+        if room < free:
+            free, where = room, f"free under ZeroGPU's {cap:.0f} GB cap"
+    if free >= need:
+        return
+    raise ModelFileError(
+        f"Not downloading the {count} weight files missing from {repo_cache} "
+        f"({missing_bytes / 1e9:.2f} GB): there are {max(free, 0) / 1e9:.1f} GB {where}, and "
+        f"the download needs {need / 1e9:.1f} GB with {extras}, so it would fill the disk "
+        f"part-way. On the Space, remove the preload_from_hub block from README.md so "
+        f"start-up downloads every file into an empty disk, as the first deploy did; on "
+        f"another machine, free space there."
+    )
 
 
 def run(runtime_config, *, strict: bool = False, spaces_module=None, resolution=None) -> str:

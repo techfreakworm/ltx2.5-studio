@@ -435,6 +435,12 @@ def test_the_startup_download_asks_for_each_file_at_its_revision(monkeypatch, tm
     # An empty cache of the test's own: the start-up fetches only what is missing,
     # so whatever this machine's own cache holds must not decide what is asked for.
     monkeypatch.setenv("HF_HUB_CACHE", str(tmp_path))
+    # Nor this machine's free disk: room for the whole set, so its room check passes.
+    import shutil
+
+    monkeypatch.setattr(
+        shutil, "disk_usage", lambda path: types.SimpleNamespace(total=0, used=0, free=10**12)
+    )
 
     preflight.ensure_weights()
 

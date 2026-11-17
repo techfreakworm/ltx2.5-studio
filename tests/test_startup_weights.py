@@ -8,20 +8,42 @@ the missing ones, at their pinned revisions, and says loudly how many and how
 large. ``preflight.ensure_weights()`` is what ``app.py`` runs for this, so it is
 driven here as ``app.py`` drives it -- the cache resolved from the environment,
 ``huggingface_hub`` replaced by a recorder so nothing is ever downloaded.
+
+Before a fallback download, start-up checks there is room for it (the missing
+bytes, ZeroGPU's packed copy still to be written, a margin) and refuses with the
+remedy when there is not: a download that fills the disk part-way is the worst
+failure a public Space can have. ``shutil.disk_usage`` is replaced here too, so the
+answer never depends on this machine's own disk.
 """
 
 from __future__ import annotations
 
 import logging
+import shutil
 import sys
 import types
+from pathlib import Path
 
 import pytest
 
-from ltx25_studio import config, model_files, preflight
-from ltx25_studio.errors import MissingModelFileError
+from ltx25_studio import config, model_files, pipelines, preflight
+from ltx25_studio.errors import MissingModelFileError, ModelFileError
 
 DECODER_WEIGHTS = "diffusion_decoder/diffusion_pytorch_model.safetensors"
+GB = 10**9
+
+
+@pytest.fixture(autouse=True)
+def free_disk(monkeypatch):
+    """``shutil.disk_usage`` for the cache's filesystem: 500 GB free unless a test sets it."""
+    state = {"free": 500 * GB, "asked": []}
+
+    def disk_usage(path):
+        state["asked"].append(Path(path))
+        return types.SimpleNamespace(total=2000 * GB, used=0, free=state["free"])
+
+    monkeypatch.setattr(shutil, "disk_usage", disk_usage)
+    return state
 
 
 @pytest.fixture
@@ -56,10 +78,10 @@ def hub(monkeypatch, cache):
     return calls
 
 
-def start(caplog):
+def start(caplog, *, on_zerogpu=False):
     """``app.py``'s call, with its log."""
     with caplog.at_level(logging.INFO, logger="ltx25_studio"):
-        paths = preflight.ensure_weights(token="hf_test")
+        paths = preflight.ensure_weights(token="hf_test", on_zerogpu=on_zerogpu)
     return paths, [r for r in caplog.records if r.name == "ltx25_studio"]
 
 
@@ -142,3 +164,78 @@ def test_the_disk_line_counts_the_preloaded_snapshot_once(cache, monkeypatch):
 
     assert "rest of the image" in line, line
     assert "FLOOR" in line and "[OK]" in line, line
+
+
+# --------------------------------------------------------------------------
+# room for a fallback download: refused before a byte is written when it does not fit
+# --------------------------------------------------------------------------
+
+
+def test_a_complete_cache_needs_no_room_check(cache, hub, free_disk, caplog):
+    place(cache, model_files.download_allow_list())
+
+    start(caplog)
+
+    assert free_disk["asked"] == [], "a complete cache asked for the free space"
+
+
+def test_a_small_gap_with_room_is_downloaded(cache, hub, free_disk, caplog):
+    free_disk["free"] = 12 * GB  # 0.83 GB missing + the 10 GB margin fit
+    place(cache, [p for p in model_files.download_allow_list() if p != DECODER_WEIGHTS])
+
+    start(caplog)
+
+    assert [call["filename"] for call in hub] == [DECODER_WEIGHTS]
+    assert free_disk["asked"], "the room was not checked before downloading"
+
+
+def test_a_large_gap_without_room_is_refused_and_nothing_is_downloaded(
+    cache, hub, free_disk, caplog
+):
+    free_disk["free"] = 50 * GB  # 71.92 GB missing + 10 GB margin do not fit
+
+    with pytest.raises(ModelFileError) as caught:
+        start(caplog)
+
+    assert hub == [], "a download was started that the disk could not hold"
+    message = str(caught.value)
+    for part in (str(cache), "35 weight files", "71.92 GB", "50.0 GB", "preload_from_hub"):
+        assert part in message, (part, message)
+    assert "\n" not in message, message
+
+
+def test_off_zerogpu_no_packed_copy_is_counted(cache, hub, free_disk, caplog):
+    """Only ZeroGPU writes a packed copy to disk; a CUDA box with room for the set fetches it."""
+    free_disk["free"] = 85 * GB  # 71.92 + 10 fit; with a 42.1 GB packed copy they would not
+
+    start(caplog)
+
+    assert len(hub) == len(model_files.download_allow_list())
+
+
+def test_on_zerogpu_the_first_deploys_shape_still_starts(cache, hub, free_disk, caplog):
+    """No preload at all (the remedy): 150 GB cap - ~10 GB image = 140 GB of room for the
+    71.92 GB download, the 42.1 GB packed copy and the margin. It must not be refused."""
+    free_disk["free"] = 2000 * GB  # ZeroGPU's filesystem is the host's: terabytes
+
+    start(caplog, on_zerogpu=True)
+
+    assert len(hub) == len(model_files.download_allow_list())
+
+
+def test_on_zerogpu_the_cap_bounds_the_room_not_the_host_filesystem(
+    cache, hub, free_disk, caplog, monkeypatch
+):
+    """A 72 GB copy already in the HF cache (a preload start-up does not find) leaves
+    68 GB under the cap: downloading the set again would be evicted, so it is refused --
+    though the host's filesystem reports terabytes free."""
+    free_disk["free"] = 2000 * GB
+    monkeypatch.setattr(pipelines, "_directory_bytes", lambda path: 72 * GB)
+
+    with pytest.raises(ModelFileError) as caught:
+        start(caplog, on_zerogpu=True)
+
+    assert hub == []
+    message = str(caught.value)
+    assert "150 GB cap" in message and "68.0 GB" in message, message
+    assert "42.1 GB packed copy" in message, message

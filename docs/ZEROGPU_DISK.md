@@ -39,14 +39,19 @@
 >
 > **When the preload and the code disagree.** `preflight.ensure_weights()` checks all 35 files at
 > start-up. Complete: one line, `weights: all 35 files (71.92 GB) are already in … nothing
-> downloaded`. Files missing: one warning naming how many and how many GB, then it downloads only
-> those (into the container, where the prune frees them once packed). ⚠️ The one case that does
-> not fit: a preload that lands somewhere start-up does not look. Start-up then downloads all
-> 71.92 GB a second time, and image + both copies + the packed copy is **193.3–197.9 GB** at the
-> pre-prune peak. The warning names the directory it checked; the remedy is to delete the
-> `preload_from_hub` block, which is the first deploy's shape: everything downloaded at start-up,
-> the same 121.4–126.0 GB peak, and the prune then frees the download. A preload that fails
-> outright (a 401) stops the Space before any app code runs; same remedy.
+> downloaded`. Files missing: it first checks the room. The missing bytes, ZeroGPU's 42.1 GB packed
+> copy still to be written and a 10 GB margin must fit in the smaller of the filesystem's free
+> space (on ZeroGPU that is the host's, terabytes, so it alone never refuses) and the room left
+> under the 150 GB cap: 150 − ~10 GB of image − everything already in the Hub cache. If they fit,
+> one warning names how many files and how many GB, and it downloads only those (into the
+> container, where the prune frees them once packed). If not, start-up stops before writing a
+> byte, with one message naming the directory, the count and GB, the free GB and the remedy. That
+> is the case of a preload that lands in the Hub cache but not where start-up looks: a second
+> 71.92 GB on top of it would be **193.3–197.9 GB** at the pre-prune peak, so it is refused rather
+> than evicted. The remedy is to delete the `preload_from_hub` block, which is the first deploy's
+> shape: 124.0 GB needed against 140 GB of room, so it starts, peaks at the same 121.4–126.0 GB,
+> and the prune then frees the download. A preload that fails outright (a 401) stops the Space
+> before any app code runs; same remedy.
 >
 > **The start-up report's disk line** stays a true floor: its snapshot term is the preloaded
 > weights, measured; its ~10 GB constant is now "the rest of the image"; both readings are taken

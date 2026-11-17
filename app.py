@@ -68,8 +68,9 @@ _log.info(
 # set (`model_files`) before this runs. `ensure_weights` checks every file is in
 # the cache, with no network call when it is, and downloads only what the image
 # lacks, saying how much: a broken preload makes the start slower, not broken.
+# A download the disk (on ZeroGPU, its cap) cannot hold is refused instead.
 if WILL_USE_GPU:
-    preflight.ensure_weights(token=os.environ.get("HF_TOKEN"))
+    preflight.ensure_weights(token=os.environ.get("HF_TOKEN"), on_zerogpu=ON_ZEROGPU)
 
 # Version assertion, cache completeness and the resource report.
 #

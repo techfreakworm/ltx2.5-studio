@@ -50,8 +50,10 @@ short_description: Every LTX-2.5 mode, plus user-uploadable LoRA.
 # WHEN THE LIST AND THE CODE DISAGREE: start-up (preflight.ensure_weights) checks
 # every file the code loads and downloads whatever the image lacks, after one
 # loud log line saying how many files and how many GB, so a stale or partial
-# preload makes the start slower, not broken; a file listed here that the code
-# does not load only costs image space. A preload that fails outright (a 401)
+# preload makes the start slower, not broken -- unless the disk cannot hold that
+# download, which start-up refuses before writing a byte, naming this remedy. A
+# file listed here that the code does not load only costs image space. A preload
+# that fails outright (a 401)
 # stops the Space before any app code runs: delete this block, and start-up
 # downloads everything itself, as the first deploy did.
 #
