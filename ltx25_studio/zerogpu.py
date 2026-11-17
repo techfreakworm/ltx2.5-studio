@@ -344,7 +344,9 @@ STEP_SECONDS_AT_ZERO = 0.46
 STEP_SECONDS_PER_TOKEN = 1.81e-4
 STEP_SECONDS_PER_TOKEN_SQUARED = 1.94e-9
 
-#: Before the first step: 5-8 s warm, up to 25 s on a fresh worker's first call.
+#: Before the first step: 5-8 s warm, up to 25 s measured on a fresh worker's first call
+#: while it still built the diffusion decoder per run. The decoder is built at start-up
+#: now; 25 s stays, for a cold first call.
 PRE_SECONDS = 25.0
 #: The latent upsample between the two passes: 1-2 s measured.
 UPSAMPLE_SECONDS = 3.0
@@ -352,9 +354,10 @@ UPSAMPLE_SECONDS = 3.0
 #: (fitted 1.25e-7; 1.29e-7 at 241 frames).
 POST_SECONDS = 1.0
 POST_SECONDS_PER_PIXEL_FRAME = 1.3e-7
-#: Enhance added 27 s of window with the enhancer's weights already on disk (the start-up
-#: prefetch). A first enhanced call whose prefetch had not finished also pays the 88 s
-#: Hub fetch, which this does not cover; LTX25_GPU_DURATION_FLOOR_SECONDS is the lever.
+#: Enhance added 27 s of window with the enhancer's weights already on disk. The image
+#: preloads them (``preload_from_hub``, with the start-up prefetch as the fallback), so a
+#: first enhanced call does not pay the ~88 s Hub fetch inside its reservation;
+#: LTX25_GPU_DURATION_FLOOR_SECONDS is the lever if one ever does.
 ENHANCE_WINDOW_SECONDS = 60.0
 #: An adapter added 5-15 s (the payload read and the injection walk). Flat for any number
 #: of them: stacked adapters share one injection walk.

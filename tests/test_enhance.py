@@ -1840,9 +1840,16 @@ def test_an_enhanced_run_reserves_more_than_an_unenhanced_one():
     plain = zerogpu.estimate_duration(request=a_request())
     enhanced = zerogpu.estimate_duration(request=a_request(enhance_prompt=True))
     assert enhanced == plain + zerogpu.ENHANCE_DURATION_SECONDS
-    # Enhance added 27 s of window on the Space with the weights prefetched at start-up; the
-    # allowance is 60 s of window, reserved with the margin (the 88 s Hub fetch of a container
-    # whose prefetch has not finished is not covered: LTX25_GPU_DURATION_FLOOR_SECONDS is).
+    # Enhance added 27 s of window on the Space with the weights on disk; the allowance is 60 s
+    # of window, reserved with the margin. It does not hold the ~88 s Hub fetch: the image
+    # preloads the enhancer at its pin, so a first enhanced call does not pay it.
+    from ltx25_studio import model_files
+
+    assert any(
+        entry.startswith(model_files.ENHANCER_REPO_ID + " ")
+        and entry.endswith(" " + model_files.ENHANCER_REVISION)
+        for entry in model_files.preload_from_hub_entries()
+    ), "the +80 s Enhance allowance assumes the image preloads the enhancer"
     assert zerogpu.ENHANCE_WINDOW_SECONDS >= 2 * 27
     assert (
         zerogpu.ENHANCE_DURATION_SECONDS
