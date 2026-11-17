@@ -2185,10 +2185,14 @@ class ProgressReporter:
             logger.debug("progress reporting disabled after %r", exc)
             self._handle = None
 
-    def phase(self, label: str) -> None:
-        """Announce a phase at the start of its band; an unknown label keeps the bar where it is."""
+    def _stamp(self, label: str) -> None:
+        """Time ``label`` from now: a new phase, unless it is the one already running."""
         if not self._phases or self._phases[-1][0] != label:
             self._phases.append((label, time.monotonic()))
+
+    def phase(self, label: str) -> None:
+        """Announce a phase at the start of its band; an unknown label keeps the bar where it is."""
+        self._stamp(label)
         band = _PHASE_BANDS.get(label)
         if band is None:
             logger.debug("progress: unknown phase label %r", label)
@@ -2231,8 +2235,9 @@ class ProgressReporter:
         staged pair, loaded inside the denoise stage.
 
         Its own label at the bar's current position: a bar that retreats reads as
-        a restart. See :meth:`upscaling` for the shape.
+        a restart. Timed as a phase of its own. See :meth:`upscaling` for the shape.
         """
+        self._stamp("loading the model")
         self._emit(self._position, "loading the model")
 
     def sampling(

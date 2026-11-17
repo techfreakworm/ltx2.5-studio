@@ -201,6 +201,150 @@ def test_a_fake_with_nobody_listening_is_handed_what_it_was_before(tmp_path):
 
 
 # --------------------------------------------------------------------------
+# the bar's other words: a staged load, and a decode inside the pipeline call
+#
+# The local runner names its staged loads with ProgressReporter.loading() at the
+# bar's current position, and a single pass that decodes inside its own call (the
+# conv decoder, "Fast") names "decoding the frames" after its last step. Each is
+# a phase of its own in the time line, and the split still adds up.
+# --------------------------------------------------------------------------
+
+
+def _adds_up(line: str) -> list[tuple[str, float]]:
+    split = phases(line)
+    total = float(TOOK.match(line)["total"])
+    assert abs(sum(seconds for _, seconds in split) - total) <= 0.05 * (len(split) + 1), line
+    return split
+
+
+def _stepping_pipe():
+    """A denoise that steps with the callback it is handed, then decodes inside its own call."""
+    from test_stage_graph_contract import AudioPipeline, FakeTensor, Staged
+
+    class Frames(FakeTensor):
+        def __len__(self):
+            return 1
+
+    class SteppingPipe(AudioPipeline):
+        num_timesteps = 4
+
+        def __init__(self):
+            super().__init__()
+            self._output = Staged(Frames("frames"), audio=FakeTensor("audio-latents"))
+
+        def __call__(self, **kwargs):
+            callback = kwargs.get("callback_on_step_end")
+            for step in range(self.num_timesteps):
+                time.sleep(0.03)
+                if callback is not None:
+                    callback(self, step, 0.5, {})
+            time.sleep(0.12)  # the frames' decode, inside the call
+            return super().__call__(**kwargs)
+
+    return SteppingPipe()
+
+
+def _fast_run(tmp_path, progress=None):
+    from ltx25_studio import pipelines
+
+    pipe = _stepping_pipe()
+    runner = pipelines.StageRunner(pipe, kind="text2video", device="cuda")
+    result = generate_module.generate(
+        mode="text_to_video",
+        seed=7,
+        prompt="a lighthouse in fog",
+        decoder="conv",
+        pipeline_factory=lambda **_: runner,
+        encoder=good_encoder,
+        output_root=tmp_path,
+        retention_bytes=10**9,
+        progress=progress,
+    )
+    return result, pipe, runner
+
+
+def test_a_decode_inside_the_pipeline_call_is_timed_as_its_own_phase(tmp_path):
+    bar = Bar()
+    result, _pipe, runner = _fast_run(tmp_path, progress=bar)
+
+    split = _adds_up(took_lines(result)[0])
+    assert runner.last_run["decoder"] == "conv"
+    assert [label for label, _ in split] == bar.labels == [
+        "loading the model",
+        "preparing the inputs",
+        "sampling",
+        "decoding the frames",
+        "writing the file",
+    ]
+    seconds = dict(split)
+    assert seconds["sampling"] >= 0.1 and seconds["decoding the frames"] >= 0.1, split
+
+
+def test_with_nobody_listening_a_fast_pass_gets_no_step_callback(tmp_path):
+    """The pipeline is handed what it was before; its in-call decode then counts as sampling."""
+    result, pipe, _runner = _fast_run(tmp_path)
+
+    split = _adds_up(took_lines(result)[0])
+    assert [label for label, _ in split] == [
+        "loading the model",
+        "preparing the inputs",
+        "sampling",
+        "writing the file",
+    ]
+    assert "callback_on_step_end" not in pipe.kwargs and "progress" not in pipe.kwargs
+    assert dict(split)["sampling"] >= 0.2, split
+
+
+def _staged_local_run(tmp_path, prompt, progress=None):
+    """The runner and its weights are kept per process: a prompt of its own makes the pair load."""
+    from local_fakes import RecordingEncoder
+    from test_local_runtime import FRAMES, SEED, SIZE, _factory
+
+    return generate_module.generate(
+        mode="text_to_video",
+        prompt=prompt,
+        seed=SEED,
+        width=SIZE,
+        height=SIZE,
+        num_frames=FRAMES,
+        pipeline_factory=_factory("staged"),
+        encoder=RecordingEncoder(),
+        output_root=tmp_path,
+        retention_bytes=10**12,
+        progress=progress,
+    )
+
+
+def test_a_staged_local_run_times_its_load_and_its_decode_as_phases(tmp_path):
+    """The tiny checkpoint on the staged local runner: the pair loads inside the denoise stage."""
+    bar = Bar()
+    result = _staged_local_run(tmp_path, "a green kite above a windy beach", progress=bar)
+
+    split = _adds_up(took_lines(result)[0])
+    assert [label for label, _ in split] == bar.labels == [
+        "loading the model",
+        "preparing the inputs",
+        "loading the model",
+        "sampling",
+        "decoding the frames",
+        "writing the file",
+    ]
+
+
+def test_a_staged_load_is_timed_with_nobody_listening(tmp_path):
+    result = _staged_local_run(tmp_path, "a paper boat drifting down a gutter")
+    split = _adds_up(took_lines(result)[0])
+
+    assert [label for label, _ in split] == [
+        "loading the model",
+        "preparing the inputs",
+        "loading the model",
+        "sampling",
+        "writing the file",
+    ]
+
+
+# --------------------------------------------------------------------------
 # the log: once per run, at INFO, on ltx25_studio.generate
 # --------------------------------------------------------------------------
 
