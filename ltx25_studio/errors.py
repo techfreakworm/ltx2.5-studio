@@ -424,10 +424,10 @@ class DecoderTooSmallError(ConstraintError):
         #: ``(width, height, frames)``: the closest request that works.
         self.smallest = tuple(smallest)
         self.stage_2 = bool(stage_2)
-        # The UI's words: its controls are "Upscale ×2" and the decoder choice
-        # "Best quality" / "Fast" (ui/render.py DECODER_OPTIONS).
-        what = "Upscale ×2 cannot finish" if stage_2 else "Best quality cannot decode"
-        fix = "turn Upscale ×2 off" if stage_2 else "choose Fast"
+        # The UI's words: its controls are "Upscale ×2" and the decoder choice "Steadier
+        # (diffusion decoder)" / "Sharper (standard decoder)" (ui/render.py DECODER_OPTIONS).
+        what = "Upscale ×2 cannot finish" if stage_2 else "Steadier (diffusion decoder) cannot decode"
+        fix = "turn Upscale ×2 off" if stage_2 else "choose Sharper (standard decoder)"
         super().__init__(
             f"{what} a video this small: it needs at least "
             f"{self.minimum[0]}×{self.minimum[1]} pixels and {self.minimum[2]} frames, and this "
@@ -443,8 +443,8 @@ class DecoderUnavailableError(ConstraintError):
     def __init__(self, *, reason):
         self.reason = reason
         super().__init__(
-            f"Best quality was chosen but cannot run here: {reason}. Choose Fast, or Auto, "
-            f"which uses Best quality wherever it can run."
+            f"Steadier (diffusion decoder) was chosen but cannot run here: {reason}. Choose "
+            f"Sharper (standard decoder), or Auto, which picks the decoder that can run."
         )
 
 

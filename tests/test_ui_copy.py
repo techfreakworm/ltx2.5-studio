@@ -393,7 +393,7 @@ def test_run_facts_read_the_results_record_first_and_fall_back_to_the_request():
         "golden hour",
         "chosen by the model",
         "on 12 layers",
-        "Decoder Best quality",
+        "Decoder Steadier (diffusion decoder)",
     ):
         assert words in summary, words
     report = render.success(Recorded(), modes.get_mode("text_to_audio_video"))
@@ -419,7 +419,7 @@ def test_the_decoder_choices_say_what_each_does_and_the_report_names_the_one_tha
         took=3.0,
         decoder="diffusion",
     )
-    assert "Best quality" in render.run_summary(facts)
+    assert "Steadier (diffusion decoder)" in render.run_summary(facts)
     no_record = render.RunFacts(
         mode=modes.get_mode("text_to_video"),
         seed=1,

@@ -637,14 +637,16 @@ def test_a_choice_is_sent_by_its_value_whichever_name_the_plan_uses(tmp_path, sp
     # Above the diffusion decoder's smallest size, which the gate checks where its config is cached.
     fake = space().reply(*[Reply(video=write_video(tmp_path / "v.mp4", frames=17, size=256))] * 3)
     shape = {"width": 256, "height": 256, "num_frames": 17}
-    calls = [t2v("best", decoder="Best quality", **shape), t2v("fast", decoder="Fast", **shape),
+    calls = [t2v("best", decoder="Steadier (diffusion decoder)", **shape),
+             t2v("fast", decoder="Sharper (standard decoder)", **shape),
              t2v("value", decoder="conv", **shape)]
     code, lines, _out, _ = live(tmp_path, fake, calls)
     assert code == space_matrix.EXIT_OK, "\n".join(lines)
     assert [c["params"]["decoder"] for c in fake.generate_calls] == ["diffusion", "conv", "conv"]
     with pytest.raises(space_matrix.PlanError) as caught:
         space_matrix.parse_plan([t2v(decoder="Turbo")], base=tmp_path)
-    assert "'diffusion' (Best quality)" in str(caught.value) and "'conv' (Fast)" in str(caught.value)
+    assert "'diffusion' (Steadier (diffusion decoder))" in str(caught.value)
+    assert "'conv' (Sharper (standard decoder))" in str(caught.value)
 
 
 def test_a_variation_mode_shows_the_level_the_app_runs(tmp_path):

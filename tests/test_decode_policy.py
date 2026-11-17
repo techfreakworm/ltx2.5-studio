@@ -141,7 +141,7 @@ def test_an_explicit_diffusion_below_the_minimum_raises_naming_the_smallest_requ
     with pytest.raises(DecoderTooSmallError) as caught:
         runner(prompt="a", video_decoder="diffusion", **SMALL)
     assert caught.value.smallest == (224, 224, 17) and caught.value.stage_2 is False
-    assert "choose Fast" in str(caught.value)
+    assert "choose Sharper (standard decoder)" in str(caught.value)
     assert not pipeline.calls
 
 

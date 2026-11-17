@@ -120,14 +120,14 @@
       "label": "dec_m01_best_quality",
       "mode": "text_to_video",
       "prompt": "A red vintage tram climbs a steep cobbled street at golden hour, slow push-in. The tram bell rings twice and steel wheels grind on the rails.",
-      "decoder": "Best quality",
+      "decoder": "Steadier (diffusion decoder)",
       "expect": {"width": 704, "height": 480, "frames": 121, "has_audio": false}
     },
     {
       "label": "dec_m01_fast",
       "mode": "text_to_video",
       "prompt": "A red vintage tram climbs a steep cobbled street at golden hour, slow push-in. The tram bell rings twice and steel wheels grind on the rails.",
-      "decoder": "Fast",
+      "decoder": "Sharper (standard decoder)",
       "expect": {"width": 704, "height": 480, "frames": 121, "has_audio": false}
     },
     {

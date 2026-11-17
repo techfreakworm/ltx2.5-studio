@@ -64,7 +64,7 @@ ERROR_SPECS = {
     ),
     "DecoderUnavailableError": (
         {"reason": "it needs an NVIDIA (CUDA) GPU at this size"},
-        ["Best quality", "NVIDIA", "Fast"],
+        ["Steadier (diffusion decoder)", "NVIDIA", "Sharper (standard decoder)"],
     ),
     "DecoderTooSmallError": (
         {

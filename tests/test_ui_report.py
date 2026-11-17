@@ -206,6 +206,9 @@ def test_the_arrow_form_names_are_gone():
 
 
 def test_the_report_names_the_decoder_with_the_choices_own_words():
+    """One name per decoder: the report uses the choice's label, and the lines use only the
+    names the labels carry in brackets (#27: "Steadier (diffusion decoder)", "Sharper
+    (standard decoder)"), never another."""
     labels = {value: label for label, value, _words in render.DECODER_OPTIONS}
     for decoder in ("diffusion", "conv"):
         facts = render.RunFacts(
@@ -221,8 +224,12 @@ def test_the_report_names_the_decoder_with_the_choices_own_words():
         shown = visible(render.run_summary(facts))
         assert f"Decoder {labels[decoder]}" in shown, shown
     lines = " ".join(render.decoder_line(v) for v in labels) + render.UPSCALE_DECODER_LINE
-    for other_name in ("quick decoder", "standard", "convolutional", "diffusion decoder"):
+    for other_name in ("quick decoder", "convolutional", "conv decoder", "Best quality", "Fast"):
         assert other_name not in lines, other_name
+    bracketed = {re.search(r"\((\w+) decoder\)", labels[v]).group(1) for v in ("diffusion", "conv")}
+    assert bracketed == {"diffusion", "standard"}
+    named = {word.lower() for word in re.findall(r"(\w+) decoder", lines)}
+    assert named <= bracketed, named
 
 
 # --------------------------------------------------------------------------

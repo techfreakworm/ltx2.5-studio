@@ -377,7 +377,7 @@ def test_wrong_inputs_are_refused_in_the_uis_words(tmp_path, monkeypatch):
             num_frames=121,
             enable_stage_2=True,
         ),
-        # Best quality chosen where it cannot run at this size
+        # Steadier (diffusion decoder) chosen where it cannot run at this size
         _refusal(
             mode="text_to_video",
             prompt="p",

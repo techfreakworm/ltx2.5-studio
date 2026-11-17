@@ -262,7 +262,8 @@ card above it is built from the run record:
 - the change level, named with its choice (Video to video, Audio to sound)
 - seed
 - LoRA strengths
-- the decoder that ran, by its choice's name (Best quality, Fast)
+- the decoder that ran, by its choice's name (Steadier (diffusion decoder), Sharper
+  (standard decoder))
 - time taken, labelled by the device that ran it; on ZeroGPU, with the quota it drew
 
 Reuse seed and Use this prompt close the card, and so does a quiet "Download the sound

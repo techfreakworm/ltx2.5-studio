@@ -696,7 +696,7 @@ class Call:
 
 
 def _check_value(spec, value, problems: list[str], where: str) -> Any:
-    """``value`` as it is sent; a choice may be named by its label ("Best quality")."""
+    """``value`` as it is sent; a choice may be named by its label ("Sharper (standard decoder)")."""
     kind = spec.kind
     if kind == "text" and not isinstance(value, str):
         problems.append(f"{where}: {spec.key} must be text")
@@ -2662,7 +2662,7 @@ read-only subcommands (one GET each, no GPU time; see `<command> --help`):
 
 plan file: a JSON list of calls, or {{"defaults": {{...}}, "calls": [...]}}. A call has a "label",
 a "mode", any {ENDPOINT} field by its key (a choice by its value or its label, e.g. "decoder":
-"Best quality"), input media as file paths under --assets-dir ("image", "video", "audio") or
+"Sharper (standard decoder)"), input media as file paths under --assets-dir ("image", "video", "audio") or
 {{"from_call": "<earlier label>", "frame": 0}}, optional "loras" ([{{"source": "<hub id>" |
 "<file.safetensors>", "weight": 0.8}}]) and optional "expect" ({", ".join(sorted(_EXPECT_KEYS))}).
 Every call whose inputs exist goes through the app's own gate (generate.prepare_request) in the

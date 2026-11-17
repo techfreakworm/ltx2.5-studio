@@ -397,19 +397,36 @@ CLIP_LEVER = (
     "The prompt steers the result only at “A lot”; at the lower settings your clip is "
     "re-rendered almost as it is.",
 )
-#: The decoder choices: ``(label, value, what it does)``. The values are
-#: ``config.DECODER_CHOICES``; the reservation does not depend on the choice.
+#: The decoder choices: ``(label, value, what it does)``, named by what a user sees (the
+#: Space's A/B on the same latents: the diffusion decoder a little softer and steadier from
+#: frame to frame, the standard one sharper frame by frame with more shimmer). The values are
+#: ``config.DECODER_CHOICES``; the reservation does not depend on the choice. Auto is the
+#: vendor's default; off an NVIDIA GPU it always takes the standard decoder (``pipelines``).
 DECODER_OPTIONS: tuple[tuple[str, str, str], ...] = (
-    ("Auto", "auto", "Best quality where this machine can run it, Fast where it cannot."),
-    ("Best quality", "diffusion", "Finer detail; takes longer."),
-    ("Fast", "conv", "Slightly softer; takes less time."),
+    (
+        "Auto",
+        "auto",
+        "Diffusion decoder on an NVIDIA GPU that can run it, standard decoder elsewhere.",
+    ),
+    (
+        "Steadier (diffusion decoder)",
+        "diffusion",
+        "A little softer, steadier from frame to frame; takes a few seconds longer.",
+    ),
+    (
+        "Sharper (standard decoder)",
+        "conv",
+        "Sharper frame by frame, with a little more shimmer; faster.",
+    ),
 )
 #: What each decoder that ran is called in the report: the choice's own label.
 DECODER_NAMES = {value: label for label, value, _words in DECODER_OPTIONS}
 
 
 #: Under Upscale ×2 the decoder choice is not a lever (``pipelines.StageRunner``).
-UPSCALE_DECODER_LINE = "Upscale ×2 always finishes with Best quality, whichever you pick here."
+UPSCALE_DECODER_LINE = (
+    "Upscale ×2 always finishes with the diffusion decoder, whichever you pick here."
+)
 
 
 def decoder_line(value: Any, *, upscaling: bool = False) -> str:
