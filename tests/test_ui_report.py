@@ -237,7 +237,7 @@ def test_the_report_names_the_decoder_with_the_choices_own_words():
 # --------------------------------------------------------------------------
 
 
-def _took(device, *, zerogpu=False, gpu_time=True) -> str:
+def _took(device, *, zerogpu=False, gpu_time=True, took=27.0) -> str:
     facts = render.RunFacts(
         mode=modes.get_mode("text_to_video"),
         seed=1,
@@ -245,7 +245,7 @@ def _took(device, *, zerogpu=False, gpu_time=True) -> str:
         seconds=5.0,
         stage_2=False,
         loras=(),
-        took=27.0,
+        took=took,
         took_is_gpu=gpu_time,
         device=device,
         on_zerogpu=zerogpu,
@@ -260,6 +260,16 @@ def test_took_says_where_the_run_ran():
     assert _took("cuda") == "27 s on the GPU"
     assert _took("cuda", zerogpu=True) == "27 s of GPU time, about 54 s of your quota"
     assert _took(None, gpu_time=False) == "27 s"
+
+
+def test_a_run_under_a_second_says_so_and_never_took_0_s():
+    """Round 4: a sub-second run (the tiny checkpoint's) read "Took 0 s"."""
+    assert _took("cpu", took=0.3) == "under 1 s on the CPU"
+    assert _took(None, gpu_time=False, took=0.2) == "under 1 s"
+    assert _took("cuda", zerogpu=True, took=0.4) == "under 1 s of GPU time, under 2 s of your quota"
+    assert _took("cpu", took=0.6) == "1 s on the CPU", "half a second and more rounds to 1 s"
+    for took in (0.0, 0.1, 0.49):
+        assert "0 s" not in _took("mps", took=took)
 
 
 def test_the_run_facts_name_this_processs_device(wired, monkeypatch):

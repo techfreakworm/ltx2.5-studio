@@ -279,7 +279,8 @@ card above it is built from the run record:
 - LoRA strengths
 - the decoder that ran, by its choice's name (Steadier (diffusion decoder), Sharper
   (standard decoder))
-- time taken, labelled by the device that ran it; on ZeroGPU, with the quota it drew
+- time taken, labelled by the device that ran it; on ZeroGPU, with the quota it drew;
+  a run under half a second took "under 1 s", never "0 s"
 
 Reuse seed and Use this prompt close the card, and so does a quiet "Download the sound
 (WAV)" when the run returned its picture and its sound as two files (a video with

@@ -209,7 +209,7 @@ def test_a_result_gradio_will_not_serve_ends_with_generate_back_and_a_card(demo,
     card = status["value"]
     words = visible(card)
     assert words.startswith("### The run finished, but its result could not be shown")
-    assert re.search(r"It used \d+ s", words), "what the run used is stated"
+    assert re.search(r"It used (?:under )?\d+ s", words), "what the run used is stated"
     # The run finished and its file is kept: it is listed in Recent runs, and Show (which
     # costs nothing) is the step, not a paid rerun (review round 3, section 9 (a)).
     assert (

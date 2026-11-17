@@ -1228,15 +1228,23 @@ class RunFacts:
 
 
 def took_words(facts: RunFacts) -> str:
-    """ "Took N s", labelled by the device that ran it; on ZeroGPU, with the quota it drew."""
+    """ "Took N s", labelled by the device that ran it; on ZeroGPU, with the quota it drew. A
+    run of under half a second took "under 1 s", never "0 s"."""
     seconds = round(float(facts.took))
+    under = seconds < 1
+    spent = f"under {_num(1)}\u00a0s" if under else f"{_num(seconds)}\u00a0s"
     if not facts.took_is_gpu:
-        return f"{_num(seconds)}\u00a0s"
+        return spent
     if facts.on_zerogpu:
-        quota = seconds * int(facts.quota_multiplier)
-        return f"{_num(seconds)}\u00a0s of GPU time, about {_num(quota)}\u00a0s of your quota"
+        multiplier = int(facts.quota_multiplier)
+        quota = (
+            f"under {_num(multiplier)}\u00a0s"
+            if under
+            else f"about {_num(seconds * multiplier)}\u00a0s"
+        )
+        return f"{spent} of GPU time, {quota} of your quota"
     where = _ON_DEVICE.get(str(facts.device or ""))
-    return f"{_num(seconds)}\u00a0s {where}" if where else f"{_num(seconds)}\u00a0s"
+    return f"{spent} {where}" if where else spent
 
 
 #: Beside Reuse seed when a run returned its picture and its sound as two files.
