@@ -193,7 +193,7 @@ be refused lights none. The figures come from these sources:
   length of your clip".
 
 A request that would be refused shows "Won't run", lists every size and length problem
-with its nearest legal values, and shows no figure. The lamp words are:
+with the nearest values that run, and shows no figure. The lamp words are:
 
 - "Upscale +N s"
 - "Enhance +N s"
@@ -269,7 +269,11 @@ card above it is built from the run record:
 
 - mode
 - size and upscale
-- length, and where it came from
+- length, and where it came from: a length the model picked reads "chosen by the
+  model" only strictly inside the shortest and longest the user allowed; at either end
+  (where the pipeline may have raised or lowered the model's own figure) it reads "the
+  shortest you allowed" or "the longest you allowed", and the run's note says what the
+  model chose
 - the change level, named with its choice (Video to video, Audio to sound)
 - seed
 - LoRA strengths

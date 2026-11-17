@@ -451,7 +451,7 @@ def build_ui() -> gr.Blocks:
                         step=0.1,
                         value=handlers.seconds_for_frames(_DEFAULT_FRAMES),
                         label="Length (seconds)",
-                        info="Written as a legal frame count; the exact frames are in Advanced.",
+                        info="Written as a frame count that runs; the exact frames are in Advanced.",
                         elem_id="seconds",
                         visible=not view0.timed_input,
                     )
@@ -513,7 +513,7 @@ def build_ui() -> gr.Blocks:
                         )
                     frames_hint = gr.Markdown(elem_classes=["mr-hint"])
                     snap_button = gr.Button(
-                        "Snap to legal values", elem_classes=["mr-secondary"], size="sm"
+                        "Snap to values that run", elem_classes=["mr-secondary"], size="sm"
                     )
                     components.render_fields(pool, "seed")
                     components.render_fields(

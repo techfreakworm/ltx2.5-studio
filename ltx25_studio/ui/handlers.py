@@ -1156,6 +1156,15 @@ def run_facts(outcome: RunOutcome) -> render.RunFacts:
     sent = fact(result, "prompt", None)
     typed = str(params.get("prompt") or "").strip()
     elapsed = fact(result, "elapsed_seconds", None)
+    length_source = fact(result, "length_source", origin)
+    bound = None
+    if length_source == generate_module.LENGTH_FROM_MODEL:
+        bound = _length_bound(
+            fact(result, "frames", None),
+            getattr(request, "min_seconds", params.get("min_seconds")),
+            getattr(request, "max_seconds", params.get("max_seconds")),
+            rate,
+        )
     return render.RunFacts(
         mode=mode,
         seed=int(fact(result, "seed", getattr(result, "seed", 0))),
@@ -1166,7 +1175,8 @@ def run_facts(outcome: RunOutcome) -> render.RunFacts:
         took=float(elapsed if elapsed is not None else outcome.took),
         took_is_gpu=elapsed is not None,
         prompt_sent=sent if sent and str(sent).strip() != typed else None,
-        length_source=fact(result, "length_source", origin),
+        length_source=length_source,
+        length_bound=bound,
         audio_level=level if varies_audio else None,
         video_level=clip_level,
         decoder=fact(result, "decoder", None),
@@ -1174,6 +1184,27 @@ def run_facts(outcome: RunOutcome) -> render.RunFacts:
         on_zerogpu=on_zerogpu,
         quota_multiplier=quota_multiplier(),
     )
+
+
+def _length_bound(frames: Any, shortest: Any, longest: Any, rate: float) -> str | None:
+    """Where a model-picked length of ``frames`` sits in the user's range: "shortest" or
+    "longest" when it is the frame count the duration head gives at that end (where the range
+    may have raised or lowered the model's own figure), "only" when the range allows one
+    length, None strictly inside (the model's figure, for certain) or when unknown. The ends
+    are the pipeline's own (``constraints.duration_head_frame_range``)."""
+    count, low, high = _as_int(frames), _as_float(shortest), _as_float(longest)
+    if count is None or low is None or high is None:
+        return None
+    first, last = constraints.duration_head_frame_range(
+        min_seconds=low, max_seconds=high, frame_rate=float(rate)
+    )
+    if count == first == last:
+        return "only"
+    if count == first:
+        return "shortest"
+    if count == last:
+        return "longest"
+    return None
 
 
 def _run_device(result: Any) -> tuple[str | None, bool]:

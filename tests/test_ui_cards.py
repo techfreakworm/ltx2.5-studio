@@ -232,6 +232,6 @@ def test_the_advanced_hints_respect_the_limits():
 
     dims, frames = handlers.on_shape_change(2048, 480, 489)
     assert "runs" not in dims and str(constraints.MAX_DIMENSION) in dims, dims
-    assert "legal length" not in frames and str(constraints.MAX_NUM_FRAMES) in frames, frames
+    assert "runs" not in frames and str(constraints.MAX_NUM_FRAMES) in frames, frames
     dims, frames = handlers.on_shape_change(1920, 480, 481)
-    assert "runs" in dims and "legal length" in frames
+    assert "runs" in dims and "runs" in frames

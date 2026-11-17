@@ -495,7 +495,7 @@ def quota_explainer(*, multiplier: int, example_reserve: int) -> str:
         f"needs the xlarge GPU, which {double}: a {example_reserve} s reservation needs "
         f"{example_reserve * multiplier} s of quota free to start, and you are billed for the "
         f"GPU time actually used, times {multiplier}. Runs that fail on the GPU are billed too. "
-        "A timed-out run is not retried for you; press Generate again."
+        f"A run that runs out of GPU time is not retried for you. {_CARDS['timeout'][1]}"
     )
 
 
@@ -507,7 +507,7 @@ def quota_explainer(*, multiplier: int, example_reserve: int) -> str:
 def frame_hint(num_frames: Any, *, ratio: int, lower: int, upper: int, valid: bool) -> str:
     """Guidance for the frame count. ``constraints.py`` has already decided."""
     if valid:
-        return f"{num_frames} frames is a legal length ({int(num_frames) / 24:.2f} s)."
+        return f"{num_frames} frames runs ({int(num_frames) / 24:.2f} s)."
     return (
         f"{num_frames} frames won't run. Use {lower} ({lower / 24:.1f} s) or "
         f"{upper} ({upper / 24:.1f} s), or press Snap."
@@ -1211,6 +1211,9 @@ class RunFacts:
     prompt_sent: str | None = None
     #: "requested" | "model" | "audio": where the length came from.
     length_source: str | None = None
+    #: A model-picked length at an end of the user's range: "shortest", "longest" or "only"
+    #: (the range allows one length). There the range may have moved the model's figure.
+    length_bound: str | None = None
     #: The level actually used to change the user's sound (Audio -> sound).
     audio_level: float | None = None
     #: The level actually used to change the user's clip (Video -> video).
@@ -1256,6 +1259,13 @@ def run_summary(facts: RunFacts) -> str:
         "audio": ", matched to your audio",
         "video": ", matched to your clip",
     }.get(facts.length_source or "", "")
+    if facts.length_source == "model" and facts.length_bound:
+        # Only a length strictly inside the range is the model's own figure for certain.
+        origin = {
+            "shortest": ", the shortest you allowed",
+            "longest": ", the longest you allowed",
+            "only": ", the only length you allowed",
+        }.get(facts.length_bound, origin)
     if facts.seconds is not None:
         rows.append(("Length", _secs_html(facts.seconds) + origin))
     elif origin:
