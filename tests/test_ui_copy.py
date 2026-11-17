@@ -246,6 +246,45 @@ def test_the_lip_sync_line_is_under_the_audio_in_audio_to_video_and_nowhere_else
     )
 
 
+#: Mode 11 with a recording and no picture sometimes renders a black-and-white period film (#28).
+PERIOD_FILM = (
+    "An old-sounding recording can come out as a period film: say “in colour” in the prompt, "
+    "or give a first-frame picture."
+)
+
+
+def test_the_period_film_sentence_is_in_mode_11s_help_and_nowhere_else(tmp_path, monkeypatch):
+    """Through the built page's own switch: in Audio to video the sentence is shown, under the
+    first-frame picture and above the prompt, by exactly one component; in no other mode."""
+    pytest.importorskip("gradio", reason="gradio is a declared dev dependency")
+    from test_ui_form import Form
+
+    from ltx25_studio.ui import build_ui, showcase
+
+    monkeypatch.setenv(showcase.EXAMPLES_ENV, str(tmp_path / "no-examples"))
+    demo = build_ui()
+    form = Form(demo)
+    blocks = sorted(demo.blocks.values(), key=lambda block: block._id)
+
+    def holders() -> list:
+        return [
+            b
+            for b in blocks
+            if form.visible(b) and any(PERIOD_FILM in text for text in _texts(form, b))
+        ]
+
+    for mode_id in MODE_IDS:
+        form.pick_mode(mode_id)
+        if mode_id == "audio_to_video":
+            (caption,) = holders()
+            assert "mr-caption" in caption.elem_classes
+            assert form.fields["image"]._id < caption._id < form.fields["prompt"]._id
+            assert form.get(caption) == render.media_caption(modes.get_mode(mode_id), "image")
+        else:
+            assert holders() == [], mode_id
+    assert render.media_caption(modes.get_mode("audio_to_video"), "image").endswith(PERIOD_FILM)
+
+
 def test_mode_11_states_its_limit_in_its_purpose_line_and_the_remedy_under_its_audio():
     mode = modes.get_mode("audio_to_video")
     assert render.purpose_line(mode) == PURPOSE_11

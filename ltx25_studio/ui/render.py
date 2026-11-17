@@ -358,7 +358,11 @@ _CAPTIONS: dict[tuple[str, str], str] = {
         "lip-synced. For a face that speaks in time, use Image + text to video with sound and "
         "write the words in quotes in your prompt; the model voices them itself."
     ),
-    ("audio_to_video", "image"): "Optional. Used as the first frame.",
+    # Under the first-frame picture, above the prompt: the two remedies it names.
+    ("audio_to_video", "image"): (
+        "Optional. Used as the first frame. An old-sounding recording can come out as a period "
+        "film: say “in colour” in the prompt, or give a first-frame picture."
+    ),
 }
 
 
