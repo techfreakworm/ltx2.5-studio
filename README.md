@@ -161,8 +161,8 @@ audio is encoded to `audio_latents`, and then:
 - With automatic length on, these two modes take their length from your audio file: the
   duration predictor reads only the text, so it cannot hear the upload.
 
-In the other modes, **Let the model pick the length** has the model's duration predictor choose
-it within the range you allow, and the run's note says what it chose. When its own figure lies
+Where a mode offers **Let the model pick the length**, the model's duration predictor chooses it
+within the range you allow, and the run's note says what it chose. When its own figure lies
 outside the range, the note says so and what the range made of it: "The model chose 4.5 s; your
 shortest length is 5 s, so the video is 5.0 s."
 
