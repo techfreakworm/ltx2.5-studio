@@ -554,6 +554,36 @@ refused on the Space before any GPU time
 
 ---
 
+## The page
+
+The whole design is in [`docs/UI_DESIGN.md`](docs/UI_DESIGN.md). A few things it does that are
+easy to miss:
+
+- **The line beside Generate** names what the run returns: its size, with "upscaled" when
+  Upscale ×2 is on, or "Sound" in a sound-only mode, then the length and, on the Space, the quota
+  it needs ("1408 × 960 upscaled, 5.0 s, needs 210 s quota"); elsewhere it says where the run
+  happens instead.
+- **The monitor keeps your run** when you pick another mode. While it does, and that mode has a
+  sample, the button under the purpose line reads "See an example of" and the mode's name, and
+  puts that sample on the monitor; then the same button reads "Back to your run" and puts your
+  run back.
+- **The monitor's player works by keyboard and touch**, and so does a loaded clip's preview:
+  the controls show on keyboard focus, while the video is paused and on a touch screen; Play is
+  named "Play" or "Pause", and only Enter and Space act on it, so Tab moves on without
+  starting or stopping the clip.
+- **The Done card** says where the length came from: "chosen by the model" only when the
+  model's length lies strictly inside the range you allowed, otherwise "the shortest you
+  allowed" or "the longest you allowed" (the run's note then says what the model chose). A run
+  of under half a second took "under 1 s". After a video with sound, "Download the sound (WAV)"
+  beside Reuse seed gives the sound track on its own.
+- **A rejected adapter** gets one next step for its kind, such as "Use an adapter made for
+  LTX-2.5." or "Download the file again, then upload it."
+- **Restore settings**, in Recent runs, says what it did until your next run: "Settings from
+  08:06 restored; the seed is random again, as it was for that run. Your current audio stays as
+  it is."
+
+---
+
 ## Examples on the page
 
 Every mode comes with at least one example, which fills the form and runs nothing, and a

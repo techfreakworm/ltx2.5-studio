@@ -392,6 +392,12 @@ loads after ours. Where a Gradio rule out-ranks a class (its `h1`–`h6` reset i
 - **Motion:** state changes only, and none under `prefers-reduced-motion`.
 - **Footer:** Gradio's hidden footer controls stay hidden ("Stop Recording" is never
   shown), and its run-history link, which competes with Recent runs, is hidden.
+- **Players work without a hovering pointer.** The monitor's video player and a loaded
+  clip's preview show their control bar to keyboard focus, while the video is paused and
+  on a touch screen, in the well colour. Play is named "Play" or "Pause" and full screen
+  "Full screen", and only Enter and Space act on them, so Tab moves on without starting
+  or stopping a clip. On a phone a media zone's own buttons, a loaded audio's controls and
+  a checkbox's label are 44 px targets like every other control.
 
 ## Showcase
 
