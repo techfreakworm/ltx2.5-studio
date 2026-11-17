@@ -584,6 +584,9 @@ STARTUP_ONLY = {
         "bypassed offline by the injected pipeline_factory; exercised for real on the Space"
     ),
     "ltx25_studio.preflight": "startup resource and version checks, by definition",
+    "ltx25_studio.log_filter": (
+        "installed by app.py's logging set-up; the forked GPU worker inherits the filter"
+    ),
     "ltx25_studio.local_runtime": (
         "imported by pipelines at module scope; runs only for a local mps/cpu generation with "
         "real weights, which the offline probe cannot make"

@@ -27,7 +27,7 @@ except ImportError:  # local development, where ZeroGPU does not exist
 
     spaces = _zerogpu_bootstrap.local_spaces_stub()
 
-from ltx25_studio import device, outputs, pipelines, preflight, zerogpu
+from ltx25_studio import device, log_filter, outputs, pipelines, preflight, zerogpu
 from ltx25_studio import enhance as enhance_module
 from ltx25_studio import generate as generate_module
 from ltx25_studio.config import load_config
@@ -35,6 +35,9 @@ from ltx25_studio.ui import build_ui
 from ltx25_studio.ui.blocks import served_outputs
 
 logging.basicConfig(level=logging.INFO)
+# bitsandbytes' int8 cast warning once per process, not once per matmul; the
+# forked GPU worker inherits the filter with the logger.
+log_filter.install()
 _log = logging.getLogger("ltx25_studio")
 
 # Unguarded on purpose. An unrecognised LTX25_* value must reach the operator as
