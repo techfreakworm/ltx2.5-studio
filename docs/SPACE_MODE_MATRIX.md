@@ -3,8 +3,8 @@
 > **How to read this document (2026-11-16).** §1–§9 are the August 2026 matrix on the Space,
 > made with builds whose output was colour static (the block below); they are corrected in
 > place where later measurements overtook them. **§10 is the current state:** what has been
-> verified since the 2026-11-16 fixes, locally on real weights, and the place for the
-> post-deploy Space run, which has not happened yet.
+> verified since the 2026-11-16 fixes, on the Space after deploy 1 (§10.1) and on real weights
+> on a Mac (§10.2).
 
 > # ⛔ INVALIDATED (2026-08-25) — every generation result in this document was produced by a BROKEN TRANSFORMER
 >
@@ -154,7 +154,7 @@
 > 2026-08-25. It was never written up, and its video and audio files are gone;
 > only single mid-frames survive, outside this repo. It cannot be
 > reconstructed (corrected 2026-11-16). **§10** now holds what has been
-> verified since, and the place for the post-deploy Space run. Every section
+> verified since: on the Space after deploy 1 (§10.1) and on a Mac (§10.2). Every section
 > below stays exactly as measured.
 
 ---
@@ -820,13 +820,13 @@ upload, download and client overhead, none of which is GPU time.
 | 4 | ⏸️ **Reproducibility is evidenced, not proven** (§5). No two-run frame-hash comparison exists. Cheap to close. **→ Sharpened (2026-08-25): §5's "byte-identical" headline itself overstated the evidence — the cross-day match was size + decoded statistics, no day-1 hash was ever recorded, and the day-1 file is gone. The close is now a same-seed re-run sha256-compared against the surviving 2026-08-22 artifact (`b78803cc…`), planned 2026-08-25 — it settles byte-level reproducibility across the sampled containers.** **→ CLOSED later the same day: sha256-verified byte identity across three containers and three code shas for `text_to_video`, plus condition-pipeline (`ef8571e6…`) and LoRA-path (`20a3a84b…`) determinism — `SPACE_SESSION_2026-08-25.md` §3.** | ✅ closed (2026-08-25) |
 | 5 | ⚠️ **`audio_to_video` and `image_text_to_audio_video` are near-static** (§6). May be expected at this geometry; nothing establishes it either way. **→ EXPLAINED (2026-08-25) by the conditioning discriminator: output motion statistics mirror the conditioning input's (a near-static clip at 0.905 produced 0.864 where the active clip produced 17.277), so a near-static output from gentle conditioning is the conditioning *working*, not a defect — `SPACE_SESSION_2026-08-25.md` §7. Motion mirroring is not semantic fidelity; that limit is stated there.** **→ ⛔ THE EXPLANATION IS WITHDRAWN (2026-08-25, later): both the 0.905 input and the 0.864 output were colour static from the broken int8 build. Those mean |Δ| figures are the motion energy of noise, so nothing was explained. Back to what it was — an unexplained observation, now to be re-measured against `e3b5333`.** | ⏸️ REOPENED (2026-08-25) |
 | 6 | ⛔ **`audio.validate_audio_latents_against_video` has ZERO callers.** Found by inspection, not by this matrix. It is exported, documented as *"the check that stops a desynced file being emitted rather than refused"*, and nothing calls it — so supplied `audio_latents` set the audio length while `num_frames` sets the video length, with nothing comparing them. Both audio-input modes passed here **only because their fixture came from a same-geometry run**, which is a property of the runner's chaining and not a defect anyone would notice. **→ WIRED at `59cfa6e` (2026-08-25): `generate._prepared_audio`'s supplied-latents branch now calls it, a mismatch raises with both lengths named, `auto_duration` skips, and could-not-check shapes surface as warnings.** | ✅ wired `59cfa6e` |
-| 7 | ⏸️ **Only one configuration has been exercised** — 256×256×9, stage 2 off, no LoRA, no `auto_duration`. Nothing here says what any mode does at a shippable resolution, and stage 2 has never run on the Space at all. **→ SUPERSEDED (2026-08-25): 704×480×49 and 1216×704×121 (via the tiled decode, `cdb3211`) both pass; stage 2 ran for the first time — PASS at 704×480×25 input (1408×960 out), FAIL at ×49 in the diffusion decoder, so its ceiling is between those; LoRA exercised in both directions with a passing inertness check. Still never exercised on the platform: `auto_duration`. `SPACE_SESSION_2026-08-25.md`.** **→ ⛔ Corrected 2026-11-16: the ×49 failure was the `large` partition, and ×49 passes on `xlarge` (§1 of [`MIG_ALLOCATOR_SIGHTINGS.md`](MIG_ALLOCATOR_SIGHTINGS.md)); the inertness check compared two broken renders and is withdrawn (the block at the top). `auto_duration` has since run on real weights locally (§10.2); on the platform it never has.** | ✅ superseded · ⏸️ auto_duration open on the Space |
-| 8 | ⏸️ **No mode has been shown to FOLLOW its conditioning input.** Every check in this document is a property of the output alone — motion, level, distinctness. `video_to_video` returning mean \|Δ\| 17.277 from an 18.894 input is equally consistent with faithful conditioning and with ignoring the clip entirely (§2.1). Settling it needs a comparison the runner does not currently make: same seed, two different conditioning clips, and a difference in the output. **→ THE NAMED COMPARISON WAS MADE (2026-08-25): same seed, same prompt, two clips — outputs 17.277 vs 0.864, mirroring their inputs (18.894 vs 0.905), against a control pair whose noise floor is exactly zero (byte-identical). Conditioning drives the output; the prompt-only null hypothesis is dead. Resolved for motion-following; *semantic* fidelity — content, not motion energy — remains ⏸️ untested. `SPACE_SESSION_2026-08-25.md` §7.** **→ ⛔ THE RESOLUTION IS WITHDRAWN (2026-08-25, later). R7a and R7b both ran on the broken int8 build; the comparison was between two garbage renders. It shows the conditioning *path* carries a number across the fork — a mechanical result, and it stands — and it does not show that any mode follows its conditioning input. This item returns to ⏸️ open, exactly as originally written, and the clip-swap is the right experiment to re-run against `e3b5333`.** **→ Locally, on real weights (2026-11-16, §10.2): the image modes start on the supplied image (frame-0 SSIM 0.74–0.87 against it), and video to sound follows what is visible in the clip. On the Space: not re-run.** | ⏸️ open on the Space · ✅ locally (§10.2) |
-| 9 | ⚠️ **`video_to_audio` is 8–12 dB quieter than every other audio mode** (§6.1) — −19.5 dBFS against −7.6 to −11.1. Passes the level checks, is nowhere near the −40 dBFS flag, and is the only audio mode conditioned on video. Recorded because H9 was a level anomaly that passed every structural check. **→ Annotation (2026-08-25): now CONSISTENT-WITH the conditioning finding — outputs mirror their conditioning input (`SPACE_SESSION_2026-08-25.md` §7), and a gentle scene plausibly yields quiet audio. Consistent-with is not established-by: nothing has probed audio conditioning directly, so this stays what it is — an observation.** **→ ⛔ The consistent-with reasoning is withdrawn (2026-08-25, later): it derived entirely from §7, which is itself withdrawn above. −19.5 dBFS was the level of audio generated by a broken transformer. Unexplained again, and cheap to re-measure.** **→ Locally, on real weights (2026-11-16, §10.2): video to sound follows what is visible; an eventless clip gives a quiet, eventless track. Not re-measured on the Space.** | ⏸️ open on the Space · ✅ locally (§10.2) |
+| 7 | ⏸️ **Only one configuration has been exercised** — 256×256×9, stage 2 off, no LoRA, no `auto_duration`. Nothing here says what any mode does at a shippable resolution, and stage 2 has never run on the Space at all. **→ SUPERSEDED (2026-08-25): 704×480×49 and 1216×704×121 (via the tiled decode, `cdb3211`) both pass; stage 2 ran for the first time — PASS at 704×480×25 input (1408×960 out), FAIL at ×49 in the diffusion decoder, so its ceiling is between those; LoRA exercised in both directions with a passing inertness check. Still never exercised on the platform: `auto_duration`. `SPACE_SESSION_2026-08-25.md`.** **→ ⛔ Corrected 2026-11-16: the ×49 failure was the `large` partition, and ×49 passes on `xlarge` (§1 of [`MIG_ALLOCATOR_SIGHTINGS.md`](MIG_ALLOCATOR_SIGHTINGS.md)); the inertness check compared two broken renders and is withdrawn (the block at the top). `auto_duration` has since run on real weights locally (§10.2); on the platform it never has.** **→ On the Space after deploy 1 (2026-11-16): the model picked the length at 512×960 with 5–10 s allowed (§10.1, row 9).** | ✅ superseded · ✅ auto_duration on the Space (§10.1) |
+| 8 | ⏸️ **No mode has been shown to FOLLOW its conditioning input.** Every check in this document is a property of the output alone — motion, level, distinctness. `video_to_video` returning mean \|Δ\| 17.277 from an 18.894 input is equally consistent with faithful conditioning and with ignoring the clip entirely (§2.1). Settling it needs a comparison the runner does not currently make: same seed, two different conditioning clips, and a difference in the output. **→ THE NAMED COMPARISON WAS MADE (2026-08-25): same seed, same prompt, two clips — outputs 17.277 vs 0.864, mirroring their inputs (18.894 vs 0.905), against a control pair whose noise floor is exactly zero (byte-identical). Conditioning drives the output; the prompt-only null hypothesis is dead. Resolved for motion-following; *semantic* fidelity — content, not motion energy — remains ⏸️ untested. `SPACE_SESSION_2026-08-25.md` §7.** **→ ⛔ THE RESOLUTION IS WITHDRAWN (2026-08-25, later). R7a and R7b both ran on the broken int8 build; the comparison was between two garbage renders. It shows the conditioning *path* carries a number across the fork — a mechanical result, and it stands — and it does not show that any mode follows its conditioning input. This item returns to ⏸️ open, exactly as originally written, and the clip-swap is the right experiment to re-run against `e3b5333`.** **→ Locally, on real weights (2026-11-16, §10.2): the image modes start on the supplied image (frame-0 SSIM 0.74–0.87 against it), and video to sound follows what is visible in the clip. On the Space: not re-run.** **→ On the Space after deploy 1 (2026-11-16, §10.1): the image modes start on the supplied image (frame-0 SSIM 0.741–0.872 against it), and audio to video's sound is the supplied recording (correlation 0.982–0.990).** | ✅ on the Space (§10.1) · ✅ locally (§10.2) |
+| 9 | ⚠️ **`video_to_audio` is 8–12 dB quieter than every other audio mode** (§6.1) — −19.5 dBFS against −7.6 to −11.1. Passes the level checks, is nowhere near the −40 dBFS flag, and is the only audio mode conditioned on video. Recorded because H9 was a level anomaly that passed every structural check. **→ Annotation (2026-08-25): now CONSISTENT-WITH the conditioning finding — outputs mirror their conditioning input (`SPACE_SESSION_2026-08-25.md` §7), and a gentle scene plausibly yields quiet audio. Consistent-with is not established-by: nothing has probed audio conditioning directly, so this stays what it is — an observation.** **→ ⛔ The consistent-with reasoning is withdrawn (2026-08-25, later): it derived entirely from §7, which is itself withdrawn above. −19.5 dBFS was the level of audio generated by a broken transformer. Unexplained again, and cheap to re-measure.** **→ Locally, on real weights (2026-11-16, §10.2): video to sound follows what is visible; an eventless clip gives a quiet, eventless track. Not re-measured on the Space.** **→ Re-measured on the Space after deploy 1 (2026-11-16, §10.1): on the tram clip, −44.2 dBFS at seed 7 and −35.9 dBFS at seed 19.** | ✅ re-measured on the Space (§10.1) · ✅ locally (§10.2) |
 | 10 | ⚠️ **The quota ledger's history begins mid-day** (§7). It reports 67.252 GPU-s for a day whose real bound is ~413, because it was installed after the matrix ran. The figure is accurate for what it observed and misleading if quoted as a daily total; nothing in its output says where its history starts. | ⏸️ open |
 | 11 | ⛔ **RECALIBRATE THE STRUCTURE DETECTOR AGAINST POST-FIX ARTIFACTS** (2026-08-25). `e54477c`'s SR/HF thresholds were fitted to a "real" population of eight banked artifacts that were all colour static, and one flat-grey failure. It therefore separates *flat* from *everything else* and does not separate static from picture: SR 0.9183 (static) against 0.9961–0.9968 (the post-fix photograph), with the 0.70 gate below both. The photograph's HF (0.075–0.133) sits **outside** the band the table calls real (0.147–0.386). The detector's conclusion is unaffected — it never promotes — but its numbers now describe the wrong two populations. **→ Recalibrated on 2026-11-16 (`752b18e`) on a labelled set of real frames from the local runs, with three named conditions (flat, veiled, static), still demote-only. On five correct outputs it had not seen it gave no note, and it flagged the pre-fix veiled audio-to-video output as "veiled".** | ✅ recalibrated (local evidence) |
-| 12 | ⏸️ **The post-fix eleven-mode matrix** — every mode re-run against `e3b5333` at a shippable config, with a frame from each looked at. §10 is where it goes. Until it lands, the only output this project has ever verified as an image is the single post-fix comparison frame. **→ ⛔ Corrected 2026-11-16: it ran on 2026-08-25 but was never written up and its files are gone. §10.2 records the local real-weights matrix of 2026-11-16; the Space matrix is to be run after the next deploy (§10.1).** | ⏸️ on the Space · ✅ locally, 11 of 11 (§10.2) |
-| 13 | ⏸️ **The NVML allocator assert has now been seen THREE times, and the record held them apart** (2026-08-27). R3's VAE decode and R4b's diffusion decoder (both 2026-08-25, `SPACE_SESSION_2026-08-25.md` §4/§5) and the first enhanced generation in a fresh worker (2026-08-27) all died on `NVML_SUCCESS == r INTERNAL ASSERT FAILED at CUDACachingAllocator.cpp:1165`. Collected side by side in [`MIG_ALLOCATOR_SIGHTINGS.md`](MIG_ALLOCATOR_SIGHTINGS.md) with the shared shape stated as a **hypothesis, explicitly not established** — this partition may mishandle a large allocation that follows another large allocation. **Deliberately not being chased**: sighting 3's premise disappears if the enhancer is made resident, and every question is blocked on a headroom number nobody has. `0a4ddbb` now reports peak VRAM (allocated / reserved / total, split by phase) on every generation, so one flagship run settles whether there was room. **→ ✅ IT DID, AND THE ANSWER WAS THE PARTITION (2026-08-27). The first run to print `total_memory` read 47.375 GiB — ZeroGPU's `large` — where the whole build assumed `xlarge`'s 94.971 GiB. `LTX25_ZEROGPU_SIZE=auto` sends no `gpuSize` at all, and the packer's own promotion never leaves `get_duration_seconds`. R4b is RETIRED by measurement: re-run on `xlarge` it PASSES at 53.08 s with peak 55.906 GiB reserved — 8.5 GiB more than the entire old partition, so it was arithmetically impossible and always would have been. ⏸️ The other two sightings are NOT retired: R3's untiled path is consistent-but-permanently-untestable (tiling is unconditional since `cdb3211`, and a tiling-off toggle was refused), and the enhancer sighting is pending the residency change. The single-cause account is SUPPORTED, NOT PROVEN.** **→ (2026-11-16) The residency change is `52a0f56`, deployed on 2026-08-26; no enhanced run has been recorded on the Space since, so sighting 3 is still pending.** | ✅ root cause found · ⏸️ 2 of 3 sightings unretired |
+| 12 | ⏸️ **The post-fix eleven-mode matrix** — every mode re-run against `e3b5333` at a shippable config, with a frame from each looked at. §10 is where it goes. Until it lands, the only output this project has ever verified as an image is the single post-fix comparison frame. **→ ⛔ Corrected 2026-11-16: it ran on 2026-08-25 but was never written up and its files are gone. §10.2 records the local real-weights matrix of 2026-11-16; the Space matrix is to be run after the next deploy (§10.1).** **→ Run on deploy 1 (2026-11-16): 24 calls, all eleven modes, every output looked at (§10.1).** | ✅ on the Space, 11 of 11 (§10.1) · ✅ locally, 11 of 11 (§10.2) |
+| 13 | ⏸️ **The NVML allocator assert has now been seen THREE times, and the record held them apart** (2026-08-27). R3's VAE decode and R4b's diffusion decoder (both 2026-08-25, `SPACE_SESSION_2026-08-25.md` §4/§5) and the first enhanced generation in a fresh worker (2026-08-27) all died on `NVML_SUCCESS == r INTERNAL ASSERT FAILED at CUDACachingAllocator.cpp:1165`. Collected side by side in [`MIG_ALLOCATOR_SIGHTINGS.md`](MIG_ALLOCATOR_SIGHTINGS.md) with the shared shape stated as a **hypothesis, explicitly not established** — this partition may mishandle a large allocation that follows another large allocation. **Deliberately not being chased**: sighting 3's premise disappears if the enhancer is made resident, and every question is blocked on a headroom number nobody has. `0a4ddbb` now reports peak VRAM (allocated / reserved / total, split by phase) on every generation, so one flagship run settles whether there was room. **→ ✅ IT DID, AND THE ANSWER WAS THE PARTITION (2026-08-27). The first run to print `total_memory` read 47.375 GiB — ZeroGPU's `large` — where the whole build assumed `xlarge`'s 94.971 GiB. `LTX25_ZEROGPU_SIZE=auto` sends no `gpuSize` at all, and the packer's own promotion never leaves `get_duration_seconds`. R4b is RETIRED by measurement: re-run on `xlarge` it PASSES at 53.08 s with peak 55.906 GiB reserved — 8.5 GiB more than the entire old partition, so it was arithmetically impossible and always would have been. ⏸️ The other two sightings are NOT retired: R3's untiled path is consistent-but-permanently-untestable (tiling is unconditional since `cdb3211`, and a tiling-off toggle was refused), and the enhancer sighting is pending the residency change. The single-cause account is SUPPORTED, NOT PROVEN.** **→ (2026-11-16) The residency change is `52a0f56`, deployed on 2026-08-26; no enhanced run has been recorded on the Space since, so sighting 3 is still pending.** **→ (2026-11-16, deploy 1) An enhanced run on the Space loaded the enhancer and finished, peak 61.426 GiB reserved of 94.971 GiB (§10.1, row 10).** | ✅ root cause found · ⏸️ 2 of 3 sightings unretired |
 
 ### ⛔ Item 6 was the THIRD instance of one defect class. There are now FOUR, and the fourth cost half a GPU
 
@@ -928,32 +928,148 @@ says it is the last one, and three of these four were invisible to a green gate.
 
 ## 10. Verification after the 2026-11-16 fixes
 
-Nothing in §1–§9 describes the current code. This section does: 10.1 is the Space, 10.2 is
-what has been verified on real weights so far, on a Mac.
+Nothing in §1–§9 describes the code after the 2026-11-16 fixes. This section does: 10.1 is the
+Space, running deploy 1, and 10.2 is what has been verified on real weights on a Mac.
 
-### 10.1 On the Space — to be written from the post-deploy Space run
+### 10.1 On the Space, deploy 1 (2026-11-16)
 
-> ⏸️ **Not run yet.** The Space still runs the 2026-08-26 build (sha `f809472`, the tree of
-> `445abcb`) and has generated nothing since; none of the 2026-11-16 fixes is deployed. This
-> section is to be written from the post-deploy Space run. The August post-fix matrix
-> (`e3b5333`, 512×960×121) cannot stand in for it: it was never written up and its files are
-> gone.
->
-> Only the Space can show the parts that need CUDA, and none of them has been verified since
-> the fixes: Upscale ×2 (stage 2), the diffusion decoder (the default decode where it can run,
-> `LTX25_DECODER=auto`), bitsandbytes int8, and ZeroGPU's progress, quota and timeout
-> behaviour.
->
-> What each row must carry, per the standing operator ruling (statistical checks are a
-> pre-filter, never a verdict):
->
-> 1. The config, stated as §1 states its own, and large enough to look at. 256×256×9 does not
->    qualify.
-> 2. Per mode: wall, cost bound, artifact bytes, stream layout.
-> 3. A frame per mode at native resolution and the record of a person or model having looked
->    at it; for sound, the level and a listening record. No row passes without them.
-> 4. The picture check as a demotion signal only.
-> 5. What it cost, against the daily GPU budget.
+Recorded by the lead in the run log of the 2026-11-16 fix (the entries of 21:32, 21:41 and
+21:57).
+Each call's files are kept under its label in that run's evidence directory, outside this repo:
+`evidence/space/matrix/<label>/` holds what was sent (`request.json`), what came back
+(`result.json` with the page's own report, and the files), the client's measurements
+(`verify.json`, `timing.json`, the progress events in `events.jsonl`) and the lead's
+inspection (`inspect/`: six frames at native resolution, a frame sheet, a spectrogram and
+`report.json`); `evidence/space/deploy1/` holds the build log, the Space's start-up and run
+logs, the endpoint check (`info.txt`) and the timings (`timings.md`). Every figure below is in
+those files, under the label its row names.
+
+**What ran.**
+
+| | |
+|---|---|
+| Space | `techfreakworm/LTX2.5-Studio` on ZeroGPU; private during these calls, public since |
+| Code | Space commit `0cd54f2`, whose tree is `1e9fd20` on `fix/studio-2026-11`: deploy 1 ([`RELEASE_NOTES.md`](RELEASE_NOTES.md)) |
+| Packages | as pinned (the build log): transformers 5.23.0, tokenizers 0.23.3, bitsandbytes 0.50.2, kernels 0.16.2, accelerate 1.15.0, peft 0.20.0, huggingface_hub 1.33.0, safetensors 0.8.0, numpy 2.5.5, gradio 6.24.0, diffusers 0.40.0.dev0 at the pinned commit; the platform's `spaces` 0.51.3 |
+| Cold start | 17 min 24 s (15:44:26 → 16:01:50 UTC), 14 min 55 s of it fetching 37 files, 72.19 GB, at the model's revision `871165de` and the decoder's `aba1b702` |
+| Start-up report | "precision: int8 for transformer, text_encoder (bitsandbytes LLM.int8; the transformer keeps its conditioning, projection and gate Linears bf16 via 13 skip patterns); bf16 for every other component"; "spaces: 0.51.3"; "packed copy: not measured yet, ZeroGPU writes it at launch after this report"; "quantised transformer, text_encoder as int8 \| peak RSS 0.79 -> 85.67 GiB" |
+| GPU | `xlarge`, requested by the app; every run's report reads 94.971 GiB total |
+| Endpoint | all 19 inputs of `/on_generate` match the deployed commit's field spec |
+| Client | `scripts/space_matrix.py` from a clean export of `1e9fd20`; 24 calls, one at a time, 16:02–16:27 UTC |
+| Files | H.264 video at 24 fps, with AAC 48 kHz stereo sound in the modes that have sound; every mode that returns sound also returns it as a 48 kHz stereo `.wav` |
+
+**The inputs.** The tram prompt: "A red vintage tram climbs a steep cobbled street at golden
+hour, slow push-in. The tram bell rings twice and steel wheels grind on the rails." The captain
+prompt: 'A weathered sea captain in a yellow raincoat stands on the deck of a ship in a storm
+and shouts: "The storm is coming! All hands on deck!" Thunder rolls and waves crash against the
+hull.' The close-up prompt: "Close-up of a weathered sea captain shouting on the deck of a ship
+in a storm, rain on his face." Files prepared for the test: a tram picture and a cabin picture
+(`tram_landscape.png`, `cabin_landscape.png`), the captain's portrait (`captain_portrait.png`),
+a cabin clip and a tram clip (704×480, 121 frames), an ocean recording (5.0 s), the captain's
+recorded line (4.83 s, 48 kHz stereo) and the operator's own recording (8.16 s, 24 kHz mono).
+
+**Per call.** Seed 7, the Decoder at Auto, no adapter, no Upscale and no Enhance unless the row
+says otherwise; the four sound-only calls render at 256×256, as the app does in every mode that
+returns only sound. The window runs from the worker's start to its end (`timing.json`); GPU-s
+is that window × 2, the `xlarge` multiplier: an upper bound, not billed seconds.
+
+| # | label | sent | back | seen and measured | window · GPU-s ≤ |
+|---|---|---|---|---|---|
+| 1 | `m01_text_to_video` | Text to video, the tram prompt, 704×480, 121 frames | 704×480, 121 frames, silent, 1,104,842 B; "the frames were decoded by the model's diffusion decoder"; peak 53.090 GiB reserved | a tram on a cobbled street, sharp | 32.3 s · 64.6 |
+| 2 | `m04_video_to_video` | Video to video, the cabin clip, "The same cabin in heavy snowfall at dusk, warm light glowing in the windows.", A lot | 704×480, 121 frames, 1,147,376 B; "Length set from your clip: 5.0 s." "Your clip was changed a lot." | the clip varied: SSIM 0.433 to it | 17.0 s · 34.0 |
+| 3 | `m05_text_to_audio_video` | Text to video with sound, the captain prompt, 704×480, 121 frames | the mp4 with picture and sound, 1,135,358 B, and the `.wav`, 961,998 B | transcript exact ("The storm is coming! All hands on deck!"); −19.0 dBFS | 24.0 s · 47.9 |
+| 4 | `m10_audio_to_audio` | Audio to audio, the ocean recording, "Heavy rain on a tin roof with distant rolling thunder.", Moderately | a `.wav`, 4.73 s, 908,238 B; "Your audio was trimmed from 5.00 s to 4.72 s to match the video." "Your audio was changed moderately." | +1.4 dB against the input (locally +1.5 dB, §10.2 row 10) | 22.2 s · 44.5 |
+| 5 | `m11_audio_to_video_first_frame` | Audio to video, the captain's line, his portrait as the first frame, the close-up prompt, 480×704, length from the audio | 480×704, 113 frames, 1,047,762 B, and the `.wav`; "Length set from your audio: 4.7 s." "The sound in this file is your audio, unchanged." | in colour; frame 0 against the portrait SSIM 0.872 (locally 0.871, `M11h`); the sound against the recording: correlation 0.990, level +0.06 dB | 24.7 s · 49.3 |
+| 6 | `x2_m05_text_to_audio_video` | row 3 at 49 frames with **Upscale ×2** | 1408×960, 49 frames, 1,492,822 B, and the `.wav`, 385,998 B; the progress read "sampling — pass 1 of 2", "upscaling ×2", "sampling — pass 2 of 2", "decoding the frames"; peak 55.912 GiB reserved | stage 2 works: added detail at native size (railings, rust, chain), not washed out; transcript "The storm is coming all hands on deck"; the sound reaches 0 dBFS, 30 samples clipped | 33.4 s · 66.7 (reserved 270 s) |
+| 7 | `dec_m01_fast` | row 1 with the standard (conv) decoder, the page's "Fast" at deploy 1 | 704×480, 121 frames, 1,686,458 B; "the frames were decoded by the standard (convolutional) decoder, as chosen"; peak 42.711 GiB reserved | the same scene as row 1, SSIM 0.876 to it (the decoder A/B below) | 19.6 s · 39.2 |
+| 8 | `x1_m05_49f_single_pass` | row 3 at 49 frames without Upscale: row 6's twin | 704×480, 49 frames, 524,955 B, and the `.wav`, 385,998 B | transcript exact; the sound reaches 0 dBFS, 78 samples clipped: as loud as row 6's, so Upscale is not what makes it loud | 37.4 s · 74.8 |
+| 9 | `len_m05_512x960_model_picks` | row 3 at 512×960 with "Let the model pick the length", 5–10 s | "The model chose the length: 5.0 s."; 512×960, 121 frames, 2,202,425 B, and the `.wav`; the Space's log (`run_log_after_11_calls.log`): "Duration prediction clamped: raw 4.47s outside [5.00s, 10.00s], using 5.04s (121 frames) @ 24.00 fps" | transcript exact | 28.2 s · 56.3 |
+| 10 | `enh_m05_text_to_audio_video` | Text to video with sound with **Enhance my prompt**: "A sea captain shouts a warning on a ship's deck as a storm hits." | 704×480, 121 frames, 1,582,284 B, and the `.wav`; the progress began "enhancing the prompt"; the Space's log (`run_log_after_11_calls.log`) has transformers' MISMATCH line for one of the enhancer's weights, then "restored model.language_model.embed_tokens_per_layer.embedding_scale [262144, 35] from model.safetensors" and "prompt enhanced: 64 chars in, 1030 chars out"; peak 61.426 GiB reserved | a storm-at-sea sequence ending on a captain shouting; transcript "Hold hold fast ye dogs!" | 51.6 s · 103.3 (reserved 360 s) |
+| 11 | `op_m11_operator_audio` | Audio to video, the operator's recording, the close-up prompt, 512×960, length from the audio | 512×960, 193 frames (8.04 s), 2,559,888 B, and the `.wav`; "Your audio was converted from mono at 24 kHz to stereo at 48 kHz to match the video's soundtrack. Its pitch and length are unchanged." "Your audio was trimmed from 8.16 s to 8.04 s to match the video."; peak 63.301 GiB reserved | the sound is the recording: correlation 0.988 (the +3.0 dB the inspector prints compares the mono file with the stereo one) | 36.5 s · 73.0 |
+| 12 | `lora_m01_bts_w100` | Text to video with the adapter `SOLRICKS/LTX-2.5-BTS-Movie-Set` from the Hub at 1.0, "btssetstyle, a film crew sets up lights around a red vintage tram on a cobbled street at golden hour.", a random seed | Validate on the Space: "Every check before a run passed: the file reads cleanly and every layer fits its target in LTX-2.5.", "Fits LTX-2.5: 1632 of 1632 layers", rank 16; the run: seed 2690990278, 704×480, 121 frames, 1,449,691 B | a film crew with camera rigs around the tram | 36.4 s · 72.9 (reserved 240 s) |
+| 13 | `m02_image_to_video` | Image to video, the tram picture, no prompt | 704×480, 121 frames, 1,908,309 B | frame 0 against the picture SSIM 0.742 (locally 0.75, §10.2) | 21.9 s · 43.7 |
+| 14 | `m03_image_text_to_video` | Image + text to video, the tram picture and the tram prompt | 704×480, 121 frames, 1,759,736 B | frame 0 SSIM 0.741 (locally 0.74) | 17.8 s · 35.7 |
+| 15 | `m06_image_to_audio_video` | Image to video with sound, the cabin picture, no prompt | 704×480, 121 frames, 1,176,212 B, and the `.wav` | frame 0 SSIM 0.850 (locally 0.85); −24.3 dBFS | 23.7 s · 47.5 |
+| 16 | `m07_image_text_to_audio_video` | Image + text to video with sound, the tram picture and the tram prompt (a bell and wheels; no speech) | 704×480, 121 frames, 1,842,167 B, and the `.wav` | frame 0 SSIM 0.741; no speech asked for and none made; a quiet metallic sound, −35.4 dBFS with peaks at −15.5 | 28.2 s · 56.5 |
+| 17 | `m08_text_to_audio` | Text to audio, 'A calm male voice says: "Welcome aboard. Mind the gap between the train and the platform." A two-tone door chime follows.' | a `.wav`, 5.01 s, 961,998 B | the announcement, with two words of the instruction read aloud: "voice says welcome aboard mind the gap between the train and the platform"; −23.4 dBFS | 13.5 s · 27.0 |
+| 18 | `m09_video_to_audio` | Video to audio, the tram clip, "A tram bell, steel wheels on rails, city street ambience." | a `.wav`, 5.01 s, 961,998 B | −44.2 dBFS, peaks at −31.5 | 22.4 s · 44.8 |
+| 19 | `m11_audio_to_video` | Audio to video, the captain's line, the close-up prompt, 704×480, no picture | 704×480, 113 frames, 1,108,958 B, and the `.wav` | a **black-and-white** period-film picture of the captain (saturation 0.012); the sound is the recording (correlation 0.990, +0.06 dB) | 23.1 s · 46.2 |
+| 20 | `x2_m11_audio_to_video` | row 19 at 49 frames with **Upscale ×2** | 1408×960, 49 frames, 1,603,601 B, and the `.wav`; "Your audio was trimmed from 4.83 s to 2.04 s to match the video."; peak 56.537 GiB reserved | in colour, a ship at night in rain, coherent: stage 2 runs in a mode it used to fail in; the sound against the recording: correlation 0.982 | 29.4 s · 58.8 (reserved 270 s) |
+| 21 | `m11_audio_to_video_seed21` | row 19 at seed 21, the seed of the local run `M11g_a2v_same_prompt` | 704×480, 113 frames, 920,176 B, and the `.wav` | in colour (saturation 0.402; `M11g` 0.29, §10.2): a ship at sea | 21.7 s · 43.4 |
+| 22 | `m09_video_to_audio_seed19` | row 18 at seed 19 | a `.wav`, 5.01 s, 961,998 B | −35.9 dBFS, peaks at −23.8 | 10.5 s · 21.1 |
+| 23 | `m05_text_to_audio_video_seed12` | row 3 at seed 12, the seed of the local final pass's `F05_t2av` | 704×480, 121 frames, 1,039,616 B, and the `.wav` | transcript exact; −15.2 dBFS | 22.9 s · 45.9 |
+| 24 | `lora_twin_no_adapter` | row 12 without the adapter, at row 12's seed | 704×480, 121 frames, 1,212,419 B | a different picture: SSIM 0.322 to row 12 (the adapter A/B below) | 22.2 s · 44.3 |
+
+**What it cost:** at most 1241.3 GPU-s for UTC 2026-11-16, against the run's ceiling of 1920
+(80 % of the PRO quota's 2400). No quota refusal, no queue timeout, no failed run. Every
+window was 10.5–51.6 s, against reservations of 180–360 s: a plain run at 704×480 with 121
+frames reserved 180 s, so it needed 360 s of quota free to start, and drew at most 34.0–64.6
+GPU-s.
+
+**How the outputs were judged.** The lead looked at every video's six frames at native
+resolution and its frame sheet, and measured every sound track: its level (the RMS of the
+`.wav`), a spectrogram and, where there is speech, a transcript. The app's picture check (in
+`verify.json`) raised no condition on any of the 20 videos: it demotes and never promotes, and a
+black-and-white picture (row 19) is not one of its conditions. At the time the client called
+the 13 runs that return video with sound a MISMATCH (`result.json`, `outcome`), because it
+expected a picture stream in the `.wav` the app returns beside the mp4. That was the client's
+defect, not the app's, fixed at `a40a311` (its replay of row 3's files passes); the lead
+judged those files with his own tools.
+
+**What these calls settle**, the parts only a GPU can show:
+
+- transformers 5.23.0 and bitsandbytes 0.50.2 load the int8 transformer and text encoder, and
+  the start-up report says int8;
+- on CUDA the default decode is the diffusion decoder, at its own revision (the Space's log:
+  "diffusion_decoder: ignored the expected extra key(s) decoder.type_emb"), and its pictures
+  are correct; the report of every run that returns video names the decoder that ran;
+- Upscale ×2 runs in text to video with sound and in audio to video (rows 6 and 20): in row 6
+  it adds detail rather than washing the picture out, and row 20 is a coherent picture in
+  colour;
+- progress crosses the ZeroGPU fork under `spaces` 0.51.3, in the app's own words, and every
+  run is granted and measures the whole `xlarge` GPU;
+- the prompt enhancer loads and rewrites on CUDA under transformers 5.23.0 (row 10);
+- the model picks the length at 512×960 (row 9);
+- an adapter from the Hub passes Validate on the Space and changes the picture (rows 12, 24);
+- the image modes start on the supplied image as they do on the Mac (rows 5, 13–15), and audio
+  to video's sound is the recording (rows 5, 11, 19, 20).
+
+**Decoder A/B** (rows 1 and 7: the same seed, prompt and size; `ab_decoder/`: `full_0072.png`,
+`crop3x_0072.png`, `measure.txt`). The same scene (SSIM 0.876). The diffusion decoder is a little
+softer and steadier from frame to frame; the standard decoder is sharper frame by frame and
+shimmers more. Both pictures are correct.
+
+| | diffusion decoder (row 1) | standard decoder (row 7) |
+|---|---|---|
+| fine detail (std) | 10.30 | 11.65 |
+| Laplacian variance | 421.6 | 591.6 |
+| frame-to-frame change of the fine detail (shimmer) | 1.471 | 1.883 (28 % more) |
+| from the last sampling step to "writing the file" (`events.jsonl`) | 4.4 s | 1.9 s |
+
+**Adapter A/B** (rows 12 and 24: the same prompt and seed). With the adapter, a film crew with
+camera rigs around the tram; without it, a street scene (SSIM 0.322; frame 72 of both side by
+side: `ab_adapter_frame72.png`).
+
+**Audio to video and colour** (rows 19, 21, 5). The same recording and prompt gave a
+black-and-white period-film picture at seed 7 (saturation 0.012) and a colour picture at seed 21
+(0.402); with a first-frame picture it came out in colour. On the Mac, before the
+audio-encoding fix, all three runs with no picture and no colours named in the prompt came out
+black and white (§10.2, row 11); now the look depends on the sample.
+
+**Open at deploy 1, found by these calls:**
+
+- the model's sound for a 2 s shouted line reaches full scale and is clipped when written: 30
+  and 78 samples at 0 dBFS in rows 6 and 8;
+- the Space's log is flooded by one bitsandbytes warning, one per int8 matmul ("MatMul8bitLt:
+  inputs will be cast from torch.bfloat16 to float16 during quantization"): 55,400 of the
+  55,534 lines of `run_log_after_11_calls.log`;
+- when the model's own length is outside the range and is moved to its edge, the note says
+  only "The model chose the length" (row 9);
+- the diffusion decoder is loaded again inside the runs ("Some weights of the model checkpoint
+  … were not used when initializing" appears in the run log at each load), not once at
+  start-up;
+- the endpoint returns the files, the notes and the diagnostics, but neither which adapter was
+  attached nor the time the run took.
 
 ### 10.2 Locally, on real weights (Apple silicon), 2026-11-16
 

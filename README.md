@@ -224,8 +224,10 @@ expected reading** — of three real public LTX LoRAs measured for this design, 
 because rejecting on absence would reject the most downloaded LTX adapter on the Hub.
 
 On real weights (locally, on a Mac) two public LTX-2.5 adapters visibly change the output
-when given their trigger words. An adapter that needs trigger words cannot show that effect in
-the two modes that take no prompt (image to video, image to video with sound).
+when given their trigger words. On the Space one of them, at 1.0 with its trigger word, passed
+Validate there and gave a different picture from the same prompt and seed without it. An
+adapter that needs trigger words cannot show that effect in the two modes that take no prompt
+(image to video, image to video with sound).
 
 ---
 
@@ -263,18 +265,20 @@ run in a fresh worker also pays about 29 s to load it. Point `LTX25_PROMPT_ENHAN
 
 Why it is placed that way, as measured: on the CPU the rewrite took about nine minutes; freed
 after every rewrite it cost +30.78 s a run (46.53 s against 15.75 s at 256×256×9); kept
-loaded on the full `xlarge` GPU, the largest peak measured so far (55.906 GiB) still leaves
-about 36 GiB spare.
+loaded on the full `xlarge` GPU, it fits: on the Space after the 2026-11-16 fixes an enhanced
+run peaked at 61.43 GiB reserved of 94.97 GiB, and the largest peak of that day's 24 runs,
+63.30 GiB, still left more than 31 GiB spare.
 
 The weights are fetched into the Hub cache at startup, in the background, so that the first
 enhanced run does not pay the ~88 s download inside its reservation
-(`LTX25_PREFETCH_ENHANCER=0` declines the ~2.5 GB). On the build the Space runs now, that fetch
-fails at startup (seen in the log of 2026-11-13, for a reason that applies to every boot), so
-the first enhanced run in each container pays the download too. The cause is fixed in the
-code; this is not verified on the Space yet. The pinned transformers
-(5.23.0) refuses one per-layer scale table of the enhancer's checkpoint, so the app reads that
-one weight back from the cached checkpoint and refuses any other mismatch. With that, both the
-text and the image route rewrite prompts on real weights (verified on a Mac, 2026-11-16).
+(`LTX25_PREFETCH_ENHANCER=0` declines the ~2.5 GB). On the Space's build of 2026-08-26 that
+fetch failed at startup (seen in the log of 2026-11-13, for a reason that applies to every
+boot); on the build deployed on 2026-11-16 it runs: the Space's log shows the 2.49 GB download
+under way in the background once the page is up. The pinned transformers (5.23.0) refuses one
+per-layer scale table of the enhancer's checkpoint, so the app reads that one weight back from
+the cached checkpoint and refuses any other mismatch. With that, both the text and the image
+route rewrite prompts on real weights on a Mac, and the text route does on the Space
+(2026-11-16).
 
 There is deliberately **no seed control** for it. LTX-2.5 enhancement decodes greedily, so
 `prompt_enhancement_seed` changes nothing — an advertised lever attached to nothing is a
@@ -450,8 +454,11 @@ reservation × 2 of quota free; it is then billed for the GPU time it actually u
 | with prompt enhancement | 360 s | 720 s |
 | Upscale ×2 + LoRA + enhancement | 510 s | 1020 s |
 
-How much GPU time a run uses after the 2026-11-16 fixes has not been measured on the Space
-yet, and neither has the longest reservation the platform accepts.
+What runs drew on the Space after the 2026-11-16 fixes (24 runs, all eleven modes, that day):
+each run's GPU window was 10.5–51.6 s, against reservations of 180–360 s. A plain run at
+704×480 with 121 frames reserved 180 s, needed 360 s of quota free to start, and drew at most
+34–65 GPU-s (its window × 2). The longest reservation the platform accepts has not been
+measured.
 
 Things worth knowing as a user:
 
@@ -473,7 +480,8 @@ stay in bf16: quantising them is what turned every Space output into colour stat
 **The decoder.** On CUDA the default, `LTX25_DECODER=auto`, decodes with the model's own
 diffusion decoder wherever it can run (its kernel available, the video large enough) and with
 the conv VAE otherwise, and the run says which. Before 2026-11-16 the diffusion decoder ran only
-with Upscale ×2. Not verified on the Space yet.
+with Upscale ×2. On the Space after the fixes, every run that returned video at the default was
+decoded by the diffusion decoder, and its report said so.
 
 ### Upscale ×2 (stage 2)
 
@@ -482,10 +490,13 @@ default**, because it is a real quota cost (× 1.5 on the reservation). It needs
 runs only on the Space. The three sound-only modes never run it, and the app says so for them.
 
 What is known: 704×480 with 49 frames passes on `xlarge` (55.906 GiB reserved, measured
-2026-08-26); the frames of that run were not looked at. The largest size that fits, and the
-picture quality, are not measured. Until 2026-11-16 it failed in the six modes that take an
-image, a clip or audio; it is now wired for all eight modes that offer it, which is verified
-on a tiny test checkpoint, not yet on real weights.
+2026-08-26; the frames of that run were not looked at). Until 2026-11-16 it failed in the six
+modes that take an image, a clip or audio; it is now wired for all eight modes that offer it,
+which is verified on a tiny test checkpoint. On the Space after the fixes (2026-11-16) it ran
+at 704×480 with 49 frames in text to video with sound and in audio to video, and returned
+1408×960: in the first with added detail at native size and not washed out, in the second a
+coherent picture in colour, at peaks of 55.91 and 56.54 GiB reserved. The largest size that
+fits is not measured.
 
 ---
 
@@ -509,7 +520,10 @@ idle monitor instead of a sample.
   resilience doctrine (including the exact pins), the architecture, and the ZeroGPU execution
   model. Decisions that later measurements overtook carry dated corrections.
 - [`docs/SPACE_MODE_MATRIX.md`](docs/SPACE_MODE_MATRIX.md) — what has been verified, and how:
-  §10 for the state after 2026-11-16; §1–§9 for the August runs on the Space.
+  §10 for the state after 2026-11-16 (§10.1 the Space, §10.2 a Mac); §1–§9 for the August runs
+  on the Space.
+- [`docs/RELEASE_NOTES.md`](docs/RELEASE_NOTES.md) — what each deploy to the Space contains,
+  what was verified on it, and what was open when it shipped.
 - The August 2026 records — [`docs/OPERATOR_HANDOFF.md`](docs/OPERATOR_HANDOFF.md),
   [`docs/TEST_PLAN.md`](docs/TEST_PLAN.md) (a quota-bounded GPU plan whose Space half was never
   run as designed), [`docs/SPACE_SESSION_2026-08-25.md`](docs/SPACE_SESSION_2026-08-25.md),
