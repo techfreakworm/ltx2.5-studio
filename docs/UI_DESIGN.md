@@ -186,7 +186,8 @@ exported, so joint modes never show one file twice. Its contents depend on the s
 
 Above the grid are cost lamps that light only when they are true; a request that would
 be refused lights none. The row is a named group ("Costs that apply") and an unlit lamp
-is hidden from assistive tech, so a lamp's state is not in colour alone. The figures come from these sources:
+is hidden from assistive tech, so a lamp's state is not in colour alone. The figures
+come from these sources:
 
 - **Reserves:** `zerogpu.estimate_duration` for the same request, with each extra
   named with its seconds.
@@ -303,8 +304,8 @@ Restore, or a change to a control its step names (Enhance for the enhancer card,
 Upscale, Enhance or LoRA for the quota card, size, length or Upscale for a timeout or
 memory card, any field for a refused input) turns it into one line, "Last run: Text to
 video, 08:05. The prompt enhancer is unavailable."; a card whose step is to press
-Generate again stays until the next run. Categories arrive as strings from `errors.categorise`; each
-has its own card (not enough quota, a run longer than the platform allows, no GPU free
+Generate again stays until the next run. Categories arrive as strings from
+`errors.categorise`; each has its own card (not enough quota, a run longer than the platform allows, no GPU free
 in time, out of GPU time, out of memory, an input problem, an adapter that does not
 fit, the enhancer unavailable, a bug), and a category the UI has never seen gets a
 generic one. A queue timeout reads as "No GPU was free in time", never as running out
