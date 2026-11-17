@@ -2560,6 +2560,8 @@ def generate(
                 # user gets a silent video with no on-screen explanation -- which is most
                 # of what the warning was for.
                 encoder_warnings: list[str] = []
+                # Facts for the collapsed block (a track turned down from over full scale).
+                encoder_facts: list[str] = []
                 encoder_kwargs = {
                     "run_dir": run_dir,
                     "mode": request.mode,
@@ -2567,6 +2569,7 @@ def generate(
                     "seed": seed,
                     "frame_rate": request.frame_rate,
                     "warnings": encoder_warnings,
+                    "diagnostics": encoder_facts,
                     "counterpart_label": modes.counterpart_label_for(request.mode),
                 }
                 if supplied_audio is not None:
@@ -2622,6 +2625,7 @@ def generate(
             # policy are diagnostics too.
             diagnostics = (
                 decoder_lines
+                + tuple(encoder_facts)
                 + tuple(artifact_lines)
                 + _sweep(root, retention_bytes)
                 + probe.notes()

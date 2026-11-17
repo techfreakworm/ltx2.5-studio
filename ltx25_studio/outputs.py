@@ -94,6 +94,7 @@ stops the predecessor's "newest video in the output dir" fallback growing back
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass
 from fractions import Fraction
 from pathlib import Path
@@ -113,6 +114,7 @@ __all__ = [
     "MIN_STRUCTURE_RATIO",
     "MUXED_AUDIO_CHANNELS",
     "MUXED_AUDIO_CODEC",
+    "OVER_FULL_SCALE_PEAK_DBFS",
     "PICTURE_CONDITIONS",
     "STATIC_MAX_CORRELATION",
     "STATIC_MIN_COLOURFULNESS",
@@ -180,6 +182,10 @@ AUDIO_ONLY_CODEC = "pcm_s16le"
 #: A supplied track is muxed with this many channels: the vocoder's layout, which is
 #: what every other run's soundtrack has and what ``tests/verify_streams.py`` expects.
 MUXED_AUDIO_CHANNELS = 2
+
+#: Where the peak of a model track that went over full scale is put, in dBFS: just
+#: under full scale, so the 16-bit wav never pins a sample (:func:`_under_full_scale`).
+OVER_FULL_SCALE_PEAK_DBFS = -0.1
 
 #: Plain downmix of more than two channels: front left/right at full level, every
 #: other channel at -3 dB, the LFE left out, each side then normalised so it cannot clip.
@@ -433,6 +439,36 @@ def _as_audio_planes(audio, *, target: Path):
     if array.dtype != np.float32:
         array = array.astype(np.float32)
     return np.ascontiguousarray(array)
+
+
+def _under_full_scale(planes):
+    """``(planes, reduction_db)``: the model's track, turned down whole if it went over full scale.
+
+    Within full scale (a peak of 1.0 or less) the same array comes back with
+    ``None``, so the track is written exactly as before. Over it, every sample
+    is multiplied by one factor that puts the peak at
+    :data:`OVER_FULL_SCALE_PEAK_DBFS`: nothing clips and every sample keeps its
+    ratio to every other. Only the model's own track comes here; a user's
+    recording is carried as it is.
+    """
+    import numpy as np
+
+    peak = float(np.max(np.abs(planes))) if planes.size else 0.0
+    if not (math.isfinite(peak) and peak > 1.0):
+        return planes, None
+    ceiling = 10.0 ** (OVER_FULL_SCALE_PEAK_DBFS / 20.0)
+    turned_down = np.ascontiguousarray(planes * np.float32(ceiling / peak), dtype=np.float32)
+    return turned_down, 20.0 * math.log10(peak / ceiling)
+
+
+def _turned_down_note(reduction_db: float) -> str:
+    """The diagnostics line for a track :func:`_under_full_scale` turned down."""
+    over_db = reduction_db + OVER_FULL_SCALE_PEAK_DBFS
+    return (
+        f"the sound peaked {over_db:.1f} dB over full scale, so the whole track was turned "
+        f"down {reduction_db:.1f} dB to peak at {OVER_FULL_SCALE_PEAK_DBFS:g} dBFS instead of "
+        f"clipping."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1024,8 +1060,10 @@ def _write_video(
 ):
     """Encode the frames, muxing the audio track only if the mode exports it.
 
-    Returns ``(notes, planes)``: any warnings the caller should surface, and the
-    exact float samples muxed (``None`` when no audio was muxed). Audio present
+    Returns ``(notes, planes, reduction_db)``: any warnings the caller should
+    surface, the exact float samples muxed (``None`` when no audio was muxed),
+    and how many dB the model's track was turned down because it went over full
+    scale (``None`` when it was not; see :func:`_under_full_scale`). Audio present
     with no sample rate raises rather than falling back to a video-only write:
     silently dropping the audio track from a *joint* generation is the exact
     defect this module is written against. Dropping it from a **video-only**
@@ -1057,6 +1095,7 @@ def _write_video(
     )
     notes: list[str] = []
     planes = None
+    reduction_db = None
     supplied = supplied_audio if include_audio else None
     if supplied is not None:
         audio = supplied.waveform
@@ -1091,7 +1130,7 @@ def _write_video(
                 notes.append(note)
                 _log.warning("%s", note)
         else:
-            planes = _as_audio_planes(audio, target=target)
+            planes, reduction_db = _under_full_scale(_as_audio_planes(audio, target=target))
 
     array = _as_video_frames(frames, target=target)
     _, height, width, _ = array.shape
@@ -1150,10 +1189,10 @@ def _write_video(
             _encode_audio(container, audio_stream, planes, sampling_rate=sampling_rate)
     finally:
         container.close()
-    return tuple(notes), planes
+    return tuple(notes), planes, reduction_db
 
 
-def _write_audio(audio, target: Path, *, sampling_rate) -> None:
+def _write_audio(audio, target: Path, *, sampling_rate, model_track: bool = False):
     """Write the audio track alone, preserving its channel count.
 
     Uncompressed PCM, so what comes back is what the vocoder produced (or, for
@@ -1161,6 +1200,10 @@ def _write_audio(audio, target: Path, *, sampling_rate) -> None:
     must come from ``vocoder.config.output_sampling_rate`` at runtime -- never
     assumed -- and the channel count survives, because the vocoder is stereo
     and a mono downmix is a silent quality regression.
+
+    ``model_track`` marks the model's own track, which is turned down when it
+    went over full scale (:func:`_under_full_scale`); returns by how many dB, or
+    ``None``. The muxed samples of a video+audio run come here already final.
     """
     import av
 
@@ -1175,6 +1218,9 @@ def _write_audio(audio, target: Path, *, sampling_rate) -> None:
         target=target,
     )
     planes = _as_audio_planes(audio, target=target)
+    reduction_db = None
+    if model_track:
+        planes, reduction_db = _under_full_scale(planes)
 
     container = av.open(str(target), mode="w")
     try:
@@ -1187,6 +1233,7 @@ def _write_audio(audio, target: Path, *, sampling_rate) -> None:
         _encode_audio(container, stream, planes, sampling_rate=sampling_rate)
     finally:
         container.close()
+    return reduction_db
 
 
 def write_output(
@@ -1200,6 +1247,7 @@ def write_output(
     sampling_rate=None,
     warnings=None,
     supplied_audio: SuppliedAudio | None = None,
+    diagnostics=None,
     **extra,
 ) -> dict[str, Path]:
     """Encode the pipeline output into ``run_dir``; return the artifact path per track.
@@ -1230,6 +1278,12 @@ def write_output(
     caller that asked for the user's own track and silently received the model's
     would have no way to find out.
 
+    The model's own track is turned down as a whole when it went over full scale,
+    never clipped (:func:`_under_full_scale`); the mp4 and the wav carry the same
+    turned-down samples. ``diagnostics`` is an optional list that collects the
+    line saying by how many dB; it is logged too. A user's recording is carried
+    as it is.
+
     **Nothing measured about the frames can stop this write.** The structure
     detector is a statistical pre-filter and it is wrong about real, murky
     output by design; by the time it runs the user has already spent 35+
@@ -1257,7 +1311,7 @@ def write_output(
 
     try:
         if wants_video:
-            notes, muxed = _write_video(
+            notes, muxed, reduction_db = _write_video(
                 frames,
                 audio,
                 target,
@@ -1279,10 +1333,17 @@ def write_output(
                 _write_audio(muxed, track, sampling_rate=sampling_rate)
                 written["audio"] = track
         else:
-            _write_audio(audio, target, sampling_rate=sampling_rate)
+            reduction_db = _write_audio(
+                audio, target, sampling_rate=sampling_rate, model_track=True
+            )
             written = {"audio": target}
     except LTXStudioError:
         raise
     except Exception as exc:
         raise EncodeError(path=str(target), reason=str(exc)) from exc
+    if reduction_db is not None:
+        line = _turned_down_note(reduction_db)
+        _log.info("%s", line)
+        if diagnostics is not None:
+            diagnostics.append(line)
     return written
