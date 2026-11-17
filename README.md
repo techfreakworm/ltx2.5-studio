@@ -147,7 +147,10 @@ audio is encoded to `audio_latents`, and then:
   sound track is your recording itself, cut to the video's length. By default the video takes
   its length from the recording (the longest length that fits in it); a set length longer than
   the recording is refused before anything runs. The prompt is optional, and so is an image for
-  the first frame.
+  the first frame. Without one, an old-sounding recording can come out as a period film, in
+  black and white: say "in colour" in the prompt, or give a first-frame picture. (On the Space
+  the same recording and prompt came out black and white at one seed and in colour at another,
+  and in colour with a first-frame picture.)
 - **Audio to audio** changes your audio by one of the model's own levels: 0.42, 0.73 or 0.91
   (*A little*, *Moderately*, *A lot*), or 1.0 (*Ignore my audio (new sound)*), which makes
   fresh sound.
