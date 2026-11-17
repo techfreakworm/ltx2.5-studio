@@ -256,6 +256,15 @@ before any VAE exists, with a load-time tripwire that raises if upstream ever ch
 
 The app's own limits, not the model's: at most 1920 pixels a side, 481 frames, 20 seconds.
 
+On the Space there is one more, the size and length it has been measured to finish. A
+request whose first or Upscale pass would hold more than 64,000 latent tokens
+((width / 32) × (height / 32) × ((frames − 1) / 8 + 1)), or whose returned video would pass
+520 million pixel-frames, is refused before any GPU time, with a sentence that says what fits:
+"This size and length is more than this Space has been measured to finish. At 1888 × 1120,
+up to 9.7 s fits. Make it smaller or shorter." The largest run measured to finish returned
+1920 × 1088 at 10 s, through Upscale ×2 from 960 × 544 (63,240 tokens in its Upscale pass,
+503,439,360 pixel-frames). Off the Space this limit does not apply.
+
 ### Prompt enhancement
 
 **Off by default.** Ticking *Enhance my prompt* rewrites your line into a full LTX-2.5
@@ -265,7 +274,7 @@ report, because an enhancer that silently swaps your prompt is worse than none.
 
 **What it costs.** The enhancer is `google/gemma-4-E2B-it-qat-mobile-transformers` (2.49 GB,
 public, ungated, pinned to one revision). It runs on the GPU inside the run's own
-reservation, so an enhanced run **reserves 180 s more**. The rewrite itself takes a few
+reservation, so an enhanced run **reserves 80 s more**. The rewrite itself takes a few
 seconds; the enhancer then stays loaded for the life of the GPU worker, and the first enhanced
 run in a fresh worker also pays about 29 s to load it. Point `LTX25_PROMPT_ENHANCER_REPO` at
 `google/gemma-4-E2B-it` for the 10.28 GB bf16 build instead (that repo loads unpinned).
@@ -456,24 +465,37 @@ This is metered, and the meter is the resource you will actually run out of.
 | Multiplier | **× 2 on `xlarge`** (× 1 on `large`): Hugging Face's documented rate. Billed seconds cannot be read back, so it has not been measured here |
 | PRO quota | 2400 GPU-seconds a day, as Hugging Face documents it. When it resets has not been verified |
 
-**What one run reserves** (`zerogpu.estimate_duration`): the base reservation,
-`LTX25_GPU_DURATION_SECONDS` (180 s by default, and on the Space); × 1.5 with Upscale ×2;
-then + 60 s with any LoRA and + 180 s with prompt enhancement. To start, a run needs its
-reservation × 2 of quota free; it is then billed for the GPU time it actually uses, × 2.
+**What one run reserves** (`zerogpu.estimate_duration`) follows its size and length. It is a
+fit of the Space's own measurements ([`docs/SPACE_MODE_MATRIX.md`](docs/SPACE_MODE_MATRIX.md)
+§10.3): the seconds before the first step, eight denoise steps whose time grows with the latent
+tokens they hold, then the decode and the write, which grow with the pixels returned; Upscale ×2
+adds its three steps at twice the width and height; adapters are allowed 30 s and prompt
+enhancement 60 s. Each part is reserved at 1.3 × its time, rounded up to 5 s, and the run's
+own part is never below 45 s. To start, a run needs its reservation × 2 of quota free; it is
+then billed for the GPU time it actually uses, × 2.
 
-| run | reserves | quota it needs free to start |
+| run (text to video with sound) | reserves | quota it needs free to start |
 |---|---:|---:|
-| plain | 180 s | 360 s |
-| Upscale ×2 | 270 s | 540 s |
-| with a LoRA | 240 s | 480 s |
-| with prompt enhancement | 360 s | 720 s |
-| Upscale ×2 + LoRA + enhancement | 510 s | 1020 s |
+| 704×480, 5 s (121 frames): the default | 60 s | 120 s |
+| the same with Upscale ×2 | 105 s | 210 s |
+| the same with adapters | 100 s | 200 s |
+| the same with prompt enhancement | 140 s | 280 s |
+| the same with all three | 225 s | 450 s |
+| 1280×704, 10 s | 145 s | 290 s |
+| 960×544, 10 s, Upscale ×2 (returns 1920×1088) | 240 s | 480 s |
 
-What runs drew on the Space after the 2026-11-16 fixes (24 runs, all eleven modes, that day):
-each run's GPU window was 10.5–51.6 s, against reservations of 180–360 s. A plain run at
-704×480 with 121 frames reserved 180 s, needed 360 s of quota free to start, and drew at most
-34–65 GPU-s (its window × 2). The longest reservation the platform accepts has not been
-measured.
+A sound-only mode, at its 256×256, reserves 45 s for 5 s of sound. So at the default size
+Upscale ×2 adds 45 s, and more for a larger or longer video; adapters add 40 s, however many;
+prompt enhancement adds 80 s. `LTX25_GPU_DURATION_SECONDS`, which used to set a flat 180 s, is
+ignored: if it is set, start-up says so once. `LTX25_GPU_DURATION_FLOOR_SECONDS`, unset by
+default, raises every reservation to at least that many seconds, should an estimate ever
+prove short.
+
+What runs drew on the Space: on 2026-11-16, under deploy 1's flat 180 s, 24 runs in all
+eleven modes had GPU windows of 10.5–51.6 s, so a plain run at 704×480 with 121 frames drew
+at most 34–65 GPU-s (its window × 2) while it needed 360 s of quota free to start. Six larger
+runs on 2026-11-17, up to 1920×1088 at 10 s, took 52–154 s (§10.3). The longest reservation
+the platform accepts has not been measured.
 
 Things worth knowing as a user:
 
@@ -508,7 +530,8 @@ and shimmers more. The diffusion decode costs about 2.5 s more per run there (4.
 ### Upscale ×2 (stage 2)
 
 A latent upsample plus three more denoise steps, doubling width and height. **Off by
-default**, because it is a real quota cost (× 1.5 on the reservation). It needs CUDA, so it
+default**, because it is a real quota cost (45 s more reserved at the default size, more for a
+larger or longer video). It needs CUDA, so it
 runs only on the Space. The three sound-only modes never run it, and the app says so for them.
 
 What is known: 704×480 with 49 frames passes on `xlarge` (55.906 GiB reserved, measured
@@ -517,8 +540,11 @@ modes that take an image, a clip or audio; it is now wired for all eight modes t
 which is verified on a tiny test checkpoint. On the Space after the fixes (2026-11-16) it ran
 at 704×480 with 49 frames in text to video with sound and in audio to video, and returned
 1408×960: in the first with added detail at native size and not washed out, in the second a
-coherent picture in colour, at peaks of 55.91 and 56.54 GiB reserved. The largest size that
-fits is not measured.
+coherent picture in colour, at peaks of 55.91 and 56.54 GiB reserved. On 2026-11-17 it
+returned 1408×960 at 5 and 10 s and 1920×1088 at 10 s, the last from 960×544 in a 154 s GPU
+window (§10.3 of [`docs/SPACE_MODE_MATRIX.md`](docs/SPACE_MODE_MATRIX.md)); a larger request is
+refused on the Space before any GPU time
+([the limits](#limits-the-app-checks-before-it-reserves-a-gpu)).
 
 ---
 

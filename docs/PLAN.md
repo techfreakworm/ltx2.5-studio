@@ -1285,7 +1285,7 @@ Recorded for completeness — **but see §8.4: we do not use accelerate's offloa
 | 1 | **ZeroGPU quota attribution rides a contextvar** (`gradio.context.LocalContext.request`). It does **not** cross a plain `threading.Thread` — without it every user is bucketed as Space-anonymous and you get *"Space app has reached its GPU limit"* at **0 minutes used** | any thread we spawn must carry `contextvars.copy_context()`; better, do not spawn plain threads across the GPU boundary |
 | 2 | The `duration=` callable must accept **the exact same positional signature** as the decorated function, trailing kwargs included | otherwise TypeError at schedule time; test the signature match |
 | 3 | **Hidden 1.5× duration multiplier on `large`** (`duration_factor`): `duration=60` is scheduled as 90 s. On `xlarge` the factor is skipped but the request is **doubled** instead | never reason about wall-clock quota from the `duration=` number alone |
-| 4 | Default duration is 60 s. The **max is a server-side, tier-dependent, unpublished cap** | **discover it, never hardcode it.** Empirically ~120 s is the safe ceiling; the official Lightricks LTX Space ships `@spaces.GPU(duration=75, size="xlarge")`. *(Corrected 2026-11-16: this app's base reservation is now 180 s, `LTX25_GPU_DURATION_SECONDS`, and `zerogpu.estimate_duration` can ask for up to 510 s: ×1.5 with stage 2, +60 s with LoRAs, +180 s with the enhancer. The server's maximum is still not known.)* |
+| 4 | Default duration is 60 s. The **max is a server-side, tier-dependent, unpublished cap** | **discover it, never hardcode it.** Empirically ~120 s is the safe ceiling; the official Lightricks LTX Space ships `@spaces.GPU(duration=75, size="xlarge")`. *(Corrected 2026-11-16: this app's base reservation is now 180 s, `LTX25_GPU_DURATION_SECONDS`, and `zerogpu.estimate_duration` can ask for up to 510 s: ×1.5 with stage 2, +60 s with LoRAs, +180 s with the enhancer. The server's maximum is still not known.)* *(Corrected 2026-11-17: the reservation now follows each run's size and length, fitted to the Space's measurements with a 1.3 margin per term (`zerogpu.estimate_duration`; `SPACE_MODE_MATRIX.md` §10.3): 60 s for the default 704×480, 5 s run, +45 s with stage 2 at that size and more for larger or longer, +40 s with adapters, +80 s with the enhancer; `LTX25_GPU_DURATION_SECONDS` is ignored, and `LTX25_GPU_DURATION_FLOOR_SECONDS` sets a minimum. The largest run measured to finish, 1920×1088 at 10 s through stage 2, reserves 240 s. The server's maximum is still not known.)* |
 | 5 | **Do NOT auto-retry a ZeroGPU timeout** using the captured Gradio request: the `X-IP-Token` ages past TTL during attempt 1, so attempt 2 always 401s with *"Expired ZeroGPU proxy token"* — **masquerading as the root cause** | surface the original timeout; never retry behind the user's back |
 | 6 | `preload_from_hub` is **capped at 10 entries**, and preloaded files are owned by the *build* user and **read-only to runtime uid 1000** — a later lazy `hf_hub_download` fails with `Permission denied (os error 13)` unless the cache is mirrored | §6.2 |
 | 7 | Accumulated generations filled the 2.3 Space's disk and it went unhealthy | §2.7 — sweep on startup and after each run |
@@ -1897,6 +1897,16 @@ approximately double the runs.
 > 510 s. Billing is the GPU time actually used × 2 on `xlarge` (Hugging Face's documented rate;
 > not measurable here, no quota endpoint answers), so a runs-per-day figure depends on what each
 > run uses and is not stated here. To start, a run needs its reservation × 2 of quota free.
+>
+> ⛔ **Corrected 2026-11-17: the reservation follows each run's size and length now.**
+> `zerogpu.estimate_duration` is a fit of the Space's measured runs (`SPACE_MODE_MATRIX.md`
+> §10.3) with a 1.3 margin per term, rounded up to 5 s: the default 704×480, 5 s run reserves
+> 60 s and needs 120 s of quota free to start (it was 180 s and 360 s); stage 2 adds 45 s at that
+> size and more for larger or longer runs, adapters 40 s, the enhancer 80 s. On the Space a run
+> past the measured envelope (64,000 latent tokens in a pass, 520 million returned
+> pixel-frames) is refused before any GPU time. `LTX25_GPU_DURATION_SECONDS` is ignored (start-up
+> says so once); `LTX25_GPU_DURATION_FLOOR_SECONDS`, unset by default, raises every reservation to
+> at least its value.
 
 Two further traps from §5.8: the hidden **1.5× `duration_factor` on `large`** (so `duration=60`
 schedules as 90 s; `xlarge` skips the factor but doubles the request instead), and the fact that

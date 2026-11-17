@@ -3,8 +3,8 @@
 > **How to read this document (2026-11-16).** §1–§9 are the August 2026 matrix on the Space,
 > made with builds whose output was colour static (the block below); they are corrected in
 > place where later measurements overtook them. **§10 is the current state:** what has been
-> verified since the 2026-11-16 fixes, on the Space after deploy 1 (§10.1) and on real weights
-> on a Mac (§10.2).
+> verified since the 2026-11-16 fixes, on the Space after deploy 1 (§10.1, and the size and
+> length it finishes, §10.3) and on real weights on a Mac (§10.2).
 
 > # ⛔ INVALIDATED (2026-08-25) — every generation result in this document was produced by a BROKEN TRANSFORMER
 >
@@ -929,7 +929,8 @@ says it is the last one, and three of these four were invisible to a green gate.
 ## 10. Verification after the 2026-11-16 fixes
 
 Nothing in §1–§9 describes the code after the 2026-11-16 fixes. This section does: 10.1 is the
-Space, running deploy 1, and 10.2 is what has been verified on real weights on a Mac.
+Space, running deploy 1, 10.2 is what has been verified on real weights on a Mac, and 10.3 is
+the size and length the Space was measured to finish.
 
 ### 10.1 On the Space, deploy 1 (2026-11-16)
 
@@ -1285,3 +1286,50 @@ The second session's audio to video and adapter runs have not been repeated thro
 
 Not run locally, by design: Upscale ×2, the diffusion decoder and bitsandbytes int8 need CUDA.
 Their state is in 10.1.
+
+### 10.3 Size and length on the Space (measured on deploy 1, 2026-11-17)
+
+Recorded by the lead in the run log of the deploy-2 work (the entry "ANSWER to the operator's
+question", 2026-11-17). Each call's files are kept under its label in that run's evidence
+directory, outside this repo, `evidence/space/d2_measure/<label>/`, beside the Space's run logs
+and the summary `MEASUREMENTS.md`, where every figure below can be found.
+
+Six calls on deploy 1 (Space `0cd54f2`, int8, `xlarge`), 02:33–02:50 UTC, one at a time: text
+to video with sound, the captain prompt, seed 7, the Decoder at Auto (the diffusion decoder).
+The window is the Space log's schedule → release; GPU-s is the window × 2, an upper bound.
+Tokens N = (W / 32) × (H / 32) × ((F − 1) / 8 + 1), and the Upscale pass runs at 2W × 2H.
+Before = schedule → first denoise step; after = last denoise step → release (the decode, the
+mux, the write).
+
+| label | asked for | returned | N, pass 1 / 2 | s per step, pass 1 / 2 | before · after | window | GPU-s ≤ | peak GiB, allocated / reserved |
+|---|---|---|---|---|---|---|---|---|
+| `M1_x2_m05_704x480_121f` | 704×480×121, Upscale ×2 | 1408×960×121 | 5,280 / 21,120 | 1.49 / 5.17 | 6 · 19 s | 52 s | 103.6 | 56.46 / 67.14 |
+| `M2_m05_704x480_481f_20s` | 704×480×481 (20 s) | 704×480×481 | 20,130 | 4.83 | 5 · 22 s | 65 s | 130.3 | 50.27 / 59.49 |
+| `M3_m05_1408x960_121f` | 1408×960×121 | 1408×960×121 | 21,120 | 5.14 | 8 · 20 s | 69 s | 135.9 | 55.52 / 66.20 |
+| `M5_x2_m05_704x480_241f` | 704×480×241, Upscale ×2 | 1408×960×241 | 10,230 / 40,920 | about 2.6 / 11.12 | about 4 · 42 s | 100 s | 200.2 | 59.84 / 78.31 |
+| `M4_m05_1280x704_241f` | 1280×704×241 (10 s) | 1280×704×241 | 27,280 | 6.80 | 6 · 28 s | 88 s | 175.9 | 56.37 / 71.98 |
+| `M6_x2_m05_960x544_241f` | 960×544×241, Upscale ×2 | 1920×1088×241 | 15,810 / 63,240 | 3.79 / 19.96 | 1 · 62 s | 154 s | 307.9 | 62.75 / 74.33 |
+
+Every output was probed (size, frame count, 48 kHz stereo AAC) and looked at (frames for M2, M4
+and M6): coherent pictures at native size over the whole clip. M5's first-pass step time is
+approximate because its progress bar was pushed out of the log. Six and seven samples were
+clipped in M3 and M4 (the clipping found by §10.1). At most 1053.9 GPU-s for the six, no quota
+refusal, no failed run.
+
+**The fit**, least squares through 5,280, 21,120 and 40,920 tokens and within 0.2 s of every
+other point measured, deploy 1's included: seconds per denoise step t(N) = 0.46 + 1.81 × 10⁻⁴ N
++ 1.94 × 10⁻⁹ N²; after the last step, about 1.0 s + 1.25 × 10⁻⁷ s per returned pixel-frame
+(1.29 × 10⁻⁷ at 241 frames). Checked against M4 (89 s predicted, 88 measured) and M6 (about 162
+predicted, 154 measured). The app's reservation is this fit (`zerogpu.estimate_duration`): 25 s
+before the first step, eight steps of t(N1), then 1.0 s + 1.3 × 10⁻⁷ s per returned pixel-frame;
+Upscale ×2 adds 3 s, three steps of t(N2) and its larger output; each part is reserved at
+1.3 × its time, rounded up to 5 s. Every one of these six runs and deploy 1's 24 is reserved at
+least 1.3 × its window (`tests/test_reservation.py`).
+
+**The operator's question: the largest size that completes a 10 s clip.** 1920 × 1088 at 10 s
+completes, through Upscale ×2 from 960 × 544 (M6), in 154 s of GPU time (at most 307.9 GPU-s,
+about 5 minutes of `xlarge` quota). In one pass, 1280 × 704 at 10 s took 88 s (M4); through
+Upscale ×2 from 704 × 480, 1408 × 960 at 10 s took 100 s (M5). 1920 × 1088 in one pass was not
+run. On the Space the app now refuses, before any GPU time, a run whose pass would hold more than
+64,000 tokens (M6's Upscale pass held 63,240) or whose returned video would pass 520 million
+pixel-frames (M6 returned 503,439,360): `constraints.validate_envelope`.

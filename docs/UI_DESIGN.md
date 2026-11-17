@@ -198,8 +198,8 @@ be refused lights none. The row is a named group ("Costs that apply") and an unl
 is hidden from assistive tech, so a lamp's state is not in colour alone. The figures
 come from these sources:
 
-- **Reserves:** `zerogpu.estimate_duration` for the same request, with each extra
-  named with its seconds.
+- **Reserves:** `zerogpu.estimate_duration` for the same request, at its size and
+  length, with each extra named with its seconds.
 - **Needs:** the reservation times the quota multiplier.
 - **Renders and Returns:** the size and length come from the request that
   `generate.prepare_request` scopes. A clip mode with no clip loaded yet says "the
