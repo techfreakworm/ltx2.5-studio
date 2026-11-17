@@ -784,6 +784,10 @@ button:disabled { cursor: not-allowed !important; }
   #commission .tab-like-container { height: 46px !important; }
   #commission button.reset-button { min-width: 44px !important; min-height: 44px !important;
     height: 44px !important; }
+  /* a media zone's own buttons (download, clear) and a checkbox's label are 44 px targets too */
+  #commission :is(#in-image, #in-video, #in-audio) :is(.icon-button-wrapper, .icon-buttons) :is(button, a) {
+    min-width: 44px !important; }
+  #commission .checkbox-container { min-height: 44px; }
   #monitor button, #monitor a[download], #monitor .controls [role="button"] {
     min-width: 44px !important; min-height: 44px !important;
     display: inline-flex; align-items: center; justify-content: center; }

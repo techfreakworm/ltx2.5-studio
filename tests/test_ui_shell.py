@@ -142,3 +142,17 @@ def test_generate_in_flight_is_drawn_busy_not_refused():
     assert 'gr.update(interactive=False, value="Generating…")' in inspect.getsource(blocks), (
         "the start step's label is the one the script looks for"
     )
+
+
+def test_on_a_phone_a_media_zones_own_buttons_and_the_checkboxes_are_44_px_targets():
+    """Minor 12: a loaded media zone's download and clear buttons were about 25 and 20 px wide,
+    and Enhance, Upscale and "Let the model pick the length" a 16 px box in a 20 px label."""
+    start = chrome._css().index("@media (max-width: 1023px) {")
+    narrow = chrome._css()[start : chrome._css().index("\n}\n", start)]
+    zone = re.search(
+        r"#commission :is\(#in-image, #in-video, #in-audio\) :is\(\.icon-button-wrapper, \.icon-buttons\) "
+        r":is\(button, a\) \{([^}]*)\}",
+        narrow,
+    )
+    assert zone and "min-width: 44px !important" in zone.group(1)
+    assert "#commission .checkbox-container { min-height: 44px; }" in narrow
