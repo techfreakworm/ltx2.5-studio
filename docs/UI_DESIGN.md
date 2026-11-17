@@ -265,7 +265,11 @@ card above it is built from the run record:
 - the decoder that ran, by its choice's name (Best quality, Fast)
 - time taken, labelled by the device that ran it; on ZeroGPU, with the quota it drew
 
-Reuse seed and Use this prompt close the card.
+Reuse seed and Use this prompt close the card, and so does a quiet "Download the sound
+(WAV)" when the run returned its picture and its sound as two files (a video with
+sound): the sound track alone, for a voice or ambience to use elsewhere. A sound-only
+or silent run, or one file carrying both tracks, offers none; the player's own
+download is the video, with its sound.
 
 A failure has a plain category headline, a quota line, one next step and the verbatim
 detail in a `<details>`. Categories arrive as strings from `errors.categorise`; each

@@ -602,6 +602,15 @@ def build_ui() -> gr.Blocks:
                         scale=0,
                         min_width=140,
                     )
+                    sound_download = gr.DownloadButton(
+                        render.SOUND_DOWNLOAD,
+                        visible=False,
+                        elem_id="sound-download",
+                        elem_classes=["mr-quiet"],
+                        size="sm",
+                        scale=0,
+                        min_width=200,
+                    )
                 status = gr.Markdown("", elem_id="run-status")
                 with gr.Column(elem_id="recent"):
                     recent_head = gr.Markdown(
@@ -1260,6 +1269,7 @@ def build_ui() -> gr.Blocks:
             run_summary,
             reuse_seed,
             use_prompt,
+            sound_download,
             monitor_state,
             sample_jump,
             last_failure,
@@ -1292,6 +1302,7 @@ def build_ui() -> gr.Blocks:
                 gr.update(visible=False),
                 gr.update(visible=False),
                 gr.update(visible=False),
+                gr.update(value=None, visible=False),
                 {"kind": "running", "mode": mode_id},
                 gr.update(visible=False),
                 None,
@@ -1319,6 +1330,7 @@ def build_ui() -> gr.Blocks:
             status,
             sample_jump,
             last_failure,
+            sound_download,
         ]
 
         def _ended(
@@ -1377,6 +1389,8 @@ def build_ui() -> gr.Blocks:
                 prompt_value = sent if differs else None
                 monitor_next = _run_state(shown.mode_id, result.seed, shown.video, shown.audio)
                 failure = None
+                track = _sound_track(shown)
+                sound = gr.update(value=track, visible=track is not None)
             else:
                 monitor = [
                     gr.update(value=render.monitor_idle(mode), visible=True),
@@ -1396,6 +1410,7 @@ def build_ui() -> gr.Blocks:
                     if headline
                     else None
                 )
+                sound = gr.update(value=None, visible=False)
             return [
                 gr.update(value="Generate", interactive=review_out[2]["interactive"]),
                 review_out[3],
@@ -1415,6 +1430,7 @@ def build_ui() -> gr.Blocks:
                 status_update,
                 _jump_update(show, mode_id, monitor_next),
                 failure,
+                sound,
             ]
 
         def _finish(
@@ -1476,6 +1492,7 @@ def build_ui() -> gr.Blocks:
             status,
             sample_jump,
             last_failure,
+            sound_download,
         ]
 
         def _finish_bare(request: gr.Request) -> list:
@@ -1522,6 +1539,7 @@ def build_ui() -> gr.Blocks:
                     if headline
                     else None
                 ),
+                gr.update(value=None, visible=False),
             ]
 
         generation = generate_button.click(
@@ -1902,6 +1920,15 @@ def _run_state(mode_id: str, seed: Any, video: Any, audio: Any, *, earlier: bool
         "audio": audio,
         "earlier": earlier,
     }
+
+
+def _sound_track(outcome: handlers.RunOutcome) -> Any:
+    """The run's sound as a file of its own, when it returned a picture and its sound as two
+    files (``outputs.write_output`` writes both for a video with sound); else None."""
+    video, audio = outcome.video, outcome.audio
+    if video is None or audio is None or Path(audio) == Path(video):
+        return None
+    return audio if Path(audio).exists() else None
 
 
 def _kept(state: dict | None) -> bool:

@@ -1204,6 +1204,10 @@ def took_words(facts: RunFacts) -> str:
     return f"{_num(seconds)}\u00a0s {where}" if where else f"{_num(seconds)}\u00a0s"
 
 
+#: Beside Reuse seed when a run returned its picture and its sound as two files.
+SOUND_DOWNLOAD = "Download the sound (WAV)"
+
+
 def run_summary(facts: RunFacts) -> str:
     """The head of the success report: what you got, in one block."""
     rows = [("Mode", _e(facts.mode.label))]
