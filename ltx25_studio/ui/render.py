@@ -87,6 +87,7 @@ __all__ = [
     "result_not_shown",
     "run_summary",
     "running",
+    "sample_of",
     "shot_anchor_readout",
     "success",
     "upscale_info",
@@ -833,6 +834,15 @@ READY = "Ready. Nothing is spent until you press Generate."
 
 #: Below 1024 px the monitor sits under the inputs: a jump to the mode's sample.
 SAMPLE_JUMP = "See an example output"
+#: While the monitor holds a run from another mode, at every width: the selected mode's sample.
+SAMPLE_OF = "See an example of {mode}"
+#: While a sample covers a run, the same control puts the run back.
+BACK_TO_RUN = "Back to your run"
+
+
+def sample_of(mode: Any) -> str:
+    """The control that puts ``mode``'s sample on a monitor holding a run of another mode."""
+    return SAMPLE_OF.format(mode=mode.label)
 
 
 def monitor_idle(mode: Any) -> str:

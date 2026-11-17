@@ -20,7 +20,7 @@ from ltx25_studio.ui.fields import FIELD_KEYS
 
 gr = pytest.importorskip("gradio", reason="gradio is a declared dev dependency")
 
-_PROPS = ("visible", "interactive", "label", "info", "placeholder", "choices")
+_PROPS = ("visible", "interactive", "label", "info", "placeholder", "choices", "elem_classes")
 
 
 def _same(a: Any, b: Any) -> bool:

@@ -57,7 +57,8 @@ same Generate button, restyled. There is never a second Generate in the DOM. Pre
 Generate or Show on a narrow screen scrolls the monitor into view; Restore settings
 brings the purpose line, which names the restored mode, into view; and while the
 monitor shows a sample a "See an example output" button under the purpose line jumps
-to it.
+to it. The same button, at every width, offers the selected mode's sample over a run
+of another mode (see the monitor, below).
 
 ## The matrix
 
@@ -151,9 +152,17 @@ exported, so joint modes never show one file twice. Its contents depend on the s
 - **Idle:** the selected mode's sample output from the manifest, captioned "Example
   output, not your run". If there is no sample, a designed idle frame names the mode.
 - **During a run:** the phase-labelled progress (`show_progress_on`).
-- **After a run:** that run's result, captioned with its mode and seed. It stays on
-  screen when the mode changes.
+- **After a run:** that run's result, captioned with its own mode (the one that ran,
+  even if another was selected while it ran) and seed. It stays on screen when the
+  mode changes.
 - **Shown from Recent runs:** an earlier run's own file, captioned "Earlier run".
+- **A sample over a run:** while the monitor holds a run (yours or an earlier one) of
+  another mode than the selected one, and that mode has a sample, the button under the
+  purpose line reads "See an example of Audio to audio" at every width (class
+  `mr-over-run`). It puts that sample on the monitor with its usual caption, and later
+  switches follow with their own samples; the run is kept, and the same button reads
+  "Back to your run" and puts it back, while its file is still on disk. Below 1024 px
+  the button also scrolls to the monitor.
 
 **The cost panel** is the signature element. It is a labelled grid with these rows:
 

@@ -901,7 +901,7 @@ def build_ui() -> gr.Blocks:
                 *example_updates,
                 *monitor_updates,
                 monitor_next,
-                gr.update(visible=monitor_next.get("kind") == "sample"),
+                _jump_update(show, mode_id, monitor_next),
                 status_update,
                 failure,
             ]
@@ -1333,7 +1333,8 @@ def build_ui() -> gr.Blocks:
             run whose result goes on the monitor; without one the monitor is idle and
             holds no file, and ``report`` is the card the status holds. ``listed`` is a
             finished run that is not shown: it goes into Recent runs, where Show can serve
-            its file."""
+            its file. ``mode_id`` is the selected mode (the review's); a finished run is
+            named by its own mode, which the user may have left while it ran."""
             mode = modes.get_mode(mode_id)
             review_out = _review(mode_id, False, source, *values)
             entries = list(recent_now or [])
@@ -1341,7 +1342,11 @@ def build_ui() -> gr.Blocks:
                 entries.insert(
                     0,
                     _recent_entry(
-                        mode_id, listed.result, listed.params, handlers.run_facts(listed), listed
+                        listed.mode_id,
+                        listed.result,
+                        listed.params,
+                        handlers.run_facts(listed),
+                        listed,
                     ),
                 )
                 entries = entries[:RECENT_LIMIT]
@@ -1349,14 +1354,16 @@ def build_ui() -> gr.Blocks:
                 result = shown.result
                 params = shown.params
                 facts = handlers.run_facts(shown)
-                entries.insert(0, _recent_entry(mode_id, result, params, facts, shown))
+                entries.insert(0, _recent_entry(shown.mode_id, result, params, facts, shown))
                 entries = entries[:RECENT_LIMIT]
                 has_video = shown.video is not None
                 monitor = [
                     gr.update(visible=False),
                     gr.update(value=shown.video, visible=has_video, autoplay=True),
                     gr.update(value=shown.audio if not has_video else None, visible=not has_video),
-                    render.monitor_caption(kind="run", mode=mode, seed=result.seed),
+                    render.monitor_caption(
+                        kind="run", mode=modes.get_mode(shown.mode_id), seed=result.seed
+                    ),
                 ]
                 summary = gr.update(value=render.run_summary(facts), visible=True)
                 seed_button = gr.update(value="Reuse seed", visible=True)
@@ -1365,7 +1372,7 @@ def build_ui() -> gr.Blocks:
                 differs = bool(sent) and sent.strip() != str(params.get("prompt") or "").strip()
                 prompt_button = gr.update(visible=differs)
                 prompt_value = sent if differs else None
-                monitor_next = {"kind": "run", "mode": mode_id}
+                monitor_next = _run_state(shown.mode_id, result.seed, shown.video, shown.audio)
                 failure = None
             else:
                 monitor = [
@@ -1403,7 +1410,7 @@ def build_ui() -> gr.Blocks:
                 gr.update(visible=bool(entries)),
                 *_recent_rows(entries),
                 status_update,
-                gr.update(visible=False),
+                _jump_update(show, mode_id, monitor_next),
                 failure,
             ]
 
@@ -1531,7 +1538,7 @@ def build_ui() -> gr.Blocks:
 
         show_outputs = [monitor_idle, video_out, audio_out, monitor_caption, monitor_state]
 
-        def _show(index: int, entries: list, monitor: dict) -> list[Any]:
+        def _show(index: int, entries: list, monitor: dict, mode_id: str) -> list[Any]:
             entries = list(entries or [])
             entry = entries[index] if index < len(entries) else None
             path = entry and (entry.get("video") or entry.get("audio"))
@@ -1546,29 +1553,36 @@ def build_ui() -> gr.Blocks:
                     gr.update(visible=False),
                     gr.update(),
                 ]
-            mode = modes.get_mode(entry["mode"])
-            has_video = entry.get("video") is not None
+            state = _run_state(
+                entry["mode"], entry["seed"], entry.get("video"), entry.get("audio"), earlier=True
+            )
             return [
-                gr.update(visible=False),
-                gr.update(value=entry.get("video"), visible=has_video, autoplay=False),
-                gr.update(value=None if has_video else entry.get("audio"), visible=not has_video),
-                render.monitor_caption(kind="earlier", mode=mode, seed=entry["seed"]),
-                {"kind": "run", "mode": entry["mode"]},
+                *_run_on_monitor(state),
+                state,
                 gr.update(),
-                gr.update(visible=False),
+                _jump_update(show, mode_id, state),
             ]
 
         for index, row in enumerate(recent_rows):
             show_run = row[1]
             show_run.click(
-                fn=lambda entries, monitor, i=index: _show(i, entries, monitor),
-                inputs=[recent, monitor_state],
+                fn=lambda entries, monitor, mode_id, i=index: _show(i, entries, monitor, mode_id),
+                inputs=[recent, monitor_state, mode_selector],
                 outputs=[*show_outputs, show_run, sample_jump],
                 js=_SCROLL_TO_MONITOR,
                 **_PRIVATE,
             )
 
-        sample_jump.click(fn=None, js=_SCROLL_TO_SAMPLE, **_PRIVATE)
+        def _on_jump(mode_id: str, monitor: dict) -> list[Any]:
+            return _jump(show, mode_id, monitor)
+
+        sample_jump.click(
+            fn=_on_jump,
+            inputs=[mode_selector, monitor_state],
+            outputs=[*show_outputs, sample_jump],
+            js=_SCROLL_TO_SAMPLE,
+            **_PRIVATE,
+        )
 
         # =================================================================
         # examples: fill the form, run nothing
@@ -1611,10 +1625,16 @@ def build_ui() -> gr.Blocks:
 # helpers for build_ui
 # ---------------------------------------------------------------------------
 
+#: The control under the purpose line shows or changes the monitor: below 1024 px the page
+#: brings it in (it sits under the inputs); wider, the rail scrolls as little as it takes.
 _SCROLL_TO_SAMPLE = """
-() => {
+(...args) => {
   const still = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-  document.getElementById('monitor')?.scrollIntoView({behavior: still ? 'auto' : 'smooth', block: 'center'});
+  const wide = window.innerWidth >= 1024;
+  document.getElementById('monitor')?.scrollIntoView(wide
+    ? {behavior: 'instant', block: 'nearest'}
+    : {behavior: still ? 'auto' : 'smooth', block: 'center'});
+  return args;
 }
 """
 
@@ -1754,10 +1774,19 @@ def _sample_caption(mode: Any, sample: showcase.Sample | None) -> str:
 
 def _monitor_for_mode(show: showcase.Showcase, mode: Any, monitor: dict) -> tuple[list, dict]:
     """Swap the idle monitor to the new mode's sample; never hide a finished run. A failed
-    run's caption stays only in its own mode: elsewhere its card is one line naming it."""
+    run's caption stays only in its own mode: elsewhere its card is one line naming it. A
+    sample put over a run keeps that run to go back to."""
     kind = (monitor or {}).get("kind")
     if kind in ("run", "running") or (kind == "failed" and monitor.get("mode") == mode.id):
         return [gr.update(), gr.update(), gr.update(), gr.update()], monitor
+    updates, state = _sample_on_monitor(show, mode)
+    if (monitor or {}).get("covered"):
+        state["covered"] = monitor["covered"]
+    return updates, state
+
+
+def _sample_on_monitor(show: showcase.Showcase, mode: Any) -> tuple[list, dict]:
+    """The monitor showing ``mode``'s sample with its caption, or its idle frame."""
     sample = show.sample_for(mode.id)
     if sample is None:
         return (
@@ -1784,6 +1813,89 @@ def _monitor_for_mode(show: showcase.Showcase, mode: Any, monitor: dict) -> tupl
         ],
         {"kind": "sample", "mode": mode.id},
     )
+
+
+#: The control under the purpose line is a quiet button; with this class the stylesheet
+#: shows it at every width (``chrome.py``), not only where the monitor sits under the form.
+_QUIET = "mr-quiet"
+_OVER_RUN = "mr-over-run"
+
+
+def _run_state(mode_id: str, seed: Any, video: Any, audio: Any, *, earlier: bool = False) -> dict:
+    """The monitor state of a run on it: what it is and enough to put it back."""
+    return {
+        "kind": "run",
+        "mode": mode_id,
+        "seed": int(seed),
+        "video": video,
+        "audio": audio,
+        "earlier": earlier,
+    }
+
+
+def _kept(state: dict | None) -> bool:
+    """Whether a run's file is still on disk (its folder may have been evicted)."""
+    path = (state or {}).get("video") or (state or {}).get("audio")
+    return bool(path) and Path(path).exists()
+
+
+def _run_on_monitor(state: dict) -> list:
+    """The monitor showing the run ``state`` describes, under its own caption."""
+    mode = modes.get_mode(state["mode"])
+    has_video = state.get("video") is not None
+    return [
+        gr.update(visible=False),
+        gr.update(value=state.get("video"), visible=has_video, autoplay=False),
+        gr.update(value=None if has_video else state.get("audio"), visible=not has_video),
+        render.monitor_caption(
+            kind="earlier" if state.get("earlier") else "run", mode=mode, seed=state.get("seed")
+        ),
+    ]
+
+
+def _over_run(show: showcase.Showcase, mode_id: str, monitor: dict) -> bool:
+    """The monitor holds a run of another mode than ``mode_id``, which has a sample."""
+    return (
+        monitor.get("kind") == "run"
+        and monitor.get("mode") != mode_id
+        and show.sample_for(mode_id) is not None
+    )
+
+
+def _jump_update(show: showcase.Showcase, mode_id: str, monitor: dict | None) -> dict:
+    """The control under the purpose line, for the selected mode and what the monitor holds.
+
+    Over a run of another mode: that mode's sample, at every width. While a sample covers a
+    run: the way back. While the monitor shows the mode's sample: the jump to it, which the
+    stylesheet shows only where the monitor sits under the form.
+    """
+    monitor = monitor or {}
+    if _over_run(show, mode_id, monitor):
+        words, classes = render.sample_of(modes.get_mode(mode_id)), [_QUIET, _OVER_RUN]
+    elif _kept(monitor.get("covered")):
+        words, classes = render.BACK_TO_RUN, [_QUIET, _OVER_RUN]
+    elif monitor.get("kind") == "sample":
+        words, classes = render.SAMPLE_JUMP, [_QUIET]
+    else:
+        return gr.update(value=render.SAMPLE_JUMP, visible=False, elem_classes=[_QUIET])
+    return gr.update(value=words, visible=True, elem_classes=classes)
+
+
+def _jump(show: showcase.Showcase, mode_id: str, monitor: dict | None) -> list:
+    """The control under the purpose line, pressed. Over a run of another mode, that mode's
+    sample goes on the monitor and later switches follow with their own; while a sample
+    covers a run, the run comes back. Otherwise (the jump to the sample) only the page moves.
+    Returns the monitor's four outputs, its state and the control."""
+    monitor = dict(monitor or {})
+    if _over_run(show, mode_id, monitor):
+        updates, state = _sample_on_monitor(show, modes.get_mode(mode_id))
+        state["covered"] = monitor
+    elif _kept(monitor.get("covered")):
+        state = dict(monitor["covered"])
+        updates = _run_on_monitor(state)
+    else:
+        updates, state = [gr.update(), gr.update(), gr.update(), gr.update()], monitor
+    return [*updates, state, _jump_update(show, mode_id, state)]
 
 
 def _example_updates(show: showcase.Showcase, mode_id: str, slots: int, note: Any) -> list:
