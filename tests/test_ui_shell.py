@@ -150,9 +150,12 @@ def test_on_a_phone_a_media_zones_own_buttons_and_the_checkboxes_are_44_px_targe
     start = chrome._css().index("@media (max-width: 1023px) {")
     narrow = chrome._css()[start : chrome._css().index("\n}\n", start)]
     zone = re.search(
-        r"#commission :is\(#in-image, #in-video, #in-audio\) :is\(\.icon-button-wrapper, \.icon-buttons\) "
-        r":is\(button, a\) \{([^}]*)\}",
+        r"#commission :is\(#in-image, #in-video, #in-audio\) "
+        r":is\(\.icon-button-wrapper, \.icon-buttons, \.source-selection\) :is\(button, a\),\n"
+        r"  #commission #in-audio \.controls button \{([^}]*)\}",
         narrow,
     )
-    assert zone and "min-width: 44px !important" in zone.group(1)
+    assert zone and "min-width: 44px !important" in zone.group(1), (
+        "the toolbar, the source buttons and a loaded audio's controls (20-40 px wide in F5 at 390)"
+    )
     assert "#commission .checkbox-container { min-height: 44px; }" in narrow

@@ -784,8 +784,11 @@ button:disabled { cursor: not-allowed !important; }
   #commission .tab-like-container { height: 46px !important; }
   #commission button.reset-button { min-width: 44px !important; min-height: 44px !important;
     height: 44px !important; }
-  /* a media zone's own buttons (download, clear) and a checkbox's label are 44 px targets too */
-  #commission :is(#in-image, #in-video, #in-audio) :is(.icon-button-wrapper, .icon-buttons) :is(button, a) {
+  /* a media zone's own buttons (download, clear; the source buttons; a loaded audio's playback and
+     editing controls, which Gradio sets out in two rows here) and a checkbox's label are 44 px
+     targets too */
+  #commission :is(#in-image, #in-video, #in-audio) :is(.icon-button-wrapper, .icon-buttons, .source-selection) :is(button, a),
+  #commission #in-audio .controls button {
     min-width: 44px !important; }
   #commission .checkbox-container { min-height: 44px; }
   #monitor button, #monitor a[download], #monitor .controls [role="button"] {
