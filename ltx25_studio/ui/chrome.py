@@ -638,6 +638,17 @@ button:disabled { cursor: not-allowed !important; }
 #monitor :is(.icon-button-wrapper, .icon-buttons) :is(button, a) { border: none !important;
   background: rgba(14, 18, 22, 0.72) !important; border-radius: 6px !important;
   color: var(--mr-paper) !important; box-shadow: none !important; }
+/* the download corner sits inside the clipped edge, so its focus ring is whole */
+#video-out .icon-button-wrapper { top: 8px !important; right: 8px !important; }
+/* the player's bar: Gradio shows it to a hovering pointer only. It also shows to keyboard
+   focus inside the player, while the video is paused (the script sets .mr-paused from the
+   video's own events) and on a touch screen; in the well colour, not Gradio's grey */
+#video-out .wrap > .controls { background: rgba(14, 18, 22, 0.86) !important; }
+#video-out .wrap:has(:focus-visible) > .controls, #video-out .wrap.mr-paused > .controls {
+  opacity: 1 !important; }
+@media (hover: none) {
+  #video-out .wrap > .controls { opacity: 1 !important; }
+}
 #monitor-caption p { margin: 0; font-size: 13px; line-height: 19px; color: var(--mr-dust); }
 #monitor-caption strong { color: var(--mr-paper); font-weight: 600; }
 
@@ -765,8 +776,11 @@ button:disabled { cursor: not-allowed !important; }
   #commission .tab-like-container { height: 46px !important; }
   #commission button.reset-button { min-width: 44px !important; min-height: 44px !important;
     height: 44px !important; }
-  #monitor button, #monitor a[download] { min-width: 44px !important; min-height: 44px !important;
+  #monitor button, #monitor a[download], #monitor .controls [role="button"] {
+    min-width: 44px !important; min-height: 44px !important;
     display: inline-flex; align-items: center; justify-content: center; }
+  /* the player's glyphs keep their size inside those targets */
+  #monitor .controls :is(button, [role="button"]) svg { width: 20px !important; height: 20px !important; }
   /* 44 px targets for the footer's links; Gradio's run history stays hidden here too */
   footer :is(button, a):not(.hidden):not(.run-history) { display: inline-flex !important;
     align-items: center; min-height: 44px !important; }
@@ -911,6 +925,58 @@ _SCRIPT = """
     lastReport = key;
     if (target && wide()) target.scrollIntoView({ block: 'nearest', behavior: still() ? 'auto' : 'smooth' });
   };
+
+  // == the monitor's player ================================================
+  // Gradio's bar shows to a hovering pointer only, names Play "play-pause-replay-button" and
+  // toggles playback on any key pressed on it, Tab included. The stylesheet also shows the bar
+  // while the video is paused (.mr-paused, set here from the video's own events); here the
+  // controls get their names, and only Enter and Space act on them.
+  const playerState = (wrap, video) => {
+    const paused = video.paused || video.ended;
+    wrap.classList.toggle('mr-paused', paused);
+    const play = wrap.querySelector(':scope > .controls .inner > [role="button"]:first-child');
+    if (play) {
+      play.dataset.mrControl = 'play';
+      const name = paused ? 'Play' : 'Pause';
+      if (play.getAttribute('aria-label') !== name) play.setAttribute('aria-label', name);
+    }
+    wrap.querySelectorAll(':scope > .controls [aria-label="full-screen"]').forEach((full) => {
+      full.dataset.mrControl = 'full-screen';
+      full.setAttribute('aria-label', 'Full screen');
+    });
+  };
+  // A new file on the monitor is a new player: each video is wired once.
+  const players = () => {
+    document.querySelectorAll('#video-out video').forEach((video) => {
+      const wrap = video.closest('.wrap');
+      if (!wrap) return;
+      if (!video.dataset.mrPlayer) {
+        video.dataset.mrPlayer = '1';
+        ['play', 'pause', 'ended', 'emptied', 'loadedmetadata'].forEach((type) =>
+          video.addEventListener(type, () => playerState(wrap, video)));
+      }
+      playerState(wrap, video);
+    });
+  };
+  // Runs before Gradio's handlers (its Play's delegated keydown, its full screen's keypress):
+  // any other key never reaches them, and Space never scrolls the rail or the page. A cancelled
+  // keydown sends no keypress, so Space presses full screen here.
+  const playerKeys = (event) => {
+    const control = event.target instanceof Element
+      ? event.target.closest('#video-out [data-mr-control]') : null;
+    if (!control) return;
+    const acts = (event.key === 'Enter' || event.key === ' ') && !event.repeat;
+    if (!acts) {
+      event.stopPropagation();
+      if (event.key === ' ') event.preventDefault();
+    } else if (event.key === ' ' && event.type === 'keydown') {
+      event.preventDefault();
+      if (control.dataset.mrControl === 'full-screen') control.click();
+    }
+  };
+  document.addEventListener('keydown', playerKeys, true);
+  document.addEventListener('keypress', playerKeys, true);
+
   let queued = false;
   const settle = () => {
     if (queued) return;
@@ -925,6 +991,7 @@ _SCRIPT = """
   if (document.fonts && document.fonts.ready) document.fonts.ready.then(settle);
   ready(() => {
     settle();
+    players();
     const rail = byId('rail');
     if (rail && !rail.dataset.mrFit) {
       rail.dataset.mrFit = '1';
