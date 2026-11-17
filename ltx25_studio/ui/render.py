@@ -809,17 +809,27 @@ def commit_line(facts: CostFacts) -> str:
 
 
 def figure_line(facts: CostFacts) -> str:
-    """The cost panel's figure in one line: the size, the length and the quota needed (on
-    ZeroGPU) or where it runs. Empty for a request that won't run (it has no figure)."""
+    """The cost panel's figure in one line: what the run returns (as the Returns row: the
+    returned size, "upscaled" under Upscale ×2, or "Sound" where only sound comes back), its
+    length, and the quota needed (on ZeroGPU) or where it runs. Empty for a request that
+    won't run (it has no figure)."""
     if facts.state == "refused":
         return ""
     parts = []
-    if facts.render_size:
-        parts.append(_size(*facts.render_size))
+    if facts.returns == "audio":
+        parts.append("Sound")
+    else:
+        size = facts.returned_size or (None if facts.stage_2 else facts.render_size)
+        if size:
+            parts.append(_size(*size) + ("\u00a0upscaled" if facts.stage_2 else ""))
     if facts.auto_seconds is not None:
         parts.append(f"{facts.auto_seconds[0]:g}–{facts.auto_seconds[1]:g}\u00a0s")
     elif facts.seconds is not None:
         parts.append(_seconds(facts.seconds))
+    elif facts.length_pending == "clip":
+        parts.append("the length of your clip")
+    elif facts.length_from_audio:
+        parts.append("the length of your audio")
     if not facts.on_zerogpu:
         parts.append(where_it_runs(facts.device))
     elif facts.reserve is not None:

@@ -137,8 +137,15 @@ def test_restore_brings_the_purpose_line_into_view(demo):
     assert "wide ? 'nearest' : 'center'" in blocks._SCROLL_TO_PURPOSE
 
 
-def test_the_mode_names_its_figure_in_every_mode(demo):
-    """Every mode's figure line, ready, is the size and length the panel states."""
+def _returns_row(facts) -> str:
+    panel = re.sub(r"<[^>]+>", "", render.cost_panel(facts)).replace(" ", " ")
+    return re.search(r"Returns(.*?)(?:Runs|Reserves)", panel).group(1)
+
+
+def test_the_line_names_what_the_run_returns_in_every_mode(demo):
+    """Round 4, M1: the line beside Generate (the phone bar's ready line too) names what the
+    run returns, as the panel's Returns row does: the returned size in a video mode, and
+    "Sound" in a sound-only mode, never the 256 x 256 picture it renders and throws away."""
     from conftest import inputs_for
 
     from ltx25_studio.ui.fields import FIELDS
@@ -146,5 +153,104 @@ def test_the_mode_names_its_figure_in_every_mode(demo):
     for mode_id in modes.MODES:
         values = {spec.key: spec.default for spec in FIELDS} | inputs_for(mode_id)
         facts = handlers.review(mode_id, values)
-        figure = render.figure_line(facts).replace("\u00a0", " ")
-        assert figure.startswith(f"{facts.render_size[0]} × {facts.render_size[1]}"), mode_id
+        figure = render.figure_line(facts).replace(" ", " ")
+        if facts.state == "ready":
+            assert render.commit_line(facts).replace(" ", " ") == figure, mode_id
+        if "video" in modes.get_mode(mode_id).exports:
+            size = f"{facts.returned_size[0]} × {facts.returned_size[1]}"
+            assert figure.startswith(f"{size}, "), (mode_id, figure)
+            assert _returns_row(facts).startswith(size), (mode_id, _returns_row(facts))
+        else:
+            assert figure.startswith("Sound, "), (mode_id, figure)
+            assert "×" not in figure, (mode_id, figure)
+            assert _returns_row(facts).startswith("sound only"), mode_id
+
+
+@pytest.fixture
+def space(monkeypatch):
+    """The Space-shaped build: the stand-in platform package, as app.py resolves it."""
+    import sys
+    import types
+
+    from ltx25_studio import config
+
+    module = types.ModuleType("spaces")
+    module.GPU = lambda *a, **k: lambda f: f
+    monkeypatch.setitem(sys.modules, "spaces", module)
+    monkeypatch.delenv(config.ENV_DEVICE, raising=False)
+
+
+def test_with_upscale_the_line_names_the_upscaled_size_on_the_space(space):
+    from conftest import inputs_for
+
+    from ltx25_studio.ui.fields import FIELDS
+
+    values = {spec.key: spec.default for spec in FIELDS} | inputs_for("text_to_audio_video")
+    facts = handlers.review("text_to_audio_video", values | {"enable_stage_2": True})
+    assert facts.on_zerogpu and facts.stage_2 and facts.returned_size == (1408, 960)
+    figure = render.figure_line(facts).replace(" ", " ")
+    need = facts.reserve * facts.multiplier
+    assert figure == f"1408 × 960 upscaled, 5.0 s, needs {need} s quota"
+    assert "704 × 480" not in figure
+    assert _returns_row(facts).startswith("1408 × 960 video with sound, upscaled ×2")
+
+
+def test_with_upscale_off_zerogpu_the_bar_names_the_upscaled_size(monkeypatch):
+    """A CUDA machine of one's own runs Upscale at the default size; and the tablet and phone
+    capture (P3, the tiny checkpoint on the CPU): 64 x 64 upscaled returns 128 x 128."""
+    import sys
+
+    from conftest import inputs_for
+
+    from ltx25_studio import config, zerogpu
+    from ltx25_studio.ui.fields import FIELDS
+
+    monkeypatch.delitem(sys.modules, "spaces", raising=False)
+    monkeypatch.delenv(config.ENV_DEVICE, raising=False)
+    monkeypatch.setattr(zerogpu, "host_has_cuda", lambda: True)
+    assert handlers.run_platform() == ("cuda", False)
+    values = {spec.key: spec.default for spec in FIELDS} | inputs_for("text_to_audio_video")
+    facts = handlers.review("text_to_audio_video", values | {"enable_stage_2": True})
+    assert facts.state == "ready" and facts.stage_2, facts.reason
+    bar = render.commit_line(facts).replace(" ", " ")
+    assert bar == "1408 × 960 upscaled, 5.0 s, on the GPU"
+
+    p3 = render.CostFacts(
+        mode_name="Text to video with sound",
+        state="ready",
+        render_size=(64, 64),
+        returned_size=(128, 128),
+        stage_2=True,
+        frames=9,
+        seconds=9 / 24,
+        returns="audio+video",
+        on_zerogpu=False,
+        device="cpu",
+    )
+    bar = render.commit_line(p3).replace(" ", " ")
+    assert bar == "128 × 128 upscaled, 0.4 s, on the CPU" and "64 × 64" not in bar
+
+
+def test_the_sound_only_modes_say_sound_with_their_length(space):
+    from conftest import inputs_for
+
+    from ltx25_studio.ui.fields import FIELDS
+
+    for mode_id in ("text_to_audio", "video_to_audio", "audio_to_audio"):
+        values = {spec.key: spec.default for spec in FIELDS} | inputs_for(mode_id)
+        facts = handlers.review(mode_id, values)
+        figure = render.figure_line(facts).replace(" ", " ")
+        need = f"needs {facts.reserve * facts.multiplier} s quota"
+        assert figure.startswith("Sound, ") and figure.endswith(need), (mode_id, figure)
+        assert "256" not in figure, (mode_id, figure)
+    unset = render.CostFacts(
+        mode_name="Audio to audio",
+        state="ready",
+        render_size=(256, 256),
+        returns="audio",
+        returned_size=(256, 256),
+        length_from_audio=True,
+        on_zerogpu=False,
+        device="cpu",
+    )
+    assert render.figure_line(unset) == "Sound, the length of your audio, on the CPU"

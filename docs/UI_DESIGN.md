@@ -43,16 +43,19 @@ At 1024 px and wider the page has two columns under a one-line identity bar.
   When they are taller than the rail, the monitor gives up height first, down to
   180 px, letterboxed. If the panel still runs under Generate, the panel's figure line
   stands above the button: "704 × 480, 5.0 s, needs 360 s quota" (off ZeroGPU, "on the
-  CPU"). When there is room to spare, the caption keeps four lines less the panel's
-  notes, so Generate stays where it is from mode to mode.
+  CPU"). It names what the run returns, as the panel's Returns row does: "1408 × 960
+  upscaled, 5.0 s, …" with Upscale ×2, and "Sound, 5.0 s, …" (or "Sound, the length of
+  your audio, …") in a sound-only mode, never the 256 × 256 picture it throws away.
+  When there is room to spare, the caption keeps four lines less the panel's notes, so
+  Generate stays where it is from mode to mode.
 - **What a click changes comes into view.** Generate and Show scroll the rail as little
   as it takes to show the monitor; when a run ends, the head of its report (the Done
   card's head, or a failure's headline and next step) is brought into view clear of
   Generate.
 
 Below 1024 px the page is one column. The inputs come first, then the cost panel,
-monitor and report. A fixed bottom bar holds one short line (the cost, or why
-Generate is off: "Needs a prompt", "Won't run: 2 problems (width, frames)") and the
+monitor and report. A fixed bottom bar holds one short line (the figure line above, or
+why Generate is off: "Needs a prompt", "Won't run: 2 problems (width, frames)") and the
 same Generate button, restyled. There is never a second Generate in the DOM. Pressing
 Generate or Show on a narrow screen scrolls the monitor into view; Restore settings
 brings the purpose line, which names the restored mode, into view; and while the
