@@ -6,6 +6,11 @@
   Now every caption names the example it was made from, every length the settings state is the
   sample's own, a recording's length is the recording's, and "no upscale" is said in words.
 
+* Minor 8: the samples were made on the operator's Mac, and on the Space the same prompt and
+  seed give another take (mode 05 at seed 12: crewmen on deck there, the ship from above here),
+  yet the captions said "Same prompt and seed as ...". Now each says it was made earlier by this
+  app from that example, with its prompt and seed, and promises no repeat.
+
 The captions are read from the shipped manifest; lengths are measured off the files when the
 media were fetched (a clone without Git LFS holds pointers, and the length checks skip).
 """
@@ -70,3 +75,11 @@ def test_every_length_a_caption_states_is_the_samples_own(mode_id):
         )
         assert abs(float(found.group(1)) - seconds_of(recording)) < 0.05, (mode_id, settings)
     assert "the recording's length" not in settings, (mode_id, settings)
+
+
+@pytest.mark.parametrize("mode_id", sorted(MANIFEST))
+def test_every_caption_says_the_sample_was_made_earlier_and_promises_no_repeat(mode_id):
+    caption = MANIFEST[mode_id]["sample"]["caption"]
+    assert caption.startswith("Made earlier by this app from “"), (mode_id, caption)
+    for promise in ("Same prompt and seed", "same seed", "Same seed"):
+        assert promise not in caption, (mode_id, promise)

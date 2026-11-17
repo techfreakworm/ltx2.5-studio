@@ -378,7 +378,10 @@ loads after ours. Where a Gradio rule out-ranks a class (its `h1`–`h6` reset i
   choice). "Try an example" fills the form and runs nothing.
 - A sample output has its file, caption, settings and seed. Its settings may be free
   text, or a mapping (size, seconds, upscale, enhance, `auto_duration`) that the
-  caption says in words.
+  caption says in words. The shipped captions name the example each sample was made
+  from and say it was made earlier, with that example's inputs and seed: the samples
+  were made on one machine, and another (the Space) gives another take for the same
+  seed, so no caption promises a repeat. The lengths they state are the files' own.
 
 Entries that name a missing file, or a path outside the folder, are skipped. With no
 manifest, there is no example row and the monitor shows its idle frame. A manifest

@@ -33,7 +33,7 @@
    ],
    "sample": {
     "file": "samples/text_to_audio_video.mp4",
-    "caption": "Made by this app from “Storm on deck”, with its prompt and seed: LTX-2.5, no upscale.",
+    "caption": "Made earlier by this app from “Storm on deck”, with its prompt and seed: LTX-2.5, no upscale.",
     "settings": "704 × 480, 5 s",
     "seed": 12
    }
@@ -52,7 +52,7 @@
    ],
    "sample": {
     "file": "samples/text_to_video.mp4",
-    "caption": "Made by this app from “Tram at golden hour”, with its prompt and seed: LTX-2.5, no upscale.",
+    "caption": "Made earlier by this app from “Tram at golden hour”, with its prompt and seed: LTX-2.5, no upscale.",
     "settings": "704 × 480, 5 s",
     "seed": 7
    }
@@ -71,7 +71,7 @@
    ],
    "sample": {
     "file": "samples/image_to_video.mp4",
-    "caption": "Made by this app from “Tram picture”, with its picture and seed: LTX-2.5, no upscale.",
+    "caption": "Made earlier by this app from “Tram picture”, with its picture and seed: LTX-2.5, no upscale.",
     "settings": "704 × 480, 5 s",
     "seed": 13
    }
@@ -91,7 +91,7 @@
    ],
    "sample": {
     "file": "samples/image_text_to_video.mp4",
-    "caption": "Made by this app from “Tram picture + push-in”, with its picture, prompt and seed: LTX-2.5, no upscale.",
+    "caption": "Made earlier by this app from “Tram picture + push-in”, with its picture, prompt and seed: LTX-2.5, no upscale.",
     "settings": "704 × 480, 5 s",
     "seed": 14
    }
@@ -110,7 +110,7 @@
    ],
    "sample": {
     "file": "samples/image_to_audio_video.mp4",
-    "caption": "Made by this app from “Cabin under the aurora”, with its picture and seed: LTX-2.5, no upscale.",
+    "caption": "Made earlier by this app from “Cabin under the aurora”, with its picture and seed: LTX-2.5, no upscale.",
     "settings": "704 × 480, 5 s",
     "seed": 15
    }
@@ -131,7 +131,7 @@
    ],
    "sample": {
     "file": "samples/image_text_to_audio_video.mp4",
-    "caption": "Made by this app from “The captain speaks”, with its picture, prompt and seed: LTX-2.5, no upscale.",
+    "caption": "Made earlier by this app from “The captain speaks”, with its picture, prompt and seed: LTX-2.5, no upscale.",
     "settings": "480 × 704, 5 s",
     "seed": 16
    }
@@ -150,7 +150,7 @@
    ],
    "sample": {
     "file": "samples/video_to_video.mp4",
-    "caption": "Made by this app from “Cabin, turned to summer”, with its clip, prompt and seed, at “A lot”: LTX-2.5, no upscale.",
+    "caption": "Made earlier by this app from “Cabin, turned to summer”, with its clip, prompt and seed, at “A lot”: LTX-2.5, no upscale.",
     "settings": "704 × 480, 5 s (the clip's length)",
     "seed": 17
    }
@@ -168,7 +168,7 @@
    ],
    "sample": {
     "file": "samples/text_to_audio.m4a",
-    "caption": "Made by this app from “Platform announcement”, with its prompt and seed: LTX-2.5.",
+    "caption": "Made earlier by this app from “Platform announcement”, with its prompt and seed: LTX-2.5.",
     "settings": "5 s of sound",
     "seed": 18
    }
@@ -187,7 +187,7 @@
    ],
    "sample": {
     "file": "samples/video_to_audio.m4a",
-    "caption": "Made by this app from “Give the captain a voice”, for its silent clip, with its prompt and seed: LTX-2.5.",
+    "caption": "Made earlier by this app from “Give the captain a voice”, for its silent clip, with its prompt and seed: LTX-2.5.",
     "settings": "5 s of sound",
     "seed": 19
    }
@@ -205,7 +205,7 @@
    ],
    "sample": {
     "file": "samples/audio_to_audio.m4a",
-    "caption": "Made by this app from “Ocean, varied”, with its recording and seed, at “Moderately”: LTX-2.5.",
+    "caption": "Made earlier by this app from “Ocean, varied”, with its recording and seed, at “Moderately”: LTX-2.5.",
     "settings": "4.7 s of sound, the longest that fits the 5.0 s recording",
     "seed": 20
    }
@@ -235,7 +235,7 @@
    ],
    "sample": {
     "file": "samples/audio_to_video.mp4",
-    "caption": "Made by this app from “Waves, pictured”, with its recording, prompt and seed: LTX-2.5, no upscale. The sound is the recording itself.",
+    "caption": "Made earlier by this app from “Waves, pictured”, with its recording, prompt and seed: LTX-2.5, no upscale. The sound is the recording itself.",
     "settings": "704 × 480, 4.7 s, the longest that fits the 5.0 s recording",
     "seed": 23
    }
