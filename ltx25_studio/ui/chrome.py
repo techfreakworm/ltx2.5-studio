@@ -641,17 +641,21 @@ button:disabled { cursor: not-allowed !important; }
 #monitor :is(.icon-button-wrapper, .icon-buttons) :is(button, a) { border: none !important;
   background: rgba(14, 18, 22, 0.72) !important; border-radius: 6px !important;
   color: var(--mr-paper) !important; box-shadow: none !important; }
-/* the download corner sits inside the clipped edge, so its focus ring is whole */
-#video-out .icon-button-wrapper { top: 8px !important; right: 8px !important; }
-/* the player's bar: Gradio shows it to a hovering pointer only. It also shows to keyboard
-   focus inside the player, while the video is paused (the script sets .mr-paused from the
-   video's own events) and on a touch screen; in the well colour, not Gradio's grey */
-#video-out .wrap > .controls { background: rgba(14, 18, 22, 0.86) !important; }
-#video-out .wrap:has(:focus-visible) > .controls, #video-out .wrap.mr-paused > .controls {
+/* a player's corner buttons (the monitor's download; a loaded clip's reset, trim and clear) sit
+   inside the clipped edge, so their focus rings are whole. Every gr.Video is one of these two. */
+:is(#video-out, #in-video) .icon-button-wrapper { top: 8px !important; right: 8px !important; }
+/* every Gradio video player (the monitor's, a loaded clip's), found by its own markup: its bar
+   shows to a hovering pointer only. It also shows to keyboard focus inside the player, while the
+   video is paused (the script sets .mr-paused from the video's own events) and on a touch
+   screen; in the well colour, not Gradio's grey */
+.wrap:has(> .mirror-wrap) > .controls { background: rgba(14, 18, 22, 0.86) !important; }
+.wrap:has(> .mirror-wrap):has(:focus-visible) > .controls, .wrap.mr-paused > .controls {
   opacity: 1 !important; }
 @media (hover: none) {
-  #video-out .wrap > .controls { opacity: 1 !important; }
+  .wrap:has(> .mirror-wrap) > .controls { opacity: 1 !important; }
 }
+/* the media zone dims its own buttons; a loaded clip's bar keeps the player's white glyphs */
+#commission #in-video .wrap > .controls button { color: #fff !important; }
 #monitor-caption p { margin: 0; font-size: 13px; line-height: 19px; color: var(--mr-dust); }
 #monitor-caption strong { color: var(--mr-paper); font-weight: 600; }
 
@@ -791,11 +795,14 @@ button:disabled { cursor: not-allowed !important; }
   #commission #in-audio .controls button {
     min-width: 44px !important; }
   #commission .checkbox-container { min-height: 44px; }
-  #monitor button, #monitor a[download], #monitor .controls [role="button"] {
+  #monitor button, #monitor a[download] { min-width: 44px !important; min-height: 44px !important;
+    display: inline-flex; align-items: center; justify-content: center; }
+  /* every video player's controls are 44 px targets; their glyphs keep their size */
+  .wrap:has(> .mirror-wrap) > .controls :is(button, [role="button"]) {
     min-width: 44px !important; min-height: 44px !important;
     display: inline-flex; align-items: center; justify-content: center; }
-  /* the player's glyphs keep their size inside those targets */
-  #monitor .controls :is(button, [role="button"]) svg { width: 20px !important; height: 20px !important; }
+  .wrap:has(> .mirror-wrap) > .controls :is(button, [role="button"]) svg {
+    width: 20px !important; height: 20px !important; }
   /* 44 px targets for the footer's links; Gradio's run history stays hidden here too */
   footer :is(button, a):not(.hidden):not(.run-history) { display: inline-flex !important;
     align-items: center; min-height: 44px !important; }
@@ -999,11 +1006,12 @@ _SCRIPT = """
     if (target && wide()) target.scrollIntoView({ block: 'nearest', behavior: still() ? 'auto' : 'smooth' });
   };
 
-  // == the monitor's player ================================================
-  // Gradio's bar shows to a hovering pointer only, names Play "play-pause-replay-button" and
-  // toggles playback on any key pressed on it, Tab included. The stylesheet also shows the bar
-  // while the video is paused (.mr-paused, set here from the video's own events); here the
-  // controls get their names, and only Enter and Space act on them.
+  // == the video players ===================================================
+  // Every Gradio video player on the page (the monitor's, a loaded clip's): its bar shows to a
+  // hovering pointer only, it names Play "play-pause-replay-button" and it toggles playback on
+  // any key pressed on Play, Tab included. The stylesheet also shows the bar while the video is
+  // paused (.mr-paused, set here from the video's own events); here the controls get their
+  // names, and only Enter and Space act on them.
   const playerState = (wrap, video) => {
     const paused = video.paused || video.ended;
     wrap.classList.toggle('mr-paused', paused);
@@ -1018,9 +1026,9 @@ _SCRIPT = """
       full.setAttribute('aria-label', 'Full screen');
     });
   };
-  // A new file on the monitor is a new player: each video is wired once.
+  // A new file on the monitor or a clip loaded is a new player: each video is wired once.
   const players = () => {
-    document.querySelectorAll('#video-out video').forEach((video) => {
+    document.querySelectorAll('.mirror-wrap > video').forEach((video) => {
       const wrap = video.closest('.wrap');
       if (!wrap) return;
       if (!video.dataset.mrPlayer) {
@@ -1035,8 +1043,7 @@ _SCRIPT = """
   // any other key never reaches them, and Space never scrolls the rail or the page. A cancelled
   // keydown sends no keypress, so Space presses full screen here.
   const playerKeys = (event) => {
-    const control = event.target instanceof Element
-      ? event.target.closest('#video-out [data-mr-control]') : null;
+    const control = event.target instanceof Element ? event.target.closest('[data-mr-control]') : null;
     if (!control) return;
     const acts = (event.key === 'Enter' || event.key === ' ') && !event.repeat;
     if (!acts) {
