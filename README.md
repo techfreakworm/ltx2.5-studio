@@ -262,8 +262,8 @@ find out.
 `(num_frames − 1) // 8 + 1` and **silently floors**: ask for 120 frames and you get 113.
 
 This app refuses an illegal size or frame count before any GPU time is reserved. The hint
-beside the fields names the nearest legal values, and **Snap to legal values** sets them when
-you press it; nothing you typed is rewritten behind your back. The `8` is
+beside the fields names the nearest values that run, and **Snap to values that run** sets them
+when you press it; nothing you typed is rewritten behind your back. The `8` is
 `vae.temporal_compression_ratio`, used as a documented pre-load default so the UI can validate
 before any VAE exists, with a load-time tripwire that raises if upstream ever changes it.
 
