@@ -519,7 +519,9 @@ Things worth knowing as a user:
 the transformer and the text encoder on ZeroGPU, where bf16 does not fit the disk cap, and
 bf16 everywhere else. 316 of the transformer's 1660 linear layers — its conditioning path —
 stay in bf16: quantising them is what turned every Space output into colour static until
-2026-08-25.
+2026-08-25. bitsandbytes' warning that int8 inputs are cast from bf16 to float16 reaches the log
+once per process, not once per matrix product, so the Space's log keeps its start-up report and
+its real warnings.
 
 **The decoder.** On CUDA the default, `LTX25_DECODER=auto`, decodes with the model's own
 diffusion decoder wherever it can run (its kernel available, the video large enough) and with
