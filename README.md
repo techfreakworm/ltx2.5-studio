@@ -285,12 +285,14 @@ loaded on the full `xlarge` GPU, it fits: on the Space after the 2026-11-16 fixe
 run peaked at 61.43 GiB reserved of 94.97 GiB, and the largest peak of that day's 24 runs,
 63.30 GiB, still left more than 31 GiB spare.
 
-The weights are fetched into the Hub cache at startup, in the background, so that the first
-enhanced run does not pay the ~88 s download inside its reservation
-(`LTX25_PREFETCH_ENHANCER=0` declines the ~2.5 GB). On the Space's build of 2026-08-26 that
-fetch failed at startup (seen in the log of 2026-11-13, for a reason that applies to every
-boot); on the build deployed on 2026-11-16 it runs: the Space's log shows the 2.49 GB download
-under way in the background once the page is up. The pinned transformers (5.23.0) refuses one
+On the Space the enhancer's weights come with the model's: `preload_from_hub` fetches its 8
+files (2.49 GB) before the app starts, so the first enhanced run does not pay the ~88 s
+download inside its reservation. On a CUDA machine start-up also fetches them into the Hub
+cache in the background, which on the Space finds them already there
+(`LTX25_PREFETCH_ENHANCER=0` declines the ~2.5 GB). Before the preload, that start-up fetch
+was all there was: it failed on the Space's build of 2026-08-26 (seen in the log of
+2026-11-13, for a reason that applies to every boot) and ran on deploy 1. The pinned
+transformers (5.23.0) refuses one
 per-layer scale table of the enhancer's checkpoint, so the app reads that one weight back from
 the cached checkpoint and refuses any other mismatch. With that, both the text and the image
 route rewrite prompts on real weights on a Mac, and the text route does on the Space
@@ -464,6 +466,7 @@ This is metered, and the meter is the resource you will actually run out of.
 | GPU size | **`xlarge`**, 94.971 GiB measured. The app asks for it explicitly: `LTX25_ZEROGPU_SIZE` defaults to `xlarge`. With `auto` the platform hands out `large`, 47.375 GiB measured, which is where this Space ran until 2026-08-26 ([`docs/MIG_ALLOCATOR_SIGHTINGS.md`](docs/MIG_ALLOCATOR_SIGHTINGS.md)) |
 | Multiplier | **× 2 on `xlarge`** (× 1 on `large`): Hugging Face's documented rate. Billed seconds cannot be read back, so it has not been measured here |
 | PRO quota | 2400 GPU-seconds a day, as Hugging Face documents it. When it resets has not been verified |
+| Weights | from the image: before the app starts, `preload_from_hub` (the README's front matter) fetches the 35 model files the Space loads (71.92 GB; the temporal upsampler, which nothing loads, is no longer fetched) and the prompt enhancer's 8 files (2.49 GB). Start-up checks the cache and downloads only what is missing, saying how many files and GB, and refuses a download the 150 GB disk could not hold before writing a byte. How long a cold start takes with the preload has not been measured |
 
 **What one run reserves** (`zerogpu.estimate_duration`) follows its size and length. It is a
 fit of the Space's own measurements ([`docs/SPACE_MODE_MATRIX.md`](docs/SPACE_MODE_MATRIX.md)

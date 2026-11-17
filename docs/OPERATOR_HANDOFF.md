@@ -23,9 +23,17 @@
 >   Space repo has its own root commit, so pushing a work commit is rejected as non-fast-forward;
 >   every deploy so far was a merge commit on the live Space head
 >   (`git commit-tree <work>^{tree} -p <work> -p <Space head>`) pushed as a fast-forward. Never
->   `--force`. The 72.19 GB download happens at startup, not at build time: the 2026-11-13 cold
+>   `--force`. The 72.19 GB download happened at startup, not at build time: the 2026-11-13 cold
 >   start took 13 min 59 s, about 11.5 min of it the download. `tests/test_deploy_drift.py`
 >   does not assert `startup_duration_timeout`.
+> - **Where the weights come from** (§5; §3's "private-Space fetch path"; the deploy table's
+>   `startup_duration_timeout` and token rows): the Space is public now, and the code has the
+>   image bring the weights. `preload_from_hub` in the README's front matter fetches the 35
+>   model files the int8 Space loads (71.92 GB; the temporal upsampler is no longer fetched) and
+>   the prompt enhancer's 8 files (2.49 GB) before the app starts. `preflight.ensure_weights()`
+>   then checks the cache, downloads only what is missing, and refuses before writing a byte a
+>   download the 150 GB disk could not hold. How long a cold start takes this way has not been
+>   measured.
 > - **§5 "On hinode"**: hinode is retired. `scripts/sync_to_hinode.sh`, `scripts/hinode_run.sh`
 >   and every `scripts/host_*.py` were removed on 2026-11-16 (`git show 2f356b5:scripts/<name>`
 >   restores one).
