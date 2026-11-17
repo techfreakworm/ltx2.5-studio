@@ -490,9 +490,12 @@ input[type="range"] { accent-color: var(--mr-paper); }
 #purpose { margin-top: 12px !important; }
 #purpose p { margin: 0; font-size: 14px; color: var(--mr-dust); max-width: 70ch; }
 #purpose strong { color: var(--mr-paper); font-weight: 600; }
-/* the jump to the sample output: only where the monitor sits far below (one column) */
+/* the jump to the sample output: where the monitor sits far below (one column); and at every
+   width while the monitor holds a run from another mode (.mr-over-run), where it is the only
+   way to that mode's sample. It stays a quiet text button in the form column, beside the rail. */
 #sample-jump { align-self: flex-start; width: auto !important; flex: 0 0 auto !important; }
 @media (min-width: 1024px) { #sample-jump { display: none !important; } }
+@media (min-width: 1024px) { #sample-jump.mr-over-run { display: flex !important; } }
 
 /* == examples ============================================================ */
 #examples { gap: 8px !important; align-items: center !important; flex-wrap: wrap !important;
