@@ -406,10 +406,11 @@ UI instead, start `app.py` from that environment with `LTX25_DEVICE=mps` and
 (2026-11-16): audio to video, and text to video with an adapter uploaded on the page, finished;
 text to video with sound was refused by the memory check's early reading. On a build with that
 check fixed (above) it then finished through the page, and the file the browser downloaded was
-identical to the command-line run's. In that second session audio to video was refused by the
-memory check, with other heavy jobs on the machine (`65.5 + 27.5 = 93.0 GB`), and the test
-machine's own memory watchdog stopped the session while the adapter run loaded the
-transformer, so those two have not been run through the page on the fixed build.
+identical to the command-line run's. In that second session, with other heavy jobs on the
+machine, audio to video was refused by the memory check (`65.5 + 27.5 = 93.0 GB` against its
+90 GB limit), and the test machine's own memory watchdog stopped the session while the adapter
+run loaded the transformer, so those two have not been run through the page on the fixed
+build.
 
 Started this way on a Mac, the page names where the run happens and shows no meter: its cost
 panel reads "Runs on this Mac's GPU; nothing is metered" where the Space's shows what a run
