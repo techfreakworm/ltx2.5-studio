@@ -685,16 +685,25 @@ def build_ui() -> gr.Blocks:
             ready = facts.state == "ready" and not is_running
             text = render.readiness_reason(facts, running=bool(is_running))
             # Upscale where this machine cannot run it for this request: parked, unticked,
-            # with the backend's reason, so Generate is never pressed into that refusal.
+            # with the backend's reason and no size promised, so Generate is never pressed
+            # into that refusal. Elsewhere its label names the size it returns, for a size the
+            # model takes. This step alone writes the label, with the parking.
             info = render.upscale_info(
                 upscale_seconds=upscale_seconds,
                 on_zerogpu=on_zerogpu,
                 refused=facts.upscale_refused,
             )
+            fields = _values(values)
             upscale = (
-                gr.update(interactive=False, value=False, info=info)
+                gr.update(
+                    interactive=False, value=False, info=info, label=render.upscale_label(None)
+                )
                 if facts.upscale_refused
-                else gr.update(interactive=True, info=info)
+                else gr.update(
+                    interactive=True,
+                    info=info,
+                    label=_upscale_label(fields["width"], fields["height"]),
+                )
             )
             return [
                 render.cost_panel(facts),
@@ -931,13 +940,13 @@ def build_ui() -> gr.Blocks:
 
         def _hints(width: Any, height: Any, frames: Any) -> list[Any]:
             dims, frame_text = handlers.on_shape_change(width, height, frames)
-            return [dims, frame_text, gr.update(label=_upscale_label(width, height))]
+            return [dims, frame_text]
 
         for control in shape_inputs:
             control.change(
                 fn=_hints,
                 inputs=shape_inputs,
-                outputs=[dims_hint, frames_hint, pool["enable_stage_2"]],
+                outputs=[dims_hint, frames_hint],
                 **_PRIVATE,
             )
 
@@ -1717,7 +1726,7 @@ def build_ui() -> gr.Blocks:
         demo.load(
             fn=_hints,
             inputs=shape_inputs,
-            outputs=[dims_hint, frames_hint, pool["enable_stage_2"]],
+            outputs=[dims_hint, frames_hint],
             **_PRIVATE,
         )
 

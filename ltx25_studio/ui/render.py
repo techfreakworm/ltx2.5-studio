@@ -649,7 +649,8 @@ def _lamps(facts: CostFacts) -> str:
     extras = dict(facts.extras) if facts.on_zerogpu else {}
     live = facts.state != "refused"
     lamps = []
-    if facts.stage_2_offered:
+    # Parked where this machine cannot run it: no lamp for a lever that is not offered here.
+    if facts.stage_2_offered and not facts.upscale_refused:
         seconds = extras.get("Upscale ×2")
         lamps.append(
             _lamp(f"Upscale +{seconds}\u00a0s" if seconds else "Upscale", lit=live and facts.stage_2)

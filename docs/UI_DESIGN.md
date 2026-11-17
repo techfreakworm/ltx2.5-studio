@@ -223,7 +223,9 @@ is not on ZeroGPU (a Mac, the CPU, a CUDA box of one's own):
 - Upscale ×2 where this machine cannot run it for the request (the backend's own gate,
   `generate._checked_stage_2_size`: off CUDA, above a small decoder size) is parked:
   unticked, disabled, and its line says "Upscale ×2 needs a CUDA GPU; this machine runs on
-  the CPU." It frees itself at a size the backend accepts.
+  the CPU." While parked its label is the bare "Upscale ×2", with no returned size, and
+  the panel shows no Upscale lamp. It frees itself at a size the backend accepts, and the
+  size and the lamp come back. The review step writes the label, with the parking.
 
 On ZeroGPU every one of these sentences is as above.
 
