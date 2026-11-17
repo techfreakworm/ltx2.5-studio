@@ -131,6 +131,10 @@ and the widgets on screen cannot drift apart.
 A run that is missing a required input is refused before a GPU is reserved, and an input a
 mode does not take is dropped with a note rather than used.
 
+Sound the model makes over full scale is turned down as a whole, to peak at −0.1 dBFS, instead of
+being clipped, in the video's sound track and the `.wav` alike, and the run's diagnostics say by
+how many dB. Your own recording, carried into the file by audio to video, is never changed.
+
 **Video to video** makes a variation of your clip, steered by the prompt if you give one. The
 clip is noised to one of three of the model's own levels and denoised from there; **How much to
 change your clip** picks the level: *A little* (0.42), *Moderately* (0.73) or *A lot* (0.91, the
