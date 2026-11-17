@@ -5,6 +5,94 @@ and what was known to be open when it shipped. Newest first. ZeroGPU's billed se
 read back, so every GPU figure here is an upper bound, the run's wall clock × 2, never billed
 seconds.
 
+## Deploy 2 — 2026-11-17 (in preparation)
+
+**Not deployed yet.** The code is the branch `fix/studio-2026-11`. The commits named below are on
+it; the UI's second round-4 package and these docs land next, and their commits are named once
+they are in. What the Space shows after the deploy goes under "On the Space", at the end of this
+section.
+
+### Landed after deploy 1's push, before the deploy-2 work (`1e9fd20..a40a311`)
+
+- **#2** A run never inherits another run's adapter: before anything is attached, every run
+  removes any adapter left on the model, and a run whose leftover cannot be removed is refused
+  as an adapter failure and never sampled. `d9da392`
+- **#3, #4** On short desktop windows the cost figure stays beside Generate, what a click changes
+  comes into view, and Generate never leaves the rail. `3a32028`
+- **#7** An adapter whose weight pairs are named `lora_down`/`lora_up` is refused at Validate,
+  naming both namings, instead of passing every check and failing inside the run. `daa617a`,
+  `7214030`
+- **#8** Validate's shape check is never skipped silently: an adapter validated without a shape
+  table or a transformer has its report say so, and the run checks it against the live
+  transformer before attaching it. `d2ed8cb`
+- **#9** A condition passed to `conditioning.build_conditions` as a mapping keeps its kind, so a
+  direct caller's video is built as a video condition. `88b163b`
+- **#13** The Space harness judges what a mode promises over the files a call returns, so a
+  video-with-sound call with its `.wav` beside the mp4 passes (deploy 1's false MISMATCH).
+  `a40a311`
+- **#20** The last UI round's follow-ons and polish: a clip matches its picture, the result plays
+  by itself, an unshown run is listed with Show as its step, Longest stops at 20 s above Shortest;
+  no Gradio "Runs" link on narrow screens, locked decoder chips drawn as locked, sizes and seeds
+  that never break. `f0ff7e3`, `58847c6`
+
+### The deploy-2 work
+
+- **#10** A bad MPS watermark pair stops an MPS start in the app's own words before the numerics
+  self-test runs, so it is never reported as a PyTorch that computes wrongly. `e664ad9`
+- **#11** `scripts/local_generate.py` applies the app's MPS numerics gate and exits refused before
+  loading anything on a PyTorch that fails it. `444bc2b`
+- **#12** The progress bar names "loading the model" while a staged local run loads, and
+  "decoding the frames" after the last step of a pass that decodes inside the pipeline call (the
+  standard decoder). `aeab028`
+- **#14** Sound the model makes over full scale is turned down as a whole to a −0.1 dBFS peak
+  instead of being clipped, the mp4 and the `.wav` carry the same samples, and the diagnostics
+  say by how many dB. `ed91409`
+- **#15** bitsandbytes' int8 cast warning reaches the log once per process, not once per matrix
+  product. `18bcc7a`
+- **#16** When the model's own length lies outside the range allowed, the note says what it chose
+  and what the range made of it. `9b280fb`
+- **#17** The diffusion decoder is built once at start-up, beside the pipeline, so ZeroGPU packs
+  it and every run uses that instance; a start-up build that fails logs one line and each run
+  builds its own. `ed13532`, `d229cdc`, `5e06a43`
+- **#18** An API caller's diagnostics name each attached adapter and give the run's time split
+  into the progress bar's phases. `0f7e71d`, `17782c8`
+- **#21** The reservation follows each run's size and length, fitted to the Space's measured runs
+  with a 1.3 margin: the default run reserves 60 s and needs 120 s of quota free to start (it was
+  180 s and 360 s); on the Space a run past the measured envelope (64,000 tokens in a pass, 520
+  million returned pixel-frames) is refused before any GPU time; `LTX25_GPU_DURATION_SECONDS` is
+  ignored and `LTX25_GPU_DURATION_FLOOR_SECONDS` sets a minimum. `ac68de5`, `1b0022d`
+- **#23** The weights come from the image: `preload_from_hub` fetches the 35 model files the
+  Space loads (71.92 GB; the temporal upsampler is no longer fetched) and the prompt enhancer's 8
+  (2.49 GB), and start-up downloads only what is missing, refusing a download the disk cannot
+  hold. `41dcf05`, `ff62c55`, `72b989d`
+- **#20** UI round 4, its first package: the monitor's player, and every video player on the page,
+  works by keyboard and touch; the jump to a mode's sample also shows on desktop while the monitor
+  holds a run of another mode; the cost travels with a stuck Generate; after a run the report's
+  head and the monitor fit in the rail together; the idle rail no longer scrolls over nothing;
+  Generate in flight is drawn busy; 44 px targets on a phone. `93a7f52`, `f8393c1`, `3b92225`,
+  `5a6543d`, `0cf63ed`, `81032ed`, `700b8bc`, `07beaa9`, `9e59de0`, `fe49110`
+
+### Landing next
+
+- UI round 4, its second package: **#20** "See an example of" another mode over a run and "Back
+  to your run", the line beside Generate naming what the run returns, the Done card's length
+  words, "under 1 s", an adapter rejection's next step, Restore's note; **#5** a request Gradio
+  refuses before any handler runs no longer leaves the page on "Generating…"; **#6** "Download the
+  sound (WAV)"; **#27** the decoder choices "Auto", "Steadier (diffusion decoder)" and "Sharper
+  (standard decoder)"; **#28** mode 11's black-and-white sentence.
+- These docs: **#25**, **#29**, **#24**, **#28**, **#27**, and for the code above **#21**, **#23**,
+  **#17**, **#20**, **#14**, **#15**, **#16**, **#18**, **#10**, **#11**, **#12**.
+
+### Not in deploy 2
+
+- **#22** Audio to video does not lip-sync: deferred, left open.
+- **#24** Gradio 6.24.0's un-awaited `get_current_user` warning: documented (README, Known
+  issues); Gradio is not bumped.
+
+### On the Space
+
+*Not deployed yet.*
+
 ## Deploy 1 — 2026-11-16
 
 **What it is.** Commit `1e9fd20` of the branch `fix/studio-2026-11`, pushed to GitHub on
