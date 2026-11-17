@@ -126,9 +126,11 @@ other switch. Its media are not restored.
 
 **Length.** "Match my clip" writes a clip's frame count into the frame field for the
 run; a mode without a timed input gets the user's own length back, never the clip's.
-In Advanced the frame count shows while the length is set, and the shortest and
-longest seconds while the model picks it; never both. The length slider steps by
-0.1 s.
+A recording too short for any usable length (under nine frames at 24 fps) is refused
+before the run, in the same words as at a set length: "Your audio is 0.3 s, too short
+for Audio to video: the shortest recording it can use is 0.4 s." In Advanced the frame
+count shows while the length is set, and the shortest and longest seconds while the
+model picks it; never both. The length slider steps by 0.1 s.
 
 **Levers.** Every visible control changes what reaches the pipeline (a test flips each
 one, in every mode, with Upscale on and off).

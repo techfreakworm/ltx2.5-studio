@@ -1087,7 +1087,8 @@ evidence directory, outside this repo.
   never resident together.
 - Through `scripts/local_generate.py`, which drives the app's own `generate()`. Single stage,
   conv-VAE decode (the diffusion decoder needs CUDA), 704×480×121 (5 s at 24 fps) unless a row
-  says otherwise. **The app's own UI was not part of these runs.**
+  says otherwise. **The app's own UI was not part of these runs**; the runs through the page
+  are at the end of this section.
 - The code is named per row. Most runs predate `c712e7e`, which made the local runner a
   `StageRunner`, one stage graph with the Space's (the local side supplies only the
   residency); the lip-sync runs below (`aa7ff84`, `482800d`) ran after it, and so did the
@@ -1263,6 +1264,25 @@ The lead records no swap growth for `G0b`, `G3` and batches B1–B4. `G3`'s 333 
 while five test suites ran; repeated on a quieter machine (`G3r_rope64`) it took 142 s.
 Loading adds about a minute (`G0`: small components 3.9 s, text encoder 12.0 s plus 4.2 s to
 encode, transformer 32.5 s).
+
+**Through the page, in a real browser.** The app started as a user starts it (`python app.py`,
+staged residency, the Q8_0 GGUF transformer), Chrome driven by a script, and the files the
+browser downloaded inspected like every other run's. A first attempt (code `16bbbd3`) ran text
+to video with sound through the page (208 s of denoise and decode) and found that a result
+written to an output folder outside the working directory and the temp dir could not be
+served, and that the page then stayed on "Generating…" for good; both are fixed in deploy 1.
+Then two sessions:
+
+| session, code | run | result |
+|---|---|---|
+| 1, `b27082c` | text to video with sound, its first example | refused after 14 s by the memory check's early reading: `committed 67.3 + need 25.1 = 92.4 GB > 90.0 GB`, read just after the text encoder's release; eight seconds later the gauge read 38.8 GB. The fix is the one above (`ba2d582`) |
+| 1, `b27082c` | audio to video, its shipped example "A portrait set to a recording" (480×704, seed 21) | Done in 137 s; the downloaded file byte-identical to the run folder's; the portrait in colour, breaking into a shout; its sound against the example's recording: level +0.1 dB, envelope correlation 0.999 |
+| 1, `b27082c` | text to video with `SOLRICKS/LTX-2.5-BTS-Movie-Set` uploaded on the page at 0.8 (480×704, 2 s) | the adapter panel: "Fits LTX-2.5: 1632 of 1632 layers"; the report: "LoRA: BTSMovieSet_LTX25_v1 at 0.8, on 1632 layers"; 84 s; the adapter's film-set look. No page errors in the browser console |
+| 2, `8cfe2f2` | text to video with sound, its first example, the results written to a folder outside the app's directory and the temp dir | "memory settled in 0.22 s: 62.2 -> 53.4 GB", then `53.4 + 25.1 = 78.4` OK; Done in 215 s; the file the browser downloaded is byte-identical to the run folder's and identical to the command-line run `F05_t2av` (SSIM 1.000, transcript exact) |
+| 2, `8cfe2f2` | audio to video, its shipped example | refused by the memory check after it had waited and read again: `65.5 + 27.5 = 93.0 GB > 90`, while the machine's other load stood at 42–53 GB |
+| 2, `8cfe2f2` | text to video with the adapter | passed the memory check (`61.3 + 25.1 = 86.3`); while the 22.8 GB transformer file was read, the machine's committed memory rose to 93.3 GB and the test machine's watchdog stopped the session |
+
+The second session's audio to video and adapter runs have not been repeated through the page.
 
 Not run locally, by design: Upscale ×2, the diffusion decoder and bitsandbytes int8 need CUDA.
 Their state is in 10.1.

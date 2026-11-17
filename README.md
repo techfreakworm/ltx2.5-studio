@@ -77,14 +77,17 @@ A Gradio studio for [LTX-2.5](https://huggingface.co/Lightricks/LTX-2.5) — Lig
 22B joint **video + audio** generation model — covering every mode the model supports,
 with **user-uploadable LoRA at inference time**.
 
-Built on `diffusers`, pinned to an exact commit. Deploys to a private Hugging Face Space
-on ZeroGPU: [`techfreakworm/LTX2.5-Studio`](https://huggingface.co/spaces/techfreakworm/LTX2.5-Studio).
+Built on `diffusers`, pinned to an exact commit. Deploys to a public Hugging Face Space on
+ZeroGPU: [`techfreakworm/LTX2.5-Studio`](https://huggingface.co/spaces/techfreakworm/LTX2.5-Studio).
 It also runs on an Apple-silicon Mac with enough memory ([below](#run-it-locally-apple-silicon)).
 
-> **Where things stand, 2026-11-16.** After that day's fixes, all eleven modes are verified on
-> real weights on a Mac. The Space still runs the build of 2026-08-26 and has not been run since
-> the fixes, so nothing in this README about the Space's behaviour after them is verified yet.
-> The record, run by run: [`docs/SPACE_MODE_MATRIX.md`](docs/SPACE_MODE_MATRIX.md) §10.
+> **Where things stand, 2026-11-16.** The Space runs the build deployed that day, deploy 1,
+> with that day's fixes. On it all eleven modes ran, with Upscale ×2, both decoders, an adapter
+> from the Hub, prompt enhancement and the model-chosen length, and every result was looked at
+> and measured; on a Mac all eleven modes are verified on real weights too. The record, run by
+> run: [`docs/SPACE_MODE_MATRIX.md`](docs/SPACE_MODE_MATRIX.md) §10.1 (the Space) and §10.2
+> (the Mac); what deploy 1 contains, and what was open at it:
+> [`docs/RELEASE_NOTES.md`](docs/RELEASE_NOTES.md).
 
 ---
 
@@ -175,9 +178,10 @@ change that in any case tried. Two changes to how the app samples — re-noising
 with the picture, plus cross-modal guidance — reached at most +0.26 in a probe, and neither is in
 the app. Lightricks' own audio-driven lip-sync recipes for LTX-2.3 use the non-distilled model;
 this app runs the distilled LTX-2.5 transformer, unguided. So, for a face that speaks in time,
-use **Image + text to video with sound** and put the line in quotes in the prompt. Audio to video
-sets a picture to a recording — its mood, its content, its length — and does not lip-sync. The
-measurements are in [`docs/SPACE_MODE_MATRIX.md`](docs/SPACE_MODE_MATRIX.md) §10.2.
+use **Image + text to video with sound** and write the words in quotes in your prompt; the
+model voices them itself. Audio to video sets a picture to a recording — its mood, its
+content, its length — and does not lip-sync. The measurements are in
+[`docs/SPACE_MODE_MATRIX.md`](docs/SPACE_MODE_MATRIX.md) §10.2.
 
 Through the API, pass `noise_scale` yourself for video to video and audio to audio: the
 endpoint's published default, 0.5, is snapped to the nearest level, 0.42 (*A little*), in both.
@@ -397,10 +401,17 @@ PYTORCH_MPS_HIGH_WATERMARK_RATIO=0.5 PYTORCH_MPS_LOW_WATERMARK_RATIO=0.4 HF_HUB_
 UI instead, start `app.py` from that environment with `LTX25_DEVICE=mps` and
 `LTX25_TRANSFORMER_GGUF="$GGUF"`. Through the UI on real weights, in a real browser
 (2026-11-16): audio to video, and text to video with an adapter uploaded on the page, finished;
-text to video with sound was refused by the memory check's early reading, fixed since (above),
-and has not been run through the UI again yet.
+text to video with sound was refused by the memory check's early reading. On a build with that
+check fixed (above) it then finished through the page, and the file the browser downloaded was
+identical to the command-line run's. In that second session audio to video was refused by the
+memory check, with other heavy jobs on the machine (`65.5 + 27.5 = 93.0 GB`), and the test
+machine's own memory watchdog stopped the session while the adapter run loaded the
+transformer, so those two have not been run through the page on the fixed build.
 
-<!-- For the lead: one sentence is needed here on what the page shows about cost when it runs on this machine (no reservation, quota or billing), once the UI's local wording (F75) has landed. -->
+Started this way on a Mac, the page names where the run happens and shows no meter: its cost
+panel reads "Runs on this Mac's GPU; nothing is metered" where the Space's shows what a run
+reserves, needs free and is billed, and nothing on the page speaks of quota, reserving,
+billing or paying.
 
 **What it costs in memory, as measured** (the whole machine's committed memory — active,
 wired and compressed pages — on the 128 GB Mac): 57–61 GB at 704×480 with 49–121 frames,
