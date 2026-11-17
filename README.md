@@ -519,9 +519,12 @@ stay in bf16: quantising them is what turned every Space output into colour stat
 
 **The decoder.** On CUDA the default, `LTX25_DECODER=auto`, decodes with the model's own
 diffusion decoder wherever it can run (its kernel available, the video large enough) and with
-the conv VAE otherwise, and the run says which. Before 2026-11-16 the diffusion decoder ran only
-with Upscale ×2. On the Space after the fixes, every run that returned video at the default was
-decoded by the diffusion decoder, and its report said so.
+the conv VAE otherwise, and the run says which. The diffusion decoder is built once, at
+start-up, beside the pipeline, so on the Space it is packed with the rest and every run uses
+that one instance; if that build fails, start-up logs one line and each run builds its own, as
+before. Before 2026-11-16 the diffusion decoder ran only with Upscale ×2. On the Space after the
+fixes, every run that returned video at the default was decoded by the diffusion decoder, and
+its report said so.
 
 On the page the choice reads **Auto** (the default, as above: the vendor's own),
 **Steadier (diffusion decoder)** or **Sharper (standard decoder)**. What you see: on the
