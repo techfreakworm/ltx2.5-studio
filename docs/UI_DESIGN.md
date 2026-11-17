@@ -159,7 +159,9 @@ chip.
 exported, so joint modes never show one file twice. Its contents depend on the state:
 
 - **Idle:** the selected mode's sample output from the manifest, captioned "Example
-  output, not your run". If there is no sample, a designed idle frame names the mode.
+  output, not your run". If there is no sample, a designed idle frame names the mode,
+  captioned "Ready. Nothing is spent until you press Generate." on ZeroGPU and "Ready.
+  Nothing runs until you press Generate." elsewhere.
 - **During a run:** the phase-labelled progress (`show_progress_on`).
 - **After a run:** that run's result, captioned with its own mode (the one that ran,
   even if another was selected while it ran) and seed. It stays on screen when the
@@ -327,8 +329,10 @@ most its `MAX_WEIGHT`) when the row is shown, so the LoRA package stays lazy unt
 adapter is checked. The strength reaches the run from the pointer (the slider's
 `release`) and from the keyboard (its `input`: arrow keys send nothing else); the value
 `input` sends is held to the slider's range as the page holds it, because a number typed
-into its box passes through values outside it. An accepted adapter gets a roll-edged card. A rejected one gets a
-cut card with a plain headline and the validator's message, with a server path to the
+into its box passes through values outside it. An accepted adapter gets a roll-edged
+card. A rejected one gets a cut card with a plain headline, one next step for its kind
+("Use an adapter made for LTX-2.5.", "Download the file again, then upload it.", ...),
+on ZeroGPU "Nothing was spent.", and the validator's message, with a server path to the
 file shown as its name. At 560 px and below a row stacks: name, strength, Remove.
 
 ## Visual system
