@@ -142,6 +142,12 @@ one, in every mode, with Upscale on and off).
 - Audio to sound shows "How much to change your sound" (four choices, the same field).
 - The clip-strength slider shows only where a video condition reads it; with today's
   registry that is no mode, and its API slot stays.
+- The decoder choice reads Auto (the default, the vendor's: the diffusion decoder on an
+  NVIDIA GPU that can run it, the standard decoder elsewhere), Steadier (diffusion
+  decoder) and Sharper (standard decoder), named by what a user sees: on the Space the same
+  run through both decoders gives the same scene, the diffusion decoder a little softer and
+  steadier from frame to frame, the standard decoder sharper frame by frame with more
+  shimmer.
 - While Upscale ×2 is on, the decoder choice cannot be changed: stage 2 always finishes
   with the diffusion decoder, and the line under the choice says so.
 

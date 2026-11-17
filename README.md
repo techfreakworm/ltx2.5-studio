@@ -497,6 +497,13 @@ the conv VAE otherwise, and the run says which. Before 2026-11-16 the diffusion 
 with Upscale ×2. On the Space after the fixes, every run that returned video at the default was
 decoded by the diffusion decoder, and its report said so.
 
+On the page the choice reads **Auto** (the default, as above: the vendor's own),
+**Steadier (diffusion decoder)** or **Sharper (standard decoder)**. What you see: on the
+Space, the same run through both gives the same scene; the diffusion decoder is a little
+softer and steadier from frame to frame, and the standard decoder is sharper frame by frame
+and shimmers more. The diffusion decode costs about 2.5 s more per run there (4.4 s against
+1.9 s at 704×480 with 121 frames).
+
 ### Upscale ×2 (stage 2)
 
 A latent upsample plus three more denoise steps, doubling width and height. **Off by
