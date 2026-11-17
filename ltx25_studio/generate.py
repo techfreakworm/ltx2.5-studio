@@ -2161,9 +2161,13 @@ class ProgressReporter:
     cannot decay into a branch that only one code path takes.
     """
 
-    def __init__(self, handle: Callable | None = None) -> None:
+    def __init__(self, handle: Callable | None = None, *, started: float | None = None) -> None:
         self._handle = handle
         self._position = 0.0
+        #: ``(label, monotonic start)`` per phase announced, timed whether or not
+        #: anyone listens; ``started`` (the run's own clock) opens the first.
+        self._phases: list[tuple[str, float]] = []
+        self._started = started
 
     def __bool__(self) -> bool:
         """True when there is somebody listening."""
@@ -2183,12 +2187,28 @@ class ProgressReporter:
 
     def phase(self, label: str) -> None:
         """Announce a phase at the start of its band; an unknown label keeps the bar where it is."""
+        if not self._phases or self._phases[-1][0] != label:
+            self._phases.append((label, time.monotonic()))
         band = _PHASE_BANDS.get(label)
         if band is None:
             logger.debug("progress: unknown phase label %r", label)
             self._emit(self._position, label)
             return
         self._emit(band[0], label)
+
+    def phase_seconds(self, end: float) -> tuple[tuple[str, float], ...]:
+        """Each phase announced, in order, and its seconds: to the next one's start, the last to ``end``.
+
+        Counted from ``started`` when it was given, so the phases add up to the
+        run's own time.
+        """
+        timed = []
+        for position, (label, began) in enumerate(self._phases):
+            if position == 0 and self._started is not None:
+                began = self._started
+            until = self._phases[position + 1][1] if position + 1 < len(self._phases) else end
+            timed.append((label, max(0.0, until - began)))
+        return tuple(timed)
 
     def upscaling(self) -> None:
         """The stage-2 latent upsample.
@@ -2319,6 +2339,47 @@ def _run_device(pipe) -> str | None:
         return None
 
 
+def _adapters_of(lora_reports) -> tuple[tuple[str, float, int], ...]:
+    """``(label, weight, attached module count)`` per attached adapter, as the record holds them."""
+    return tuple(
+        (
+            str(getattr(report, "label", "") or Path(str(report.source)).stem),
+            float(report.weight),
+            int(report.attached),
+        )
+        for report in lora_reports or ()
+    )
+
+
+def _weight_words(weight: float) -> str:
+    """An adapter's strength as the page writes it: 1.0, 0.8, 0.85."""
+    text = f"{float(weight):.2f}"
+    return text[:-1] if text.endswith("0") else text
+
+
+def _adapter_lines(lora_reports) -> tuple[str, ...]:
+    """One diagnostics line per attached adapter: "adapter <label> at <weight>: attached to <n> layers"."""
+    return tuple(
+        f"adapter {label} at {_weight_words(weight)}: attached to {attached} "
+        f"{'layer' if attached == 1 else 'layers'}"
+        for label, weight, attached in _adapters_of(lora_reports)
+    )
+
+
+def _took_line(seconds: float, phases, device: str | None) -> str:
+    """The run's time and its phases in the progress bar's words: "took 23.4 s on cuda: sampling 14.0 s, ..."."""
+    line = f"took {seconds:.1f} s" + (f" on {device}" if device else "")
+    split = ", ".join(f"{label} {length:.1f} s" for label, length in phases)
+    return f"{line}: {split}" if split else line
+
+
+def _names_its_phases(pipe) -> bool:
+    """True for the real runner, which announces its own phases (sampling, upscaling, decoding)."""
+    from . import pipelines
+
+    return isinstance(pipe, pipelines.StageRunner)
+
+
 def _run_record(
     request,
     spec,
@@ -2340,14 +2401,7 @@ def _run_record(
     frames = _frame_count(output)
     rate = float(request.frame_rate)
     level = kwargs.get("audio_noise_level")
-    adapters = tuple(
-        (
-            str(getattr(report, "label", "") or Path(str(report.source)).stem),
-            float(report.weight),
-            int(report.attached),
-        )
-        for report in lora_reports or ()
-    )
+    adapters = _adapters_of(lora_reports)
     return RunRecord(
         mode=request.mode,
         requested_width=int(request.width),
@@ -2482,7 +2536,7 @@ def generate(
         # reason: a reporter built only when a UI is attached is a code path the
         # offline gate never walks. With no handle every method is a no-op, so the
         # call sites below stay branch-free.
-        reporter = ProgressReporter(progress)
+        reporter = ProgressReporter(progress, started=started)
 
         # --- prompt enhancement, HERE and nowhere else -------------------------
         # BELOW the dispatch branch, so on a Space this executes inside the
@@ -2589,9 +2643,10 @@ def generate(
             audio_notes += _audio_level_notes(kwargs, request, spec) + clip_notes + condition_notes
             # Consumed by `StageRunner`, never forwarded to diffusers -- the same
             # treatment `enable_stage_2` gets, and for the same reason: it is ours.
-            # Only when somebody is listening, so an injected fake in the offline
-            # gate is handed exactly the kwargs it was handed before.
-            if reporter:
+            # When somebody is listening, and always to the real runner, which
+            # names its phases for the run's time line; an injected fake in the
+            # offline gate is handed exactly the kwargs it was handed before.
+            if reporter or _names_its_phases(pipe):
                 kwargs["progress"] = reporter
 
             # The head's own figure, for the note when the range moved it.
@@ -2693,11 +2748,19 @@ def generate(
             # the flagship run that finally gives a headroom number is not the one
             # somebody remembered to turn a flag on for. Evictions and the decoder
             # policy are diagnostics too.
+            sweep_lines = _sweep(root, retention_bytes)
+            # One clock reading ends the run's time and its last phase together.
+            ended = time.monotonic()
+            device = _run_device(pipe)
+            took = _took_line(ended - started, reporter.phase_seconds(ended), device)
+            logger.info("%s", took)
             diagnostics = (
                 decoder_lines
+                + _adapter_lines(lora_reports)
+                + (took,)
                 + tuple(encoder_facts)
                 + tuple(artifact_lines)
-                + _sweep(root, retention_bytes)
+                + sweep_lines
                 + probe.notes()
                 + _partition_notes(probe)
                 + (f"run folder: {run_dir}",)
@@ -2710,10 +2773,10 @@ def generate(
                 seed=seed,
                 run_facts=run_facts,
                 lora_reports=lora_reports,
-                elapsed=time.monotonic() - started,
+                elapsed=ended - started,
                 probe=probe,
                 diagnostics=diagnostics,
-                device=_run_device(pipe),
+                device=device,
             )
 
             result = GenerationResult(
