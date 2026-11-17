@@ -32,7 +32,7 @@ gr = pytest.importorskip("gradio", reason="gradio is a declared dev dependency")
 
 MODE_IDS = tuple(modes.MODES)
 #: The words of a meter (the brief's list): none may appear off ZeroGPU.
-METER_WORDS = ("quota", "reserv", "billed", "bill", "pay")
+METER_WORDS = ("quota", "reserv", "billed", "bill", "pay", "spent", "spend")
 
 
 def visible(markup) -> str:

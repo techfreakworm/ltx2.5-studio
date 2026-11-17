@@ -1927,7 +1927,7 @@ def _length_state(view: handlers.ModeView, source: str, values: dict, frames: An
 
 def _sample_caption(mode: Any, sample: showcase.Sample | None) -> str:
     if sample is None:
-        return render.READY
+        return render.ready_line(on_zerogpu=handlers.run_platform()[1])
     return render.monitor_caption(
         kind="sample",
         mode=mode,
@@ -1959,7 +1959,7 @@ def _sample_on_monitor(show: showcase.Showcase, mode: Any) -> tuple[list, dict]:
                 gr.update(value=render.monitor_idle(mode), visible=True),
                 gr.update(value=None, visible=False),
                 gr.update(value=None, visible=False),
-                render.READY,
+                render.ready_line(on_zerogpu=handlers.run_platform()[1]),
             ],
             {"kind": "idle", "mode": mode.id},
         )

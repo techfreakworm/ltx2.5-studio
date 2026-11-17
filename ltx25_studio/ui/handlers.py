@@ -882,7 +882,8 @@ def on_validate_lora(
         entry = lora.staged_entry(source, report, weight=lora.staging.DEFAULT_WEIGHT)
     except Exception as exc:  # noqa: BLE001 -- every failure must reach the user
         _discard(copy)
-        return (render.lora_rejected(source, exc), staged, render.applied_loras(staged))
+        rejected = render.lora_rejected(source, exc, on_zerogpu=run_platform()[1])
+        return (rejected, staged, render.applied_loras(staged))
 
     existing = lora.find_duplicate(staged, entry)
     if existing is not None:

@@ -82,7 +82,9 @@ def test_a_rejection_quotes_the_validator_verbatim_under_a_plain_headline(tmp_pa
     reason = str(raised.value).strip().split(str(adapter), 1)[-1]
     assert reason in verdict, "the validator's message, verbatim"
     assert "LoRA" + "DimensionError" not in verdict.split("\n")[0]
-    assert "Nothing was spent." in verdict
+    # "Nothing was spent." is the Space's sentence; the step follows on every platform.
+    assert ("Nothing was spent." in verdict) is handlers.run_platform()[1]
+    assert "Use an adapter made for LTX-2.5." in verdict
 
 
 def test_strength_goes_through_the_lora_modules_own_check(tmp_path):

@@ -72,6 +72,7 @@ __all__ = [
     "lora_nothing_to_validate",
     "lora_rejected",
     "lora_stage_of",
+    "lora_step",
     "lora_summary_label",
     "lora_validating",
     "lost_run",
@@ -84,6 +85,7 @@ __all__ = [
     "purpose_line",
     "quota_explainer",
     "readiness_reason",
+    "ready_line",
     "recent_run_label",
     "result_not_shown",
     "run_summary",
@@ -872,6 +874,13 @@ def readiness_reason(facts: CostFacts, *, running: bool = False) -> str:
 # ---------------------------------------------------------------------------
 
 READY = "Ready. Nothing is spent until you press Generate."
+#: Where nothing is metered.
+READY_LOCAL = "Ready. Nothing runs until you press Generate."
+
+
+def ready_line(*, on_zerogpu: bool = True) -> str:
+    """The idle monitor's line with no sample to show, in this platform's words."""
+    return READY if on_zerogpu else READY_LOCAL
 
 #: Below 1024 px the monitor sits under the inputs: a jump to the mode's sample.
 SAMPLE_JUMP = "See an example output"
@@ -1014,6 +1023,38 @@ _LORA_HEADLINES: tuple[tuple[type, str], ...] = (
 )
 
 
+#: One next step per rejection kind (the card's rule: what happened, then one step).
+_LORA_STEPS: tuple[tuple[type, str], ...] = (
+    (LoRAFetchError, "Check the Hub id, or download the file and upload it."),
+    (LoRATooLargeError, "Use a smaller adapter file."),
+    (LoRAFormatError, "Upload the adapter's .safetensors file."),
+    (LoRAHeaderError, "Download the file again, then upload it."),
+    (LoRATruncatedError, "Download the file again, then upload it."),
+    (LoRAVersionError, "Use an adapter made for LTX-2.5."),
+    (LoRAConventionError, "Use an adapter made for LTX-2.5."),
+    (LoRAInContextError, "Use a standard LoRA: this app does not apply IC LoRAs."),
+    (LoRAPairingError, "Download the file again; if it is refused again, the adapter is incomplete."),
+    (LoRADimensionError, "Use an adapter made for LTX-2.5."),
+    (LoRAModuleNotFoundError, "Use an adapter made for LTX-2.5."),
+    (LoRANotAttachedError, "Use an adapter made for LTX-2.5."),
+)
+_LORA_UNKNOWN_STEP = "Try another adapter, or report it with the words below."
+
+
+def lora_step(exc: BaseException) -> str:
+    """The one next step for a rejected adapter."""
+    if isinstance(exc, LoRAError):
+        from ..lora.manifest import LoRAManifestDriftError
+        from ..lora.staging import LoRAWeightError
+
+        if isinstance(exc, LoRAManifestDriftError):
+            return "Report it with the words below; your file may be fine."
+        if isinstance(exc, LoRAWeightError):
+            return "Set a strength within the slider's range."
+    return next((step for error_type, step in _LORA_STEPS if isinstance(exc, error_type)),
+                _LORA_UNKNOWN_STEP)
+
+
 def lora_stage_of(exc: BaseException) -> tuple[str, str] | None:
     """The validator stage an exception came from, or ``None`` if unmapped."""
     for error_type, number, name in _LORA_STAGES:
@@ -1128,15 +1169,17 @@ def _lora_extra_headline(exc: BaseException) -> str | None:
     return None
 
 
-def lora_rejected(source: str, exc: BaseException) -> str:
-    """A rejection: plain headline, the verbatim validator message underneath."""
+def lora_rejected(source: str, exc: BaseException, *, on_zerogpu: bool = True) -> str:
+    """A rejection: plain headline, what happened (on ZeroGPU, that nothing was spent), one
+    next step, and the verbatim validator message underneath."""
     name = shown_name(source)
     headline = (_lora_extra_headline(exc) if isinstance(exc, LoRAError) else None) or next(
         (text for error_type, text in _LORA_HEADLINES if isinstance(exc, error_type)),
         "Rejected: the adapter could not be checked",
     )
     detail = _without_paths(str(exc).strip(), name) or "No detail was attached to the error."
-    return f"### {headline}\n\n{name} was not staged. Nothing was spent.\n\n> {detail}"
+    spent = " Nothing was spent." if on_zerogpu else ""
+    return f"### {headline}\n\n{name} was not staged.{spent} {lora_step(exc)}\n\n> {detail}"
 
 
 def _without_paths(text: str, name: str) -> str:
