@@ -87,6 +87,7 @@ __all__ = [
     "readiness_reason",
     "ready_line",
     "recent_run_label",
+    "restored_line",
     "result_not_shown",
     "run_summary",
     "running",
@@ -1580,6 +1581,27 @@ def failure(exc: BaseException, *, refused: bool = False, on_zerogpu: bool = Tru
         f'<details class="mr-detail"{opened}><summary>Detail</summary>'
         f"<p>{_e(detail)}</p></details>"
     )
+
+
+#: The page's name for each kind of media input.
+_MEDIA_WORDS = {"image": "image", "video": "clip", "audio": "audio"}
+
+
+def restored_line(*, at: str, seed: int | None, media: Sequence[str] = ()) -> str:
+    """What Restore settings did, in Recent runs: the run's settings are in the form, its own
+    seed setting with them (a fixed seed, or random again), and the current media stay."""
+    if seed is not None and seed >= 0:
+        line = f"Settings from {at} restored, with that run's seed, {seed}."
+    else:
+        line = f"Settings from {at} restored; the seed is random again, as it was for that run."
+    if media:
+        kinds = _and([_MEDIA_WORDS.get(kind, kind) for kind in media])
+        line += (
+            f" Your current {kinds} stays as it is."
+            if len(media) == 1
+            else f" Your current {kinds} stay as they are."
+        )
+    return line
 
 
 def recent_run_label(

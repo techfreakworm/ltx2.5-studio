@@ -616,6 +616,10 @@ def build_ui() -> gr.Blocks:
                     recent_head = gr.Markdown(
                         "Recent runs", visible=False, elem_classes=["mr-recent-head"]
                     )
+                    # What a Restore did: the settings, the seed in words, the media kept.
+                    recent_note = gr.Markdown(
+                        "", visible=False, elem_id="recent-note", elem_classes=["mr-hint"]
+                    )
                     recent_rows = []
                     for _ in range(RECENT_LIMIT):
                         with gr.Row(elem_classes=["mr-recent-row"], equal_height=True):
@@ -1290,6 +1294,7 @@ def build_ui() -> gr.Blocks:
             reuse_seed,
             use_prompt,
             sound_download,
+            recent_note,
             monitor_state,
             sample_jump,
             last_failure,
@@ -1323,6 +1328,7 @@ def build_ui() -> gr.Blocks:
                 gr.update(visible=False),
                 gr.update(visible=False),
                 gr.update(value=None, visible=False),
+                gr.update(visible=False),
                 {"kind": "running", "mode": mode_id},
                 gr.update(visible=False),
                 None,
@@ -1648,17 +1654,23 @@ def build_ui() -> gr.Blocks:
         # writes the restored run's own settings, in ONE step: a chained step
         # would race the radio's own change event. Writing the radio leaves its
         # change handler nothing to do (previous == mode).
-        restore_outputs = [*switch_outputs, mode_selector, pool["seed"]]
+        restore_outputs = [*switch_outputs, mode_selector, pool["seed"], recent_note]
 
         def _restore(index: int, entries: list, *state: Any) -> list[Any]:
             entries = list(entries or [])
             if index >= len(entries):
-                return [*_mode_change(state[0], *state), gr.update(), gr.update()]
+                return [*_mode_change(state[0], *state), gr.update(), gr.update(), gr.update()]
             entry = entries[index]
             settings = dict(entry.get("settings") or {})
             out = _mode_change(entry["mode"], *state, restored=settings)
             seed = gr.update(value=settings["seed"]) if "seed" in settings else gr.update()
-            return [*out, entry["mode"], seed]
+            mode = modes.get_mode(entry["mode"])
+            said = render.restored_line(
+                at=entry["at"],
+                seed=handlers._as_int(settings.get("seed")),
+                media=[kind for kind in handlers.media_order() if modes.accepts(mode, kind)],
+            )
+            return [*out, entry["mode"], seed, gr.update(value=said, visible=True)]
 
         for index, (_text, _show, restore, reuse) in enumerate(recent_rows):
             restore.click(

@@ -311,7 +311,10 @@ generic one. A queue timeout reads as "No GPU was free in time", never as runnin
 of GPU time.
 
 **Recent runs** keeps the last six runs of the session, each with "Show" (while its
-file is still on disk), "Restore settings" and "Reuse seed".
+file is still on disk), "Restore settings" and "Reuse seed". Restore says what it did in
+a quiet line under the heading, until the next run: "Settings from 08:06 restored; the
+seed is random again, as it was for that run. Your current audio stays as it is." (or
+"with that run's seed, 42" for a fixed seed).
 
 ## LoRA
 
