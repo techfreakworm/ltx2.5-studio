@@ -1124,14 +1124,77 @@ def _frame_count(output) -> int | None:
     return None
 
 
-def _chosen_length_note(output, request: GenerationRequest) -> tuple[str, ...]:
-    """Under automatic duration, say what length the model picked."""
+class _DurationReading:
+    """The duration head's own figure, in seconds, read as the pipeline runs it.
+
+    A forward hook on the head of the pipeline being called (an audio-conditioned
+    derivative shares that module). It reads the output and returns nothing, so
+    what is sampled does not change. ``seconds`` stays None where there is no
+    head or it did not run; the first reading of a run is kept.
+    """
+
+    def __init__(self, pipe):
+        self.seconds: float | None = None
+        head = getattr(getattr(pipe, "pipeline", pipe), "duration_head", None)
+        register = getattr(head, "register_forward_hook", None)
+        self._handle = register(self._read) if callable(register) else None
+
+    def _read(self, _module, _inputs, output) -> None:
+        if self.seconds is not None:
+            return
+        try:
+            if output.numel() == 1:
+                self.seconds = float(output.item())
+        except Exception:  # noqa: BLE001 -- a reading must never break the run
+            self.seconds = None
+
+    def close(self) -> None:
+        if self._handle is not None:
+            self._handle.remove()
+            self._handle = None
+
+
+def _outside(predicted: float, bound: float, *, below: bool) -> str | None:
+    """``predicted`` to one decimal, or two where one would round it onto ``bound``.
+
+    None when even two decimals reach the bound: the range then moved it by less
+    than a frame, and the plain note says it as it is.
+    """
+    for places in (1, 2):
+        text = f"{predicted:.{places}f}"
+        if (float(text) < bound) if below else (float(text) > bound):
+            return text
+    return None
+
+
+def _chosen_length_note(
+    output, request: GenerationRequest, predicted: float | None = None
+) -> tuple[str, ...]:
+    """Under automatic duration, say what length the model picked.
+
+    ``predicted`` is the duration head's own figure (:class:`_DurationReading`).
+    Outside the range, the note says what the model chose and what the range made
+    of it; inside, or unknown, it says the length.
+    """
     if not request.auto_duration:
         return ()
     count = _frame_count(output)
     if count is None:
         return ("the model chose the length itself.",)
-    return (f"the model chose the length: {count / float(request.frame_rate):.1f} s.",)
+    seconds = count / float(request.frame_rate)
+    if predicted is not None:
+        for which, bound, below in (
+            ("shortest", float(request.min_seconds), True),
+            ("longest", float(request.max_seconds), False),
+        ):
+            if (predicted < bound) if below else (predicted > bound):
+                shown = _outside(predicted, bound, below=below)
+                if shown is not None:
+                    return (
+                        f"the model chose {shown} s; your {which} length is {bound:g} s, "
+                        f"so the video is {seconds:.1f} s.",
+                    )
+    return (f"the model chose the length: {seconds:.1f} s.",)
 
 
 def _seeded_generator(pipe, seed: int):
@@ -2531,6 +2594,8 @@ def generate(
             if reporter:
                 kwargs["progress"] = reporter
 
+            # The head's own figure, for the note when the range moved it.
+            reading = _DurationReading(pipe) if request.auto_duration else None
             try:
                 output = pipe(**kwargs)
             except LTXStudioError:
@@ -2542,9 +2607,14 @@ def generate(
                         mode=spec.label, stage="generating", reason=str(exc)[:200]
                     ) from exc
                 raise DecodeError(mode=request.mode, reason=f"the pipeline raised {exc!r}") from exc
+            finally:
+                if reading is not None:
+                    reading.close()
 
             output = _decoded(output, request.mode)
-            length_notes = _chosen_length_note(output, request)
+            length_notes = _chosen_length_note(
+                output, request, reading.seconds if reading is not None else None
+            )
             run_facts = getattr(pipe, "last_run", None)
             decoder_lines = ()
             if isinstance(run_facts, dict) and "video" in spec.exports:
