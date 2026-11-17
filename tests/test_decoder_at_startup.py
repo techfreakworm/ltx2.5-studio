@@ -318,6 +318,16 @@ def _run(tmp_path, name):
         generate._IN_GPU_WORKER.reset(token)
 
 
+def _decode_is_timed(result) -> None:
+    """The run's time line still has its decode phase, after sampling, and adds up."""
+    from test_run_report_lines import _adds_up, took_lines
+
+    (line,) = took_lines(result)
+    labels = [label for label, _seconds in _adds_up(line)]
+    assert "decoding the frames" in labels, line
+    assert labels.index("decoding the frames") > labels.index("sampling"), line
+
+
 def test_tiny_the_decoder_is_built_once_and_every_run_uses_that_instance(tiny_space, tmp_path):
     loads, decodes = tiny_space
 
@@ -329,6 +339,8 @@ def test_tiny_the_decoder_is_built_once_and_every_run_uses_that_instance(tiny_sp
     assert loads == ["diffusion_decoder"], f"the decoder was loaded {len(loads)} times"
     assert decodes == [startup_decoder, startup_decoder]
     assert first.output_path.is_file() and second.output_path.is_file()
+    _decode_is_timed(first)
+    _decode_is_timed(second)
 
 
 def test_tiny_a_failed_startup_build_falls_back_to_the_per_run_build(
@@ -357,3 +369,4 @@ def test_tiny_a_failed_startup_build_falls_back_to_the_per_run_build(
     assert loads == ["diffusion_decoder"], "the run did not build its own decoder"
     assert len(decodes) == 1 and decodes[0] is pipelines._CACHE["__decoder__"]
     assert result.output_path.is_file()
+    _decode_is_timed(result)
