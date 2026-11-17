@@ -697,7 +697,9 @@ button:disabled { cursor: not-allowed !important; }
 #generate-btn:hover:not(:disabled) { background: #f6b45c !important; }
 #generate-btn:disabled { background: var(--mr-slate-2) !important; color: var(--mr-dust) !important;
   border: 1px dashed var(--mr-line) !important; opacity: 1 !important; }
-#generate-btn.is-running:disabled, #generate-btn:disabled[data-running] { border-style: solid !important; }
+/* in flight (the script sets data-running): a solid edge and a paper label, not a refusal */
+#generate-btn:disabled[data-running] { border-style: solid !important; border-color: var(--mr-dust) !important;
+  color: var(--mr-paper) !important; }
 #generate-reason p { margin: 0; font-size: 13px; line-height: 19px; color: var(--mr-paper); }
 #generate-reason:empty, #generate-reason:not(:has(p)) { display: none; }
 
@@ -1045,6 +1047,7 @@ _SCRIPT = """
   // view in the rail (the button's own script brings in the purpose line, already in view
   // there). The button is found by the words blocks.py gives it.
   const RESTORE = 'Restore settings';
+  const RUNNING = 'Generating…';
   document.addEventListener('click', (event) => {
     const button = event.target instanceof Element ? event.target.closest('#recent button') : null;
     if (!button || !wide() || button.textContent.trim() !== RESTORE) return;
@@ -1088,6 +1091,8 @@ _SCRIPT = """
     if (gen && !gen.getAttribute('aria-describedby')) {
       gen.setAttribute('aria-describedby', 'cost generate-reason');
     }
+    // a run in flight: the start step relabels Generate (blocks.py's words)
+    if (gen) gen.toggleAttribute('data-running', gen.disabled && gen.textContent.trim() === RUNNING);
     document.querySelectorAll('.mx-note[data-modes]').forEach((note) => {
       note.dataset.modes.split(' ').forEach((mode) => {
         const input = document.querySelector(`#mode-matrix input[value="${mode}"]`);

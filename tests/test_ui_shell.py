@@ -123,3 +123,22 @@ def test_the_caption_keeps_its_reserve_only_while_no_runs_report_is_shown():
     browsed) left a 57-69 px blank band under a one-line run caption."""
     fit = _function(chrome.head_html(), "const fit = () => {")
     assert "else if (!target) captionMin = captionH + Math.min(" in fit
+
+
+def test_generate_in_flight_is_drawn_busy_not_refused():
+    """Minor 13: "Generating..." had the refused button's dashed edge and dust label; the rule for
+    a run in flight styled a data-running attribute nothing set."""
+    import inspect
+
+    from ltx25_studio.ui import blocks
+
+    css = chrome._css()
+    rule = re.search(r"#generate-btn:disabled\[data-running\] \{([^}]*)\}", css)
+    assert rule and "border-style: solid !important" in rule.group(1)
+    assert "color: var(--mr-paper) !important" in rule.group(1)
+    script = chrome.head_html()
+    assert "const RUNNING = 'Generating…';" in script
+    assert "gen.toggleAttribute('data-running', gen.disabled && gen.textContent.trim() === RUNNING);" in script
+    assert 'gr.update(interactive=False, value="Generating…")' in inspect.getsource(blocks), (
+        "the start step's label is the one the script looks for"
+    )
