@@ -42,7 +42,7 @@ At 1024 px and wider the page has two columns under a one-line identity bar.
   monitor, the caption, the cost panel and Generate into the rail at rail scroll 0.
   When they are taller than the rail, the monitor gives up height first, down to
   180 px, letterboxed. If the panel still runs under Generate, the panel's figure line
-  stands above the button: "704 × 480, 5.0 s, needs 360 s quota" (off ZeroGPU, "on the
+  stands above the button: "704 × 480, 5.0 s, needs 120 s quota" (off ZeroGPU, "on the
   CPU"). It names what the run returns, as the panel's Returns row does: "1408 × 960
   upscaled, 5.0 s, …" with Upscale ×2, and "Sound, 5.0 s, …" (or "Sound, the length of
   your audio, …") in a sound-only mode, never the 256 × 256 picture it throws away.
@@ -207,7 +207,8 @@ with the nearest values that run, and shows no figure. The lamp words are:
 - "Audio encode"
 
 The cost words at the point of choice come from the same estimator: the Upscale line
-says how many seconds it adds, and the Enhance line says what it reserves and that a
+says how many seconds it adds at the default size and length, and that the cost panel
+shows what it adds when it is on; the Enhance line says what it reserves and that a
 cold start can take about 2 minutes (it mentions an image only where the mode takes
 one).
 
