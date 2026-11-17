@@ -239,6 +239,15 @@ Detail. Gradio tells the page only "Error", so the app keeps that message per se
 from the step that failed. A request that would be refused never reaches `generate()`,
 so its red panel can truthfully say "Nothing ran. No GPU time was used."
 
+The failure step reads the run's own inputs, so when Gradio could not prepare them (an
+upload its cache clean-up removed after six hours) it fails the same way. A last
+failure listener after it reads no input at all and sends no file: it brings Generate
+back, puts the monitor back to its idle frame and shows "Your inputs could not be read"
+("Nothing ran", the upload to add again, Gradio's message as its Detail). Typed number
+fields declare no range, because Gradio refuses a value outside one before any handler
+runs; the app's own gate refuses a seed below −1 in the page's words. Sliders keep
+their ranges.
+
 **The report** is the `/on_generate` Markdown, in `#run-status`. That region is in the
 page from the first paint (empty, visually hidden), with `role="status"`, so its first
 message is announced; it turns assertive on failure. On success it carries a "Done"

@@ -64,6 +64,7 @@ __all__ = [
     "failure",
     "figure_line",
     "frame_hint",
+    "inputs_unread",
     "last_run_line",
     "lora_accepted",
     "lora_duplicate",
@@ -1296,6 +1297,21 @@ def lost_run(detail: str | None = None, *, on_zerogpu: bool = True) -> str:
         "### The run ended without a result\n\n"
         f"{billed}Press Generate again. If it happens again, report it with the detail "
         "below.\n\n" + _detail(detail)
+    )
+
+
+def inputs_unread(detail: str | None = None, *, hours: int, on_zerogpu: bool = True) -> str:
+    """The page could not hand the run its inputs, so nothing ran.
+
+    Gradio reads every input before any of this app's code runs; an upload its cache
+    clean-up removed (after ``hours``) is the cause a creator meets. ``detail`` is Gradio's
+    own message. The GPU sentence is ZeroGPU's alone.
+    """
+    used = "Nothing ran. No GPU time was used." if on_zerogpu else "Nothing ran."
+    return (
+        "### Your inputs could not be read\n\n"
+        f"{used} If you added an image, clip or audio more than {hours} hours ago, the app has "
+        "cleared its copy: add it again, then press Generate.\n\n" + _detail(detail)
     )
 
 

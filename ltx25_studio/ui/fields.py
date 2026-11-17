@@ -286,12 +286,14 @@ FIELDS: tuple[Field, ...] = (
         visible_when=_offers_upscale,
         **_copy("enable_stage_2"),
     ),
+    # No minimum: Gradio refuses a typed value outside a number's range before any handler
+    # runs; the app's own gate refuses a seed below -1 in the page's words.
     Field(
         key="seed",
         kind="number",
         group="sampling",
         default=-1,
-        options={"minimum": -1, "step": 1, "precision": 0},
+        options={"step": 1, "precision": 0},
         **_copy("seed"),
     ),
     Field(

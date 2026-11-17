@@ -121,6 +121,8 @@ _PRIVATE = {"api_visibility": "private", "show_progress": "hidden"}
 
 _OUTCOMES: OrderedDict[str, handlers.RunOutcome] = OrderedDict()
 _FAILURES: OrderedDict[str, str] = OrderedDict()
+#: The mode each session's run was started in, for a listener that reads no input.
+_STARTED: OrderedDict[str, str] = OrderedDict()
 _OUTCOMES_LOCK = threading.Lock()
 _OUTCOMES_KEPT = 64
 
@@ -1267,6 +1269,7 @@ def build_ui() -> gr.Blocks:
             mode_id: str, enhance: Any, prompt: Any, request: gr.Request = None
         ) -> list[Any]:
             _forget(request)
+            _keep(_STARTED, _session(request), mode_id)
             mode = modes.get_mode(mode_id)
             device, on_zerogpu = handlers.run_platform()
             starting = handlers.on_generate_start(
@@ -1458,6 +1461,69 @@ def build_ui() -> gr.Blocks:
                 mode_id, recent_now, source, values, None, status_update, caption, report, listed
             )
 
+        bare_outputs = [
+            generate_button,
+            reason,
+            running,
+            monitor_idle,
+            video_out,
+            audio_out,
+            monitor_caption,
+            run_summary,
+            reuse_seed,
+            use_prompt,
+            monitor_state,
+            status,
+            sample_jump,
+            last_failure,
+        ]
+
+        def _finish_bare(request: gr.Request) -> list:
+            """After a failure step that Gradio failed too: it could not prepare that step's
+            inputs, which are the run's own (an upload its cache clean-up removed). Takes no
+            inputs, so nothing Gradio prepares can stop it, and sends no file. Generate comes
+            back, the monitor goes idle and the card says what is known; it cannot read the
+            form, so the cost panel and Recent runs stay as they are."""
+            outcome, message = _recall(request), _recall_failure(request)
+            mode_id = outcome.mode_id if outcome is not None else None
+            mode_id = mode_id or _take(_STARTED, request) or DEFAULT_MODE
+            try:
+                if outcome is None:
+                    report = render.inputs_unread(
+                        message, hours=DELETE_CACHE[1] // 3600, on_zerogpu=on_zerogpu
+                    )
+                    kind = "refused"
+                elif handlers.has_result(outcome):
+                    # Not listed in Recent runs (this step cannot read them): no Show step.
+                    report = render.result_not_shown(handlers.run_facts(outcome), message)
+                    kind = "unshown"
+                else:
+                    report = outcome.status
+                    kind = "refused" if handlers.ran_nothing(outcome) else "failed"
+            except Exception as exc:  # noqa: BLE001 -- Generate comes back whatever the report
+                report, kind = render.lost_run(message or str(exc), on_zerogpu=on_zerogpu), "failed"
+            headline = render.card_headline(report)
+            return [
+                gr.update(value="Generate", interactive=True),
+                "",
+                False,
+                gr.update(value=render.monitor_idle(modes.get_mode(mode_id)), visible=True),
+                gr.update(value=None, visible=False),
+                gr.update(value=None, visible=False),
+                render.monitor_caption(kind=kind),
+                gr.update(visible=False),
+                gr.update(visible=False),
+                gr.update(visible=False),
+                {"kind": "failed", "mode": mode_id},
+                gr.update(value=report, visible=True),
+                gr.update(visible=False),
+                (
+                    {"mode": mode_id, "at": time.strftime("%H:%M"), "headline": headline}
+                    if headline
+                    else None
+                ),
+            ]
+
         generation = generate_button.click(
             fn=_start,
             inputs=[mode_selector, pool["enhance_prompt"], pool["prompt"]],
@@ -1482,8 +1548,13 @@ def build_ui() -> gr.Blocks:
             **_PRIVATE,
         }
         finished = generation.then(fn=_finish, **finish_io)
-        generation.failure(fn=_finish_failed, **finish_io)
-        finished.failure(fn=_finish_failed, **finish_io)
+        # The failure step reads the run's own inputs, so a request Gradio could not prepare
+        # fails it the same way: the last listener after it reads none.
+        for failed in (
+            generation.failure(fn=_finish_failed, **finish_io),
+            finished.failure(fn=_finish_failed, **finish_io),
+        ):
+            failed.failure(fn=_finish_bare, inputs=None, outputs=bare_outputs, **_PRIVATE)
         _keep_failures(demo, (generation, finished))
 
         use_prompt.click(
