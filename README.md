@@ -232,7 +232,7 @@ because rejecting on absence would reject the most downloaded LTX adapter on the
 
 On real weights (locally, on a Mac) two public LTX-2.5 adapters visibly change the output
 when given their trigger words. On the Space one of them, at 1.0 with its trigger word, passed
-Validate there and gave a different picture from the same prompt and seed without it. An
+Validate and gave a different picture from the same prompt and seed without it. An
 adapter that needs trigger words cannot show that effect in the two modes that take no prompt
 (image to video, image to video with sound).
 

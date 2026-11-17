@@ -934,9 +934,8 @@ Space, running deploy 1, and 10.2 is what has been verified on real weights on a
 ### 10.1 On the Space, deploy 1 (2026-11-16)
 
 Recorded by the lead in the run log of the 2026-11-16 fix (the entries of 21:32, 21:41 and
-21:57).
-Each call's files are kept under its label in that run's evidence directory, outside this repo:
-`evidence/space/matrix/<label>/` holds what was sent (`request.json`), what came back
+21:57). Each call's files are kept under its label in that run's evidence directory, outside
+this repo: `evidence/space/matrix/<label>/` holds what was sent (`request.json`), what came back
 (`result.json` with the page's own report, and the files), the client's measurements
 (`verify.json`, `timing.json`, the progress events in `events.jsonl`) and the lead's
 inspection (`inspect/`: six frames at native resolution, a frame sheet, a spectrogram and

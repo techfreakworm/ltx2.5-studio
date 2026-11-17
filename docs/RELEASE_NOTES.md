@@ -105,10 +105,10 @@ GPU-s; no quota refusal, no queue timeout, no failed run. Call by call:
 
 ### Through the page, on real weights, on a Mac
 
-In a real browser, with the app started as a user starts it. The first session: audio to video
-and text to video with an adapter uploaded on the page finished; text to video with sound was
-refused by the app's own memory check. Five defects were found that evening, and deploy 1 has a
-fix for each:
+Two sessions ran in a real browser, with the app started as a user starts it. In the first,
+audio to video and text to video with an adapter uploaded on the page finished; text to video
+with sound was refused by the app's own memory check. Five defects were found that evening,
+and deploy 1 has a fix for each:
 
 - with the output folder outside the working directory and the temp dir, Gradio refused to
   serve the finished result; that folder is now passed to launch as the one allowed path;
